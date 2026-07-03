@@ -29,12 +29,6 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 
 ---
 
-## Prerequisites
-
-Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
-
----
-
 ## Quickstart — Hyperloom UI (PrimusClaw)
 
 The fastest way to start is through the hosted **AMD Hyperloom** web interface — powered by **[PrimusClaw](https://github.com/AMD-AGI/Primus-Claw)**, the hosted online mode designed for **large-scale reachability**. Any team member can launch an optimization through the browser without local GPU setup or environment configuration.
@@ -150,7 +144,7 @@ Edit `.env`:
 
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
-OPENAI_BASE_URL=https://crusoe.primus-safe.amd.com/api/v1/llm-proxy/v1
+OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
 # Optional: set only if you installed the internal extension (enables roofline
 # gap / MI355+ MAF). Leave unset for the open-source-only report.
 # TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
@@ -163,12 +157,12 @@ OPENAI_BASE_URL=https://crusoe.primus-safe.amd.com/api/v1/llm-proxy/v1
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
-| `OPENAI_BASE_URL` | LLM gateway endpoint | `https://crusoe.primus-safe.amd.com/api/v1/llm-proxy/v1` |
+| `OPENAI_BASE_URL` | LLM gateway endpoint | `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1` |
 | `TRACELENS_INTERNAL_ROOT` (optional, internal users) | Path to your own internal TraceLens extension checkout (`pip install -e .`; rehydration module). Hyperloom never clones it. Set only to enable the internal extension; unset => open-source-only. | (self-provided) |
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to auto-drop cursor; the default `forge,geak,claude,codex,cursor` ladder then runs as `forge,geak,claude,codex`. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://crusoe.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.
 
 > The table above is the single-gateway (AMD LiteLLM) default: one OpenAI-compatible endpoint serves both Claude and GPT models. The two setups below are alternatives — pick one; do not mix them with the single-gateway block above.
 
@@ -209,7 +203,7 @@ CODEX_MODEL=your-gateway-kernel-model
 
 </details>
 
-> If HTTPS requests to `crusoe.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
+> If HTTPS requests to `global.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
 >
 > ```bash
 > curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
