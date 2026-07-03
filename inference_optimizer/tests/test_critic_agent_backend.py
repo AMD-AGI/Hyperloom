@@ -1157,7 +1157,6 @@ from inference_optimizer.orchestrator.backends import (
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.paths import make_session_dir
 
 
 pytestmark = pytest.mark.critic_agent_e2e
@@ -1227,17 +1226,6 @@ class _DeterministicClient:
     def __init__(self):
         self.completions = _DeterministicCompletions()
         self.chat = _DeterministicChat(self.completions)
-
-
-# Fixtures
-@pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return sd
 
 
 @pytest.fixture

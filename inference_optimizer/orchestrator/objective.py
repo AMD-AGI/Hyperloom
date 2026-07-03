@@ -22,6 +22,15 @@ class ObjectiveError(ValueError):
     """Raised by `build_objective` on bad/conflicting inputs."""
 
 
+def _resolve_current_tput(state: "SharedState") -> float:
+    """Resolve current throughput, preferring ``current_best['tput']`` over baseline (0.0 if none)."""
+    cb = state.current_best or {}
+    v = cb.get("tput") if isinstance(cb, dict) else None
+    if isinstance(v, (int, float)) and v > 0:
+        return float(v)
+    return float(state.baseline_tput or 0.0)
+
+
 # ---------------------------------------------------------------------------
 @dataclass
 class Objective(ABC):
@@ -195,22 +204,8 @@ class TargetTputObjective(Objective):
         return "tput"
 
     def _current_tput(self, state: "SharedState") -> float:
-        """Resolve the current throughput, preferring the best-so-far result.
-
-        Reads ``state.current_best['tput']`` when it is a positive number,
-        otherwise falls back to the baseline throughput.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Current throughput in tok/s/GPU, or 0.0 if none is available.
-        """
-        cb = state.current_best or {}
-        v = cb.get("tput") if isinstance(cb, dict) else None
-        if isinstance(v, (int, float)) and v > 0:
-            return float(v)
-        return float(state.baseline_tput or 0.0)
+        """Resolve current throughput (best-so-far, else baseline)."""
+        return _resolve_current_tput(state)
 
     def progress(self, state: "SharedState") -> float:
         """Compute progress as current throughput divided by the target, capped at 1.0.
@@ -308,22 +303,8 @@ class TargetBaselineObjective(Objective):
         return "baseline"
 
     def _cur(self, state: "SharedState") -> float:
-        """Resolve the current throughput, preferring the best-so-far result.
-
-        Reads ``state.current_best['tput']`` when it is a positive number,
-        otherwise falls back to the baseline throughput.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Current throughput in tok/s, or 0.0 if none is available.
-        """
-        cb = state.current_best or {}
-        v = cb.get("tput") if isinstance(cb, dict) else None
-        if isinstance(v, (int, float)) and v > 0:
-            return float(v)
-        return float(state.baseline_tput or 0.0)
+        """Resolve current throughput (best-so-far, else baseline)."""
+        return _resolve_current_tput(state)
 
     def progress(self, state: "SharedState") -> float:
         """Compute progress as current throughput divided by the reference, capped at 1.0.
