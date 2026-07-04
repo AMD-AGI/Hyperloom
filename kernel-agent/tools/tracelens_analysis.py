@@ -4052,6 +4052,29 @@ def _raise_on_failed_deterministic_pipeline(
     )
 
 
+def _is_scriptable_framework(framework: str | None) -> bool:
+    """Return whether ``framework`` is a server-less scriptable image framework.
+
+    Scriptable frameworks (e.g. xDiT diffusion) have no LLM decode steady-state
+    phase, so trace analysis uses the plain pytorch perf report + skips the
+    steady-state splitter. Prefers the canonical ``framework_registry``; falls
+    back to a name check so the tool stays usable when run standalone (outside
+    an importable ``inference_optimizer`` package).
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for scriptable image frameworks.
+    """
+    try:
+        from inference_optimizer.framework_registry import is_scriptable
+
+        return is_scriptable(framework)
+    except Exception:
+        return str(framework or "").strip().lower() in {"xdit"}
+
+
 def _run_deterministic_tracelens_steps(
     trace_path: Path,
     output_dir: Path,
@@ -4088,22 +4111,40 @@ def _run_deterministic_tracelens_steps(
     csv_dir = output_dir / "perf_report_csvs"
     csv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: perf report
-    report_cmd = [
-        sys.executable,
-        "-m",
-        "TraceLens.Reporting.generate_perf_report_pytorch_inference",
-        "--profile_json_path",
-        str(trace_path),
-        "--output_csvs_dir",
-        str(csv_dir),
-        "--gpu_arch_platform",
-        platform,
-        "--include_call_stack",
-        "--enable_pseudo_ops",
-    ]
-    if capture_folder and capture_folder.exists():
-        report_cmd += ["--capture_folder", str(capture_folder)]
+    # Step 1: perf report. Serving frameworks use the inference report (adds
+    # steady-state phase columns, call stacks, pseudo-ops, graph-capture replay).
+    # Scriptable image frameworks (xDiT diffusion) have no steady-state decode
+    # phase and no capture sidecar, so use the plain pytorch report, which is
+    # the variant validated to produce a clean per-kernel roofline for diffusion
+    # traces; the inference-only flags are omitted.
+    if _is_scriptable_framework(framework):
+        report_cmd = [
+            sys.executable,
+            "-m",
+            "TraceLens.Reporting.generate_perf_report_pytorch",
+            "--profile_json_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(csv_dir),
+            "--gpu_arch_platform",
+            platform,
+        ]
+    else:
+        report_cmd = [
+            sys.executable,
+            "-m",
+            "TraceLens.Reporting.generate_perf_report_pytorch_inference",
+            "--profile_json_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(csv_dir),
+            "--gpu_arch_platform",
+            platform,
+            "--include_call_stack",
+            "--enable_pseudo_ops",
+        ]
+        if capture_folder and capture_folder.exists():
+            report_cmd += ["--capture_folder", str(capture_folder)]
     rc = run_command(report_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
     if rc != 0:
         return rc
@@ -5706,6 +5747,40 @@ def write_reports(
         except Exception as exc:  # pragma: no cover - guard against import cycles
             print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
 
+    # Diffusion / scriptable workload-level roofline. TraceLens produces a
+    # *per-kernel* roofline (each op vs its dtype ceiling); for diffusion we also
+    # aggregate it into an end-to-end *workload* roofline (kernel efficiency x
+    # GPU busy ratio + optional per-denoise-step timings), mirroring the LLM
+    # decode memory-bound ceiling. Best-effort sidecar: never blocks the
+    # per-kernel report.
+    diffusion_roofline_path = ""
+    if _is_scriptable_framework(getattr(args, "framework", "")):
+        try:
+            tools_dir = str(Path(__file__).resolve().parent)
+            if tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+            from diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
+
+            _num_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
+            _diff_report = _build_diffusion_roofline(
+                tracelens_dir / "perf_report_csvs",
+                _num_steps or None,
+                int(getattr(args, "top_k", 10) or 10),
+            )
+            out = run_dir / "diffusion_roofline.json"
+            atomic_write_json(out, _diff_report)
+            diffusion_roofline_path = str(out)
+            print(
+                "[diffusion_roofline] "
+                f"kernel_eff={_diff_report['totals']['kernel_roofline_efficiency']:.3f} "
+                f"gpu_busy_ratio={_diff_report.get('gpu_busy_ratio')} "
+                f"-> {out}"
+            )
+        except FileNotFoundError as exc:
+            print(f"[diffusion_roofline] skipped: {exc}")
+        except Exception as exc:  # noqa: BLE001 - best-effort sidecar
+            print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
+
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(kernel_candidates_path),
@@ -5715,6 +5790,8 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
+    if diffusion_roofline_path:
+        artifact_paths["diffusion_roofline"] = diffusion_roofline_path
     return artifact_paths
 
 
@@ -5807,6 +5884,16 @@ def main() -> int:
         "Leave empty for the open-source-only report.",
     )
     parser.add_argument("--roofline-json", default="")
+    parser.add_argument(
+        "--num-denoise-steps",
+        type=int,
+        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
+        help=(
+            "Denoise steps captured in the profiled window (scriptable/xDiT "
+            "diffusion only). Enables per-denoise-step timings in the workload "
+            "roofline sidecar. Env: HYPERLOOM_NUM_DENOISE_STEPS."
+        ),
+    )
     parser.add_argument(
         "--roofline-output-name",
         default="kernel_roofline.json",
