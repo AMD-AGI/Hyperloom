@@ -299,7 +299,7 @@ def test_composite_device_name_no_match_falls_back_to_fanout(tla) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# _select_sources
+# _select_source_meta
 # --------------------------------------------------------------------------- #
 def test_select_sources_framework_hint_picks_matching_container(tla) -> None:
     """With both containers editable and neither on disk, the framework hint decides."""
@@ -309,8 +309,8 @@ def test_select_sources_framework_hint_picks_matching_container(tla) -> None:
         sglang={"ks": _kernel(_EDITABLE_CU_2)},
     )
     resolver = tla.OpResolver({})
-    assert resolver._select_sources(entry, "vllm") == [_EDITABLE_CU]
-    assert resolver._select_sources(entry, "sglang") == [_EDITABLE_CU_2]
+    assert [m[0] for m in resolver._select_source_meta(entry, "vllm")] == [_EDITABLE_CU]
+    assert [m[0] for m in resolver._select_source_meta(entry, "sglang")] == [_EDITABLE_CU_2]
 
 
 def test_select_sources_on_disk_tie_break_beats_framework_hint(tla, tmp_path: Path) -> None:
@@ -324,7 +324,7 @@ def test_select_sources_on_disk_tie_break_beats_framework_hint(tla, tmp_path: Pa
     )
     resolver = tla.OpResolver({})
     # sglang hint, but only the vllm source is present on disk -> vllm wins.
-    assert resolver._select_sources(entry, "sglang") == [str(on_disk)]
+    assert [m[0] for m in resolver._select_source_meta(entry, "sglang")] == [str(on_disk)]
 
 
 # --------------------------------------------------------------------------- #
