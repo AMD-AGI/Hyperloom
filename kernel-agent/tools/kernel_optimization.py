@@ -933,22 +933,6 @@ def _shape_case_from_value(
     }
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Coerce a TraceLens numeric field, returning ``default`` on drift.
-
-    Args:
-        value: The value to coerce to ``float``.
-        default: Fallback returned when ``value`` cannot be parsed.
-
-    Returns:
-        The parsed float, or ``default`` on any failure.
-    """
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, Any]:
     """Expose primary/supplementary serving shapes in machine-readable form.
 
@@ -2888,27 +2872,6 @@ def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
-def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
-    """Create a relative symlink inside the run dir pointing at the mirror.
-
-    Best-effort: failures (unsupported filesystem, existing link) are
-    swallowed so artifact mirroring never breaks a run.
-
-    Args:
-        run_dir (Path): The run directory the symlink is created under.
-        mirror (Path): The target directory the symlink should point at.
-    """
-    try:
-        link_dir = run_dir / mirror.parent.name  # geak / oob
-        link_dir.mkdir(parents=True, exist_ok=True)
-        link = link_dir / mirror.name
-        if link.exists() or link.is_symlink():
-            return
-        link.symlink_to(mirror, target_is_directory=True)
-    except OSError:
-        pass
-
-
 def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
     """Run a best-effort ``git checkout -- .`` to undo rogue agent writes.
 
@@ -2935,6 +2898,19 @@ def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
             append_log(log_path, f"[git-fallback] stderr: {proc.stderr.strip()[:400]}")
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         append_log(log_path, f"[git-fallback] failed: {type(exc).__name__}: {exc}")
+
+
+def _merge_rocprof_before(result: dict[str, Any], rocprof_before: dict[str, Any]) -> None:
+    """Copy pre-optimization rocprof metadata into a backend result."""
+    if not rocprof_before:
+        return
+    result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+    if rocprof_before.get("reason"):
+        result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+    if rocprof_before.get("json_path"):
+        result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+    if rocprof_before.get("txt_path"):
+        result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
 
 
 def invoke_backend(
@@ -3085,14 +3061,7 @@ def invoke_backend(
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
-            if rocprof_before:
-                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
-                if rocprof_before.get("reason"):
-                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
-                if rocprof_before.get("json_path"):
-                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
-                if rocprof_before.get("txt_path"):
-                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            _merge_rocprof_before(result, rocprof_before)
             # Surface GEAK partial outputs so a SIGTERM'd attempt with patches is still promoted to "partial".
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
@@ -3192,14 +3161,7 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if common_test_command:
                 result["test_command"] = common_test_command
-            if rocprof_before:
-                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
-                if rocprof_before.get("reason"):
-                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
-                if rocprof_before.get("json_path"):
-                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
-                if rocprof_before.get("txt_path"):
-                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            _merge_rocprof_before(result, rocprof_before)
             return result
         if backend == "forge":
             # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
@@ -3223,14 +3185,7 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if common_test_command:
                 result["test_command"] = common_test_command
-            if rocprof_before:
-                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
-                if rocprof_before.get("reason"):
-                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
-                if rocprof_before.get("json_path"):
-                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
-                if rocprof_before.get("txt_path"):
-                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            _merge_rocprof_before(result, rocprof_before)
             return result
         return {
             "returncode": 2,
@@ -3248,23 +3203,6 @@ def invoke_backend(
         # dirty-file state that forge just carefully restored.
         if log_path is not None and backend != "forge":
             _git_checkout_fallback(kernel_repo, log_path)
-
-
-def env_first(*names: str) -> str:
-    """Return the first non-empty environment variable among ``names``.
-
-    Args:
-        *names (str): Environment variable names to check, in priority order.
-
-    Returns:
-        str: The value of the first set, non-empty variable, or an empty
-            string when none are set.
-    """
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return ""
 
 
 def run_attempt(
