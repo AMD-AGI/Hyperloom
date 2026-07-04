@@ -3787,6 +3787,14 @@ class Coordinator:
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
         source_context = self._read_enablement_source_context(signature)
+        # Auto-feedback (structural): for a weight-init failure, derive the
+        # checkpoint's ground-truth per-layer weight inventory from the model's
+        # safetensors index and fold it into the mandate. This makes the loop
+        # self-correct from the checkpoint on every retry instead of re-deriving
+        # a wrong sharing rule from the raw error alone (no manual hints needed).
+        weight_facts = self._derive_checkpoint_weight_facts(text)
+        if weight_facts:
+            source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
         mandate = build_mandate(
             req,
             signature=signature,
@@ -3917,6 +3925,136 @@ class Coordinator:
                 offending_file,
                 exc_info=True,
             )
+            return ""
+
+    def _derive_checkpoint_weight_facts(self, launch_log: str) -> str:
+        """Auto-derive ground-truth checkpoint-weight facts for a weight-init failure.
+
+        When a launch fails with a *weight-loading* error — vLLM/HF strict init
+        (``weights were not initialized from checkpoint``) or a state_dict
+        mismatch (``Missing/Unexpected key(s) in state_dict``) — the offending
+        parameter names in the traceback are only *half* the picture: the
+        specialist also needs to know which of those names ACTUALLY EXIST in the
+        checkpoint (so it can copy/alias from a real source) versus which are
+        instantiated by the model but absent from the checkpoint (so they need
+        synthesis/sharing). Prior enablement rounds kept re-deriving a wrong
+        sharing rule because that ground truth was never fed back.
+
+        This parses the failing ``model...`` parameter names out of the launch
+        log, then cross-references the model's ``*.safetensors.index.json`` (or
+        ``pytorch_model.bin.index.json``) ``weight_map`` to report, per offending
+        family, which layer indices carry that weight in the checkpoint and which
+        do not. The result is a compact, verifiable FACTS block that is appended
+        to the enablement mandate on EVERY retry, so the loop self-corrects from
+        the checkpoint instead of guessing. Fully exception-guarded: any failure
+        (no index, unreadable, no matches) returns ``""`` and the mandate degrades
+        to the log-only form.
+
+        Args:
+            launch_log: The captured launch / traceback text.
+
+        Returns:
+            str: A ``CHECKPOINT WEIGHT FACTS`` block, or ``""``.
+        """
+        text = (launch_log or "")
+        low = text.lower()
+        try:
+            import glob as _glob
+            import json as _json
+            import re as _re
+            from pathlib import Path as _Path
+
+            # Offending parameter names in the traceback (e.g.
+            # 'model.layers.5.self_attn.indexer.k_norm.weight'). Parsed FIRST so
+            # the trigger is robust to a head-truncated launch log that dropped
+            # the "not initialized from checkpoint" phrase but still carries the
+            # quoted weight names (the real signal we need).
+            offending = set(_re.findall(r"['\"]((?:model|language_model|transformer)\.[\w.]+)['\"]", text))
+            weighty = {o for o in offending if o.endswith((".weight", ".bias", "_scale"))}
+            phrase_hit = (
+                "not initialized from checkpoint" in low
+                or "missing key" in low
+                or "unexpected key" in low
+                or "error(s) in loading state_dict" in low
+            )
+            # Fire when the log names offending weights/biases even if the
+            # explanatory phrase was truncated off; require weight-shaped names
+            # so we do not misfire on unrelated quoted 'model.*' tokens.
+            if not (phrase_hit or weighty):
+                return ""
+            if not offending:
+                return ""
+            model_path = str(getattr(self.shared_state, "model_path", "") or "").strip()
+            if not model_path or not _Path(model_path).is_dir():
+                return ""
+            # Load the checkpoint weight_map (sharded index) or list single-file keys.
+            weight_map: dict[str, Any] = {}
+            idx_files = _glob.glob(f"{model_path}/*.index.json")
+            if idx_files:
+                data = _json.loads(_Path(idx_files[0]).read_text(errors="replace"))
+                weight_map = data.get("weight_map", {}) if isinstance(data, dict) else {}
+            if not weight_map:
+                return ""
+            ckpt_keys = set(weight_map.keys())
+            # Group offending names by a layer-index-stripped "family" so we can
+            # report the per-layer presence pattern compactly.
+            def _family(name: str) -> str:
+                return _re.sub(r"\.\d+\.", ".{N}.", name)
+
+            def _layer_idx(name: str) -> int | None:
+                m = _re.search(r"\.(\d+)\.", name)
+                return int(m.group(1)) if m else None
+
+            fams: dict[str, dict[str, Any]] = {}
+            for nm in offending:
+                fam = _family(nm)
+                d = fams.setdefault(fam, {"missing_layers": set()})
+                li = _layer_idx(nm)
+                if li is not None:
+                    d["missing_layers"].add(li)
+            lines: list[str] = []
+            for fam in sorted(fams):
+                # For this family, which layer indices DO exist in the checkpoint?
+                fam_re = _re.compile("^" + _re.escape(fam).replace(r"\{N\}", r"\d+") + "$")
+                present_layers = sorted(
+                    {li for k in ckpt_keys if fam_re.match(k) for li in [_layer_idx(k)] if li is not None}
+                )
+                missing_layers = sorted(fams[fam]["missing_layers"])
+                if present_layers:
+                    lines.append(
+                        f"- '{fam}': PRESENT in checkpoint for layers {present_layers}; "
+                        f"MISSING (instantiated by model, absent from checkpoint) for layers "
+                        f"{missing_layers}. To satisfy the strict init check, the missing layers "
+                        f"must obtain this tensor from a present layer (copy/alias from the nearest "
+                        f"preceding present layer) OR the model must not instantiate it there."
+                    )
+                else:
+                    lines.append(
+                        f"- '{fam}': NOT present in the checkpoint for ANY layer "
+                        f"(missing for layers {missing_layers}). The checkpoint has no source for "
+                        f"this tensor — the model should not require it (guard/skip its "
+                        f"instantiation) rather than copy it."
+                    )
+            if not lines:
+                return ""
+            header = (
+                "CHECKPOINT WEIGHT FACTS (auto-derived from the model's "
+                "safetensors index — GROUND TRUTH, prefer over assumptions). The "
+                "boot failed on weight initialization; for each offending tensor "
+                "family, here is exactly which layers carry it in the checkpoint:"
+            )
+            footer = (
+                "IMPORTANT: verify the exact model class + its load_weights() entry "
+                "point actually used for this architecture (grep the framework "
+                "source for the architecture/model_type) and confirm the parameter-"
+                "dict key naming (with/without a 'model.' prefix) at that scope "
+                "BEFORE writing copy logic — a prior fix silently no-op'd because "
+                "it edited the wrong loader / used mismatched key names, so the copy "
+                "never executed and the SAME weights stayed uninitialized."
+            )
+            return header + "\n" + "\n".join(lines) + "\n" + footer
+        except Exception:  # noqa: BLE001 — auto-facts are best-effort grounding
+            log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
     def _discover_enablement_candidate_refs(
@@ -4185,9 +4323,32 @@ class Coordinator:
                     cur.append(sc)
             state.enablement_setup_commands = cur
 
+        def _reset_baseline_failure_backstop() -> None:
+            """Clear the baseline-failure counters on enablement forward progress.
+
+            The baseline fast-fail backstop (``baseline_failure_streak`` /
+            ``baseline_total_failures`` → ``stop_reason='baseline_failed'`` at
+            :data:`_BASELINE_MAX_TOTAL_FAILURES`) exists to stop a run whose
+            baseline keeps failing *the same way*. But a **serial** enablement
+            makes the baseline re-fail on purpose: each round clears gap #n and
+            the next baseline/integrate boot stops at a *new, deeper* gap #(n+1).
+            Those crashes are progress, not a stuck baseline — yet the backstop
+            counts them independently of enablement (the counters only reset on
+            an actual baseline SUCCESS), so N serial gaps trip ``baseline_failed``
+            at N=3 and guillotine a healthy, advancing loop. Reset them whenever
+            enablement advances/succeeds so the honest ``enablement_stalled`` cap
+            (consecutive NO-progress rounds) becomes the sole enablement-phase
+            fast-fail; a real baseline regression after enablement completes still
+            re-arms the streak normally.
+            """
+            state.baseline_failure_streak = 0
+            state.baseline_arg_error_streak = 0
+            state.baseline_total_failures = 0
+
         if status == "kept":
             state.enablement_succeeded = True
             state.enablement_stall_streak = 0
+            _reset_baseline_failure_backstop()
             _stack_setup_commands()
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
@@ -4204,6 +4365,9 @@ class Coordinator:
             if new_log:
                 state.enablement_launch_log = new_log
             state.enablement_stall_streak = 0
+            # Serial-gap revalidation crashes are progress, not a stuck
+            # baseline: clear the baseline fast-fail backstop (see helper).
+            _reset_baseline_failure_backstop()
             state.enablement_dispatched = False
         else:
             # No progress: count toward the stall cap.
@@ -13781,6 +13945,21 @@ class Coordinator:
         # eager fallback. Scope is baseline-only; explore/sweep do not benefit.
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             err_class = result_payload.get("error_class", "")
+            # Enablement-aware backstop suppression: while a serial enablement is
+            # actively engaged, baseline boots re-fail *on purpose* — each round
+            # clears gap #n and the next boot stops at a new, deeper gap #(n+1).
+            # Those crashes are progress, so the ``baseline_failed`` fast-fail
+            # (streak / total) must NOT fire here; the honest ``enablement_stalled``
+            # cap (consecutive NO-progress rounds in _maybe_rearm_enablement) is
+            # the correct fast-fail in this regime. Engaged = a progressing patch
+            # already stacked OR a specialist currently dispatched/attempting.
+            # ``fast_exit_arg_error`` is deterministic (a bad CLI arg the same
+            # params never fix) and stays gated on its own streak regardless.
+            enablement_engaged = bool(
+                (getattr(self.shared_state, "enablement_kept_patches", None) or [])
+                or getattr(self.shared_state, "enablement_dispatched", False)
+                or int(getattr(self.shared_state, "enablement_attempts", 0) or 0) > 0
+            )
             if err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
@@ -13788,7 +13967,7 @@ class Coordinator:
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
-                if self.shared_state.baseline_failure_streak >= 3:
+                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: mixed error_classes split the per-class
             # streaks above so neither reaches its threshold and the session
@@ -13799,6 +13978,7 @@ class Coordinator:
                 self.shared_state.baseline_total_failures
                 >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
+                and not enablement_engaged
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
