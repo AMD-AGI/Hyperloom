@@ -1708,6 +1708,14 @@ class PolicyGate:
         # scope='freeform' has no domain anchor:
         # it skips the tag / gap vocabulary checks and runs a lightweight
         # mechanical sanity gate instead.
+        #
+        # This is the sanctioned way to let the agent freely decide a
+        # specialist's mandate: pass ``scope='freeform'`` + ``task_description``
+        # (or a ``tasks=[...]`` wave), NOT an ad-hoc / relaxed ``domain`` tag.
+        # ``params.tags`` remains a controlled vocabulary validated below; the
+        # domain KEY→kb_anchor translation (``normalize_dispatch_tags``) only
+        # accepts real catalogue entries, so genuinely unknown tags still trip
+        # ``specialist_unknown_domain``.
         scope_raw = str(params.get("scope") or "").strip().lower()
         if scope_raw == SPECIALIST_SCOPE_FREEFORM:
             self._validate_freeform_specialist_dispatch(params)
