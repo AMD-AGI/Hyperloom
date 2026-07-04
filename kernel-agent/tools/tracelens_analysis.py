@@ -445,11 +445,6 @@ class OpResolver:
             ))
         return out
 
-    @classmethod
-    def _container_sources(cls, container: dict[str, Any] | None) -> list[str]:
-        """Editable, patchable source paths for one container (dedup, order-preserving)."""
-        return [m[0] for m in cls._container_source_meta(container)]
-
     def _select_source_meta(
         self, entry: dict[str, Any], framework: str | None,
     ) -> list[tuple[str, str, str]]:
@@ -481,10 +476,6 @@ class OpResolver:
         if fw == "sglang" and sgl:
             return sgl
         return sgl or vll
-
-    def _select_sources(self, entry: dict[str, Any], framework: str | None) -> list[str]:
-        """Pick the editable source paths, routing to the installed container."""
-        return [m[0] for m in self._select_source_meta(entry, framework)]
 
     def _single(
         self, op_name: str, entry: dict[str, Any], framework: str | None,
@@ -3015,7 +3006,7 @@ def _expand_op_fanout(
     ``--framework``); it disambiguates which container's source to route to when
     both/neither are on disk. Only ``vllm``/``sglang`` are honored (the mapping's
     container keys); any other value (e.g. ``atom``) or an empty/unset value
-    falls through to ``OpResolver._select_sources``' on-disk-presence-then-default
+    falls through to ``OpResolver._select_source_meta``' on-disk-presence-then-default
     ordering.
     """
     framework = (framework or "").strip().lower() or None
@@ -3625,22 +3616,6 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
         if val is not None and val >= 0:
             return val
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
-
-
-def _is_other_like_category(category: str) -> bool:
-    """Return whether a category counts as the ``other`` bucket.
-
-    Args:
-        category: Raw or upstream category label.
-
-    Returns:
-        ``True`` if the label (or its normalized upstream form) is an
-        other-like category.
-    """
-    raw_l = str(category or "").strip().lower()
-    if raw_l in _OTHER_LIKE_CATEGORIES:
-        return True
-    return str(normalize_upstream_category(category or "")).strip().lower() in _OTHER_LIKE_CATEGORIES
 
 
 def recover_other_bucket_candidates(
