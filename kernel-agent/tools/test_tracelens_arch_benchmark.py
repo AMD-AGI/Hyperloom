@@ -173,6 +173,9 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
+        # Force the microbench branch: hyperloom's achievable spec now
+        # short-circuits populate_gpu_arch_json (A3), so isolate the fallback.
+        patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
         patch.object(
             tab,
             "select_idle_gpu",
@@ -263,6 +266,9 @@ def test_populate_external_raises_on_microbench_failure(
     """Open-source path surfaces a non-zero microbenchmark exit code."""
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
+        # A3 short-circuits on hyperloom's achievable spec; force the microbench
+        # branch so the non-zero exit code propagates as intended.
+        patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
         patch.object(tab, "select_idle_gpu", return_value=0),
     ):
         with pytest.raises(RuntimeError, match="exit code 7"):
