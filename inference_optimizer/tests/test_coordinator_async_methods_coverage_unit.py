@@ -414,6 +414,72 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     )
 
 
+# -- Problem 3: journal no longer records a reverted patch as KEEP -----------
+def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
+    """Regression for the "fake KEEP" bug: a reverted integrate_patch reaches the
+    fact hook with kept=True (``status != failed`` is promotable), yet the
+    journal must record REVERT with the REAL measured delta (from delta_pct)."""
+    from inference_optimizer.orchestrator.optimization_journal import (
+        OUTCOME_REVERT,
+    )
+    from inference_optimizer.orchestrator.task_registry import Task
+
+    task = Task(
+        task_id="t-revert-fake-keep",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="t-revert-fake-keep",
+    )
+    coord._record_fact_per_task(
+        task=task,
+        source_session_id="sess-a",
+        # The exact real-session signature: tput == baseline → delta_pct ~0,
+        # executor returns "reverted", dispatcher marks it promotable.
+        result_dict={
+            "status": "reverted",
+            "delta_pct": -0.44,
+            "output_throughput": 0.440529,
+            "reason": "throughput delta -0.44% < keep_threshold 1.00%",
+        },
+        kept=True,
+    )
+    entry = coord._ensure_journal().entries[-1]
+    assert entry.outcome == OUTCOME_REVERT
+    assert entry.gain_pct == -0.44  # real delta shown, not null
+    assert entry.reason and "keep_threshold" in entry.reason
+
+
+def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> None:
+    from inference_optimizer.orchestrator.optimization_journal import OUTCOME_KEEP
+    from inference_optimizer.orchestrator.task_registry import Task
+
+    task = Task(
+        task_id="t-real-keep",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="t-real-keep",
+    )
+    coord._record_fact_per_task(
+        task=task,
+        source_session_id="sess-a",
+        result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
+        kept=True,
+    )
+    entry = coord._ensure_journal().entries[-1]
+    assert entry.outcome == OUTCOME_KEEP
+    assert entry.gain_pct == 6.2
+
+
+def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
+    """Guard the key Problem-3 constraint: we must NOT change routing — a reverted
+    integrate_patch stays promotable so it still runs the pending_integrate
+    cleanup in _promote_to_shared_state (only the journal semantics changed)."""
+    assert coord._is_promotable_result("integrate_patch", {"status": "reverted"}) is True
+    assert coord._is_promotable_result("integrate_patch", {"status": "failed"}) is False
+
+
 # -- _compose_prompt additional branches -----------------------------------
 class _Obj:
     kind = "gain_pct"
