@@ -188,6 +188,7 @@
     "framework_agent_phase_done": false,
     "framework_agent_phase_enabled": true,
     "framework_agent_phase_progress": [],
+    "framework_agent_review_counts": {},
     "framework_agent_specialist_candidate_map": {},
     "framework_consecutive_empty_discoveries": 0,
     "framework_max_candidates": 0,

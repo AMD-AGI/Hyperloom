@@ -3060,9 +3060,7 @@ class Coordinator:
         # audit preserves the legacy both-tracks behaviour (zero regression).
         audit = await self._audit_framework_agent_candidate(next_candidate)
         audit_step = str((audit or {}).get("recommended_next_step") or "")
-        _cand_id_log = str(
-            next_candidate.get("candidate_id") or next_candidate.get("pr_url") or next_candidate.get("ref") or ""
-        )
+        _cand_id_log = self._framework_candidate_key(next_candidate)
         # G5: only honour a skip when the audit is confident AND evidence-backed;
         # otherwise fall through to authoring (never silently skip a GPU test on
         # a low-confidence already-present claim).
@@ -3132,7 +3130,7 @@ class Coordinator:
             or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
         unprocessed_ids = {
-            str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            self._framework_candidate_key(c)
             for c in self._unprocessed_framework_agent_candidates()
         }
         try:
@@ -3296,16 +3294,14 @@ class Coordinator:
 
             write_semantic_audit(
                 self.session_dir,
-                candidate_id=str(
-                    candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or ""
-                ),
+                candidate_id=self._framework_candidate_key(candidate),
                 verdict=audit,
             )
         except Exception:  # noqa: BLE001 — observability is best-effort
             log.debug("FRAMEWORK: write_semantic_audit failed", exc_info=True)
         log.info(
             "FRAMEWORK: audit candidate=%s status=%s appl=%s next=%s",
-            candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "",
+            self._framework_candidate_key(candidate),
             audit.get("semantic_status"),
             audit.get("applicability"),
             audit.get("recommended_next_step"),
@@ -3359,7 +3355,7 @@ class Coordinator:
             audit: The semantic-audit verdict driving the skip.
         """
         state = self.shared_state
-        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
+        cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         semantic = str((audit or {}).get("semantic_status") or "")
         status = "already_present" if semantic.startswith("already_") else "not_applicable"
@@ -3449,7 +3445,7 @@ class Coordinator:
             short-circuits the re-dispatch).
         """
         state = self.shared_state
-        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
+        cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.{cand_id}"
         title = str(candidate.get("title") or "").strip()
@@ -3570,11 +3566,7 @@ class Coordinator:
         from .task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
-            already_rows = {
-                str(p.get("candidate_id") or "")
-                for p in (getattr(state, "framework_agent_phase_progress", None) or [])
-                if isinstance(p, dict)
-            }
+            already_rows = self._framework_processed_candidate_keys()
             # Only stamp when the authored deliverable is genuinely NOT in flight.
             # A specialist that produced a config-lever / patch deliverable routes
             # it to an integrate_patch (often first as a pending Critic proposal,
@@ -4127,11 +4119,50 @@ class Coordinator:
             int(getattr(state, "enablement_attempts", 0) or 0),
         )
 
+    @staticmethod
+    def _framework_candidate_key(row: dict[str, Any] | None) -> str:
+        """Canonical FRAMEWORK candidate dedup/progress key (see ``candidate_key``).
+
+        Thin wrapper over
+        :func:`framework_agent_artifacts.candidate_key` so every candidate
+        selection / dedup / progress-row / idempotency site derives the key
+        from one place (``candidate_id or pr_url or ref``). Prevents the
+        asymmetry where a candidate carrying only a ``pr_url`` failed to dedup
+        against its own progress row.
+
+        Args:
+            row: A candidate dict or ``framework_agent_phase_progress`` row.
+
+        Returns:
+            The candidate key, or ``""`` when no identity field is set.
+        """
+        from .framework_agent_artifacts import candidate_key
+
+        return candidate_key(row)
+
+    def _framework_processed_candidate_keys(self) -> set[str]:
+        """Set of candidate keys that already carry a terminal progress row.
+
+        A candidate is "processed" once any ``framework_agent_phase_progress``
+        row is keyed on it; such a candidate must never be re-selected. Progress
+        rows store the key in their ``candidate_id`` field, so this reuses
+        :meth:`_framework_candidate_key`.
+
+        Returns:
+            The set of processed candidate keys (possibly empty).
+        """
+        return {
+            self._framework_candidate_key(p)
+            for p in (getattr(self.shared_state, "framework_agent_phase_progress", None) or [])
+            if isinstance(p, dict) and self._framework_candidate_key(p)
+        }
+
     def _unprocessed_framework_agent_candidates(self) -> list[dict[str, Any]]:
         """Return all not-yet-processed candidates in the latest batch (order preserved).
 
-        Processed = the candidate id already appears in
-        ``framework_agent_phase_progress``.
+        Processed = the candidate key already appears in
+        ``framework_agent_phase_progress`` (see
+        :meth:`_framework_processed_candidate_keys`).
 
         Returns:
             The list of candidate dicts lacking a progress row (possibly empty).
@@ -4146,16 +4177,12 @@ class Coordinator:
         candidates = latest.get("candidates") or []
         if not isinstance(candidates, list):
             return []
-        processed = {
-            str(p.get("candidate_id") or "")
-            for p in (getattr(state, "framework_agent_phase_progress", None) or [])
-            if isinstance(p, dict)
-        }
+        processed = self._framework_processed_candidate_keys()
         out: list[dict[str, Any]] = []
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
-            cand_id = str(cand.get("candidate_id") or cand.get("pr_url") or cand.get("ref") or "")
+            cand_id = self._framework_candidate_key(cand)
             if cand_id and cand_id not in processed:
                 out.append(cand)
         return out
@@ -4248,13 +4275,27 @@ class Coordinator:
         ctx_lines.append("")
         ctx_lines.append("Candidates (choose the ONE most likely to raise throughput):")
         for i, c in enumerate(listed):
-            cid = str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            cid = self._framework_candidate_key(c)
             title = str(c.get("title") or "").strip()
             repo = str(c.get("repo") or c.get("discovered_repo_url") or "").strip()
             audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
             appl = str((audit or {}).get("applicability") or "") if audit else ""
             extra = f" [audit_applicability={appl}]" if appl else ""
             ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        # Step C — soft guidance: fold this session's already-tried / failed
+        # candidates into the prompt as negative samples so the ranker stops
+        # re-picking equivalents. Purely derived from the ledgers (zero extra
+        # LLM cost); best-effort — a build failure must never wedge ranking.
+        try:
+            tried_block = self._render_framework_memory_for_prompt(
+                self._build_framework_working_memory(),
+            )
+        except Exception:  # noqa: BLE001 — advisory only
+            log.debug("FRAMEWORK: working-memory render for ranker failed", exc_info=True)
+            tried_block = ""
+        if tried_block:
+            ctx_lines.append("")
+            ctx_lines.append(tried_block)
         ctx_lines.append("")
         ctx_lines.append(
             "Prefer PRs from this session's own framework repo, especially those "
@@ -4413,12 +4454,9 @@ class Coordinator:
             for cand in batch.get("candidates") or []:
                 if not isinstance(cand, dict):
                     continue
-                cid = str(
-                    cand.get("candidate_id")
-                    or cand.get("pr_url")
-                    or cand.get("ref")
-                    or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
-                )
+                # Canonical key (candidate_id/pr_url/ref); synthetic repo-PR
+                # fallback only when the candidate carries no identity field.
+                cid = self._framework_candidate_key(cand) or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
                 if cid:
                     ids.add(cid)
         # Fold in PR ids the research scout already mined so the two mechanisms never re-process a PR.
@@ -4439,6 +4477,117 @@ class Coordinator:
             if cid:
                 refs.append(cid)
         return refs
+
+    # Statuses that mean the candidate was ADOPTED (positive). Everything else
+    # in framework_agent_phase_progress is a negative signal for the ranker.
+    _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
+
+    # Max tried-candidate rows fed into the ranker/discovery working memory
+    # (most-recent-first), to keep the prompt bounded.
+    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
+
+    def _build_framework_working_memory(self) -> dict[str, Any]:
+        """Aggregate the FRAMEWORK working memory from the three ledgers (deterministic, zero-LLM).
+
+        Mirrors ``orchestration_memory`` for the framework layer: a structured,
+        purely-derived view of "what this session already tried / excluded /
+        learned", so discovery and the candidate ranker can be biased away from
+        repeating failed candidates. No new data source — it aggregates
+        ``framework_agent_phase_progress`` (terminal rows, reliably populated
+        after the P0 fix), ``framework_agent_critic_decisions`` (recent Critic
+        verdicts) and the batch dedup set.
+
+        Returns:
+            A dict with:
+              - ``tried_and_why``: recent terminal candidates as
+                ``{ref, status, gain_pct, why}`` (most recent last, capped).
+              - ``excluded_refs``: sorted union of known-candidate ids and
+                candidates that already carry a terminal progress row (hard
+                dedup source for discovery — Step B).
+              - ``learnings``: deduped Critic rationales for denied candidates.
+              - ``pending``: still-unprocessed candidate refs in the latest batch.
+        """
+        state = self.shared_state
+        progress = getattr(state, "framework_agent_phase_progress", None) or []
+        rows = [p for p in progress if isinstance(p, dict) and self._framework_candidate_key(p)]
+        tried: list[dict[str, Any]] = []
+        for row in rows[-self._FRAMEWORK_TRIED_MEMORY_CAP :]:
+            status = str(row.get("status") or "").strip()
+            gain = row.get("gain_pct")
+            why = str(row.get("rationale") or row.get("reason") or "").strip()
+            tried.append(
+                {
+                    "ref": self._framework_candidate_key(row),
+                    "status": status,
+                    "gain_pct": (float(gain) if isinstance(gain, (int, float)) else None),
+                    "why": why[:200],
+                }
+            )
+        # Learnings: distinct Critic denial rationales (negative priors), capped.
+        learnings: list[str] = []
+        seen_learn: set[str] = set()
+        for dec in getattr(state, "framework_agent_critic_decisions", None) or []:
+            if not isinstance(dec, dict):
+                continue
+            if str(dec.get("verdict") or "").strip().lower() not in ("reject", "critic_denied", "deny"):
+                continue
+            rationale = str(dec.get("rationale") or "").strip()
+            if rationale and rationale not in seen_learn:
+                seen_learn.add(rationale)
+                learnings.append(rationale[:200])
+            if len(learnings) >= self._FRAMEWORK_TRIED_MEMORY_CAP:
+                break
+        pending = [self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()]
+        excluded = self._framework_known_candidate_ids() | self._framework_processed_candidate_keys()
+        return {
+            "tried_and_why": tried,
+            "excluded_refs": sorted(r for r in excluded if r),
+            "learnings": learnings,
+            "pending": [r for r in pending if r],
+        }
+
+    @staticmethod
+    def _render_framework_memory_for_prompt(memory: dict[str, Any] | None) -> str:
+        """Render the FRAMEWORK working memory into prompt text (mirror of ``render_memory_for_seed``).
+
+        Emits a bounded ``tried_and_why`` / ``learnings`` bullet block framed as
+        "already tried this session — avoid proposing the same or equivalent".
+        Returns ``""`` when there is nothing tried yet (fresh phase), so callers
+        can skip the section cleanly.
+
+        Args:
+            memory: A record from :meth:`_build_framework_working_memory`.
+
+        Returns:
+            The rendered prompt text, or ``""`` when empty.
+        """
+        if not isinstance(memory, dict) or not memory:
+            return ""
+        tried = memory.get("tried_and_why") or []
+        learnings = memory.get("learnings") or []
+        if not tried and not learnings:
+            return ""
+        lines: list[str] = [
+            "Already tried THIS session (avoid proposing the same PR or an "
+            "equivalent change — prefer a candidate that attacks a different "
+            "bottleneck):",
+        ]
+        for t in tried:
+            if not isinstance(t, dict):
+                continue
+            ref = str(t.get("ref") or "").strip()
+            if not ref:
+                continue
+            status = str(t.get("status") or "").strip() or "?"
+            gain = t.get("gain_pct")
+            gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
+            why = str(t.get("why") or "").strip()
+            why_str = f" — {why}" if why else ""
+            lines.append(f"  - {ref} [{status}]{gain_str}{why_str}")
+        if learnings:
+            lines.append("Learnings (avoid these dead ends):")
+            lines.extend(f"  - {str(x)}" for x in learnings)
+        return "\n".join(lines)
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
         """Repo URLs to query for the FRAMEWORK batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
@@ -4752,6 +4901,16 @@ class Coordinator:
         )
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_agent_discover_repo_urls(framework)
+        # Step A/B — feed the session working memory into discovery so fa
+        # hard-filters already-seen/terminal candidates and de-prioritises
+        # equivalents. Best-effort: a build failure must never wedge discovery.
+        try:
+            fw_memory = self._build_framework_working_memory()
+        except Exception:  # noqa: BLE001 — advisory only
+            log.debug("FRAMEWORK: working-memory build for discovery failed", exc_info=True)
+            fw_memory = {}
+        excluded_candidate_ids = list(fw_memory.get("excluded_refs") or [])
+        failed_candidate_context = list(fw_memory.get("tried_and_why") or [])[-10:]
         payload: dict[str, Any] | None = None
         merged_candidates: list[dict[str, Any]] = []
         batch_id = ""
@@ -4772,6 +4931,8 @@ class Coordinator:
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
                     pr_states=["open", "merged", "closed"],
+                    excluded_candidate_ids=excluded_candidate_ids,
+                    failed_candidate_context=failed_candidate_context,
                     timeout_sec=per_repo_timeout,
                 )
             except Exception as exc:  # noqa: BLE001 — defensive
@@ -4823,8 +4984,12 @@ class Coordinator:
         if not merged_candidates:
             return False
         batch_id = str((payload or {}).get("batch_id") or "")
-        # Cross-batch + cross-repo de-dup so the new batch only carries genuinely new PRs.
-        seen_ids = self._framework_known_candidate_ids()
+        # Cross-batch + cross-repo de-dup so the new batch only carries genuinely
+        # new PRs. Coordinator-side hard-dedup backstop (Step B): even if fa
+        # forgot to honour ``excluded_candidate_ids``, re-filter here against the
+        # full excluded set (known candidate ids ∪ candidates that already carry
+        # a terminal progress row) so a failed/tested PR is never re-queued.
+        seen_ids = self._framework_known_candidate_ids() | self._framework_processed_candidate_keys()
         primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate for consistent executor fields + a stable progress-ledger id.
         norm: list[dict[str, Any]] = []
@@ -4888,7 +5053,7 @@ class Coordinator:
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
         }
-        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or "")
+        cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         try:
             await self.tasks.create_or_return_existing(
@@ -4913,21 +5078,15 @@ class Coordinator:
                 exc,
             )
             # Record enqueue_failed progress row so the candidate is skipped next tick (else the loop spins).
-            progress = getattr(state, "framework_agent_phase_progress", None)
-            if not isinstance(progress, list):
-                progress = []
-                state.framework_agent_phase_progress = progress
-            progress.append(
-                {
-                    "candidate_id": cand_id,
-                    "batch_id": candidate.get("batch_id") or "",
-                    "task_id": None,
-                    "status": "enqueue_failed",
-                    "error": repr(exc),
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=str(candidate.get("batch_id") or ""),
+                status="enqueue_failed",
+                kept=False,
+                rationale=repr(exc),
+                provenance="pump",
+                extra={"error": repr(exc)},
             )
-            state.save(self.session_dir)
 
     _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
@@ -5001,12 +5160,7 @@ class Coordinator:
             audit_step: The resolved route (``direct_framework`` /
                 ``author_via_specialist`` / ``""`` for legacy both-tracks).
         """
-        cand_id = str(
-            candidate.get("candidate_id")
-            or candidate.get("pr_url")
-            or candidate.get("ref")
-            or ""
-        )
+        cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         # Dedup: a candidate is already awaiting its pre-screen verdict.
         for p in self.state.pending_proposals.values():
@@ -5020,6 +5174,39 @@ class Coordinator:
                     return
             except Exception:  # noqa: BLE001 — defensive
                 continue
+        # P0-4 repeated-review backstop: count how many times this candidate has
+        # been sent for review. Under healthy operation a candidate is submitted
+        # once (a terminal row makes it "processed"); repeated submissions mean a
+        # terminal-row leak let it be re-selected. Past the abort threshold,
+        # force a terminal row and stop — no single candidate can burn the phase.
+        if cand_id:
+            counts = getattr(self.shared_state, "framework_agent_review_counts", None)
+            if not isinstance(counts, dict):
+                counts = {}
+                self.shared_state.framework_agent_review_counts = counts
+            count = int(counts.get(cand_id, 0) or 0) + 1
+            counts[cand_id] = count
+            if count > self._MAX_REPEATED_REVIEW_SUBMISSIONS:
+                log.warning(
+                    "FRAMEWORK: candidate=%s submitted for review %d times "
+                    "(> cap %d); aborting to protect the phase budget",
+                    cand_id,
+                    count,
+                    self._MAX_REPEATED_REVIEW_SUBMISSIONS,
+                )
+                self._stamp_framework_progress(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="repeated_review_abort",
+                    kept=False,
+                    rationale=(
+                        f"submitted for review {count} times "
+                        f"(> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})"
+                    ),
+                    provenance="pump",
+                    extra={"review_submissions": count},
+                )
+                return
         propose_payload: dict[str, Any] = {
             "action_name": "framework_agent",
             "provenance": "framework_agent",
@@ -5091,7 +5278,11 @@ class Coordinator:
         candidate = dict(payload.get("candidate") or {})
         audit = payload.get("audit") if isinstance(payload.get("audit"), dict) else {}
         audit_step = str(payload.get("audit_step") or "")
-        cand_id = str(payload.get("framework_agent_candidate_id") or "")
+        cand_id = str(
+            payload.get("framework_agent_candidate_id")
+            or self._framework_candidate_key(candidate)
+        )
+        batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
@@ -5104,12 +5295,14 @@ class Coordinator:
         log.info(
             "FRAMEWORK: critic-approved candidate=%s batch=%s audit_step=%s raw=%s author=%s",
             cand_id,
-            str(payload.get("batch_id") or ""),
+            batch_id,
             audit_step or "<unknown>",
             want_raw,
             want_author,
         )
         if want_raw:
+            # _enqueue_framework_agent_task owns its own enqueue_failed terminal
+            # row on failure, so a raw-track candidate always ends up processed.
             await self._enqueue_framework_agent_task(candidate)
         if want_author and authoring_enabled:
             try:
@@ -5122,6 +5315,128 @@ class Coordinator:
                     "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,
                 )
+                # Author-only route (no raw track to own a terminal row): stamp
+                # materialize_failed so an approved-but-undispatchable candidate
+                # is not re-selected every tick (P0 terminal-row invariant).
+                if not want_raw:
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=batch_id,
+                        status="materialize_failed",
+                        kept=False,
+                        rationale=repr(exc),
+                        provenance="pump",
+                        extra={"error": repr(exc)},
+                    )
+
+    def _stamp_framework_progress(
+        self,
+        *,
+        candidate_id: str,
+        batch_id: str = "",
+        status: str,
+        kept: bool = False,
+        rationale: str = "",
+        provenance: str = "",
+        gain_pct: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
+        """Idempotently stamp a terminal ``framework_agent_phase_progress`` row.
+
+        The single terminal-row writer for every FRAMEWORK path that ends a
+        candidate's life without a benched executor result (critic denial,
+        needs_review dead-ends, materialize/enqueue failures, silent apply/bench
+        failures, repeated-review aborts). Guarantees the P0 invariant: any
+        candidate that can no longer advance carries exactly one terminal row,
+        so the pump's plateau / phase-done early-exit accrues instead of relying
+        on the budget-cap backstop.
+
+        Idempotent: a candidate key that already has ANY progress row is left
+        untouched (returns ``False``) so a later path can never double-stamp or
+        overwrite an earlier verdict. Writes the row + a ``decision.json`` and
+        persists SharedState. Best-effort on the artifact/save side (never
+        raises into the pump).
+
+        Args:
+            candidate_id: The canonical candidate key (see
+                :meth:`_framework_candidate_key`).
+            batch_id: The discovery batch the candidate belonged to.
+            status: The terminal status (e.g. ``critic_denied`` /
+                ``no_result_failed`` / ``reauthor_cap`` …).
+            kept: Whether the candidate was promoted (terminal rows are almost
+                always ``False``).
+            rationale: Human-readable reason recorded on the row + decision.json.
+            provenance: Origin tag for the decision.json (``critic`` / ``pump``
+                / ``executor`` …).
+            gain_pct: Measured delta, when one exists.
+            extra: Optional additional fields merged into the decision.json.
+
+        Returns:
+            ``True`` when a new row was appended; ``False`` when the candidate
+            already had a row (idempotent no-op) or the key was empty.
+        """
+        cand_id = str(candidate_id or "")
+        if not cand_id:
+            return False
+        state = self.shared_state
+        progress = getattr(state, "framework_agent_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            state.framework_agent_phase_progress = progress
+        if cand_id in {
+            self._framework_candidate_key(p)
+            for p in progress
+            if isinstance(p, dict)
+        }:
+            return False
+        row: dict[str, Any] = {
+            "candidate_id": cand_id,
+            "batch_id": str(batch_id or ""),
+            "status": str(status or ""),
+            "kept": bool(kept),
+            "rationale": str(rationale or ""),
+            "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
+            "provenance": str(provenance or ""),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``)
+        # onto the row too, without clobbering the canonical fields above, so
+        # downstream consumers see the same detail the decision.json carries.
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                row.setdefault(str(k), v)
+        progress.append(row)
+        try:
+            from .framework_agent_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=str(batch_id or ""),
+                status=str(status or ""),
+                kept=bool(kept),
+                provenance=str(provenance or ""),
+                reason=str(rationale or ""),
+                gain_pct=gain_pct,
+                extra=extra if isinstance(extra, dict) else None,
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK: stamp decision.json write failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
+                cand_id,
+                status,
+            )
+        log.info(
+            "FRAMEWORK: stamped terminal progress candidate=%s batch=%s status=%s",
+            cand_id,
+            str(batch_id or ""),
+            status,
+        )
+        return True
 
     async def _record_framework_agent_critic_denied(
         self,
@@ -5138,45 +5453,20 @@ class Coordinator:
             pending: The rejected framework_agent pending proposal.
             reasoning: The Critic's free-text rationale.
         """
-        state = self.shared_state
         payload = pending.payload or {}
-        cand_id = str(payload.get("framework_agent_candidate_id") or "")
-        batch_id = str(payload.get("batch_id") or "")
-        progress = getattr(state, "framework_agent_phase_progress", None)
-        if not isinstance(progress, list):
-            progress = []
-            state.framework_agent_phase_progress = progress
-        progress.append(
-            {
-                "candidate_id": cand_id,
-                "batch_id": batch_id,
-                "task_id": None,
-                "status": "critic_denied",
-                "rationale": str(reasoning or ""),
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
+        cand_id = str(
+            payload.get("framework_agent_candidate_id")
+            or self._framework_candidate_key(payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None)
         )
-        try:
-            from .framework_agent_artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="critic_denied",
-                kept=False,
-                provenance="critic",
-                reason=str(reasoning or ""),
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: critic_denied decision.json write failed", exc_info=True)
-        try:
-            state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "save after framework_agent critic_denied failed for candidate=%s",
-                cand_id,
-            )
+        batch_id = str(payload.get("batch_id") or "")
+        self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=batch_id,
+            status="critic_denied",
+            kept=False,
+            rationale=str(reasoning or ""),
+            provenance="critic",
+        )
         log.info(
             "FRAMEWORK: critic rejected candidate=%s batch=%s rationale=%r",
             cand_id,
@@ -5200,13 +5490,10 @@ class Coordinator:
             advisory: The serialized Critic advisory.
         """
         advisory = advisory or {}
-        required_evidence = [
-            str(x).strip()
-            for x in (advisory.get("required_evidence") or [])
-            if str(x).strip()
-        ]
-        if not required_evidence:
-            return
+        # Resolve the candidate identity FIRST so the two dead-end returns below
+        # (no required_evidence / reauthor cap) can stamp a terminal progress row
+        # — a needs_review verdict that neither re-authors nor materializes would
+        # otherwise leave the candidate row-less and re-selected forever (P0).
         action_name = str(getattr(pending, "action_name", "") or "")
         payload = getattr(pending, "payload", {}) or {}
         candidate: dict[str, Any] = {}
@@ -5249,13 +5536,26 @@ class Coordinator:
             audit = raw_audit if isinstance(raw_audit, dict) else {}
         else:
             return
-        cand_id = str(
-            candidate.get("candidate_id")
-            or candidate.get("pr_url")
-            or candidate.get("ref")
-            or ""
-        ).strip()
+        cand_id = self._framework_candidate_key(candidate)
         if not cand_id:
+            return
+        batch_id = str(candidate.get("batch_id") or payload.get("batch_id") or "")
+        required_evidence = [
+            str(x).strip()
+            for x in (advisory.get("required_evidence") or [])
+            if str(x).strip()
+        ]
+        if not required_evidence:
+            # needs_review with nothing to act on: no re-author is possible, so
+            # this is terminal for the candidate. Stamp it so the pump advances.
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="needs_review_no_evidence",
+                kept=False,
+                rationale=str(advisory.get("advice_text") or "")[:500],
+                provenance="critic",
+            )
             return
         # Skip if the candidate is already materializing as a live integrate_patch task.
         try:
@@ -5284,6 +5584,16 @@ class Coordinator:
                     "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
                     "verdict": "needs_review",
                 },
+            )
+            # Re-author budget exhausted: terminal for the candidate. Stamp so
+            # the pump stops re-selecting it once this proposal drains.
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="reauthor_cap",
+                kept=False,
+                rationale=f"reauthor attempts >= cap ({self._MAX_REAUTHOR_ATTEMPTS})",
+                provenance="pump",
             )
             return
         attempt = prior + 1
@@ -6749,6 +7059,10 @@ class Coordinator:
 
     # Max re-author rounds per candidate on a needs_review verdict.
     _MAX_REAUTHOR_ATTEMPTS: int = 1
+
+    # P0-4 backstop: max Critic-review submissions for a single candidate before
+    # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.
+    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
@@ -11298,12 +11612,7 @@ class Coordinator:
         batch_id = str(params.get("framework_batch_id") or "")
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []
-        already = {
-            str(p.get("candidate_id") or "")
-            for p in self.shared_state.framework_agent_phase_progress
-            if isinstance(p, dict)
-        }
-        if cand_id in already:
+        if cand_id in self._framework_processed_candidate_keys():
             return
         # Map the cached audit verdict to a terminal status.
         audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
@@ -13291,6 +13600,24 @@ class Coordinator:
             result=result_payload,
         )
         any_changed = True
+        # FRAMEWORK apply/bench silent failure (P0 death-loop root cause): a
+        # framework_agent task that settles ``status="failed"`` (or empty) never
+        # reaches the promote branch that writes the terminal progress row, so
+        # without stamping here the candidate stays "unprocessed" and the pump
+        # re-selects it every tick until the budget cap. Stamp no_result_failed.
+        if task.kind == "framework_agent":
+            cand = (task.params or {}).get("candidate")
+            cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
+            if cand_id:
+                self._stamp_framework_progress(
+                    candidate_id=cand_id,
+                    batch_id=str((task.params or {}).get("batch_id") or ""),
+                    status="no_result_failed",
+                    kept=False,
+                    rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
+                    provenance="executor",
+                    extra={"status": str(result_payload.get("status") or "")},
+                )
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors (fast_exit_arg_error) get their own streak so
         # they don't burn the slow-baseline retry budget on deterministic
@@ -14884,8 +15211,23 @@ class Coordinator:
             # KEEP lift to current_best + optimization_stack + cumulative_gain_validated + watermark roofline.
             status = str(result.get("status") or "")
             candidate = result.get("candidate") or {}
-            cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
-            batch_id = str(result.get("batch_id") or candidate.get("batch_id") or "")
+            cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
+            # Silent apply/bench failure: the executor returned a promotable-
+            # looking result (status != "failed") but with no candidate / no
+            # status (empty result dict). Recover the candidate key from the
+            # task params and coerce the status so the row is a real terminal
+            # verdict the pump can dedup on, not a blank row keyed on "" (P0).
+            if not cand_id and task is not None:
+                task_cand = (getattr(task, "params", None) or {}).get("candidate")
+                cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
+            if not status:
+                status = "no_result_failed"
+            batch_id = str(
+                result.get("batch_id")
+                or candidate.get("batch_id")
+                or ((getattr(task, "params", None) or {}).get("batch_id") if task is not None else "")
+                or ""
+            )
             delta_pct = result.get("delta_pct")
             new_tput = result.get("output_throughput")
             kept_flag = status == "kept"

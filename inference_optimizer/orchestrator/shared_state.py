@@ -605,6 +605,14 @@ class SharedState:
     specialist_reauthor_attempts: dict[str, int] = field(
         default_factory=dict,
     )
+    # P0-4 backstop: per-candidate-key count of Critic-review submissions. If a
+    # candidate is submitted for review more than the abort threshold (a
+    # terminal-row leak somewhere let it be re-selected), the pump force-stamps
+    # ``repeated_review_abort`` and stops re-selecting it, so no single candidate
+    # can burn the whole phase budget even if a new path forgets its terminal row.
+    framework_agent_review_counts: dict[str, int] = field(
+        default_factory=dict,
+    )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. The kill clock starts at the server-ready marker so it measures only the post-ready (pure hot client) phase, matching the anchor. Warmup + stack-rebench exempt. Default 2.0x.

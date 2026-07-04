@@ -115,7 +115,11 @@ class _CoordinatorStub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
+    _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
+    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
+    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
+    _stamp_framework_progress = Coordinator._stamp_framework_progress
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
     _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
