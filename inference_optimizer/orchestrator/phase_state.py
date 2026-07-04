@@ -409,6 +409,11 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
         # deterministic, so stop instead of burning the slow-baseline retry budget.
         "baseline_arg_error",
+        # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive enablement
+        # rounds made no forward progress (neither runnable nor advanced to a new
+        # failure signature). Stop instead of re-deriving the same fix until the
+        # wall-clock deadline. A progressing round resets the streak.
+        "enablement_stalled",
     }
 )
 

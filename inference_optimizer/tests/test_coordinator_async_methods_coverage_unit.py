@@ -8,7 +8,6 @@ orchestration checkpoint guard."""
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 
@@ -342,6 +341,33 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
     )
     # deferred hint queued for the next compute_next_phase
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinator) -> None:
+    """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 0.0
+    coord.shared_state.enablement_succeeded = False
+    await coord._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_close"),
+    )
+    # The premature close hint is NOT queued -> the enablement loop keeps going.
+    assert coord.shared_state.pending_escalate_hint != "skip_to_close"
+
+
+@pytest.mark.asyncio
+async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
+    """skip_to_close is honored once a baseline exists (guard no longer active)."""
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.baseline_tput = 1234.0
+    coord.shared_state.enablement_succeeded = True
+    await coord._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_close"),
+    )
+    assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
 # -- _scan_stale_specialists -----------------------------------------------

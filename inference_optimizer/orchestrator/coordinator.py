@@ -52,6 +52,12 @@ _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline
 # failures (any error_class), so mixed classes can't dodge the per-class streaks.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+# Enablement stall cap: consecutive enablement rounds that neither made the
+# combo runnable nor advanced to a NEW failure signature. Reaching it stops the
+# loop with stop_reason ``enablement_stalled`` instead of re-deriving the same
+# fix until the wall-clock deadline. A *progressing* round resets the streak, so
+# an N-gap serial enablement is bounded by N + this cap, not capped at N.
+_ENABLEMENT_MAX_STALL: int = int(os.environ.get("INFERENCE_OPTIMIZER_ENABLEMENT_MAX_STALL", "3") or "3")
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
@@ -3720,13 +3726,15 @@ class Coordinator:
     ) -> dict[str, Any] | None:
         """Build enablement-specialist params from a captured launch failure.
 
-        Classifies the failure, plans bridging discovery, runs a **best-effort**
-        candidate-PR enumeration (network; fully exception-guarded, degrades to
-        repos-only), and renders the authoring mandate via
+        Classifies the failure (advisory ``kind`` only — see Q1 hardening),
+        plans bridging discovery, runs a **best-effort** candidate-PR enumeration
+        (network; fully exception-guarded, degrades to repos-only), and renders
+        the authoring mandate via
         ``framework_agent.enablement_authoring.build_mandate`` (the single source
-        of the enablement prompt). Returns ``None`` when the failure is not
-        actionable (``UNKNOWN``) so the caller falls back to the normal
-        baseline-failure gates.
+        of the enablement prompt). Returns ``None`` **only** when the launch log
+        is blank (nothing to act on); a non-blank log always yields params, even
+        when it classifies as ``UNKNOWN`` — the LLM specialist repairs from the
+        raw log so a brand-new gap type never wedges the run.
 
         On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
         different bridging PR leads, and the mandate notes flag that prior
@@ -3754,9 +3762,15 @@ class Coordinator:
         model = (getattr(state, "model_name", "") or "").strip()
         repo_url = repo_url_for_framework(framework)
 
+        # Taxonomy-independent dispatch (Q1 hardening): we dispatch a specialist
+        # for ANY non-blank launch log, even one that classifies as ``UNKNOWN``.
+        # The enumerated ``kind`` is advisory only (it routes bridge-repo hints
+        # and labels the mandate); it is NOT a gate. A brand-new failure the
+        # rule table has never seen must still get a repair attempt — the LLM
+        # specialist reads the full raw log regardless of ``kind`` — otherwise
+        # every novel gap would wedge the run in needs_human_review. Blank logs
+        # (nothing to act on) are the only non-dispatch case (handled above).
         signature = classify_failure(text)
-        if not signature.is_actionable:
-            return None
         req = EnablementRequest(
             framework=framework,
             model=model or "(target model)",
@@ -3779,8 +3793,27 @@ class Coordinator:
             candidate_refs=candidate_refs,
             source_context=source_context,
         )
+        # Patches from prior rounds that made forward progress (each cleared an
+        # earlier crash). They are re-applied as a base before this round's
+        # patch (serial-gap stacking), so the specialist must author a fix that
+        # composes ON TOP of them — targeting the *current* (deeper) failure.
+        base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
+        base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
         notes = mandate.task_description
-        if attempt:
+        if base_patches or base_setup:
+            progress_bits = []
+            if base_patches:
+                progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
+            if base_setup:
+                progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
+            notes = (
+                "STACKED ENABLEMENT (progress so far): the following already "
+                "cleared earlier boot crashes and WILL be re-applied/re-run as a "
+                "base before your changes — do NOT redo them; fix only the CURRENT "
+                "(deeper) failure, composing on top. " + "; ".join(progress_bits)
+                + "\n\n" + notes
+            )
+        elif attempt:
             notes = (
                 f"RETRY (attempt {attempt + 1}): a previous enablement patch for this "
                 f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
@@ -3808,6 +3841,13 @@ class Coordinator:
             # the post-patch failure.
             "enablement_before_signature": signature.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
+            # Progressing patches from prior rounds, stacked as a base before
+            # this round's patch (see integrate_patch enablement_base_patches).
+            "enablement_base_patches": base_patches,
+            # Allowlisted install/setup commands from prior rounds, replayed by
+            # integrate_patch before boot (durable env setup — Q3). Forwarded to
+            # the synthetic integrate_patch task by _autosubmit_specialist_patch.
+            "enablement_setup_commands": base_setup,
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "readonly": False,
@@ -4107,15 +4147,25 @@ class Coordinator:
         )
 
     def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
-        """Re-arm or terminate the enablement retry loop from an integrate outcome.
+        """Re-arm, advance, or terminate the enablement retry loop.
 
-        Called on every ``integrate_patch`` completion. For an enablement patch:
-        a ``kept`` status is terminal (sets ``enablement_succeeded``); a
-        ``reverted`` status clears the in-flight guard so the next FRAMEWORK pump
-        tick re-dispatches with the next bridging candidate
-        (``enablement_attempts`` already advanced at dispatch). Other statuses
-        (apply/bench failures) are treated like a revert so the loop keeps
-        trying within the wall-clock budget.
+        Called on every ``integrate_patch`` completion. For an enablement patch
+        there are three outcomes:
+
+        * ``kept`` — the combo is now fully runnable: terminal success
+          (``enablement_succeeded=True``).
+        * ``advanced`` — the patch cleared the prior crash and the boot now
+          stops at a *new, deeper* gap (serial enablement). **Stack** the patch
+          (append to ``enablement_kept_patches``), replace
+          ``enablement_launch_log`` with the new failure so the next round
+          classifies and targets gap #(n+1), reset the stall streak, and clear
+          the in-flight guard to dispatch the next round.
+        * anything else (``reverted`` / apply / bench failure) — no progress:
+          bump ``enablement_stall_streak``; once it reaches
+          :data:`_ENABLEMENT_MAX_STALL`, stop the run with
+          ``stop_reason='enablement_stalled'`` instead of looping on the same
+          gap; otherwise clear the guard so the next round retries a different
+          approach.
 
         Args:
             res: The integrate_patch result dict (may be ``None`` / non-dict).
@@ -4124,20 +4174,59 @@ class Coordinator:
             return
         state = self.shared_state
         status = str(res.get("status") or "")
+        stop_set = ""
+
+        def _stack_setup_commands() -> None:
+            """Append this round's applied setup commands to the durable stack."""
+            cur = list(getattr(state, "enablement_setup_commands", None) or [])
+            for c in res.get("setup_commands_applied") or []:
+                sc = str(c)
+                if sc and sc not in cur:
+                    cur.append(sc)
+            state.enablement_setup_commands = cur
+
         if status == "kept":
             state.enablement_succeeded = True
-        else:
-            # Reverted / failed: clear the in-flight guard so the pump retries.
+            state.enablement_stall_streak = 0
+            _stack_setup_commands()
+        elif status == "advanced" or bool(res.get("advanced")):
+            # Forward progress on a serial enablement: stack the progressing
+            # patch(es) + setup commands and pivot the next round to the
+            # newly-revealed gap.
+            kept = list(getattr(state, "enablement_kept_patches", None) or [])
+            for p in res.get("patches_applied") or []:
+                sp = str(p)
+                if sp and sp not in kept:
+                    kept.append(sp)
+            state.enablement_kept_patches = kept
+            _stack_setup_commands()
+            new_log = str(res.get("enablement_launch_log") or "").strip()
+            if new_log:
+                state.enablement_launch_log = new_log
+            state.enablement_stall_streak = 0
             state.enablement_dispatched = False
+        else:
+            # No progress: count toward the stall cap.
+            state.enablement_stall_streak = int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+            if state.enablement_stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+                state.set_stop_reason("enablement_stalled")
+                stop_set = "enablement_stalled"
+            else:
+                state.enablement_dispatched = False
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("enablement: save after rearm failed", exc_info=True)
         log.info(
-            "ENABLEMENT: rearm from integrate status=%s succeeded=%s next_attempt=%d",
+            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s "
+            "stacked=%d stall_streak=%d next_attempt=%d%s",
             status,
             bool(getattr(state, "enablement_succeeded", False)),
+            status == "advanced" or bool(res.get("advanced")),
+            len(getattr(state, "enablement_kept_patches", None) or []),
+            int(getattr(state, "enablement_stall_streak", 0) or 0),
             int(getattr(state, "enablement_attempts", 0) or 0),
+            f" stop_reason={stop_set}" if stop_set else "",
         )
 
     @staticmethod
@@ -9773,6 +9862,32 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("FRAMEWORK pump (%s) failed", caller)
 
+    async def _pump_enablement_safely(self, *, caller: str) -> None:
+        """Phase-independent enablement pump — runs every tick.
+
+        A baseline that cannot even *launch* traps the run in PRELUDE forever:
+        the only PRELUDE exit gate is ``baseline_tput > 0``, which a
+        non-runnable (model, backend) combo never reaches. The enablement
+        authoring dispatch used to live only inside
+        :meth:`_pump_framework_agent_phase` (guarded on
+        ``phase == FRAMEWORK_AGENT``), so it could never fire for the exact
+        "can't boot at all" scenario it exists to repair — the run instead hit
+        the 3-failure ``baseline_failed`` stop.
+
+        This wrapper drives :meth:`_maybe_enqueue_enablement_specialist` from
+        every coordinator tick, independent of phase. All dispatch guards
+        (dispatched-in-flight, already-succeeded, ``baseline_tput > 0``,
+        failure-streak, run deadline, single-node) live inside that method, so
+        calling it unconditionally here is safe and idempotent.
+
+        Args:
+            caller: Label identifying the caller ("tick" / "run"), for logs.
+        """
+        try:
+            await self._maybe_enqueue_enablement_specialist()
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.exception("ENABLEMENT pump (%s) failed", caller)
+
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
 
@@ -9787,6 +9902,9 @@ class Coordinator:
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch. Best-effort.
             await self._pump_framework_agent_phase_safely(caller="tick")
+            # Phase-independent enablement pump: repair a non-runnable combo
+            # before it wedges the run in PRELUDE (see method docstring).
+            await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
@@ -9923,6 +10041,9 @@ class Coordinator:
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
                         await self._pump_framework_agent_phase_safely(caller="run")
+                        # Phase-independent enablement pump (see method docstring):
+                        # repair a non-runnable combo stuck in PRELUDE.
+                        await self._pump_enablement_safely(caller="run")
                     # phase machine advance at tick boundary; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._advance_phase_if_needed()
@@ -12982,6 +13103,17 @@ class Coordinator:
                 before_sig = spec_params.get("enablement_before_signature")
                 if isinstance(before_sig, dict):
                     integrate_params["enablement_before_signature"] = before_sig
+                # Forward the stacked base patches (prior progressing rounds) so
+                # integrate_patch re-applies them before this round's patch.
+                base_patches = spec_params.get("enablement_base_patches")
+                if isinstance(base_patches, list) and base_patches:
+                    integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
+                # Forward stacked base setup commands (prior rounds' installs) so
+                # integrate_patch replays them before boot; the current round's
+                # own setup_commands are read from specialist_done directly.
+                base_setup = spec_params.get("enablement_setup_commands")
+                if isinstance(base_setup, list) and base_setup:
+                    integrate_params["enablement_setup_commands"] = [str(c) for c in base_setup]
         except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",

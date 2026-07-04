@@ -477,6 +477,26 @@ class SharedState:
     enablement_dispatched: bool = False
     enablement_attempts: int = 0
     enablement_succeeded: bool = False
+    # ``enablement_kept_patches``: ordered, deduped list of patch file paths
+    #   from prior enablement rounds that made *forward progress* (cleared the
+    #   previous crash but revealed a new, deeper gap). These are re-applied as
+    #   a base before the next round's patch so serial gaps stack instead of
+    #   being reverted and re-derived. See ``_maybe_rearm_enablement``.
+    enablement_kept_patches: list = field(default_factory=list)
+    # ``enablement_setup_commands``: ordered, deduped list of allowlisted
+    #   environment-setup shell commands (e.g. ``pip install transformers>=5.12``,
+    #   ``apt-get install -y gh``) that prior enablement rounds ran to make the
+    #   combo buildable/runnable. Re-run (idempotently) by integrate_patch before
+    #   applying patches + booting, so an install a specialist relied on is
+    #   durable and reproducible across re-bench / pod restarts rather than an
+    #   ephemeral side effect of one specialist session. Stacked like
+    #   ``enablement_kept_patches``.
+    enablement_setup_commands: list = field(default_factory=list)
+    # ``enablement_stall_streak``: consecutive enablement rounds that neither
+    #   became runnable nor advanced to a new failure signature. When it reaches
+    #   ``_ENABLEMENT_MAX_STALL`` the loop stops with stop_reason
+    #   ``enablement_stalled`` instead of spinning on the same gap forever.
+    enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review (UNKNOWN /
     # non-actionable failures); at most one review record per distinct log.
     enablement_human_review_logged: list = field(default_factory=list)
@@ -1324,6 +1344,35 @@ class SharedState:
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = _now_iso()
         return hint
+
+    def enablement_close_guard_active(self) -> bool:
+        """True while a not-yet-enabled run must be protected from premature close.
+
+        Until a baseline can be *established*, the entire optimization loop is
+        blocked on it — you cannot run EXPLORE/KERNEL/SWEEP without a baseline.
+        So a ``skip_to_close`` (whether the Orchestration LLM or Robustness emits
+        it) is *premature* here: giving up before the model even runs is not a
+        legitimate finish. While this guard is active the ``skip_to_close`` hint
+        is dropped; the only ways a not-yet-enabled run may terminate are the
+        *honest* ones that do not route through ``skip_to_close``:
+
+        * ``enablement_stalled`` — the enablement loop's own stall cap
+          (:data:`_ENABLEMENT_MAX_STALL` consecutive no-progress rounds),
+        * ``prelude_baseline_failed`` — repeated baseline failures with no
+          enablement engaged,
+        * the wall-clock deadline / time-exhausted exits,
+        * hard aborts (crash threshold, signal, emergency, user stop).
+
+        Returns:
+            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
+            has never gone positive and enablement has not yet succeeded.
+        """
+        phase = (self.phase or "").strip().upper()
+        return (
+            phase in ("PRELUDE", "FRAMEWORK_AGENT")
+            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
+            and not bool(getattr(self, "enablement_succeeded", False))
+        )
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(

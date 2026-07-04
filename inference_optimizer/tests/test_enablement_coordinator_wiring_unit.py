@@ -130,12 +130,17 @@ def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch):
     assert params["enablement_candidate_refs"] == []
 
 
-def test_build_params_none_for_unknown_failure():
+def test_build_params_dispatches_even_for_unknown_failure(monkeypatch):
+    """Q1: a non-blank UNKNOWN log still dispatches (kind is advisory, not a gate)."""
+    _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
-    assert (
-        Coordinator._build_enablement_specialist_params(fake, "totally unrelated noise")
-        is None
+    params = Coordinator._build_enablement_specialist_params(
+        fake, "some brand-new failure the rule table has never seen xyz"
     )
+    assert params is not None
+    assert params["enablement"] is True
+    # Classified as unknown, but still handed to the specialist.
+    assert params["enablement_failure_kind"] == "unknown"
 
 
 def test_build_params_none_for_blank_log():
@@ -165,11 +170,16 @@ def _enqueue_self(**state_kw):
         enablement_succeeded=state_kw.get("enablement_succeeded", False),
         enablement_attempts=state_kw.get("enablement_attempts", 0),
         enablement_human_review_logged=state_kw.get("enablement_human_review_logged", []),
+        enablement_kept_patches=state_kw.get("enablement_kept_patches", []),
+        enablement_stall_streak=state_kw.get("enablement_stall_streak", 0),
         baseline_tput=state_kw.get("baseline_tput", 0.0),
         baseline_failure_streak=state_kw.get("baseline_failure_streak", 1),
         enablement_launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
+        stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
     )
+    # Minimal set_stop_reason shim (real one validates against STOP_REASON_VOCAB).
+    state.set_stop_reason = lambda v, **k: setattr(state, "stop_reason", str(v or ""))
 
     async def _warm(_params):
         return None
@@ -308,23 +318,204 @@ async def test_rearm_ignores_non_enablement(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_records_human_review_for_unknown(monkeypatch):
+async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
+    """A patch that clears gap #1 and reveals gap #2 is STACKED, not reverted."""
+    fake = _enqueue_self(enablement_dispatched=True, enablement_stall_streak=2)
+    new_gap_log = (
+        "ValueError: Following weights were not initialized from checkpoint: "
+        "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
+    )
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": ["/s/runs/specialist/t1/patches/001_qk_rope.patch"],
+            "enablement_launch_log": new_gap_log,
+        }
+    )
+    st = fake.shared_state
+    # Not terminal; not stalled.
+    assert st.enablement_succeeded is False
+    assert st.stop_reason == ""
+    # Progressing patch is recorded for stacking; stall streak reset; guard cleared.
+    assert st.enablement_kept_patches == ["/s/runs/specialist/t1/patches/001_qk_rope.patch"]
+    assert st.enablement_stall_streak == 0
+    assert st.enablement_dispatched is False
+    # Launch log now points at the NEW (deeper) gap so the next round targets it.
+    assert "not initialized from checkpoint" in st.enablement_launch_log
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
+    """Re-applied base patches are not double-recorded; only the new one is added."""
+    fake = _enqueue_self(
+        enablement_dispatched=True,
+        enablement_kept_patches=["/s/runs/specialist/t1/patches/001_qk_rope.patch"],
+    )
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            # integrate re-applies the base + the new patch this round.
+            "patches_applied": [
+                "/s/runs/specialist/t1/patches/001_qk_rope.patch",
+                "/s/runs/specialist/t2/patches/002_indexer_share.patch",
+            ],
+            "enablement_launch_log": "RuntimeError: some third gap",
+        }
+    )
+    assert fake.shared_state.enablement_kept_patches == [
+        "/s/runs/specialist/t1/patches/001_qk_rope.patch",
+        "/s/runs/specialist/t2/patches/002_indexer_share.patch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rearm_stall_cap_stops_run(monkeypatch):
+    """N consecutive no-progress reverts stop the run with enablement_stalled."""
+    from inference_optimizer.orchestrator.coordinator import _ENABLEMENT_MAX_STALL
+
+    fake = _enqueue_self(enablement_dispatched=True)
+    st = fake.shared_state
+    # First _ENABLEMENT_MAX_STALL-1 reverts: bump streak, keep retrying.
+    for i in range(_ENABLEMENT_MAX_STALL - 1):
+        fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+        assert st.stop_reason == ""
+        assert st.enablement_dispatched is False
+        assert st.enablement_stall_streak == i + 1
+    # The final revert trips the cap -> terminal stop_reason.
+    fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    assert st.enablement_stall_streak == _ENABLEMENT_MAX_STALL
+    assert st.stop_reason == "enablement_stalled"
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
+    """A progressing round resets the stall streak so serial gaps aren't capped early."""
+    fake = _enqueue_self(enablement_dispatched=True)
+    st = fake.shared_state
+    fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    assert st.enablement_stall_streak == 1
+    # Progress resets the streak.
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": ["/p/a.patch"],
+            "enablement_launch_log": "ValueError: not initialized from checkpoint",
+        }
+    )
+    assert st.enablement_stall_streak == 0
+    assert st.stop_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
+    """Q3: applied setup commands are stacked on advance for durable replay next round."""
+    fake = _enqueue_self(enablement_dispatched=True)
+    fake.shared_state.enablement_setup_commands = []
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": ["/p/a.patch"],
+            "setup_commands_applied": ["pip install -U transformers"],
+            "enablement_launch_log": "ValueError: not initialized from checkpoint",
+        }
+    )
+    assert fake.shared_state.enablement_setup_commands == ["pip install -U transformers"]
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_stacks_setup_commands(monkeypatch):
+    """Q3: a runnable KEEP also records the setup commands it relied on."""
+    fake = _enqueue_self(enablement_dispatched=True)
+    fake.shared_state.enablement_setup_commands = ["apt-get install -y gh"]
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "setup_commands_applied": ["apt-get install -y gh", "pip install vllm==0.24"],
+        }
+    )
+    assert fake.shared_state.enablement_succeeded is True
+    assert fake.shared_state.enablement_setup_commands == [
+        "apt-get install -y gh",
+        "pip install vllm==0.24",
+    ]
+
+
+def test_enablement_close_guard_blocks_premature_skip_to_close():
+    """Q2: pre-enablement (baseline never established) the close guard is active."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    s = SharedState()
+    s.phase = "PRELUDE"
+    s.baseline_tput = 0.0
+    s.enablement_succeeded = False
+    assert s.enablement_close_guard_active() is True
+    # Once a baseline exists, or enablement succeeded, the guard lifts.
+    s.baseline_tput = 100.0
+    assert s.enablement_close_guard_active() is False
+    s.baseline_tput = 0.0
+    s.enablement_succeeded = True
+    assert s.enablement_close_guard_active() is False
+
+
+def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
+    """Q3: stacked base setup commands are passed to the next round + noted."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _fake_self()
+    fake.shared_state.enablement_setup_commands = ["pip install -U transformers"]
+    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    assert params is not None
+    assert params["enablement_setup_commands"] == ["pip install -U transformers"]
+    assert "STACKED ENABLEMENT" in params["notes"]
+    assert "setup command" in params["notes"]
+
+
+def test_build_params_threads_base_patches_when_stacked(monkeypatch):
+    """Stacked kept-patches are passed to the next round + noted in the mandate."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _fake_self()
+    fake.shared_state.enablement_kept_patches = [
+        "/s/runs/specialist/t1/patches/001_qk_rope.patch",
+    ]
+    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    assert params is not None
+    assert params["enablement_base_patches"] == [
+        "/s/runs/specialist/t1/patches/001_qk_rope.patch",
+    ]
+    # The mandate tells the specialist the prior patch is already applied.
+    assert "STACKED ENABLEMENT" in params["notes"]
+    assert "001_qk_rope.patch" in params["notes"]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch):
+    """Q1: a non-blank UNKNOWN failure DISPATCHES (never wedges in human_review).
+
+    A brand-new gap the rule table has never seen must still get a repair
+    attempt — the LLM specialist reads the raw log regardless of ``kind`` — so
+    the run never gets stuck waiting on a human just because a failure did not
+    match an enumerated classifier rule.
+    """
     from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(enablement_launch_log="some totally unrelated noise line")
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    assert tid == ""
-    # No authoring dispatched, but a needs_human_review observation emitted once.
-    assert len(fake.tasks.created) == 0
+    assert tid == "spec-1"
+    assert len(fake.tasks.created) == 1
+    assert fake.tasks.created[0]["params"]["enablement"] is True
+    # No human-review dead-end for a non-blank log.
     reviews = [o for o in fake.observations if o.get("kind") == "enablement_needs_human_review"]
-    assert len(reviews) == 1
-    assert reviews[0]["applicability"] == "needs_human_review"
-
-    # Same log again -> deduped (no second record).
-    await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    reviews = [o for o in fake.observations if o.get("kind") == "enablement_needs_human_review"]
-    assert len(reviews) == 1
+    assert reviews == []
 
 
 @pytest.mark.asyncio
