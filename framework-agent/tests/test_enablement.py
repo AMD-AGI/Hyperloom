@@ -15,12 +15,15 @@ from framework_agent.enablement import (
     HIP_KERNEL_MISSING,
     IMPORT_ERROR,
     MISSING_MODEL_ARCH,
+    MISSING_WEIGHT,
     NOT_IMPLEMENTED,
     SHAPE_MISMATCH,
     UNKNOWN,
     UNSUPPORTED_DTYPE,
     EnablementRequest,
+    FailureSignature,
     classify_failure,
+    enablement_made_progress,
     runnable_decision,
 )
 
@@ -64,6 +67,111 @@ def test_shape_mismatch() -> None:
     """A tensor shape error -> shape_mismatch."""
     sig = classify_failure("RuntimeError: shape '[2, 4096]' is invalid for input of size 4096")
     assert sig.kind == SHAPE_MISMATCH
+
+
+def test_shape_mismatch_narrow_bounds() -> None:
+    """A torch .narrow() bounds error (fused-projection width mismatch) -> shape_mismatch."""
+    sig = classify_failure(
+        "RuntimeError: start (0) + length (704) exceeds dimension size (576)."
+    )
+    assert sig.kind == SHAPE_MISMATCH
+
+
+def test_missing_weight_not_initialized() -> None:
+    """A strict weight-init failure -> missing_weight (distinct from shape_mismatch)."""
+    log = (
+        "ValueError: Following weights were not initialized from checkpoint: "
+        "{'model.layers.19.self_attn.indexer.k_norm.weight', "
+        "'model.layers.20.self_attn.indexer.k_norm.bias'}"
+    )
+    sig = classify_failure(log)
+    assert sig.kind == MISSING_WEIGHT
+    assert sig.is_actionable
+    assert sig.bridge_layer == "framework"
+
+
+def test_missing_weight_state_dict_keys() -> None:
+    """torch load_state_dict missing/unexpected keys -> missing_weight."""
+    assert classify_failure("RuntimeError: Missing key(s) in state_dict: 'x.weight'").kind == MISSING_WEIGHT
+    assert classify_failure("Error(s) in loading state_dict for Model:").kind == MISSING_WEIGHT
+
+
+def test_shape_mismatch_and_missing_weight_are_distinct() -> None:
+    """The two serial GLM-5.2 gaps classify as different kinds (progress detectable)."""
+    gap1 = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
+    gap2 = classify_failure(
+        "ValueError: Following weights were not initialized from checkpoint: {'m.indexer.k_norm.weight'}"
+    )
+    assert gap1.kind == SHAPE_MISMATCH
+    assert gap2.kind == MISSING_WEIGHT
+    assert gap1.kind != gap2.kind
+
+
+def test_enablement_made_progress_different_kind() -> None:
+    """A patch that moves the boot to a different actionable failure = progress."""
+    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
+    after = classify_failure(
+        "ValueError: Following weights were not initialized from checkpoint: {'m.indexer.k_norm.weight'}"
+    )
+    assert enablement_made_progress(before, after) is True
+
+
+def test_enablement_no_progress_same_failure() -> None:
+    """The identical unfixed failure re-appearing is NOT progress."""
+    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
+    after = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
+    assert enablement_made_progress(before, after) is False
+
+
+def test_enablement_no_progress_clean_boot() -> None:
+    """A clean boot (non-actionable UNKNOWN after) is runnable, not 'progress'."""
+    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
+    after = FailureSignature(kind=UNKNOWN)
+    assert enablement_made_progress(before, after) is False
+
+
+def test_enablement_progress_first_actionable_when_no_prior() -> None:
+    """With no prior actionable signature, any actionable post-patch failure is a step."""
+    after = classify_failure("ValueError: weights were not initialized from checkpoint")
+    assert enablement_made_progress(None, after) is True
+
+
+def test_enablement_progress_unknown_to_different_unknown() -> None:
+    """Q1: two DIFFERENT unknown failures still count as progress (taxonomy-independent)."""
+    before = classify_failure("novel error A raised in foo.py during widget init")
+    after = classify_failure("completely different novel error B in bar.py during frobnicate")
+    assert enablement_made_progress(before, after) is True
+
+
+def test_enablement_no_progress_same_unknown_text() -> None:
+    """Q1: the same unknown failure re-appearing (even numeric operands vary) is NOT progress."""
+    before = classify_failure("weird failure at offset 128 in module qux")
+    after = classify_failure("weird failure at offset 256 in module qux")  # only the number changed
+    assert enablement_made_progress(before, after) is False
+
+
+def test_enablement_no_progress_clean_boot_unknown_signature() -> None:
+    """A bare UNKNOWN signature (no error text) is a clean boot, not progress."""
+    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
+    assert enablement_made_progress(before, FailureSignature(kind=UNKNOWN)) is False
+
+
+def test_enablement_setup_guidance_in_mandate() -> None:
+    """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
+    from framework_agent.enablement import EnablementRequest
+    from framework_agent.enablement_authoring import ENABLEMENT_SETUP_GUIDANCE, build_mandate
+
+    req = EnablementRequest(
+        framework="vllm",
+        model="GLM-5.2",
+        repo_url="https://github.com/ROCm/vllm.git",
+        launch_log="ValueError: weights were not initialized from checkpoint",
+        gpu_type="mi300x",
+    )
+    m = build_mandate(req)
+    assert "ENVIRONMENT SETUP" in m.task_description
+    assert "setup_commands" in m.task_description
+    assert ENABLEMENT_SETUP_GUIDANCE  # non-empty guidance tuple
 
 
 def test_not_implemented() -> None:

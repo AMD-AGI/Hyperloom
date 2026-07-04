@@ -24,6 +24,7 @@ UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
 IMPORT_ERROR = "import_error"
 SHAPE_MISMATCH = "shape_mismatch"
+MISSING_WEIGHT = "missing_weight"
 NOT_IMPLEMENTED = "not_implemented"
 CAPABILITY_DISABLED = "capability_disabled"
 UNKNOWN = "unknown"
@@ -34,6 +35,7 @@ FAILURE_KINDS: tuple[str, ...] = (
     HIP_KERNEL_MISSING,
     UNSUPPORTED_DTYPE,
     SHAPE_MISMATCH,
+    MISSING_WEIGHT,
     NOT_IMPLEMENTED,
     CAPABILITY_DISABLED,
     IMPORT_ERROR,
@@ -156,8 +158,35 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"size mismatch"),
             re.compile(r"mat1 and mat2 shapes cannot be multiplied"),
             re.compile(r"[Ee]xpected .*? but got .*? \(size"),
+            # torch .narrow()/.slice() bounds error surfaced by weight loaders
+            # when a fused projection's checkpoint shard width does not match
+            # the model class's expected dim (e.g. a new attention variant
+            # loaded through an older model implementation).
+            re.compile(r"start\s*\(\s*\d+\s*\)\s*\+\s*length\s*\(\s*\d+\s*\)\s*exceeds dimension size"),
         ),
         confidence=0.7,
+    ),
+    _Rule(
+        # A model implementation that declares parameters the checkpoint does
+        # not carry (or vice-versa): the strict weight-init check refuses to
+        # boot. Common when a new architecture shares/omits per-layer tensors
+        # (e.g. index-sharing) but the framework instantiates them on every
+        # layer. Distinct from SHAPE_MISMATCH so it registers as a *different*
+        # (deeper) failure once a prior shape fix is applied — this is what lets
+        # the enablement loop detect forward progress instead of re-deriving the
+        # same fix (see ``enablement_made_progress``).
+        kind=MISSING_WEIGHT,
+        bridge_layer="framework",
+        patterns=(
+            re.compile(r"(?:were|was)\s+not\s+initialized\s+from\s+(?:the\s+)?checkpoint"),
+            re.compile(r"not\s+initialized\s+from\s+checkpoint"),
+            re.compile(r"[Mm]issing\s+key\(?s?\)?\s+in\s+state_dict"),
+            re.compile(r"[Uu]nexpected\s+key\(?s?\)?\s+in\s+state_dict"),
+            re.compile(r"[Ee]rror\(s\)\s+in\s+loading\s+state_dict"),
+            re.compile(r"KeyError:\s*['\"]([\w.]+\.(?:weight|bias))['\"]"),
+        ),
+        confidence=0.72,
+        symbol_from=_grp,
     ),
     _Rule(
         kind=NOT_IMPLEMENTED,
@@ -310,7 +339,6 @@ def classify_failure(log_text: str) -> FailureSignature:
             confidence=0.0,
         )
 
-    text_len = max(len(text), 1)
     primary = min(hits, key=lambda h: (h.rule_index, h.match.start()))
     secondary = tuple(
         h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind
@@ -454,12 +482,95 @@ def runnable_decision(
     return True, "combo now launches" + ("" if correctness_ok is None else " and passes minimal correctness")
 
 
+def _failure_identity(sig: FailureSignature | None) -> tuple[str, str, str]:
+    """A coarse, taxonomy-independent identity for a failure signature.
+
+    Deliberately does NOT rely on the enumerated ``kind`` alone: two *different*
+    boot crashes can both classify as ``UNKNOWN`` (a brand-new failure the rule
+    table has never seen), yet still represent real forward progress when the
+    error text / offending site changed. The identity is ``(kind, offending_file,
+    normalized_excerpt)`` where the excerpt is whitespace-collapsed, lower-cased,
+    truncated, and has run-to-run numeric operands (sizes / addresses / layer
+    indices) masked to ``#`` so "size 704 vs 576" and "size 512 vs 384" compare
+    equal (same failure, different operands) but a genuinely different error does
+    not.
+
+    Args:
+        sig: The failure signature (may be ``None``).
+
+    Returns:
+        tuple[str, str, str]: ``(kind, offending_file, normalized_excerpt)``.
+    """
+    if sig is None:
+        return ("", "", "")
+    excerpt = re.sub(r"\s+", " ", (sig.raw_excerpt or "")).strip().lower()
+    excerpt = re.sub(r"\d+", "#", excerpt)[:160]
+    return (sig.kind or "", (sig.offending_file or "").strip(), excerpt)
+
+
+def _has_failure(sig: FailureSignature | None) -> bool:
+    """True when a signature represents a real (post-)boot failure, not a clean boot.
+
+    ``kind`` is always populated (at least ``UNKNOWN``), so it cannot be used to
+    tell "no failure" apart from "unclassified failure". A real failure is either
+    actionable OR carries error text / an offending file; a clean boot is a
+    non-actionable signature with no content.
+    """
+    if sig is None:
+        return False
+    if sig.is_actionable:
+        return True
+    return bool((sig.raw_excerpt or "").strip() or (sig.offending_file or "").strip())
+
+
+def enablement_made_progress(
+    before_signature: FailureSignature | None,
+    after_signature: FailureSignature | None,
+) -> bool:
+    """Whether a patch advanced the boot to a *new, deeper* failure.
+
+    Enablement gaps are frequently **serial**: fixing gap #1 (e.g. a shape
+    mismatch in the weight loader) only reveals gap #2 (e.g. a missing-weight
+    error deeper in model construction). A patch that clears the original crash
+    but stops at a *different* failure has made real forward progress and its
+    diff is a necessary building block — it must be **kept / stacked**, not
+    reverted and re-derived from the stale original log.
+
+    **Taxonomy-independent (see Q1 hardening):** progress is judged by whether
+    the failure *identity* changed (:func:`_failure_identity`), NOT by whether
+    the enumerated ``kind`` changed. So a brand-new gap that the classifier has
+    never seen (``kind == UNKNOWN``) still registers as progress as long as its
+    error text / offending site differs from the prior failure. This removes the
+    dependency on adding a new ``FAILURE_KINDS`` entry for every novel gap.
+
+    A clean boot (``after`` carries no error text at all) is **not** "progress"
+    here; that is the terminal *runnable* case handled by
+    :func:`runnable_decision`.
+
+    Args:
+        before_signature: Failure signature before applying the patch.
+        after_signature: Failure signature captured from the post-patch probe.
+
+    Returns:
+        bool: ``True`` when the patch moved the boot to a new failure identity.
+    """
+    # No post-patch failure at all -> clean boot, handled by runnable_decision.
+    if not _has_failure(after_signature):
+        return False
+    if not _has_failure(before_signature):
+        # No known prior failure to compare against: any post-patch failure is
+        # treated as a (first) forward step.
+        return True
+    return _failure_identity(after_signature) != _failure_identity(before_signature)
+
+
 __all__ = [
     "CAPABILITY_DISABLED",
     "FAILURE_KINDS",
     "HIP_KERNEL_MISSING",
     "IMPORT_ERROR",
     "MISSING_MODEL_ARCH",
+    "MISSING_WEIGHT",
     "NOT_IMPLEMENTED",
     "SHAPE_MISMATCH",
     "UNKNOWN",
@@ -467,5 +578,6 @@ __all__ = [
     "EnablementRequest",
     "FailureSignature",
     "classify_failure",
+    "enablement_made_progress",
     "runnable_decision",
 ]
