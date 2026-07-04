@@ -7,6 +7,7 @@ from __future__ import annotations
 from framework_agent.enablement import EnablementRequest
 from framework_agent.enablement_authoring import (
     ENABLEMENT_PATCH_INVARIANTS,
+    ENABLEMENT_SETUP_GUIDANCE,
     build_mandate,
 )
 
@@ -50,6 +51,18 @@ def test_task_description_lists_candidate_refs() -> None:
     td = mandate.task_description
     assert td.index("PR:123") < td.index("PR:456")
     assert mandate.candidate_refs == ("PR:123", "PR:456")
+
+
+def test_mandate_authorizes_and_requires_recording_env_setup() -> None:
+    """Q3: the mandate authorizes installs AND tells the specialist to record them."""
+    td = build_mandate(_req()).task_description
+    assert "ENVIRONMENT SETUP" in td
+    # Installs are explicitly allowed (transformers / gh examples in the guidance).
+    assert "pip install" in td
+    assert "setup_commands" in td
+    # The guidance constant is non-empty and surfaced.
+    assert ENABLEMENT_SETUP_GUIDANCE
+    assert any("record" in g.lower() for g in ENABLEMENT_SETUP_GUIDANCE)
 
 
 def test_invariants_present_and_mention_runnable_gate() -> None:
