@@ -3030,19 +3030,40 @@ class Coordinator:
             ok = await self._discover_next_framework_batch()
             if not ok:
                 failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
-                if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT or failures == 0:
-                    # Retries exhausted or clean empty payload — both real exits; stamp a summary row.
+                if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
+                    # Transient discover failures exhausted — real exit.
                     self._record_framework_agent_phase_done(
-                        reason=(
-                            "discover_retries_exhausted"
-                            if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-                            else "discover_empty_payload"
-                        ),
+                        reason="discover_retries_exhausted",
+                        failure_count=failures,
+                    )
+                    state.framework_agent_phase_done = True
+                    state.save(self.session_dir)
+                    return
+                if failures == 0:
+                    # Empty-but-valid payload. A single empty batch can be a
+                    # transient upstream blip (cortex/PR-Monitor/GitHub search
+                    # flapping), so tolerate a bounded number of consecutive
+                    # empties across ticks before giving up — otherwise one
+                    # momentary empty result silently skips the whole phase.
+                    empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
+                    state.framework_agent_empty_discoveries = empties
+                    if empties < _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
+                        log.info(
+                            "FRAMEWORK: empty discovery batch (%d/%d) — retrying on a later tick",
+                            empties,
+                            _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                        )
+                        state.save(self.session_dir)
+                        return
+                    self._record_framework_agent_phase_done(
+                        reason="discover_empty_payload",
                         failure_count=failures,
                     )
                 state.framework_agent_phase_done = True
                 state.save(self.session_dir)
                 return
+            # A non-empty batch cleared any prior empty-discovery streak.
+            state.framework_agent_empty_discoveries = 0
             next_candidate = await self._select_best_framework_agent_candidate()
             if next_candidate is None:
                 self._record_framework_agent_phase_done(

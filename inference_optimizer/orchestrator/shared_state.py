@@ -580,6 +580,11 @@ class SharedState:
     framework_agent_phase_done: bool = False
     # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_agent_discover_failures: int = 0
+    # Consecutive empty-but-valid ``fa phase-discover`` batches within the current
+    # FRAMEWORK phase; tolerate up to DISCOVER_FAILURE_RETRY_LIMIT before exiting so a
+    # transient upstream blip (cortex/PR-Monitor/GitHub) doesn't skip the phase.
+    # Reset to 0 on any non-empty batch.
+    framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates
     # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
     # reset whenever a phase completes having tested >=1 candidate.
