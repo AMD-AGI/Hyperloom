@@ -351,6 +351,197 @@ class TestLifecycleScriptableSkip:
         assert result["eligible"] is True
 
 
+class TestRooflineSnapshotUnits:
+    """D10: the roofline snapshot table renders the achieved primary metric in
+    the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
+
+    def test_fmt_tput_serving_tok_s(self):
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
+        assert rs._fmt_tput(None, "vllm") == "—"
+
+    def test_fmt_tput_scriptable_renders_latency_ms(self):
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        out = rs._fmt_tput(0.15528, "xdit")
+        assert out == "6440.0 ms"
+        assert "tok/s" not in out
+
+    def test_build_snapshot_carries_framework(self):
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        snap = rs.build_roofline_snapshot(
+            snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
+        )
+        assert snap["framework"] == "xdit"
+
+    def test_metrics_table_scriptable_achieved_is_ms(self):
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        snap = rs.build_roofline_snapshot(
+            snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
+        )
+        cmp = rs.build_roofline_comparison_from_history([snap])
+        table = "\n".join(rs.format_roofline_metrics_table(cmp))
+        assert "6440.0 ms" in table
+        # Scriptable runs have no decode memory-roofline ceiling.
+        assert "decode memory-roofline ceiling" not in table
+
+    def test_snapshot_carries_latency_siblings_and_within(self):
+        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and
+        drive a unit-agnostic within/gap when no decode ceiling applies."""
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        snap = rs.build_roofline_snapshot(
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            achieved_tok_per_sec=0.15528,  # img/s
+            framework="xdit",
+            e2e_mean_ms=6440.0,
+            roofline_ideal_ms=644.0,
+        )
+        assert snap["e2e_mean_ms"] == 6440.0
+        assert snap["roofline_ideal_ms"] == 644.0
+        # No tok/s ceiling -> within = ideal / measured = 644 / 6440 = 10%.
+        assert snap["within_roofline_pct"] == 10.0
+        assert snap["gap_to_roofline_pct"] == 90.0
+        assert snap["theoretical_peak_tok_per_sec"] is None
+
+    def test_metrics_table_scriptable_shows_compute_ceiling(self):
+        """The compact table surfaces the ms compute-roofline floor + within%."""
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        snap = rs.build_roofline_snapshot(
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            achieved_tok_per_sec=0.15528,
+            framework="xdit",
+            e2e_mean_ms=6440.0,
+            roofline_ideal_ms=644.0,
+        )
+        cmp = rs.build_roofline_comparison_from_history([snap])
+        table = "\n".join(rs.format_roofline_metrics_table(cmp))
+        assert "Compute-roofline ideal (per-image latency floor):" in table
+        assert "644.0 ms" in table
+        assert "10.0%" in table
+        assert "decode memory-roofline ceiling" not in table
+
+    def test_serving_snapshot_latency_siblings_are_none(self):
+        """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
+        from inference_optimizer.orchestrator import roofline_snapshot as rs
+
+        snap = rs.build_roofline_snapshot(
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            theoretical_peak_tok_per_sec=200.0,
+            achieved_tok_per_sec=150.0,
+            framework="vllm",
+        )
+        assert snap["e2e_mean_ms"] is None
+        assert snap["roofline_ideal_ms"] is None
+        assert snap["within_roofline_pct"] == 75.0
+
+
+class TestHyperloomArchSpec:
+    """A3: TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
+
+    def _tab(self):
+        import sys
+        from pathlib import Path
+
+        tool_dir = Path(__file__).resolve().parents[2] / "kernel-agent" / "tools"
+        if str(tool_dir) not in sys.path:
+            sys.path.insert(0, str(tool_dir))
+        import tracelens_arch_benchmark as tab  # noqa: WPS433
+
+        return tab
+
+    def test_build_spec_mi355x(self):
+        tab = self._tab()
+        spec = tab.build_hyperloom_arch_spec("mi355x")
+        assert spec is not None
+        assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
+        maf = spec["max_achievable_tflops"]
+        # bf16 achievable + fp8 + fp4 derived from HW_SPECS_ACHIEVABLE.
+        assert maf["matrix_bf16"] == pytest.approx(1686.0)
+        assert maf["matrix_fp8"] == pytest.approx(3567.0)
+        assert maf["matrix_fp4"] == pytest.approx(5663.0)
+        assert all(v > 0 for v in maf.values())
+
+    def test_build_spec_case_insensitive_and_named(self):
+        tab = self._tab()
+        spec = tab.build_hyperloom_arch_spec("MI300X")
+        assert spec is not None
+        assert "matrix_bf16" in spec["max_achievable_tflops"]
+
+    def test_build_spec_unknown_platform_none(self):
+        tab = self._tab()
+        assert tab.build_hyperloom_arch_spec("nvidia-h100") is None
+
+    def test_write_spec_roundtrip(self, tmp_path):
+        tab = self._tab()
+        # default_arch_output_path writes under <root>/TraceLens/Agent/Analysis/utils/arch/
+        out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
+        assert out is not None and out.is_file()
+        import json
+
+        data = json.loads(out.read_text())
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1686.0)
+
+
+class TestValidateTraceStructureScriptable:
+    """B5: for scriptable (xDiT) traces, the LLM/InferenceX structure checks are
+    skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
+
+    def _write_trace(self, trace_dir, *, with_kernels: bool) -> None:
+        import gzip
+        import json
+
+        if with_kernels:
+            # A healthy diffusion trace: real cpu_op + kernel events, but still
+            # no execute_* / user_annotation (plain torch-profiler, no InferenceX).
+            events = [{"name": "cpu_op", "cat": "cpu_op"}, {"name": "some_gemm", "cat": "kernel"}]
+        else:
+            # A metadata-only (repeat=0 empty window) trace: no cpu_op / kernel.
+            events = [{"name": "process_labels", "cat": "process_labels"}]
+        payload = {"traceEvents": events}
+        p = trace_dir / "profile.trace.json.gz"
+        with gzip.open(p, "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload))
+
+    def test_scriptable_no_attribution_degradation(self, tmp_path):
+        from inference_optimizer.orchestrator.action_executors import profile as pf
+
+        self._write_trace(tmp_path, with_kernels=True)
+        health = pf._validate_trace_structure(tmp_path, "xdit")
+        # No capture-dir warning, no execute_* degradation for scriptable.
+        assert health["per_kernel_attribution_degraded"] is False
+        assert health["zero_ops"] is False
+        assert not any("capture_traces" in i for i in health["issues"])
+        assert not any("[3]" in i for i in health["issues"])
+
+    def test_scriptable_zero_ops_still_flagged(self, tmp_path):
+        from inference_optimizer.orchestrator.action_executors import profile as pf
+
+        self._write_trace(tmp_path, with_kernels=False)
+        health = pf._validate_trace_structure(tmp_path, "xdit")
+        # The one diffusion-relevant health signal is preserved.
+        assert health["zero_ops"] is True
+
+    def test_serving_still_flags_missing_annotations(self, tmp_path):
+        from inference_optimizer.orchestrator.action_executors import profile as pf
+
+        self._write_trace(tmp_path, with_kernels=True)
+        health = pf._validate_trace_structure(tmp_path, "vllm")
+        # Same trace, serving framework: the LLM checks DO run and flag the
+        # missing execute_*/user_annotation events.
+        assert health["per_kernel_attribution_degraded"] is True
+
+
 class TestQualityGateReportSelection:
     """Verify parse_quality_gate picks the most recently modified report."""
 

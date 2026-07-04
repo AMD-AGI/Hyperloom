@@ -1854,6 +1854,55 @@ class SharedState:
         """
         return _first_positive_tput(self.current_best)
 
+    def _scriptable_latency_roofline(
+        self, framework: str, achieved_tput: float, kernel_roofline_path: Any
+    ) -> tuple[float, float]:
+        """Resolve the (measured e2e latency, ideal latency floor) ms pair.
+
+        Scriptable/diffusion workloads have a compute-latency roofline rather
+        than a decode-throughput one. Returns ``(0.0, 0.0)`` for serving
+        frameworks and on any failure so the caller's serving path and legacy
+        behaviour are unchanged.
+
+        Args:
+            framework: Session framework name.
+            achieved_tput: Snapshot-time ``output_throughput`` (img/s for
+                scriptable xDiT).
+            kernel_roofline_path: Path to ``reports/kernel_roofline.json``; the
+                ``diffusion_roofline.json`` sidecar sits at its run-dir root.
+
+        Returns:
+            ``(e2e_mean_ms, roofline_ideal_ms)``; either element is ``0.0``
+            when unavailable.
+        """
+        try:
+            from .. import framework_registry
+
+            if not framework_registry.is_scriptable(framework):
+                return 0.0, 0.0
+            # img/s -> per-image e2e latency (ms); the achieved metric.
+            e2e_mean_ms = float(
+                framework_registry.primary_metric_value(framework, achieved_tput) or 0.0
+            )
+            # Ideal per-image latency floor from the diffusion roofline sidecar
+            # (run_dir/diffusion_roofline.json; kernel_roofline is run_dir/reports/).
+            roofline_ideal_ms = 0.0
+            try:
+                sidecar = Path(str(kernel_roofline_path)).parent.parent / "diffusion_roofline.json"
+                if sidecar.is_file():
+                    data = json.loads(sidecar.read_text(encoding="utf-8"))
+                    analytic = data.get("analytic_dit_ceiling") if isinstance(data, dict) else None
+                    totals = data.get("totals") if isinstance(data, dict) else None
+                    if isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
+                        roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
+                    elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
+                        roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                roofline_ideal_ms = 0.0
+            return e2e_mean_ms, roofline_ideal_ms
+        except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
+            return 0.0, 0.0
+
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.
 
@@ -1898,6 +1947,7 @@ class SharedState:
             mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
             cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
             bound_kind=breakdown.bound_kind,
+            framework=str(getattr(self, "framework", "") or ""),
         )
         # Mark provenance: this is the baseline-arm ceiling backup, not a
         # trace-derived snapshot.
@@ -2132,6 +2182,15 @@ class SharedState:
             except Exception:  # noqa: BLE001 — ceiling is best-effort
                 pass
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # Scriptable/diffusion has no tok/s decode ceiling. Surface the
+            # compute-latency roofline instead: the measured per-image e2e
+            # latency (achieved) vs the compute-roofline ideal floor read from
+            # the diffusion_roofline.json sidecar. Both best-effort → 0 keeps
+            # the serving path and legacy callers unchanged.
+            fw = str(getattr(self, "framework", "") or "")
+            e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(
+                fw, achieved_tput, kernel_roofline_path
+            )
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -2141,6 +2200,9 @@ class SharedState:
                 mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
                 cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
                 bound_kind=breakdown.bound_kind,
+                framework=fw,
+                e2e_mean_ms=e2e_mean_ms,
+                roofline_ideal_ms=roofline_ideal_ms,
             )
             # Per-op PerfModel breakdown for dashboard visualization.
             attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
