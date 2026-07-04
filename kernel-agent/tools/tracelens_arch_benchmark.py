@@ -205,6 +205,90 @@ def resolve_arch_json_path(platform: str) -> Path | None:
     return None
 
 
+#: hyperloom achievable-TFLOPS precision tag -> TraceLens ``max_achievable_tflops``
+#: matrix key. hyperloom keeps a single dtype table (roofline_ceiling.HW_SPECS_
+#: ACHIEVABLE); TraceLens roofline keys ceilings by ComputeSpec (matrix_<dtype>).
+_HYPERLOOM_DTYPE_TO_MATRIX_KEY: dict[str, str] = {
+    "bf16": "matrix_bf16",
+    "fp16": "matrix_fp16",
+    "fp32": "matrix_fp32",
+    "fp8": "matrix_fp8",
+    "fp4": "matrix_fp4",
+    "int8": "matrix_int8",
+}
+
+
+def build_hyperloom_arch_spec(platform: str) -> dict | None:
+    """Build a TraceLens arch spec from hyperloom's own achievable-TFLOPS table.
+
+    Uses ``roofline_ceiling.HW_SPECS_ACHIEVABLE`` (the in-repo, NDA-clear
+    achievable ceilings shared with the LLM baseline roofline) as the single
+    source of truth, so TraceLens' per-kernel roofline never depends on the
+    public bundle (MI300X/MI325X only), a TraceLens-internal checkout, or a live
+    GPU microbenchmark for newer cards (e.g. MI355X).
+
+    Args:
+        platform: Platform/architecture name (matched case-insensitively).
+
+    Returns:
+        dict | None: A TraceLens arch spec (``name`` / ``mem_bw_gbps`` /
+        ``memory_gb`` / ``max_achievable_tflops``), or ``None`` when hyperloom
+        has no achievable spec for the platform.
+    """
+    try:
+        from inference_optimizer.orchestrator.roofline_ceiling import HW_SPECS_ACHIEVABLE
+    except Exception:
+        return None
+    spec = HW_SPECS_ACHIEVABLE.get((platform or "").strip().lower())
+    if not isinstance(spec, dict):
+        return None
+    table = spec.get("peak_tflops")
+    if not isinstance(table, dict):
+        return None
+    maf: dict[str, float] = {}
+    for tag, matrix_key in _HYPERLOOM_DTYPE_TO_MATRIX_KEY.items():
+        val = table.get(tag)
+        if isinstance(val, (int, float)) and val > 0:
+            maf[matrix_key] = float(val)
+    mem_bw = spec.get("hbm_bw_gbps")
+    if not maf or not isinstance(mem_bw, (int, float)) or mem_bw <= 0:
+        return None
+    out: dict = {"name": normalize_platform(platform), "mem_bw_gbps": float(mem_bw)}
+    mem_gb = spec.get("hbm_gb")
+    if isinstance(mem_gb, (int, float)) and mem_gb > 0:
+        out["memory_gb"] = float(mem_gb)
+    out["max_achievable_tflops"] = maf
+    return out
+
+
+def write_hyperloom_arch_spec(
+    tracelens_root: Path, platform: str, log: Callable[[str], None]
+) -> Path | None:
+    """Write hyperloom's achievable arch spec into the TraceLens arch dir.
+
+    Args:
+        tracelens_root: Root of the TraceLens checkout.
+        platform: Target platform/architecture name.
+        log: Logging callable for diagnostics.
+
+    Returns:
+        Path | None: The written arch JSON path, or ``None`` when hyperloom has
+        no spec for the platform (caller falls back to the microbenchmark).
+    """
+    spec = build_hyperloom_arch_spec(platform)
+    if spec is None:
+        return None
+    out_path = default_arch_output_path(tracelens_root, platform)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(spec, indent=4) + "\n", encoding="utf-8")
+    log(
+        f"gpu_arch_json: wrote hyperloom achievable spec for {spec['name']} "
+        f"-> {out_path} (mem_bw={spec['mem_bw_gbps']} GB/s, "
+        f"dtypes={sorted(spec['max_achievable_tflops'])})"
+    )
+    return out_path
+
+
 def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
     """Return the default arch-spec JSON path for a platform.
 
@@ -353,6 +437,14 @@ def populate_gpu_arch_json(
     canonical = normalize_platform(platform)
     if not canonical:
         raise RuntimeError("target platform is empty; cannot resolve or generate gpu arch JSON")
+
+    # Prefer hyperloom's in-repo achievable spec (NDA-clear, shared with the LLM
+    # baseline roofline) over a live microbenchmark: newer cards (e.g. MI355X)
+    # are absent from the public bundle, and this keeps a single source of truth
+    # without needing an idle GPU or a TraceLens-internal checkout.
+    hyperloom_spec = write_hyperloom_arch_spec(tracelens_root, canonical, log)
+    if hyperloom_spec is not None:
+        return hyperloom_spec
 
     out_path = default_arch_output_path(tracelens_root, canonical)
     log(

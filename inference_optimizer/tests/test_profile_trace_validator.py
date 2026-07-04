@@ -22,8 +22,10 @@ def _write_minimal_sglang_trace(
     with_execute_star: bool = True,
 ) -> None:
     """Write a tiny gzipped JSON trace blob; each flag toggles one validator signal."""
+    # Real torch/kineto traces tag op events with ``"cat": "cpu_op"``; check [7]
+    # (zero_ops) keys on that category, so the healthy fixture must carry it.
     events: list[dict] = [
-        {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1, "args": {"Input Dims": [[1, 2, 3]]}},
+        {"name": "cpu_op", "cat": "cpu_op", "ph": "X", "ts": 0, "dur": 1, "args": {"Input Dims": [[1, 2, 3]]}},
     ]
     if with_user_annotation:
         events.append(
@@ -345,6 +347,41 @@ def test_trace_health_healthy_layout(tmp_path):
     assert health["per_kernel_attribution_degraded"] is False
     assert health["capture_traces_present"] is True
     assert health["issues"] == []
+
+
+# Check [7] (Hyperloom): torch-profiler captured zero ops (metadata-only trace)
+def test_validator_warns_on_metadata_only_trace(tmp_path, caplog):
+    """A main trace with no ``cpu_op`` / ``kernel`` category events (the xDiT
+    ``torch.profiler.schedule`` ``repeat=0`` discard) must trip check [7]."""
+    trace_dir = _build_healthy_layout(tmp_path)
+    main = next(trace_dir.glob("*.trace.json.gz"))
+    main.unlink()
+    # Metadata-only trace: process/thread labels + a lone device-sync marker,
+    # but no ``"cat": "cpu_op"`` / ``"cat": "kernel"`` events.
+    payload = {
+        "schemaVersion": 1,
+        "traceEvents": [
+            {"name": "process_name", "ph": "M", "args": {"name": "python"}},
+            {"name": "thread_name", "ph": "M", "args": {"name": "MainThread"}},
+            {"name": "hipDeviceSynchronize", "ph": "X", "ts": 0, "dur": 1},
+        ],
+    }
+    with gzip.open(main, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+    caplog.set_level(logging.WARNING)
+    health = _validate_trace_structure(trace_dir, "sglang")
+    assert health["zero_ops"] is True
+    assert any("NO cpu_op / kernel" in m for m in health["issues"]), health["issues"]
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("[7]" in m for m in msgs), msgs
+
+
+def test_trace_health_healthy_layout_not_zero_ops(tmp_path):
+    """The healthy layout carries real ``cpu_op`` events → check [7] stays quiet."""
+    trace_dir = _build_healthy_layout(tmp_path)
+    health = _validate_trace_structure(trace_dir, "sglang")
+    assert health["zero_ops"] is False
 
 
 def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):

@@ -445,8 +445,16 @@ def materialize_config_with_envs(
     is_profile = str(envs.get("PROFILE", "")).strip() == "1" or (
         bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True
     )
+    # Scriptable image frameworks (xDiT diffusion) have no LLM decode
+    # steady-state window: NUM_PROMPTS / PROFILE_EXTRA_BODY.start_step and the
+    # OSL/steady-floor math below are all serving concepts xDiT never consumes.
+    # Its profiler window is defined by the xDiT bench yaml + the _xdit_patcher
+    # (repeat=1); injecting the LLM window here is inert-to-harmful, so skip it.
+    from ... import framework_registry as _fw_reg
+
+    _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
     profile_num_prompts: int | None = None
-    if is_profile:
+    if is_profile and not _is_scriptable_profile:
         try:
             r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
         except (TypeError, ValueError):
@@ -670,24 +678,27 @@ def materialize_config_with_envs(
                         f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
                     ).strip()
 
-    if profile_num_prompts is not None:
-        # Profile mode: force-override NUM_PROMPTS to reach the steady-state
-        # window (an under-sized value empties the trace).
-        envs["NUM_PROMPTS"] = profile_num_prompts
-    else:
-        seq_cost = isl_val + osl_val
-        if seq_cost <= 1024:
-            factor = 10
-        elif seq_cost <= 4096:
-            factor = 5
-        elif seq_cost <= 16384:
-            factor = 3
+    if not _is_scriptable_profile:
+        # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its
+        # own iteration count from the bench yaml, so leave them untouched.
+        if profile_num_prompts is not None:
+            # Profile mode: force-override NUM_PROMPTS to reach the steady-state
+            # window (an under-sized value empties the trace).
+            envs["NUM_PROMPTS"] = profile_num_prompts
         else:
-            factor = 2
-        if "NUM_PROMPTS" not in envs:
-            envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
-    if "NUM_WARMUPS" not in envs:
-        envs["NUM_WARMUPS"] = min(conc_val, 8)
+            seq_cost = isl_val + osl_val
+            if seq_cost <= 1024:
+                factor = 10
+            elif seq_cost <= 4096:
+                factor = 5
+            elif seq_cost <= 16384:
+                factor = 3
+            else:
+                factor = 2
+            if "NUM_PROMPTS" not in envs:
+                envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+        if "NUM_WARMUPS" not in envs:
+            envs["NUM_WARMUPS"] = min(conc_val, 8)
     # ── reference-script base (lowest priority) ────────────────────────────
     # Seed the framework server-args env + envs from a reference recipe BELOW
     # the YAML base and any per-task extra_server_args. Reference flags are
