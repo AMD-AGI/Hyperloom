@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import init_git_repo
+from .conftest import git_commit_all, init_git_repo
 
 from inference_optimizer.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -726,8 +726,7 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
     # A base patch (prior progressing round) touching a DIFFERENT file, plus the
     # current round's patch on src.py.
     (repo / "other.py").write_text("def g():\n    return 10\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "add other"], check=True, capture_output=True)
+    git_commit_all(repo, "add other")
     base_patch = tmp_path / "base_000.patch"
     base_patch.write_text(
         "--- a/other.py\n+++ b/other.py\n@@ -1,2 +1,2 @@\n def g():\n-    return 10\n+    return 20\n",
