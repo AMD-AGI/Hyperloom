@@ -114,3 +114,39 @@ def test_build_report_no_geometry_skips_analytic(tmp_path):
     report = dr.build_report(tmp_path, num_denoise_steps=25, top_k=3)
     assert "analytic_dit_ceiling" not in report
     assert "reconciliation" not in report
+
+
+def test_print_summary_full_report_smoke(tmp_path, capsys):
+    """A report with every optional section (per-step + analytic ceiling +
+    reconciliation) must render without raising."""
+    _write_csvs(tmp_path)
+    report = dr.build_report(
+        tmp_path,
+        num_denoise_steps=25,
+        top_k=3,
+        dit_geometry={"hidden_size": 3072, "num_layers": 38, "num_tokens": 4096, "ffn_ratio": 4.0},
+        achievable_tflops=1686.0,
+    )
+    dr.print_summary(report)
+    out = capsys.readouterr().out
+    assert "diffusion workload roofline" in out
+    assert "top kernels by time" in out
+    assert "per denoise-step" in out
+    assert "a-priori DiT ceiling" in out
+
+
+def test_print_summary_minimal_report_smoke(tmp_path, capsys):
+    """No timeline -> ``gpu_busy_ratio`` None exercises the ``_fmt_pct`` n/a
+    branch; no geometry -> optional sections are omitted."""
+    _write_csvs(tmp_path, with_timeline=False)
+    report = dr.build_report(tmp_path, num_denoise_steps=None, top_k=3)
+    dr.print_summary(report)
+    out = capsys.readouterr().out
+    assert "n/a" in out
+    assert "per denoise-step" not in out
+    assert "a-priori DiT ceiling" not in out
+
+
+def test_fmt_pct_none_and_value():
+    assert dr._fmt_pct(None) == "n/a"
+    assert dr._fmt_pct(0.5) == "50.0%"

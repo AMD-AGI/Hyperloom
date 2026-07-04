@@ -85,10 +85,10 @@ def _discover_xfuser_base_models() -> list[Path]:
 
     def _add(candidate: Path | str | None) -> None:
         if not candidate:
-            return
+            return  # pragma: no cover - defensive; current callers pass real paths
         try:
             resolved = Path(candidate).expanduser().resolve()
-        except OSError:
+        except OSError:  # pragma: no cover - resolve() rarely raises for these paths
             return
         if not resolved.is_file() or resolved in seen:
             return
