@@ -89,6 +89,17 @@ testpaths = [
     "kernel-agent/tools/test_harness_generator.py",
     "kernel-agent/tools/test_op_to_source_resolver.py",
     "kernel-agent/tools/test_tracelens_selfheal.py",
+    # Bypass analysis backend (HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass). These
+    # modules live under kernel-agent/tools (measured by coverage) but their
+    # tests were not collected, so the bypass code was unguarded by CI and
+    # counted as uncovered. Collecting them exercises the reader/classifier/
+    # report/source-resolver/CLI (self-contained; no GPU, no TraceLens).
+    "kernel-agent/tools/test_bypass_classify.py",
+    "kernel-agent/tools/test_bypass_reader.py",
+    "kernel-agent/tools/test_bypass_report.py",
+    "kernel-agent/tools/test_bypass_source_resolver.py",
+    "kernel-agent/tools/test_bypass_trace_analysis.py",
+    "kernel-agent/tools/test_bypass_replay.py",
     # ci/ inference-optimization pipeline: the genuine unit tests
     # (test_submit_body.py + the new test_ci_*.py suites) were never
     # collected before because ci/ was absent from testpaths. The two

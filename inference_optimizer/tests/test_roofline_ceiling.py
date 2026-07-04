@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from inference_optimizer.orchestrator import roofline_ceiling as _rc
 from inference_optimizer.orchestrator.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
@@ -17,6 +18,7 @@ from inference_optimizer.orchestrator.roofline_ceiling import (
     _resolve_peak_tflops,
     apply_runtime_dtype,
     compute_compute_bound_ceiling_tok_per_sec,
+    compute_diffusion_mem_img_per_sec,
     compute_kv_bytes_per_token,
     compute_peak_from_state,
     compute_roofline_breakdown_from_state,
@@ -2345,3 +2347,60 @@ class TestPreludeRooflineWarmReplayIntegration:
         ).peak_tok_per_sec
         assert baseline_peak is not None and baseline_peak > 0
         assert fp8_peak > baseline_peak
+
+
+class TestDiffusionCeiling:
+    """xDiT (diffusion) images/sec memory-bound roofline ceiling (M7a)."""
+
+    def test_mem_img_per_sec_formula(self):
+        # per-step = weight_bytes / (bw * gpus); img/s = 1 / (steps * per-step).
+        monkey_bw = HW_SPECS["mi300x"]["hbm_bw_gbps"] * 1e9
+        weight_bytes = 6_000_000_000
+        steps = 28
+        expected = 1.0 / (steps * (weight_bytes / monkey_bw))
+        got = compute_diffusion_mem_img_per_sec(
+            gpu_type="mi300x", num_gpus=1, weight_bytes=weight_bytes, num_steps=steps
+        )
+        assert got == pytest.approx(expected, rel=1e-9)
+        assert 25 < got < 40  # ~31.5 img/s sanity band
+
+    def test_num_gpus_scales_ceiling(self):
+        one = compute_diffusion_mem_img_per_sec(gpu_type="mi300x", num_gpus=1, weight_bytes=6e9, num_steps=28)
+        eight = compute_diffusion_mem_img_per_sec(gpu_type="mi300x", num_gpus=8, weight_bytes=6e9, num_steps=28)
+        assert eight == pytest.approx(one * 8, rel=1e-9)
+
+    def test_degenerate_inputs_return_zero(self):
+        assert compute_diffusion_mem_img_per_sec(gpu_type="mi300x", num_gpus=1, weight_bytes=0, num_steps=28) == 0.0
+        assert compute_diffusion_mem_img_per_sec(gpu_type="mi300x", num_gpus=1, weight_bytes=6e9, num_steps=0) == 0.0
+        assert compute_diffusion_mem_img_per_sec(gpu_type="nope", num_gpus=1, weight_bytes=6e9, num_steps=28) == 0.0
+
+    def test_xdit_framework_routes_to_diffusion_branch(self, monkeypatch):
+        # Avoid disk: stub the model meta + step-count readers.
+        monkeypatch.setattr(_rc, "load_model_meta", lambda *a, **k: ModelMeta(
+            weight_bytes=6_000_000_000, weight_dtype_bytes=1.0, num_layers=30,
+            num_kv_heads=0, head_dim=0, hidden_size=0,
+        ))
+        monkeypatch.setattr(_rc, "_read_diffusion_num_steps", lambda state: 28)
+        state = SimpleNamespace(
+            framework="xdit", gpu_type="mi300x", model_path="/fake/dit", precision="bf16",
+            tp=1, conc=1, isl=0, osl=0, last_baseline=None,
+        )
+        bd = compute_roofline_breakdown_from_state(state, arm="baseline")
+        assert bd.bound_kind == "memory"
+        assert bd.peak_tok_per_sec > 0
+        assert bd.cmp_tok_per_sec == 0.0
+        assert bd.peak_tok_per_sec == pytest.approx(bd.mem_tok_per_sec, rel=1e-9)
+
+    def test_xdit_missing_steps_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(_rc, "load_model_meta", lambda *a, **k: ModelMeta(
+            weight_bytes=6_000_000_000, weight_dtype_bytes=1.0, num_layers=30,
+            num_kv_heads=0, head_dim=0, hidden_size=0,
+        ))
+        monkeypatch.setattr(_rc, "_read_diffusion_num_steps", lambda state: 0)
+        state = SimpleNamespace(
+            framework="xdit", gpu_type="mi300x", model_path="/fake/dit", precision="bf16",
+            tp=1, conc=1, isl=0, osl=0, last_baseline=None,
+        )
+        bd = compute_roofline_breakdown_from_state(state, arm="baseline")
+        assert bd.bound_kind == "unknown"
+        assert bd.peak_tok_per_sec == 0.0

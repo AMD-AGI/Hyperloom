@@ -301,6 +301,7 @@ def build_roofline_snapshot(
     mem_ceiling_tok_per_sec: float = 0.0,
     cmp_ceiling_tok_per_sec: float = 0.0,
     bound_kind: str = "unknown",
+    throughput_unit: str = "tok/s",
     framework: str = "",
     e2e_mean_ms: float = 0.0,
     roofline_ideal_ms: float = 0.0,
@@ -367,6 +368,10 @@ def build_roofline_snapshot(
         "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
         "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
         "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
+        # Unit the *_tok_per_sec numeric fields are expressed in: "tok/s" for
+        # text-gen, "img/s" for diffusion (xDiT). Field names stay stable for
+        # wire compatibility; consumers should render using this unit.
+        "throughput_unit": (str(throughput_unit) if throughput_unit else "tok/s"),
         "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
         # Scriptable/diffusion siblings (compute-latency roofline). None for
         # serving; the renderer selects tok/s vs ms by framework/unit.

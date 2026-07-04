@@ -1057,6 +1057,84 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
     return max(float(meta.weight_dtype_bytes or 2.0), 2.0)
 
 
+def _read_diffusion_num_steps(state: Any) -> int:
+    """Read the denoising step count (``XDIT_NUM_STEPS``) from the baseline yaml.
+
+    Args:
+        state: Shared run state carrying the materialized baseline yaml.
+
+    Returns:
+        The positive step count, or ``0`` when unavailable.
+    """
+    envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
+    return _env_int(envs, "XDIT_NUM_STEPS")
+
+
+def compute_diffusion_mem_img_per_sec(
+    *, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int
+) -> float:
+    """Memory-roofline ceiling for diffusion image throughput (images/sec).
+
+    Each denoising step must read the full model weights at least once, so the
+    per-step time is lower-bounded by ``weight_bytes / (HBM_BW * num_gpus)`` and
+    one image takes ``num_steps`` such steps. This is a strict upper bound on
+    images/sec in the memory-bound regime. The compute-bound ceiling (which
+    typically dominates for diffusion) needs per-op FLOPs modeling and is added
+    separately once it can be validated against a real xDiT trace.
+
+    Args:
+        gpu_type: GPU type key for the HBM bandwidth lookup.
+        num_gpus: Tensor/sequence-parallel degree (floored at 1).
+        weight_bytes: Total model weight bytes (read once per step).
+        num_steps: Number of denoising steps per image.
+
+    Returns:
+        The memory-bound images/sec ceiling, or ``0.0`` on unknown GPU type or
+        degenerate input.
+    """
+    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+    if spec is None:
+        return 0.0
+    bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    if weight_bytes <= 0 or num_steps <= 0 or bw <= 0:
+        return 0.0
+    per_step_s = weight_bytes / bw
+    total_s = num_steps * per_step_s
+    return 1.0 / total_s if total_s > 0 else 0.0
+
+
+def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload) -> RooflineBreakdown:
+    """Diffusion (xDiT) roofline breakdown in images/sec (memory-bound).
+
+    Values are carried in the ``*_tok_per_sec`` fields for wire compatibility;
+    the images/sec unit is tagged at the snapshot layer (``throughput_unit``).
+    Compute-bound ceiling is deferred (needs DiT FLOPs modeling + validation).
+
+    Args:
+        state: Shared run state (for the denoising step count).
+        runtime: Resolved runtime workload (model_path / gpu_type / tp).
+
+    Returns:
+        The diffusion ``RooflineBreakdown``, or ``_EMPTY_BREAKDOWN`` when the
+        model weights or step count are unavailable.
+    """
+    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+    if meta is None or meta.weight_bytes <= 0:
+        return _EMPTY_BREAKDOWN
+    num_steps = _read_diffusion_num_steps(state)
+    if num_steps <= 0:
+        return _EMPTY_BREAKDOWN
+    mem_img_s = compute_diffusion_mem_img_per_sec(
+        gpu_type=runtime.gpu_type,
+        num_gpus=runtime.tp,
+        weight_bytes=meta.weight_bytes,
+        num_steps=num_steps,
+    )
+    if mem_img_s <= 0:
+        return _EMPTY_BREAKDOWN
+    return RooflineBreakdown(mem_img_s, 0.0, mem_img_s, "memory")
+
+
 def compute_roofline_breakdown_from_state(
     state: Any,
     *,
@@ -1073,6 +1151,11 @@ def compute_roofline_breakdown_from_state(
         fields).
     """
     runtime = resolve_runtime_workload(state, arm=arm)
+    # Diffusion (xDiT) uses an images/sec ceiling with a distinct formula (no KV
+    # cache, per-step full-weight read); the LLM decode path below does not
+    # apply. Branch before loading the LLM-oriented meta/perfmodel.
+    if (runtime.framework or "").strip().lower() == "xdit":
+        return _compute_diffusion_breakdown_from_state(state, runtime)
     meta = load_model_meta(
         runtime.model_path,
         precision_hint=runtime.precision,

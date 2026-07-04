@@ -2417,24 +2417,9 @@ async def trace_analyze_handler(
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
-    # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
-    # vanished mid-run (#722), self-heal it before the fail-fast validation.
-    tracelens_root = _resolve_tracelens_root()
-    # Self-heal when the checkout is missing OR incomplete (exists but no .git,
-    # e.g. a concurrent install's half-done clone). Gating only on is_dir()
-    # would let an incomplete default checkout bypass self-heal (#722/PR#789).
-    if not (tracelens_root / ".git").exists():
-        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-    tl_err = _tracelens_root_error(tracelens_root)
-    if tl_err:
-        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
-
-    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
-    workspace_path = payload.get("workspace_path") or str(session_dir)
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
-
-    # Backfill workload context from SharedState so the tool gets the right framework/platform/model/analysis_mode when Orchestration omits them.
+    # Backfill workload context from SharedState so the tool gets the right
+    # framework/platform/model/analysis_mode when Orchestration omits them.
+    # Resolved up-front because the framework decides the default analysis route.
     from .shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -2444,6 +2429,38 @@ async def trace_analyze_handler(
     analysis_mode = (payload.get("analysis_mode") or "").strip()
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
+
+    # Analysis route: ``bypass`` runs the independent, TraceLens-free backend
+    # (no TraceLens root / CLI / package required). ``deterministic`` / ``agent``
+    # keep the TraceLens path. An explicit payload/env route always wins; when
+    # none is given, xDiT (diffusion) defaults to ``bypass`` because TraceLens
+    # does not support it (its trace_analyze fails -> empty roofline). Coerced
+    # to str first so a non-string payload value cannot raise AttributeError.
+    explicit_route = (
+        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
+    )
+    analysis_route = explicit_route or ("bypass" if framework.lower() == "xdit" else "")
+    is_bypass = analysis_route == "bypass"
+    # Resolve TraceLens root independently of inherited env (the coordinator may
+    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
+    # vanished mid-run (#722), self-heal it before the fail-fast validation.
+    # Skipped entirely on the bypass route, which never touches TraceLens.
+    tracelens_root: Path | None = None
+    if not is_bypass:
+        tracelens_root = _resolve_tracelens_root()
+        # Self-heal when the checkout is missing OR incomplete (exists but no
+        # .git, e.g. a concurrent install's half-done clone). Gating only on
+        # is_dir() would let an incomplete default checkout bypass self-heal
+        # (#722/PR#789).
+        if not (tracelens_root / ".git").exists():
+            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+        tl_err = _tracelens_root_error(tracelens_root)
+        if tl_err:
+            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+
+    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     # Scriptable image frameworks (xDiT diffusion) are server-less and have no
     # LLM decode steady-state window, so the TraceLens steady-state splitter
@@ -2457,20 +2474,23 @@ async def trace_analyze_handler(
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
 
+    # Bypass runs the independent TraceLens-free backend; both tools share the
+    # same CLI surface below except ``--tracelens-root`` (TraceLens-only).
+    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
         "python3",
-        str(_kernel_agent_tool_path("tracelens_analysis.py")),
+        str(_kernel_agent_tool_path(tool_name)),
         "--trace-input",
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
         workspace_path,
+    ]
+    if not is_bypass:
         # Pass the resolved root explicitly so the tool never depends on the
         # subprocess inheriting TRACELENS_ROOT from the coordinator env.
-        "--tracelens-root",
-        str(tracelens_root),
-    ]
+        cmd += ["--tracelens-root", str(tracelens_root)]
     # Kernel-candidate POOL size (issue #667): only forward --top-k when the
     # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
     # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
@@ -2522,12 +2542,9 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent). Coerce to str
-    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
-    # bool/list emitted by the LLM) cannot raise AttributeError here.
-    analysis_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
+    # Forward the analysis route switch (deterministic vs agent) to the
+    # TraceLens tool. ``analysis_route`` was resolved above; the bypass tool
+    # takes no ``--analysis-route`` flag so it is intentionally excluded here.
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
@@ -2615,19 +2632,20 @@ async def trace_analyze_handler(
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
             # Discovery source = the route that actually ran. The tool reports
-            # the authoritative mode (``orchestrator_mode``); the deterministic
-            # (no-LLM) route is surfaced to the dashboard as ``bypass`` while the
-            # LLM route stays ``tracelens``. Fall back to the requested
-            # ``analysis_route`` when the tool didn't echo a mode (e.g. early
-            # failure). Both routes drive the same TraceLens toolchain, so the
-            # version provenance (``tool``) stays ``tracelens`` either way.
+            # the authoritative mode (``orchestrator_mode``). The TraceLens
+            # deterministic (no-LLM) route is surfaced as ``bypass`` while the
+            # TraceLens LLM route stays ``tracelens``. The independent bypass
+            # route (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``) is its own
+            # source and does not touch TraceLens, so its ``tool`` is ``bypass``.
             _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
-            _is_bypass = _orch_mode == "deterministic" or analysis_route == "deterministic"
+            _independent_bypass = _orch_mode == "bypass" or is_bypass
+            _is_bypass = _independent_bypass or _orch_mode == "deterministic" or analysis_route == "deterministic"
             _disc_source = "bypass" if _is_bypass else "tracelens"
+            _disc_tool = "bypass" if _independent_bypass else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
                 source=_disc_source,
-                tool="tracelens",
+                tool=_disc_tool,
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
