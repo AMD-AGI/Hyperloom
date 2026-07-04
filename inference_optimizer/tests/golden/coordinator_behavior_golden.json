@@ -185,6 +185,7 @@
     "framework_agent_batches": [],
     "framework_agent_critic_decisions": [],
     "framework_agent_discover_failures": 0,
+    "framework_agent_empty_discoveries": 0,
     "framework_agent_phase_done": false,
     "framework_agent_phase_enabled": true,
     "framework_agent_phase_progress": [],
