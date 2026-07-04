@@ -114,6 +114,7 @@ class UpdateStatusTimingTests(unittest.TestCase):
             TRACE_TOOL,
         )
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
 
@@ -916,15 +917,6 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
 
     def test_env_var_overrides_default(self) -> None:
         """HYPERLOOM_GEAK_COST_LIMIT must override the argparse default."""
-        env = {**os.environ, "HYPERLOOM_GEAK_COST_LIMIT": "12.5"}
-        probe = (
-            "import sys, re, runpy\n"
-            f"sys.argv = ['kernel_optimization.py', '--help']\n"
-            "try:\n"
-            f"    runpy.run_path(r'{OPT_TOOL}', run_name='__main__')\n"
-            "except SystemExit:\n"
-            "    pass\n"
-        )
         # AST fallback: evaluate the default expression in a controlled namespace.
         import ast
 
