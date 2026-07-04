@@ -2445,6 +2445,14 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
+    # Scriptable image frameworks (xDiT diffusion) are server-less and have no
+    # LLM decode steady-state window, so the TraceLens steady-state splitter
+    # cannot produce chunks and hard-fails (trace_split_no_steady_state). Feed
+    # the raw trace to TraceLens directly and drop the (LLM-only) --split-* hints.
+    from ..framework_registry import is_scriptable
+
+    scriptable = is_scriptable(framework)
+
     # Load materialized baseline workload metadata once: feeds splitter CLI flags (--split-*) so the steady-state window is correct, and enriches hot_kernels downstream.
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
@@ -2479,16 +2487,30 @@ async def trace_analyze_handler(
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
 
-    # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
-    split_conc = payload.get("split_conc") or workload.get("conc")
-    if split_conc not in (None, ""):
-        cmd += ["--split-conc", str(split_conc).strip()]
-    split_osl = payload.get("split_osl") or workload.get("osl")
-    if split_osl not in (None, ""):
-        cmd += ["--split-osl", str(split_osl).strip()]
-    split_r = payload.get("split_r") or workload.get("random_range_ratio")
-    if split_r not in (None, ""):
-        cmd += ["--split-r", str(split_r).strip()]
+    if scriptable:
+        # No steady-state window to extract; skip the splitter entirely.
+        cmd += ["--skip-split"]
+        # Forward the denoise-step count so the diffusion workload roofline can
+        # emit per-denoise-step timings. Priority: payload override (steps in
+        # the profiled window) > baseline workload metadata (full schedule).
+        num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
+        if num_denoise not in (None, ""):
+            try:
+                if int(num_denoise) > 0:
+                    cmd += ["--num-denoise-steps", str(int(num_denoise))]
+            except (TypeError, ValueError):
+                pass
+    else:
+        # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
+        split_conc = payload.get("split_conc") or workload.get("conc")
+        if split_conc not in (None, ""):
+            cmd += ["--split-conc", str(split_conc).strip()]
+        split_osl = payload.get("split_osl") or workload.get("osl")
+        if split_osl not in (None, ""):
+            cmd += ["--split-osl", str(split_osl).strip()]
+        split_r = payload.get("split_r") or workload.get("random_range_ratio")
+        if split_r not in (None, ""):
+            cmd += ["--split-r", str(split_r).strip()]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
