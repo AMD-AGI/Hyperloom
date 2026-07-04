@@ -487,7 +487,7 @@ def submit(
     extra_files: list[str] | None = None,
     kernel_repo: str = "",
 ) -> dict:
-    """Submit an OOB run, preferring Ray with a CLI fallback.
+    """Submit an OOB run, preferring SSH/Ray placement.
 
     Ensures the output directory exists, then (when ``prefer_ray``)
     starts/attaches to a Ray cluster and runs via :func:`run_via_ray`,
