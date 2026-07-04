@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
-DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query

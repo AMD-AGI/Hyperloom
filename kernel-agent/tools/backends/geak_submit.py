@@ -409,12 +409,12 @@ def submit(
     kernel_repo: str = "",
     test_command: str = "",
 ) -> dict:
-    """Submit a GEAK run, preferring Ray with a CLI fallback.
+    """Submit a GEAK run, preferring SSH/Ray placement.
 
     Ensures the output directory exists, then (when ``prefer_ray``)
     starts/attaches to a Ray cluster and runs via :func:`run_via_ray`,
-    falling back to a structured error dict on any Ray failure. When Ray
-    is not preferred, runs via :func:`run_via_cli`.
+    returning a structured error dict on Ray failure. When Ray is not
+    preferred, runs via :func:`run_via_cli`.
 
     Args:
         prompt_file (Path): Task prompt file passed to GEAK.
