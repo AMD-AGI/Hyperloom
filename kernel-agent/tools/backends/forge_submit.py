@@ -11,8 +11,9 @@ artifact later). Emits the same artifacts every other backend does:
   <output_dir>/optimized_versions/v1_forge.<ext>   complete replaceable source
   <output_dir>/optimization_report.md              [micro_speedup] Nx + [correctness] pass
 
-Stage 1 scope: triton / JIT kernels only (no separate build step). Compiled
-backends (hip/ck/flydsl) need a build step and are deferred.
+Scope: Triton/Python kernels use the triton fellow. Compiled kernels
+(HIP/CK/aiter/hipBLASLt/FlyDSL) are also attempted when Kernel-Forge has a
+matching fellow; compile-only drivers are skipped unless explicitly allowed.
 
 Design ref: claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md
 """
