@@ -242,3 +242,198 @@ def test_tokens():
     toks = rh._tokens("Enable CUDAGraph for-decode the")
     assert "cudagraph" in toks
     assert "the" not in toks  # stopword
+
+
+# ---- targeted coverage: load_hints non-list items (line 85) ----
+
+
+def test_load_hints_items_not_list(tmp_path):
+    # top-level dict whose "hints" key is a non-list -> items not a list -> []
+    p = session_paths.research_hints_json(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"hints": {"not": "a list"}}), encoding="utf-8")
+    assert rh.load_hints(tmp_path) == []
+
+
+def test_load_hints_bare_scalar(tmp_path):
+    # top-level is neither dict nor list -> items = data (an int) -> not a list -> []
+    p = session_paths.research_hints_json(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(5), encoding="utf-8")
+    assert rh.load_hints(tmp_path) == []
+
+
+def test_load_hints_top_level_list(tmp_path):
+    # top-level list (not wrapped in {"hints": ...}) is accepted directly
+    p = session_paths.research_hints_json(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps([{"what": "x", "source": "s"}]), encoding="utf-8")
+    out = rh.load_hints(tmp_path)
+    assert len(out) == 1
+    assert out[0]["what"] == "x"
+
+
+# ---- targeted coverage: _persist OSError branch (lines 164-165) ----
+
+
+def test_persist_oserror_is_soft(tmp_path, monkeypatch, caplog):
+    def _boom(_path, _text):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rh, "_atomic_write", _boom)
+    with caplog.at_level("WARNING"):
+        # should not raise; failure is logged and swallowed
+        rh._persist(tmp_path, [{"what": "x", "source": "s"}])
+    assert any("persist failed" in r.getMessage() for r in caplog.records)
+
+
+# ---- targeted coverage: _coerce_per_conc non-dict (line 210) ----
+
+
+def test_coerce_per_conc_not_dict():
+    assert rh._coerce_per_conc("nope") is None
+    assert rh._coerce_per_conc(None) is None
+
+
+def test_coerce_per_conc_picks_fields():
+    row = rh._coerce_per_conc(
+        {"source": " v ", "conc": 8, "tput_per_gpu": 100.0, "tpot_ms": None}
+    )
+    assert row["source"] == "v"
+    assert row["conc"] == 8
+    assert row["tput_per_gpu"] == 100.0
+    # tpot_ms is None -> not copied
+    assert "tpot_ms" not in row
+
+
+# ---- targeted coverage: write_competitor_target per_conc not list (line 237) ----
+
+
+def test_write_competitor_target_per_conc_not_list(tmp_path):
+    # per_conc is a non-list -> coerced to [] -> no sourced rows -> False
+    assert rh.write_competitor_target(tmp_path, {"per_conc": "oops"}) is False
+
+
+# ---- targeted coverage: write_competitor_target OSError (lines 254-256) ----
+
+
+def test_write_competitor_target_oserror(tmp_path, monkeypatch, caplog):
+    def _boom(_path, _text):
+        raise OSError("nope")
+
+    monkeypatch.setattr(rh, "_atomic_write", _boom)
+    with caplog.at_level("WARNING"):
+        ok = rh.write_competitor_target(
+            tmp_path,
+            {"per_conc": [{"conc": 8, "tput_per_gpu": 100.0, "source": "v"}]},
+        )
+    assert ok is False
+    assert any("write failed" in r.getMessage() for r in caplog.records)
+
+
+# ---- targeted coverage: load_competitor_target branches (274-276, 278, 281) ----
+
+
+def test_load_competitor_target_bad_json(tmp_path, caplog):
+    p = session_paths.competitor_target_json(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert rh.load_competitor_target(tmp_path) is None
+    assert any("failed to read" in r.getMessage() for r in caplog.records)
+
+
+def test_load_competitor_target_not_dict(tmp_path):
+    # top-level JSON list -> not a dict -> None
+    p = session_paths.competitor_target_json(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert rh.load_competitor_target(tmp_path) is None
+
+
+def test_load_competitor_target_per_conc_not_list(tmp_path):
+    # per_conc present but not a list -> None
+    p = session_paths.competitor_target_json(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"per_conc": "oops"}), encoding="utf-8")
+    assert rh.load_competitor_target(tmp_path) is None
+
+
+# ---- targeted coverage: _match_target_row / gap_analysis no rows (310, 346) ----
+
+
+def test_gap_analysis_empty_per_conc():
+    # target dict with empty per_conc -> _match_target_row returns None -> gap None
+    assert (
+        rh.gap_analysis(
+            {"per_conc": []},
+            our_tput_per_gpu=1.0,
+            our_tpot_ms=1.0,
+        )
+        is None
+    )
+
+
+def test_match_target_row_no_rows_direct():
+    assert rh._match_target_row({"per_conc": []}, conc=8) is None
+    assert rh._match_target_row({}, conc=None) is None
+
+
+# ---- targeted coverage: gap_analysis latency-only elif (368-369) ----
+
+
+def test_gap_analysis_latency_via_elif():
+    # tpot_ratio computable and > 1.0, but throughput_gap_pct is None
+    # (no our_tput_per_gpu) -> hits the elif branch setting primary_gap.
+    target = {
+        "per_conc": [
+            {"conc": 8, "tpot_ms": 10.0, "source": "v"},
+        ],
+    }
+    gap = rh.gap_analysis(target, our_tput_per_gpu=None, our_tpot_ms=20.0, conc=8)
+    assert gap["throughput_gap_pct"] is None
+    assert gap["tpot_ratio"] == 2.0
+    assert gap["primary_gap"] == "latency"
+
+
+def test_gap_analysis_latency_elif_ratio_not_over_one():
+    # tpot_ratio <= 1.0 with no throughput gap -> stays "throughput"
+    target = {
+        "per_conc": [
+            {"conc": 8, "tpot_ms": 20.0, "source": "v"},
+        ],
+    }
+    gap = rh.gap_analysis(target, our_tput_per_gpu=None, our_tpot_ms=10.0, conc=8)
+    assert gap["tpot_ratio"] == 0.5
+    assert gap["primary_gap"] == "throughput"
+
+
+# ---- targeted coverage: match_variants_to_priors skip branches (526, 529, 537, 540) ----
+
+
+def test_match_variants_skips_bad_hints_and_variants():
+    hints = [
+        "not a dict",  # line 526: skip non-dict hint
+        {"what": "  ", "source": "s"},  # line 529: empty 'what' -> skip
+        {"what": "enable cudagraph decode", "domain_tags": ["decode"]},
+    ]
+    variants = [
+        "not a dict",  # line 537: skip non-dict variant
+        {"description": "cudagraph decode path"},  # line 540: no name -> skip
+        {"name": "v1", "description": "cudagraph decode path"},
+    ]
+    out = rh.match_variants_to_priors(variants, hints)
+    assert list(out.keys()) == ["v1"]
+    assert "enable cudagraph decode" in out["v1"]["hints"]
+
+
+# ---- targeted coverage: summarise_for_prompt extra-more line (629) ----
+
+
+def test_summarise_for_prompt_extra_more(tmp_path):
+    incoming = [
+        {"what": f"hint {i}", "source": f"s{i}"} for i in range(10)
+    ]
+    rh.append_hints(tmp_path, incoming)
+    out = rh.summarise_for_prompt(tmp_path, max_entries=3)
+    assert "... and 7 more in research_hints.md." in out
