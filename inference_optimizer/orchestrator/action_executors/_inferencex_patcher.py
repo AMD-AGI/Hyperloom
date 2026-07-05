@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -164,16 +165,34 @@ def _is_patched(src: Path) -> bool:
     return file_contains_sentinel(src, _PATCH_SENTINEL, log, "_inferencex_patcher")
 
 
-def _apply_patch_atomic(src: Path) -> bool:
-    """Rewrite ``src`` via temp-file + atomic rename so a crash
-    mid-write cannot leave a corrupt ``benchmark_lib.sh``.
+def _apply_line_replacement_atomic(
+    src: Path,
+    legacy: str,
+    patched_line: str,
+    *,
+    tmp_prefix: str,
+    missing_msg: str,
+    success_msg: str,
+) -> bool:
+    """Replace a single exact ``legacy`` line with ``patched_line`` in ``src``
+    via temp-file + atomic rename so a crash mid-write cannot leave a corrupt
+    file.
+
+    Shared by both InferenceX patches (``benchmark_lib.sh`` and
+    ``benchmark_serving.py``); they differ only in the legacy/patched text,
+    temp-file prefix, and log messages.
 
     Args:
-        src (Path): The ``benchmark_lib.sh`` file to patch in place.
+        src: The file to patch in place.
+        legacy: Exact legacy line that must be present to patch.
+        patched_line: Replacement text for ``legacy`` (first occurrence).
+        tmp_prefix: Temp-file prefix for the atomic write.
+        missing_msg: Warning (one ``%s`` for ``src``) when ``legacy`` is absent.
+        success_msg: Info (one ``%s`` for ``src``) logged on a successful write.
 
     Returns:
-        bool: ``True`` when the patched bytes were written; ``False``
-        when the legacy line is missing or any IO step fails.
+        bool: ``True`` when the patched bytes were written; ``False`` when the
+        legacy line is missing or any IO step fails.
     """
     try:
         original = src.read_text(encoding="utf-8")
@@ -181,33 +200,23 @@ def _apply_patch_atomic(src: Path) -> bool:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
 
-    if _LEGACY_LINE not in original:
-        log.warning(
-            "_inferencex_patcher: expected legacy line not found in %s; "
-            "the file may already have been hand-patched to a "
-            "different shape, or the upstream layout has changed. "
-            "Manual review needed.",
-            src,
-        )
+    if legacy not in original:
+        log.warning(missing_msg, src)
         return False
 
-    patched = original.replace(_LEGACY_LINE, _PATCHED_LINE, 1)
+    patched = original.replace(legacy, patched_line, 1)
     if patched == original:
         return False
 
-    # Preserve perms so the patched file stays runnable as a sourced lib.
     if not atomic_write_text(
         src,
         patched,
-        tmp_prefix=".benchmark_lib.sh.hyperloom_",
+        tmp_prefix=tmp_prefix,
         log_prefix="_inferencex_patcher",
     ):
         return False
 
-    log.info(
-        "_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)",
-        src,
-    )
+    log.info(success_msg, src)
     return True
 
 
@@ -281,7 +290,22 @@ def ensure_benchmark_lib_patched(
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_patched,
-        _apply_patch_atomic,
+        # Preserve perms so the patched file stays runnable as a sourced lib.
+        partial(
+            _apply_line_replacement_atomic,
+            legacy=_LEGACY_LINE,
+            patched_line=_PATCHED_LINE,
+            tmp_prefix=".benchmark_lib.sh.hyperloom_",
+            missing_msg=(
+                "_inferencex_patcher: expected legacy line not found in %s; "
+                "the file may already have been hand-patched to a "
+                "different shape, or the upstream layout has changed. "
+                "Manual review needed."
+            ),
+            success_msg=(
+                "_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)"
+            ),
+        ),
         _LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
@@ -331,61 +355,6 @@ def _is_benchmark_serving_patched(src: Path) -> bool:
     return file_contains_sentinel(src, _BENCH_SERVING_SENTINEL, log, "_inferencex_patcher")
 
 
-def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
-    """Rewrite the hardcoded ``extra_body=`` line to consult
-    ``PROFILE_EXTRA_BODY`` first, via temp-file + atomic rename.
-
-    Args:
-        src: The ``benchmark_serving.py`` file to patch in place.
-
-    Returns:
-        True when the patched bytes were written, False when the legacy line
-        is missing or any IO step fails.
-    """
-    try:
-        original = src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
-        return False
-
-    if _BENCH_SERVING_LEGACY not in original:
-        log.warning(
-            "_inferencex_patcher: expected legacy `extra_body=` line not "
-            "found in %s; InferenceX layout may have changed and Hyperloom "
-            "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
-            "ignored — TraceLens shape_discovery / roofline_annotations / "
-            "steady-state start_step won't reach the server. Manual review "
-            "needed.",
-            src,
-        )
-        return False
-
-    patched = original.replace(
-        _BENCH_SERVING_LEGACY,
-        _BENCH_SERVING_PATCHED,
-        1,
-    )
-    if patched == original:
-        return False
-
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=".benchmark_serving.py.hyperloom_",
-        log_prefix="_inferencex_patcher",
-    ):
-        return False
-
-    log.info(
-        "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
-        "var (PR-D §2: fixes silently-ignored shape_discovery / "
-        "roofline_annotations / steady-state start_step from "
-        "_workload_envs.py)",
-        src,
-    )
-    return True
-
-
 def ensure_benchmark_serving_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
@@ -407,7 +376,26 @@ def ensure_benchmark_serving_patched(
     return _ensure_patched(
         _resolve_benchmark_serving_paths(inferencex_path),
         _is_benchmark_serving_patched,
-        _apply_benchmark_serving_patch_atomic,
+        partial(
+            _apply_line_replacement_atomic,
+            legacy=_BENCH_SERVING_LEGACY,
+            patched_line=_BENCH_SERVING_PATCHED,
+            tmp_prefix=".benchmark_serving.py.hyperloom_",
+            missing_msg=(
+                "_inferencex_patcher: expected legacy `extra_body=` line not "
+                "found in %s; InferenceX layout may have changed and Hyperloom "
+                "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
+                "ignored — TraceLens shape_discovery / roofline_annotations / "
+                "steady-state start_step won't reach the server. Manual review "
+                "needed."
+            ),
+            success_msg=(
+                "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
+                "var (PR-D §2: fixes silently-ignored shape_discovery / "
+                "roofline_annotations / steady-state start_step from "
+                "_workload_envs.py)"
+            ),
+        ),
         _BENCH_SERVING_LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "

@@ -844,6 +844,7 @@ class IntentRouter:
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
+            ESCALATE_HINT_SKIP_TO_CLOSE,
             PHASE_EXPLORE,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
@@ -852,6 +853,29 @@ class IntentRouter:
         )
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
+            return
+        # Pre-enablement close guard: a not-yet-runnable model blocks the whole
+        # loop on establishing a baseline, so a ``skip_to_close`` here (from the
+        # Orchestration LLM OR Robustness) is premature — giving up before the
+        # model even boots is not a legitimate finish. Drop it and let the
+        # enablement loop keep going; the run still ends honestly via
+        # ``enablement_stalled`` (stall cap), ``prelude_baseline_failed``, the
+        # wall-clock deadline, or a hard abort — none of which route through
+        # ``skip_to_close``.
+        if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
+            log.info(
+                "escalate_strategy_change: dropping premature skip_to_close from %s "
+                "(pre-enablement: baseline not established; enablement loop still active)",
+                source,
+            )
+            await self.bus.append_and_seq(Message.new(
+                "coordinator", "*", "observation",
+                {
+                    "kind": "enablement_skip_to_close_suppressed",
+                    "source": source,
+                    "phase": (self.shared_state.phase or ""),
+                },
+            ))
             return
         # extend_*_budget mutates phase_budget_pct directly (consulted every tick).
         now_ts = datetime.now(timezone.utc).isoformat()

@@ -29,9 +29,9 @@ from ...protocol.intent import (
     validate_envelope,
 )
 from ...session_paths import allocate_turn_workdir, manifest_path
+from .._json_io import extract_first_json_with_key
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .._json_io import extract_first_json_with_key
 from .base import BackendError, BackendTurnResult, build_chat_messages
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -100,12 +100,12 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 """.strip()
 
 
-# Bare {...} fallback containing "review_verdicts" (fenced case handled by helper).
+# Bare {...} fallback carrying "review_verdicts" (fenced case handled by helper).
 _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the first review JSON (containing ``"review_verdicts"``) from a model reply."""
+    """Pull the first valid ``{"review_verdicts": ...}`` object out of a reply."""
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE)
 
 
@@ -156,7 +156,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
             raise BackendError("commit-review invocation missing --review path")
         extra_args = ["--review", str(call.review_path)]
 
-    # AGENTS.md §Exit codes: 0 success; 2 adapter bug (host → needs_review).
+    # Exit codes: 0 success; 2 adapter bug (host → needs_review).
     invoke_runtime_cli(
         call,
         module="runtime.cli",

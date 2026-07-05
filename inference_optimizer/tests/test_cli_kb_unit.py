@@ -207,3 +207,108 @@ def test_bootstrap_knowledge_plane_disabled(tmp_path) -> None:
         session_dir=tmp_path,
     )
     assert plane is not None
+
+
+def test_bootstrap_knowledge_plane_with_kb_mcp(tmp_path, monkeypatch) -> None:
+    """When a specialist KB MCP url resolves, the enabled branch (L302-303) runs."""
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://kb.invalid/mcp")
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "tok")
+    plane = cli_kb._bootstrap_knowledge_plane(_args(), session_dir=tmp_path)
+    assert plane is not None
+
+
+class _FailingParent:
+    """A stand-in ``.parent`` whose mkdir always raises OSError."""
+
+    def mkdir(self, *_a, **_k):
+        raise OSError("no space")
+
+
+class _MarkerPath:
+    """Path-like whose parent.mkdir raises, exercising the OSError guard."""
+
+    parent = _FailingParent()
+
+    def write_text(self, *_a, **_k):  # pragma: no cover - never reached
+        raise OSError("no space")
+
+
+def test_bootstrap_knowledge_plane_marker_write_failure(tmp_path, monkeypatch) -> None:
+    """An OSError writing the pr_monitor status marker is swallowed (L290-291)."""
+    from inference_optimizer import session_paths as sp
+
+    monkeypatch.setattr(sp, "pr_monitor_status_json", lambda _sd: _MarkerPath())
+    plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=True), session_dir=tmp_path)
+    assert plane is not None
+
+
+# -- _attach_recipe_audit_hook extra branches ------------------------------
+def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
+    """A target lacking ``audit_hook`` is a no-op (L67-68)."""
+
+    class _NoHook:
+        pass
+
+    obj = _NoHook()
+    cli_kb._attach_recipe_audit_hook(obj, tmp_path)
+    assert not hasattr(obj, "audit_hook")
+
+
+def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch) -> None:
+    """A write failure inside the hook is swallowed, not raised (L90-91)."""
+    from inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
+    from inference_optimizer import session_paths as sp
+
+    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
+
+    class _BadPath:
+        parent = None
+
+        def mkdir(self, *_a, **_k):
+            raise OSError("boom")
+
+    bad = _BadPath()
+    bad.parent = bad  # type: ignore[assignment]
+    monkeypatch.setattr(sp, "recipe_snapshot_audit_jsonl", lambda _sd: bad)
+    cli_kb._attach_recipe_audit_hook(kb, tmp_path)
+    # Must not raise even though the underlying write path errors.
+    kb.audit_hook({"method": "search"})
+
+
+# -- _resolve_specialist_kb_mcp --------------------------------------------
+def test_resolve_specialist_kb_mcp_override(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://x/mcp")
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "secret")
+    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
+    assert url == "http://x/mcp"
+    assert headers == {"Authorization": "Bearer secret"}
+
+
+def test_resolve_specialist_kb_mcp_override_without_token(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://x/mcp")
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", raising=False)
+    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
+    assert url == "http://x/mcp"
+    assert headers == {}
+
+
+def test_resolve_specialist_kb_mcp_gbrain(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", raising=False)
+    monkeypatch.setenv("GBRAIN_BASE_URL", "http://gbrain.invalid/")
+    monkeypatch.setenv("GBRAIN_TOKEN", "gtok")
+    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
+    assert url == "http://gbrain.invalid/mcp"
+    assert headers == {"Authorization": "Bearer gtok"}
+
+
+def test_resolve_specialist_kb_mcp_nothing_configured(monkeypatch) -> None:
+    for k in (
+        "HYPERLOOM_SPECIALIST_KB_MCP_URL",
+        "HYPERLOOM_SPECIALIST_KB_MCP_TOKEN",
+        "GBRAIN_BASE_URL",
+        "GBRAIN_TOKEN",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
+    assert url == ""
+    assert headers == {}

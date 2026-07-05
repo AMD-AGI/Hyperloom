@@ -52,6 +52,9 @@ class _CoordinatorStub:
     """
 
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
+    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
+    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
+    _stamp_framework_progress = Coordinator._stamp_framework_progress
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
