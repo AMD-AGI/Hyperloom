@@ -72,12 +72,11 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 
 | Variable           | Issuer                              | Where to obtain                                                                                       | Format              |
 |--------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------|
-| `SAFE_API_KEY`     | AMD LiteLLM gateway (typical)         | [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)                                     | `ak-...`            |
-| `OPENAI_BASE_URL`  | Same gateway                        | `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1` (default for hosted SaFE)                  | URL ending in `/v1` |
+| `SAFE_API_KEY`     | AMD LiteLLM gateway                 | [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)                                     | `ak-...`            |
+| `OPENAI_BASE_URL`  | AMD LiteLLM gateway                 | `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1` (default for the hosted SaFE setup)          | URL ending in `/v1` |
 
-Preflight derives `ANTHROPIC_BASE_URL` from `OPENAI_BASE_URL`, points
-`~/.claude/config.json` `customApiUrl` at the upstream gateway, and
-fills any **unset** alias keys from `SAFE_API_KEY`:
+`SAFE_API_KEY` is the single AMD credential used by **all** downstream
+tooling:
 
 * GEAK → `GEAK_API_KEY` / `GEAK_BASE_URL`
 * OOB `claude` / `codex` → `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
