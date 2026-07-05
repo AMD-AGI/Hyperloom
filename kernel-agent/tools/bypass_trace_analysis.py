@@ -46,6 +46,7 @@ import _bypass_trace_reader as _reader  # noqa: E402
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
+AGGREGATION_SCOPE_STEADY = "steady_state"
 
 
 def _utc_now_iso() -> str:
@@ -252,21 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         or steady_mode in {"1", "true", "on", "auto", "annotation", "steady"}
         or framework_l == "xdit"
     )
-    # xDiT diffusion analysis is heuristic (step-split + DiT kernel taxonomy) and
-    # has no real-trace ground truth yet; flag downstream products as estimated.
-    estimated = framework_l == "xdit"
-    if estimated:
-        trace_health_warnings.append(
-            {
-                "code": "bypass_xdit_estimated",
-                "severity": "info",
-                "message": (
-                    "xDiT diffusion analysis is heuristic (diffusion step-split + DiT "
-                    "kernel classification); pending validation against a real xDiT GPU "
-                    "trace (M7b)."
-                ),
-            }
-        )
+    # ``estimated`` is decided after the scope is known (below): xDiT is estimated
+    # only when it could NOT anchor to a real per-step denoising window.
 
     # --- analyze the trace (independent streaming reader) ---
     analyze: dict[str, Any]
@@ -303,6 +291,38 @@ def main(argv: list[str] | None = None) -> int:
     # every artifact reports the same, accurate scope.
     scope = analyze.get("aggregation_scope", AGGREGATION_SCOPE_FULL)
     steady_window = analyze.get("steady_window")
+
+    # xDiT is heuristic ONLY when it cannot anchor to a real per-step denoising
+    # window. When steady-state windowing locks onto the repeating ProfilerStep
+    # (real annotated trace), per-step kernel shares are trace-anchored, so the
+    # result is not "estimated" (parity with text-gen). Without such a window the
+    # full-trace fallback mixes text-encode / VAE / all steps -> estimated.
+    estimated = framework_l == "xdit" and scope != AGGREGATION_SCOPE_STEADY
+    if framework_l == "xdit" and estimated:
+        trace_health_warnings.append(
+            {
+                "code": "bypass_xdit_estimated",
+                "severity": "info",
+                "message": (
+                    "xDiT analysis fell back to full-trace shares (no per-step denoising "
+                    "window found; trace lacks step annotations such as ProfilerStep) — "
+                    "treat kernel shares / roofline as estimated."
+                ),
+            }
+        )
+    elif framework_l == "xdit":
+        trace_health_warnings.append(
+            {
+                "code": "bypass_xdit_steady_anchored",
+                "severity": "info",
+                "message": (
+                    f"xDiT analysis anchored to a real per-step denoising window "
+                    f"({(steady_window or {}).get('step_name', 'step')}×"
+                    f"{(steady_window or {}).get('step_count', 0)}); per-step kernel "
+                    "shares are trace-anchored (not estimated)."
+                ),
+            }
+        )
 
     # Multi-rank provenance: xDiT TP>1 produces one trace per rank. The reader
     # deterministically analyzes one representative rank; surface which one and

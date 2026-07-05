@@ -287,7 +287,10 @@ def test_steady_state_mode_flag_enables_windowing(tmp_path, capsys, monkeypatch)
     assert result["estimated"] is False  # vllm framework
 
 
-def test_xdit_marks_estimated_and_auto_steady(tmp_path, capsys, monkeypatch):
+def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
+    # xDiT auto-enables steady-state; when the repeating ProfilerStep window is
+    # found the per-step kernel shares are trace-anchored, so the result is NOT
+    # estimated (parity with text-gen) and carries a steady-anchored info signal.
     monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
@@ -302,16 +305,41 @@ def test_xdit_marks_estimated_and_auto_steady(tmp_path, capsys, monkeypatch):
         "--top-k", "8",
     ]
     _, result, _ = _run(argv, capsys)
-    assert result["estimated"] is True
-    # xDiT auto-enables steady-state; the repeating ProfilerStep window is found.
     assert result["aggregation_scope"] == "steady_state"
+    assert result["estimated"] is False
     codes = {w["code"] for w in result["trace_health_warnings"]}
-    assert "bypass_xdit_estimated" in codes
+    assert "bypass_xdit_steady_anchored" in codes
+    assert "bypass_xdit_estimated" not in codes
     # estimated flag flows into summary + manifest.
     summ = json.loads(Path(result["artifact_paths"]["tracelens_summary"]).read_text())
-    assert summ["estimated"] is True
+    assert summ["estimated"] is False
     manifest = json.loads(Path(result["artifact_paths"]["trace_input_manifest"]).read_text())
-    assert manifest["estimated"] is True and manifest["aggregation_scope"] == "steady_state"
+    assert manifest["estimated"] is False and manifest["aggregation_scope"] == "steady_state"
+
+
+def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
+    # No per-step annotations -> steady-state windowing falls back to full_trace,
+    # so the xDiT result is estimated and flags bypass_xdit_estimated.
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "x.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    argv = [
+        "--trace-input", str(trace),
+        "--session-id", "utest-xdit-full",
+        "--workspace-path", str(tmp_path),
+        "--framework", "xdit",
+        "--target-platform", "MI300X",
+        "--model-name", "FLUX.1-dev",
+        "--top-k", "8",
+    ]
+    _, result, _ = _run(argv, capsys)
+    assert result["aggregation_scope"] == "full_trace"
+    assert result["estimated"] is True
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    assert "bypass_xdit_estimated" in codes
+    summ = json.loads(Path(result["artifact_paths"]["tracelens_summary"]).read_text())
+    assert summ["estimated"] is True
 
 
 def test_rocprof_enrich_opt_in_runs_and_degrades(tmp_path, capsys, monkeypatch):
