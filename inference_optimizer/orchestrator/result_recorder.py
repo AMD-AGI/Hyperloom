@@ -36,6 +36,7 @@ from .optimization_journal import (
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     classify_change_kind,
+    derive_journal_outcome,
     summarize_change,
 )
 from .task_registry import Task
@@ -374,16 +375,25 @@ class ResultRecorder:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
+        # integrate_patch / framework_agent report their delta under ``delta_pct``;
+        # fall back to it so a reverted/kept patch shows its REAL measured delta
+        # in the journal instead of a null gain.
         gain_pct = _coerce_metric(result_dict.get("gain_pct"))
+        if gain_pct is None:
+            gain_pct = _coerce_metric(result_dict.get("delta_pct"))
         throughput_after = _coerce_metric(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
-        if kept:
-            outcome = OUTCOME_KEEP
+        # Journal outcome follows the executor's per-status verdict for source-
+        # patch kinds (a ``reverted`` patch is promotable but NOT a KEEP); other
+        # kinds keep the binary promotable→KEEP behaviour. See
+        # ``derive_journal_outcome`` (fixes the "fake KEEP" bug).
+        outcome = derive_journal_outcome(task.kind, result_dict, promotable=kept)
+        is_keep = outcome == OUTCOME_KEEP
+        if is_keep:
             error_class = None
             reason = None
         else:
-            outcome = OUTCOME_REVERT
             error_class = (str(result_dict.get("error_class") or "") or None)
             reason = (str(result_dict.get("reason") or "") or None)
         journal.append_entry(JournalEntry(
@@ -414,7 +424,7 @@ class ResultRecorder:
         workload_tags = self._coord._collect_workload_tags()
         extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if kept and gain_pct is not None and gain_pct > 0:
+        if is_keep and gain_pct is not None and gain_pct > 0:
             statement = self._coord._build_statement(
                 change=change, gain_pct=gain_pct, kind="lesson",
             )

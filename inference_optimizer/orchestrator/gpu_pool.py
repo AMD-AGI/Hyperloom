@@ -133,6 +133,40 @@ def resolve_gpu_specialist_devices(
     return list(range(cap))[serving:]
 
 
+def resolve_whole_machine_devices() -> list[int]:
+    """Resolve the full set of GPU ids on this node — **no** serving carve.
+
+    Returns *every* visible card and, unlike
+    :func:`resolve_gpu_specialist_devices`, does **not**:
+
+    * subtract the ``serving_tp`` cards, nor
+    * gate on ``gpu_specialist_capacity``.
+
+    Id-source precedence mirrors :func:`resolve_gpu_specialist_devices`:
+
+    1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool
+       (used verbatim, uncapped here).
+    2. The process visible-device mask (``ROCR_VISIBLE_DEVICES`` →
+       ``HIP``/``CUDA``) — used verbatim.
+    3. No mask set → ``range(detect_gpu_count())`` (the machine's detected GPU
+       count, probed lazily via ``rocm-smi`` only in this branch).
+
+    Returns:
+        The absolute GPU ids available to a framework whole-machine lease;
+        ``[]`` when the mask is set-but-empty or nothing can be resolved.
+    """
+    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
+    if explicit:
+        return explicit
+    mask_ids, mask_present = _visible_device_mask()
+    if mask_present:
+        return mask_ids
+    # No mask: fall back to the detected machine GPU count. Imported lazily.
+    from .policy import detect_gpu_count
+
+    return list(range(max(0, int(detect_gpu_count() or 0))))
+
+
 @dataclass(frozen=True)
 class GpuLease:
     holder_id: str
@@ -276,4 +310,5 @@ __all__ = [
     "GpuLease",
     "SpecialistGpuPool",
     "resolve_gpu_specialist_devices",
+    "resolve_whole_machine_devices",
 ]
