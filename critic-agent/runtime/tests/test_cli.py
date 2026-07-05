@@ -122,3 +122,209 @@ def test_invalid_request_returns_exit_code_2(tmp_path):
     bad = _write(tmp_path / "bad.json", {"kind": "wat"})
     rc = main(["init-session", "--request", str(bad)])
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# Low-level KB commands (inmemory client): these exercise the tooling
+# subcommands the SKILL bash allowlist keeps around for operators.
+# ---------------------------------------------------------------------------
+
+_PACKET = {
+    "context": {
+        "framework": "sglang",
+        "model": "deepseek-r1-0528-fp8",
+        "model_family": "deepseek",
+        "workload": "decode",
+        "precision": "fp8",
+    }
+}
+
+
+def test_list_priors_emits_scope_cache_key(tmp_path):
+    packet = _write(tmp_path / "packet.json", _PACKET)
+    out_path = tmp_path / "priors.json"
+    rc = main(["list-priors", "--packet", str(packet), "--out", str(out_path)])
+    assert rc == 0
+    payload = json.loads(out_path.read_text("utf-8"))
+    assert payload["cache"] in {"miss", "hit", "disabled"}
+    assert isinstance(payload["scope_cache_key"], str)
+    assert payload["scope_cache_key"]
+
+
+def test_write_verdict_persists_reject_lesson(tmp_path):
+    packet = _write(tmp_path / "packet.json", _PACKET)
+    verdict = _write(
+        tmp_path / "verdict.json",
+        {
+            "verdict": "reject",
+            "reasoning": "active dispatch path unproven for this kernel",
+            "packet_evidence": ["benchmark.after.gain_pct"],
+            "confidence": "high",
+        },
+    )
+    ctx = _write(
+        tmp_path / "ctx.json",
+        {"session_id": "sess_wv", "review_id": "rev_1", "topic": "active dispatch path unproven"},
+    )
+    out_path = tmp_path / "wv.json"
+    rc = main(
+        [
+            "write-verdict",
+            "--packet",
+            str(packet),
+            "--verdict",
+            str(verdict),
+            "--ctx",
+            str(ctx),
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    result = json.loads(out_path.read_text("utf-8"))
+    assert result["status"] in {"ok", "skipped", "dead_lettered", "disabled"}
+
+
+def test_write_kb_drafts_batch(tmp_path):
+    packet = _write(tmp_path / "packet.json", _PACKET)
+    kb_draft = _write(
+        tmp_path / "draft.json",
+        {
+            "kb_drafts": [
+                {
+                    "category": "kernel_optimization",
+                    "action": "Patch fused attention kernel for the decode path.",
+                    "lesson": "Active dispatch path must be updated jointly.",
+                    "tags": ["attention"],
+                    "result": {"status": "KEEP", "gain_pct": 4.2},
+                }
+            ]
+        },
+    )
+    ctx = _write(tmp_path / "ctx.json", {"session_id": "sess_wd", "review_id": "rev_wd"})
+    out_path = tmp_path / "wd.json"
+    rc = main(
+        [
+            "write-kb-drafts",
+            "--packet",
+            str(packet),
+            "--kb-draft",
+            str(kb_draft),
+            "--ctx",
+            str(ctx),
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    result = json.loads(out_path.read_text("utf-8"))
+    assert result["status"] in {"ok", "skipped", "dead_lettered", "disabled"}
+
+
+def test_add_contradiction_command(tmp_path):
+    ctx = _write(tmp_path / "ctx.json", {"session_id": "sess_ac", "review_id": "rev_ac"})
+    out_path = tmp_path / "ac.json"
+    rc = main(
+        [
+            "add-contradiction",
+            "--new-id",
+            "kb_new_1",
+            "--old-ids",
+            "kb_old_1, kb_old_2 ,",
+            "--ctx",
+            str(ctx),
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    result = json.loads(out_path.read_text("utf-8"))
+    assert "status" in result
+
+
+def test_replay_dead_letter_empty_queue(tmp_path):
+    out_path = tmp_path / "replay.json"
+    rc = main(
+        [
+            "replay-dead-letter",
+            "--dir",
+            str(tmp_path / "dlq_replay"),
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    summary = json.loads(out_path.read_text("utf-8"))
+    assert isinstance(summary, dict)
+
+
+def test_replay_dead_letter_dispatches_queued_records(tmp_path):
+    from runtime.cli import _replay_dispatch
+    from runtime.dead_letter import DeadLetter
+    from runtime.errors import RuntimeAdapterError
+    from runtime.in_memory_kb_client import InMemoryKBClient
+
+    dlq_dir = tmp_path / "dlq_dispatch"
+    dlq = DeadLetter(root=dlq_dir)
+    common = {"attempts": 1, "last_error": "boom"}
+    # Endpoints stored in the DLQ use filesystem-safe names (no "/"); edges
+    # failures are recorded under "upsert", so those are the retryable files.
+    dlq.append("upsert", {"id": "kb_x", "kind": "pitfall", "scope": {}}, **common)
+    dlq.append("batch_insert", {"items": [{"id": "kb_y", "kind": "recipe", "scope": {}}]}, **common)
+    dlq.append("list", {"scope_filter": {}, "limit": 5}, **common)
+
+    out_path = tmp_path / "replay2.json"
+    rc = main(
+        [
+            "replay-dead-letter",
+            "--dir",
+            str(dlq_dir),
+            "--keep-on-success",
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    summary = json.loads(out_path.read_text("utf-8"))
+    assert isinstance(summary, dict)
+
+    # Directly exercise the remaining _replay_dispatch branches.
+    client = InMemoryKBClient()
+    _replay_dispatch(client, "edges/add", {"edges": []})
+    with pytest.raises(RuntimeAdapterError):
+        _replay_dispatch(client, "nope", {})
+
+
+def test_commit_review_rejects_non_object_review(tmp_path):
+    request = _write(tmp_path / "req.json", {"kind": "coordinator_inbox", "raw_prompt": ""})
+    review = _write(tmp_path / "review.json", ["not", "a", "dict"])
+    rc = main(["commit-review", "--request", str(request), "--review", str(review)])
+    assert rc == 2
+
+
+def test_resolve_kb_client_cortex_requires_url(monkeypatch, tmp_path):
+    from runtime.cli import _resolve_kb_client
+    from runtime.errors import RuntimeAdapterError
+
+    monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "cortex")
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    with pytest.raises(RuntimeAdapterError, match="CORTEX_KB_URL"):
+        _resolve_kb_client()
+
+    monkeypatch.setenv("CORTEX_KB_URL", "http://cortex.invalid")
+    client = _resolve_kb_client()
+    assert client is not None
+
+
+def test_resolve_kb_client_live_requires_url(monkeypatch):
+    from runtime.cli import _resolve_kb_client
+    from runtime.errors import RuntimeAdapterError
+
+    monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "live")
+    monkeypatch.delenv("KB_BASE_URL", raising=False)
+    with pytest.raises(RuntimeAdapterError, match="KB_BASE_URL"):
+        _resolve_kb_client()
+
+    monkeypatch.setenv("KB_BASE_URL", "http://kb.invalid")
+    client = _resolve_kb_client()
+    assert client is not None
