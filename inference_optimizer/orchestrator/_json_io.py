@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 # Fenced ```json``` block; shared by every model-reply extractor.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
@@ -23,21 +22,25 @@ def read_json(path: Path, default: Any = None, *, require_dict: bool = False) ->
     return data
 
 
-def extract_first_json_with_key(text: str, key: str, bare_re: re.Pattern[str]) -> dict | None:
-    """Pull the first JSON object containing *key* out of a model reply.
+def extract_first_json_with_key(
+    text: str,
+    required_key: str,
+    bare_re: re.Pattern[str],
+) -> dict[str, Any] | None:
+    """Pull the first JSON object carrying *required_key* out of a model reply.
 
-    Prefers a fenced ```json block (least ambiguous), then falls back to
-    *bare_re* matches, progressively trimming trailing prose until
+    Prefers a fenced ```json block, then falls back to the bare top-level
+    object matched by *bare_re*, trimming trailing prose from the right until
     ``json.loads`` accepts a candidate.
 
     Args:
-        text: The raw model reply that may contain a JSON object.
-        key: Required top-level key the returned dict must contain.
-        bare_re: Caller-supplied bare-object fallback pattern (group 1 is the
-            candidate ``{...}``); the required key differs per caller.
+        text: Raw model reply that may contain a fenced or bare JSON object.
+        required_key: Top-level key the returned dict must contain.
+        bare_re: Compiled regex whose ``group(1)`` captures a bare JSON
+            candidate (each backend keys it on its own envelope shape).
 
     Returns:
-        The first dict containing *key*, or ``None`` when none is found.
+        The first dict containing *required_key*, or ``None`` when none parses.
     """
     if not text:
         return None
@@ -46,7 +49,7 @@ def extract_first_json_with_key(text: str, key: str, bare_re: re.Pattern[str]) -
             data = json.loads(m.group(1))
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and key in data:
+        if isinstance(data, dict) and required_key in data:
             return data
     for m in bare_re.finditer(text):
         candidate = m.group(1)
@@ -55,7 +58,7 @@ def extract_first_json_with_key(text: str, key: str, bare_re: re.Pattern[str]) -
                 data = json.loads(candidate[:end])
             except json.JSONDecodeError:
                 continue
-            if isinstance(data, dict) and key in data:
+            if isinstance(data, dict) and required_key in data:
                 return data
             break  # parsed but wrong shape; don't keep shrinking
     return None

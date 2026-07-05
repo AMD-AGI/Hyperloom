@@ -24,6 +24,34 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
 KNOWN_FRAMEWORKS: frozenset[str] = frozenset(_FRAMEWORK_TO_REPO_URL.keys())
 
 
+# Enablement bridging repos (ROCm / HIP / aiter), keyed by the ``bridge_layer``
+# field of ``framework_agent.enablement.FailureSignature``.
+_BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
+    "rocm_hip": (
+        "https://github.com/ROCm/aiter.git",
+        "https://github.com/ROCm/HIP.git",
+        "https://github.com/ROCm/ROCm.git",
+    ),
+    "build": ("https://github.com/ROCm/aiter.git",),
+}
+
+
+def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:
+    """Return the bridging repo URLs to scout for a failure's ``bridge_layer``.
+
+    The lookup is case-insensitive and whitespace-tolerant.
+
+    Args:
+        bridge_layer (str): The ``bridge_layer`` tag (e.g. ``"rocm_hip"``,
+            ``"build"``). ``"framework"`` returns ``()``.
+
+    Returns:
+        tuple[str, ...]: Bridge repo URLs (empty for ``"framework"`` /
+            unknown layers).
+    """
+    return _BRIDGE_LAYER_TO_REPO_URLS.get((bridge_layer or "").strip().lower(), ())
+
+
 def repo_url_for_framework(framework: str) -> str:
     """Return the canonical GitHub repo URL for ``framework``.
 
@@ -41,4 +69,4 @@ def repo_url_for_framework(framework: str) -> str:
     return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
 
 
-__all__ = ["KNOWN_FRAMEWORKS", "repo_url_for_framework"]
+__all__ = ["KNOWN_FRAMEWORKS", "bridge_repo_urls", "repo_url_for_framework"]

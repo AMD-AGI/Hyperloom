@@ -61,6 +61,7 @@ class _StateStub:
         self.framework_agent_phase_done = False
         self.framework_agent_authoring_enabled = False
         self.framework_agent_discover_failures = 0
+        self.framework_agent_empty_discoveries = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
         self.framework_agent_critic_decisions: list[dict[str, Any]] = []
@@ -115,7 +116,11 @@ class _CoordinatorStub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
+    _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
+    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
+    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
+    _stamp_framework_progress = Coordinator._stamp_framework_progress
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
     _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
@@ -312,11 +317,16 @@ def test_pump_is_noop_while_candidate_proposal_pending(
 
 
 # Scenario 4 — discover empty payload → phase_history row + phase_done
-def test_pump_marks_phase_done_with_history_row_on_empty_discover(
+def test_pump_retries_empty_discover_before_marking_phase_done(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A clean empty discover payload flips ``framework_agent_phase_done`` and records a phase_history row."""
+    """A clean empty discover payload is tolerated for up to
+    ``DISCOVER_FAILURE_RETRY_LIMIT`` consecutive ticks (transient upstream
+    blip) before flipping ``framework_agent_phase_done`` and recording a
+    phase_history row. This guards against one momentary empty result silently
+    skipping the entire FRAMEWORK phase.
+    """
 
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "", "candidates": []}
@@ -324,10 +334,49 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _CoordinatorStub(tmp_path)
 
-    _pump(stub)
+    # First (limit - 1) empty batches retry without ending the phase.
+    for i in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT - 1):
+        _pump(stub)
+        assert stub.shared_state.framework_agent_phase_done is False
+        assert stub.shared_state.framework_agent_empty_discoveries == i + 1
+        assert _framework_agent_pendings(stub) == []
+        assert [
+            r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"
+        ] == []
 
+    # The limit-th consecutive empty batch ends the phase with a summary row.
+    _pump(stub)
     assert stub.shared_state.framework_agent_phase_done is True
     assert _framework_agent_pendings(stub) == []
     rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"
+
+
+def test_pump_empty_then_nonempty_discover_resets_streak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A non-empty batch after some empty ones clears the empty-discovery streak and submits a candidate."""
+    calls = SimpleNamespace(n=0)
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        calls.n += 1
+        if calls.n == 1:
+            return {"batch_id": "", "candidates": []}
+        return {
+            "batch_id": "batch-recover",
+            "candidates": [{"pr_url": "https://example.com/pr/1", "repo": "a/b", "ref": "x1"}],
+        }
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _CoordinatorStub(tmp_path)
+
+    _pump(stub)  # empty -> retry
+    assert stub.shared_state.framework_agent_phase_done is False
+    assert stub.shared_state.framework_agent_empty_discoveries == 1
+
+    _pump(stub)  # non-empty -> resets streak, submits candidate
+    assert stub.shared_state.framework_agent_empty_discoveries == 0
+    assert stub.shared_state.framework_agent_phase_done is False
+    assert len(_framework_agent_pendings(stub)) == 1

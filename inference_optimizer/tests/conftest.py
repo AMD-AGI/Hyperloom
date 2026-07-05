@@ -116,3 +116,28 @@ def init_git_repo(
         capture_output=True,
         env=env,
     )
+
+
+def git_commit_all(path: Path, message: str) -> None:
+    """Stage everything under ``path`` and commit with a fixed non-interactive identity.
+
+    Mirrors the author identity used by :func:`init_git_repo` so tests do not rely
+    on a globally configured git ``user.name``/``user.email`` (absent in CI).
+    """
+    env = os.environ.copy()
+    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
+    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
+    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
+    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
+    subprocess.run(
+        ["git", "-C", str(path), "add", "."],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", message],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
