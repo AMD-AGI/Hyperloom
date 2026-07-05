@@ -59,9 +59,7 @@ def _fake_self(**state_kw):
     fake = types.SimpleNamespace(shared_state=state)
     # Bind the real discovery method so the builder path is exercised; tests
     # that don't want the network stub the low-level enumerate_candidates.
-    fake._discover_enablement_candidate_refs = types.MethodType(
-        Coordinator._discover_enablement_candidate_refs, fake
-    )
+    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
     # Source-context read is best-effort grounding; stub to empty so the builder
     # path stays pure (no filesystem dependency in these unit tests).
     fake._read_enablement_source_context = lambda _sig: ""
@@ -202,12 +200,8 @@ def _enqueue_self(**state_kw):
         observations=observations,
     )
     # Bind the real param builder + discovery so the gate exercises the full path.
-    fake._build_enablement_specialist_params = types.MethodType(
-        Coordinator._build_enablement_specialist_params, fake
-    )
-    fake._discover_enablement_candidate_refs = types.MethodType(
-        Coordinator._discover_enablement_candidate_refs, fake
-    )
+    fake._build_enablement_specialist_params = types.MethodType(Coordinator._build_enablement_specialist_params, fake)
+    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     # The fake has no GPU pool → no needs_gpu, so dispatch stays on research_lane only.
@@ -219,9 +213,7 @@ def _enqueue_self(**state_kw):
     fake._maybe_record_enablement_human_review = types.MethodType(
         Coordinator._maybe_record_enablement_human_review, fake
     )
-    fake._maybe_rearm_enablement = types.MethodType(
-        Coordinator._maybe_rearm_enablement, fake
-    )
+    fake._maybe_rearm_enablement = types.MethodType(Coordinator._maybe_rearm_enablement, fake)
     return fake
 
 
@@ -559,3 +551,149 @@ async def test_enqueue_noop_on_multi_node(monkeypatch):
     fake = _enqueue_self()
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
     assert len(fake.tasks.created) == 0
+
+
+# ---- _derive_checkpoint_weight_facts (auto-feedback structural grounding) ----
+
+
+def _facts_self(model_path=""):
+    """Minimal fake carrying a shared_state.model_path for the facts deriver."""
+    state = types.SimpleNamespace(model_path=model_path)
+    return types.SimpleNamespace(shared_state=state)
+
+
+_WEIGHT_INIT_LOG = (
+    "Some weights were not initialized from checkpoint and are newly initialized: "
+    "['model.layers.3.self_attn.indexer.k_norm.weight', "
+    "'model.layers.5.self_attn.indexer.k_norm.weight']"
+)
+
+
+def _write_index(model_dir, weight_map):
+    import json
+
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+
+
+def test_derive_weight_facts_blank_log_returns_empty():
+    fake = _facts_self()
+    assert Coordinator._derive_checkpoint_weight_facts(fake, "") == ""
+    assert Coordinator._derive_checkpoint_weight_facts(fake, None) == ""
+
+
+def test_derive_weight_facts_no_trigger_returns_empty():
+    """A log with no weight-init phrase and no weighty names does not fire."""
+    fake = _facts_self()
+    out = Coordinator._derive_checkpoint_weight_facts(fake, "ValueError: Model architecture 'Foo' is not supported")
+    assert out == ""
+
+
+def test_derive_weight_facts_no_model_path_returns_empty():
+    fake = _facts_self(model_path="")
+    assert Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+
+
+def test_derive_weight_facts_missing_index_returns_empty(tmp_path):
+    # Directory exists but has no *.index.json → degrades to empty.
+    fake = _facts_self(model_path=str(tmp_path))
+    assert Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+
+
+def test_derive_weight_facts_reports_present_and_missing_layers(tmp_path):
+    # The checkpoint carries the k_norm weight only for layers 0 and 3, so the
+    # offending layer 5 is reported MISSING while 3 is PRESENT.
+    _write_index(
+        tmp_path,
+        {
+            "model.layers.0.self_attn.indexer.k_norm.weight": "a.safetensors",
+            "model.layers.3.self_attn.indexer.k_norm.weight": "a.safetensors",
+        },
+    )
+    fake = _facts_self(model_path=str(tmp_path))
+    out = Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG)
+    assert "CHECKPOINT WEIGHT FACTS" in out
+    assert "PRESENT in checkpoint for layers [0, 3]" in out
+    assert "MISSING" in out
+    # The offending layers (3, 5) both appear in the missing-layers set.
+    assert "[3, 5]" in out
+
+
+def test_derive_weight_facts_family_absent_from_checkpoint(tmp_path):
+    # The checkpoint has NO k_norm weight for any layer → the "NOT present for
+    # ANY layer" branch fires (model should guard/skip instantiation).
+    _write_index(
+        tmp_path,
+        {"model.layers.0.self_attn.q_proj.weight": "a.safetensors"},
+    )
+    fake = _facts_self(model_path=str(tmp_path))
+    out = Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG)
+    assert "NOT present in the checkpoint for ANY layer" in out
+
+
+def test_derive_weight_facts_fires_on_missing_key_phrase(tmp_path):
+    # A state_dict "Missing key(s)" phrasing also triggers derivation.
+    _write_index(
+        tmp_path,
+        {"model.layers.0.self_attn.indexer.k_norm.weight": "a.safetensors"},
+    )
+    fake = _facts_self(model_path=str(tmp_path))
+    log = (
+        "RuntimeError: Error(s) in loading state_dict for Model:\n"
+        "Missing key(s) in state_dict: "
+        "'model.layers.5.self_attn.indexer.k_norm.weight'."
+    )
+    out = Coordinator._derive_checkpoint_weight_facts(fake, log)
+    assert "CHECKPOINT WEIGHT FACTS" in out
+
+
+def test_derive_weight_facts_exception_guarded(monkeypatch, tmp_path):
+    # An unreadable index (invalid JSON) must degrade to "" rather than raise.
+    (tmp_path / "model.safetensors.index.json").write_text("{not valid json")
+    fake = _facts_self(model_path=str(tmp_path))
+    assert Coordinator._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+
+
+# ---- _read_enablement_source_context (best-effort grounding snippet) ----
+
+
+def _sig(offending_file="", offending_symbol=""):
+    return types.SimpleNamespace(offending_file=offending_file, offending_symbol=offending_symbol)
+
+
+def test_read_source_context_empty_when_no_file():
+    fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
+    assert Coordinator._read_enablement_source_context(fake, _sig()) == ""
+
+
+def test_read_source_context_empty_when_file_absent(tmp_path):
+    fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
+    missing = str(tmp_path / "nope.py")
+    assert Coordinator._read_enablement_source_context(fake, _sig(missing)) == ""
+
+
+def test_read_source_context_returns_window_around_symbol(tmp_path):
+    src = tmp_path / "model.py"
+    body = "\n".join(f"line{i}" for i in range(20))
+    src.write_text(body.replace("line10", "def NEEDLE(): pass"))
+    fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
+    out = Coordinator._read_enablement_source_context(fake, _sig(str(src), "NEEDLE"), window=6)
+    assert str(src) in out
+    assert "NEEDLE" in out
+    # The header carries the resolved line window.
+    assert "lines " in out
+
+
+def test_read_source_context_head_when_symbol_absent(tmp_path):
+    src = tmp_path / "model.py"
+    src.write_text("\n".join(f"line{i}" for i in range(20)))
+    fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
+    out = Coordinator._read_enablement_source_context(fake, _sig(str(src), "not_there"), window=4)
+    # Symbol absent → snippet starts at file head.
+    assert "line0" in out
+
+
+def test_read_source_context_empty_on_blank_file(tmp_path):
+    src = tmp_path / "empty.py"
+    src.write_text("")
+    fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
+    assert Coordinator._read_enablement_source_context(fake, _sig(str(src))) == ""
