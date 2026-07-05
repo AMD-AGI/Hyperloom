@@ -366,10 +366,11 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
 
 
 def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
-    # The Qwen3.6 wrapper exposes text_config.model_type=qwen3_5_moe_text. The
-    # current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and vLLM
-    # ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested type
-    # is no longer gated and falls through to the text_coercible degraded path.
+    # The Qwen3.5-MoE wrapper exposes text_config.model_type=qwen3_5_moe_text.
+    # The current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and
+    # vLLM ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested
+    # type is no longer gated and falls through to the text_coercible degraded
+    # path.
     m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
     _write_config(
         m,

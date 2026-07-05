@@ -10,9 +10,9 @@ import pytest
 
 from runtime.dead_letter import DeadLetter
 from runtime.decision_reviewer import DecisionReviewer
-from runtime.errors import KBTransportError, KBValidationError
+from runtime.errors import KBError, KBTransportError, KBValidationError
 from runtime.in_memory_kb_client import InMemoryKBClient
-from runtime.kb_writer import KBWriter, WriteContext
+from runtime.kb_writer import KBWriter, WriteContext, slug_for_kind
 from runtime.session_memory import SessionMemory
 
 
@@ -437,6 +437,163 @@ def test_decision_reviewer_marks_bundle_when_kb_read_disabled(tmp_path, monkeypa
         }
     )
     assert bundle.kb_read_skipped_reason == "kb_read_disabled"
+
+
+_VALID_DRAFT = {
+    "category": "kernel_optimization",
+    "action": "Patch fused attention kernel for the decode path.",
+    "lesson": "Active dispatch path must be updated jointly.",
+    "tags": ["attention"],
+    "result": {"status": "KEEP", "gain_pct": 4.2},
+    "confidence": 0.9,
+}
+
+
+def test_write_kb_drafts_all_rejected_returns_skipped(writer, packet_context):
+    w, kb, _, _ = writer
+    res = w.write_kb_drafts(
+        kb_drafts=[{"category": "definitely_not_real", "action": "x"}],
+        packet_context=packet_context,
+        ctx=WriteContext(session_id="s_reject"),
+    )
+    assert res.status == "skipped"
+    assert res.detail["reason"] == "all_rejected"
+    assert res.detail["rejected"]
+    assert kb.all_rows() == []
+
+
+def test_write_kb_drafts_dead_letters_on_transport_error(breaker_writer, packet_context):
+    w, kb, _, dlq = breaker_writer
+    kb.fail_next("batch_insert", times=1)
+    res = w.write_kb_drafts(
+        kb_drafts=[_VALID_DRAFT],
+        packet_context=packet_context,
+        ctx=WriteContext(session_id="s_bt", review_id="rev_bt"),
+    )
+    assert res.status == "dead_lettered"
+    assert res.detail["reason"] == "transport_error"
+    assert any(f.name.startswith("batch_insert") for f in dlq.files())
+
+
+def test_write_kb_drafts_dead_letters_on_validation_error(writer, packet_context):
+    w, kb, _, dlq = writer
+
+    def boom(items, *, on_conflict="upsert"):
+        raise KBValidationError("422 bad batch")
+
+    kb.batch_insert = boom  # type: ignore[method-assign]
+    res = w.write_kb_drafts(
+        kb_drafts=[_VALID_DRAFT],
+        packet_context=packet_context,
+        ctx=WriteContext(session_id="s_bv", review_id="rev_bv"),
+    )
+    assert res.status == "dead_lettered"
+    assert res.detail["reason"] == "validation_error"
+    assert dlq.files()
+
+
+def test_add_contradiction_skipped_on_missing_ids(writer):
+    w, _, _, _ = writer
+    res = w.add_contradiction(new_id="", old_ids=["kb_1"], ctx=WriteContext(session_id="s"))
+    assert res.status == "skipped"
+    assert res.detail["reason"] == "missing_ids"
+
+    res2 = w.add_contradiction(new_id="kb_1", old_ids=[], ctx=WriteContext(session_id="s"))
+    assert res2.status == "skipped"
+
+
+def test_add_contradiction_disabled_when_breaker_open(breaker_writer):
+    w, _, _, _ = breaker_writer
+    w.force_kb_unreachable()
+    res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
+    assert res.status == "disabled"
+    assert res.detail["reason"] == "kb_unreachable"
+
+
+def test_add_contradiction_edge_write_transport_failure_is_skipped(breaker_writer):
+    w, kb, _, _ = breaker_writer
+    kb.fail_next("edges/add", times=1)
+    res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
+    assert res.status == "skipped"
+    assert res.detail["reason"] == "edge_write_failed"
+
+
+def test_add_contradiction_edge_write_validation_failure_is_skipped(writer):
+    w, kb, _, _ = writer
+
+    def boom(edges):
+        raise KBValidationError("422 bad edge")
+
+    kb.add_edges = boom  # type: ignore[method-assign]
+    res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
+    assert res.status == "skipped"
+    assert res.detail["reason"] == "edge_write_failed"
+
+
+def test_write_verdict_dead_letters_on_generic_kb_error(writer, packet_context):
+    """A bare KBError (not transport/validation) still dead-letters the upsert."""
+    w, kb, _, dlq = writer
+
+    def boom(payload):
+        raise KBError("generic kb failure")
+
+    kb.upsert = boom  # type: ignore[method-assign]
+    res = w.write_verdict(
+        verdict={
+            "verdict": "reject",
+            "reasoning": "active dispatch path unproven for this kernel",
+            "packet_evidence": ["benchmark.after.gain_pct"],
+        },
+        packet_context=packet_context,
+        ctx=WriteContext(session_id="s_gen", review_id="rev_gen"),
+    )
+    assert res.status == "dead_lettered"
+    assert dlq.files()
+
+
+def test_write_kb_drafts_dead_letters_on_generic_kb_error(writer, packet_context):
+    w, kb, _, dlq = writer
+
+    def boom(items, *, on_conflict="upsert"):
+        raise KBError("generic batch failure")
+
+    kb.batch_insert = boom  # type: ignore[method-assign]
+    res = w.write_kb_drafts(
+        kb_drafts=[_VALID_DRAFT],
+        packet_context=packet_context,
+        ctx=WriteContext(session_id="s_gb", review_id="rev_gb"),
+    )
+    assert res.status == "dead_lettered"
+    assert res.detail["reason"] == "transport_error"
+    assert dlq.files()
+
+
+def test_write_kb_drafts_server_params_uses_params_catalog_slug(writer, packet_context):
+    w, kb, _, _ = writer
+    res = w.write_kb_drafts(
+        kb_drafts=[
+            {
+                "category": "server_params",
+                "action": "max-running-requests",
+                "lesson": "raise concurrency ceiling for decode",
+                "tags": [],
+            }
+        ],
+        packet_context=packet_context,
+        ctx=WriteContext(session_id="s_sp", review_id="rev_sp"),
+    )
+    assert res.status == "ok"
+    rows = kb.all_rows()
+    assert rows and rows[0]["kind"] == "params_catalog"
+
+
+def test_slug_for_kind_covers_all_kinds():
+    assert slug_for_kind("params_catalog", "topic", {"action": "Max Running Requests"}) == "max-running-requests"
+    assert slug_for_kind("model_profile", "topic", {"model": "Qwen3-14B"}) == "qwen3-14b-profile"
+    assert slug_for_kind("model_profile", "topic", {"model_family": "qwen"}) == "qwen-profile"
+    assert slug_for_kind("model_profile", "fallback-topic", {}) == "fallback-topic-profile"
+    assert slug_for_kind("pitfall", "Active Path Unproven")
+    assert slug_for_kind("technique", "Fused Attention Rewrite")
 
 
 def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):

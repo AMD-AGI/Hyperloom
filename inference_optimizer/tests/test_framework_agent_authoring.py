@@ -102,7 +102,11 @@ class _Stub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
+    _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
+    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
+    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
+    _stamp_framework_progress = Coordinator._stamp_framework_progress
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
     _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
@@ -120,6 +124,13 @@ class _Stub:
     _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
     _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
+    # The stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``
+    # and the authoring task stays on research_lane only (asserted below).
+    _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
+    _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
+
+    def _framework_gpu_params(self) -> dict[str, Any]:
+        return {}
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         self.session_dir = tmp_path
