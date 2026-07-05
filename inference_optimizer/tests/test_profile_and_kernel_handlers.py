@@ -1545,10 +1545,10 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         "budget_minutes": 1,
     }
     res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-    # No trace files → failed, but the response must still be structured.
+    # Structured result regardless of route; bypass is now the default backend.
     assert res["status"] in ("ok", "succeeded", "failed")
-    assert "tool" in res or "run_id" in res or "error" in res
-    assert res.get("session_id") == session_dir.name or "run_id" in res
+    assert res.get("route") == "bypass"
+    assert res.get("candidates_path") and "artifact_paths" in res
 
 
 @pytest.mark.asyncio
@@ -1635,8 +1635,39 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_text_gen_default_stays_tracelens(session_dir, monkeypatch):
-    """Text-gen with no explicit route keeps the TraceLens tool (no auto-bypass)."""
+async def test_trace_analyze_handler_text_gen_defaults_to_bypass(session_dir, monkeypatch):
+    """Text-gen with no explicit route now DEFAULTS to the bypass backend (bypass
+    fully replaces the TraceLens analysis layer); TraceLens root is not touched."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert not any("tracelens_analysis.py" in c for c in cmd)
+    assert "--tracelens-root" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_text_gen_deterministic_escapes_to_tracelens(session_dir, monkeypatch):
+    """TraceLens stays reachable as an explicit escape hatch: text-gen with
+    analysis_route=deterministic runs the TraceLens tool, not bypass."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -1654,6 +1685,7 @@ async def test_trace_analyze_handler_text_gen_default_stays_tracelens(session_di
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
             "framework": "sglang",
+            "analysis_route": "deterministic",
             "top_k": 5,
         },
         session_dir=session_dir,

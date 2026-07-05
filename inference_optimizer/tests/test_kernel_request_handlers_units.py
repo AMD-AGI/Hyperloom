@@ -1715,7 +1715,7 @@ class TestTracelensRootResolution:
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
         )
         assert called["n"] == 1  # self-heal was attempted
         assert out["status"] == "failed"
@@ -1742,7 +1742,7 @@ class TestTracelensRootResolution:
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
         assert out["status"] == "failed"
@@ -1764,7 +1764,7 @@ class TestTracelensRootResolution:
             lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
         )
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
         )
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"

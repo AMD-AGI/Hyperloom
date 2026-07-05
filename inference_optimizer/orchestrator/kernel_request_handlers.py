@@ -2431,15 +2431,17 @@ async def trace_analyze_handler(
         analysis_mode = "inference"
 
     # Analysis route: ``bypass`` runs the independent, TraceLens-free backend
-    # (no TraceLens root / CLI / package required). ``deterministic`` / ``agent``
-    # keep the TraceLens path. An explicit payload/env route always wins; when
-    # none is given, xDiT (diffusion) defaults to ``bypass`` because TraceLens
-    # does not support it (its trace_analyze fails -> empty roofline). Coerced
-    # to str first so a non-string payload value cannot raise AttributeError.
+    # (no TraceLens root / CLI / package required) and is now the DEFAULT for all
+    # frameworks (text-gen + xDiT) — bypass fully replaces the TraceLens analysis
+    # layer end to end. TraceLens stays available only as an explicit escape hatch
+    # (``deterministic`` / ``agent`` via payload ``analysis_route`` or
+    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``). An explicit route always wins; the value
+    # is coerced to str first so a non-string payload value cannot raise
+    # AttributeError.
     explicit_route = (
         str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
     )
-    analysis_route = explicit_route or ("bypass" if framework.lower() == "xdit" else "")
+    analysis_route = explicit_route or "bypass"
     is_bypass = analysis_route == "bypass"
     # Resolve TraceLens root independently of inherited env (the coordinator may
     # not have sourced kernel-agent.env.sh). If the installer-managed checkout
