@@ -218,6 +218,63 @@ def _pr_url_for(repo: str, pr_number: int | str) -> str:
     return ""
 
 
+def _extract_pr_number(text: str) -> str:
+    """Extract a bare PR number from a ``PR:1234`` ref or a ``.../pull/1234`` URL.
+
+    Args:
+        text: A candidate ref (``PR:<n>``) or a PR URL.
+
+    Returns:
+        The bare PR number as a string, or ``""`` when none is present.
+    """
+    import re as _re
+
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    head, sep, tail = s.partition(":")
+    if sep and head.strip().upper() == "PR":
+        tail = tail.strip()
+        if tail.isdigit():
+            return tail
+    m = _re.search(r"/pull/(\d+)", s)
+    return m.group(1) if m else ""
+
+
+def _candidate_excluded_by_memory(
+    *,
+    pr_url: str,
+    ref: str,
+    pr_number: int | str,
+    excluded_ids: set[str],
+    excluded_pr_numbers: set[str],
+) -> bool:
+    """True when a discovered candidate matches the session's exclusion memory.
+
+    Hard-dedup (Step B): drops a candidate whose ``pr_url`` / ``ref`` is an
+    excluded id, or whose PR number matches an excluded / already-failed PR
+    (same-PR de-prioritisation collapses to a drop). Genuinely new candidates
+    pass through.
+
+    Args:
+        pr_url: The candidate's PR URL.
+        ref: The candidate's ref (e.g. ``PR:1234``).
+        pr_number: The candidate's parsed PR number (``int`` or ``""``).
+        excluded_ids: pr_url / ref ids the caller already saw or finalised.
+        excluded_pr_numbers: bare PR numbers derived from excluded ids +
+            failed-candidate context.
+
+    Returns:
+        ``True`` when the candidate should be excluded from the batch.
+    """
+    if pr_url and pr_url in excluded_ids:
+        return True
+    if ref and ref in excluded_ids:
+        return True
+    cand_num = str(pr_number) if isinstance(pr_number, int) else _extract_pr_number(ref or pr_url)
+    return bool(cand_num) and cand_num in excluded_pr_numbers
+
+
 def _cmd_phase_discover(args: argparse.Namespace) -> None:
     """Discover one batch of PR candidates for the FRAMEWORK_AGENT phase.
 
@@ -226,10 +283,14 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
          "gaps": [{"gap_canonical_id": str, "gap_description": str}, ...],
          "repo_url": str (optional), "work_dir": str (optional),
          "max_search_candidates": int (optional, default 5),
-         "batch_id": str (optional; defaults to "batch-<uuid8>")}
+         "batch_id": str (optional; defaults to "batch-<uuid8>"),
+         "excluded_candidate_ids": [str, ...] (optional; pr_url / ref /
+             "PR:<n>" the caller already saw or finalised — hard-filtered),
+         "failed_candidate_context": [{"ref", "status", "gain_pct", "why"},
+             ...] (optional; same-PR numbers are de-prioritised to a drop)}
 
     Output shape:
-        {"batch_id": str, "framework": str,
+        {"batch_id": str, "framework": str, "excluded_count": int,
          "candidates": [{"pr_url", "repo", "ref", "pr_number", "title",
                           "summary", "score", "diff_url",
                           "gap_canonical_id"}, ...]}
@@ -262,6 +323,22 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     gaps = request.get("gaps") or []
     if not isinstance(gaps, list) or not gaps:
         gaps = [{"gap_canonical_id": "", "gap_description": ""}]
+
+    # Step B hard-dedup: candidates the caller (Hyperloom) has already
+    # discovered or reached a terminal verdict on. Also collapse "same PR
+    # number as a failed candidate" into a drop (deterministic de-prioritise).
+    excluded_ids: set[str] = {
+        str(x).strip() for x in (request.get("excluded_candidate_ids") or []) if str(x).strip()
+    }
+    excluded_pr_numbers: set[str] = {n for n in (_extract_pr_number(x) for x in excluded_ids) if n}
+    failed_ctx = request.get("failed_candidate_context") or []
+    if isinstance(failed_ctx, list):
+        for f in failed_ctx:
+            if isinstance(f, dict):
+                n = _extract_pr_number(str(f.get("ref") or ""))
+                if n:
+                    excluded_pr_numbers.add(n)
+    excluded_count = 0
 
     # Resolve the primus_cortex base URL (the PR-Monitor service). Only enable
     # the primus_cortex search mode when a URL is available, else enumerate
@@ -330,6 +407,17 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 else (f"https://github.com/{repo}/pull/{pr_number}.diff" if repo and isinstance(pr_number, int) else "")
             )
             pr_url = html_url or _pr_url_for(repo, pr_number)
+            # Step B: drop candidates already seen / finalised / equivalent to a
+            # failed PR this session, so discovery stops re-surfacing them.
+            if _candidate_excluded_by_memory(
+                pr_url=pr_url,
+                ref=ref,
+                pr_number=pr_number,
+                excluded_ids=excluded_ids,
+                excluded_pr_numbers=excluded_pr_numbers,
+            ):
+                excluded_count += 1
+                continue
             labels = entry.get("labels") or ()
             try:
                 score = float(entry.get("score") or 0.0)
@@ -358,6 +446,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             "model": str(request.get("model") or ""),
             "gpu_type": str(request.get("gpu_type") or ""),
             "candidate_count": len(out_cands),
+            "excluded_count": excluded_count,
             "candidates": out_cands,
         },
         args.out,

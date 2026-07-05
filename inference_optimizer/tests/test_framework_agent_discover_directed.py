@@ -42,6 +42,12 @@ class _StateStub:
 class _CoordinatorStub:
     """Binds the real Coordinator discover + helper methods against a mocked ``phase_discover``."""
 
+    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
+    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
+    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
+    _build_framework_working_memory = Coordinator._build_framework_working_memory
+    _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
+
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
@@ -201,6 +207,39 @@ def test_discover_dedups_against_prior_batches(
     # Every discovered candidate was a duplicate → no new batch appended.
     assert ok is False
     assert len(stub.shared_state.framework_agent_batches) == 1
+
+
+def test_discover_fallback_filters_processed_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Step B coordinator-side backstop: even if fa re-surfaces a candidate that
+    already carries a terminal progress row (but is absent from any prior
+    batch's candidate list), the coordinator re-filters it against the full
+    excluded set (known ∪ processed) so it is never re-queued."""
+
+    async def _spy(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "batch_id": "b-proc",
+            "candidates": [
+                {"pr_url": "https://example.com/processed/pr/7"},  # has a terminal row
+                {"pr_url": "https://example.com/fresh/pr/8"},  # genuinely new
+            ],
+        }
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _spy)
+    stub = _CoordinatorStub(tmp_path)
+    # A terminal progress row keyed on the processed candidate, with NO prior
+    # batch carrying it (so _framework_known_candidate_ids alone wouldn't catch it).
+    stub.shared_state.framework_agent_phase_progress = [
+        {"candidate_id": "https://example.com/processed/pr/7", "status": "reverted"},
+    ]
+
+    ok = _call_discover(stub)
+    assert ok is True
+    batch = stub.shared_state.framework_agent_batches[-1]
+    ids = {c["candidate_id"] for c in batch["candidates"]}
+    assert ids == {"https://example.com/fresh/pr/8"}
 
 
 def test_discover_intra_batch_dedup_across_repos(

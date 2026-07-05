@@ -161,6 +161,25 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "actual patch under the normal KEEP gate."
         ),
     ),
+    SpecialistDomain(
+        key="enablement_specialist",
+        layer="non-runnable (model, backend) enablement / framework + ROCm/HIP bridging",
+        kb_anchor="framework",
+        pr_repos=("sgl-project/sglang", "ROCm/vllm", "ROCm/aiter", "ROCm/HIP"),
+        available_in="M6",
+        description=(
+            "Authoring specialist for the ENABLEMENT objective: makes a "
+            "currently non-runnable (model, backend) combo *run at all*. Given a "
+            "structured failure signature (missing model arch, unsupported "
+            "dtype, missing HIP kernel, import/build error, shape mismatch, "
+            "not-implemented) and ranked bridging PRs, it authors a bridging "
+            "patch into an isolated worktree — editing the framework source, "
+            "and, when the framework layer cannot bridge it, /opt/rocm / HIP / "
+            "aiter source. Gated on RUNNABILITY (server boots + minimal "
+            "correctness), NOT throughput. Distinct from static_recon "
+            "(which only finds already-runnable-but-disabled fast paths)."
+        ),
+    ),
 )
 
 
@@ -239,18 +258,45 @@ def domain_for_tag(tag: str) -> "SpecialistDomain | None":
     return get_domain(t)
 
 
-def normalize_dispatch_tags(params: dict) -> list[str]:
-    """Resolve a dispatch payload's tag list.
+def _tag_to_kb_anchor(tag: str) -> str:
+    """Translate one dispatch tag to its knowledge-domain anchor.
 
-    Reads ``params.tags``; falls back to the ``params.domain`` alias (mapped
-    to its ``kb_anchor`` when it names a catalogue entry, else verbatim) when
-    absent. Order-preserving dedup; empty entries dropped.
+    The catalogue has two vocabularies: the domain ``key``
+    (``serving_specialist`` …) and the ``kb_anchor`` the PolicyGate whitelist
+    validates against (``framework`` …). A tag naming a domain **key** is
+    translated to that domain's anchor; a tag that is already a valid anchor is
+    kept as-is; anything else is returned verbatim so a genuinely unknown tag
+    still surfaces as ``specialist_unknown_domain`` (the safety net is
+    preserved). This is the fix for keys leaking through ``params.tags``
+    untranslated and being mis-rejected against the anchor whitelist.
+
+    Args:
+        tag: A single (already-stripped, non-empty) dispatch tag.
+
+    Returns:
+        The tag's ``kb_anchor`` when it names a catalogue key, the tag itself
+        when it is already a valid anchor, else the tag verbatim.
+    """
+    dom = get_domain(tag)
+    if dom is not None:
+        return dom.kb_anchor or tag
+    return tag
+
+
+def normalize_dispatch_tags(params: dict) -> list[str]:
+    """Resolve a dispatch payload's tag list, translating domain keys to anchors.
+
+    Reads ``params.tags`` (each element is translated key→``kb_anchor`` via
+    :func:`_tag_to_kb_anchor`); falls back to the ``params.domain`` alias
+    (same translation) when absent. Order-preserving dedup; empty entries
+    dropped. Genuinely unknown tags pass through untranslated so PolicyGate's
+    ``specialist_unknown_domain`` still rejects them.
 
     Args:
         params: The dispatch payload (reads ``tags`` then ``domain``).
 
     Returns:
-        The resolved, order-preserving deduped tag list.
+        The resolved, order-preserving deduped anchor list.
     """
     raw = params.get("tags")
     tags: list[str] = []
@@ -258,12 +304,11 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
         for item in raw:
             t = str(item or "").strip()
             if t:
-                tags.append(t)
+                tags.append(_tag_to_kb_anchor(t))
     if not tags:
         domain = str(params.get("domain") or "").strip()
         if domain:
-            dom = get_domain(domain)
-            tags.append((dom.kb_anchor or domain) if dom else domain)
+            tags.append(_tag_to_kb_anchor(domain))
     return list(dict.fromkeys(tags))
 
 
