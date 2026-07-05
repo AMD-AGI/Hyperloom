@@ -133,8 +133,8 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == "/repo/aiter/triton/silu.py"
     assert cand["source_resolution_method"] == "trace_kernel_file"
-    # shapes flow through as one primary case + real-dims provenance.
-    assert cand["input_shapes"] == [[[8, 16]]]
+    # shapes flow through in the downstream contract form (one call, "(dims) dtype").
+    assert cand["input_shapes"] == [{"call_num": 1, "shape": "(8,16) bf16"}]
     assert cand["input_dtypes"] == ["c10::BFloat16"]
     assert cand["shape_provenance"] == "torch_trace"
 
@@ -156,8 +156,23 @@ def test_routable_candidate_carries_shapes_for_orchestrator_gate():
     shapes = cand.get("shapes")
     assert isinstance(shapes, list) and shapes, "routable candidate must expose a non-empty 'shapes' for the orchestrator gate"
     assert cand["shape_provenance"] in {"torch_trace", "tuning_csv"}
-    # shapes mirrors the captured input_shapes (one representative call).
-    assert cand["shapes"] == cand["input_shapes"] == [[[8, 16]]]
+    # shapes mirrors input_shapes in the harness-consumable contract form.
+    assert cand["shapes"] == cand["input_shapes"] == [{"call_num": 1, "shape": "(8,16) bf16"}]
+    # each entry is a dict the harness can parse (not a raw dim list).
+    assert isinstance(cand["shapes"][0], dict) and "shape" in cand["shapes"][0]
+
+
+def test_trace_shape_entries_contract_format():
+    # Kineto Input Dims + Input type -> downstream contract string:
+    # multi-operand <br>-joined "(dims) dtype", 1-D keeps trailing comma,
+    # scalar/empty operand dropped, call_count stamped.
+    out = report._trace_shape_entries([[4, 1024], [1024], []], ["c10::BFloat16", "float", "int"], 5)
+    assert out == [{"call_num": 5, "shape": "(4,1024) bf16<br>(1024,) f32"}]
+    # unmapped dtype -> bare shape (no suffix).
+    assert report._trace_shape_entries([[8, 8]], ["weird"], 1) == [{"call_num": 1, "shape": "(8,8)"}]
+    # no renderable operand -> empty (gate will reject as empty_kernel_shape).
+    assert report._trace_shape_entries([[]], ["float"], 1) == []
+    assert report._trace_shape_entries([], [], 1) == []
 
 
 def test_unresolved_shape_candidate_has_empty_shapes():

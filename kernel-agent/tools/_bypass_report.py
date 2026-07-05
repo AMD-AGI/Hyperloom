@@ -48,6 +48,67 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 _UNKNOWN_BOUND = "\u2014"  # em dash, matching the golden "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak", "claude", "codex"]
 
+# torch ``Input type`` token -> compact dtype suffix for the shape-string contract
+# (e.g. ``(15360,2048) bf16``). Independent reimplementation of the TraceLens map
+# (this module never imports TraceLens); unmapped/empty types emit a bare shape.
+_DTYPE_SUFFIX: dict[str, str] = {
+    "c10::bfloat16": "bf16", "bfloat16": "bf16",
+    "c10::half": "f16", "half": "f16", "float16": "f16",
+    "float": "f32", "float32": "f32",
+    "double": "f64", "float64": "f64",
+    "int": "i32", "int32": "i32",
+    "long": "i64", "int64": "i64",
+    "short": "i16", "int16": "i16",
+    "char": "i8", "int8": "i8",
+    "uint8": "u8", "bool": "bool",
+}
+
+
+def _format_operand_shape(dims: Any, dtype: Any) -> str | None:
+    """Render one operand as a ``(d0,d1,...) <dtype>`` string (or ``None``).
+
+    Scalar / empty / non-integer operands return ``None`` (dropped from the
+    shape string), matching the downstream harness contract. A 1-D operand keeps
+    the trailing comma (``(d,)``) so it round-trips as a tuple.
+    """
+    if not isinstance(dims, (list, tuple)) or not dims:
+        return None
+    try:
+        body = ",".join(str(int(d)) for d in dims)
+    except (TypeError, ValueError):
+        return None
+    shape = f"({body},)" if len(dims) == 1 else f"({body})"
+    suffix = _DTYPE_SUFFIX.get(str(dtype or "").strip().lower())
+    return f"{shape} {suffix}" if suffix else shape
+
+
+def _trace_shape_entries(op_shapes: Any, op_dtypes: Any, call_count: int) -> list[dict[str, Any]]:
+    """Build the downstream ``input_shapes`` contract from Kineto Input Dims/type.
+
+    Converts a call's per-arg dims (``op_shapes``) + dtypes (``op_dtypes``) into
+    ``[{"call_num", "shape"}]`` where ``shape`` is the ``<br>``-joined operand
+    strings the GEAK harness (``_build_configs`` / ``_parse_shape_string``) and
+    TraceLens candidates consume. Returns ``[]`` when no operand is renderable.
+
+    Args:
+        op_shapes: List of per-arg dimension lists (Kineto ``Input Dims``).
+        op_dtypes: List of per-arg dtype tokens (Kineto ``Input type``), aligned
+            by argument index with ``op_shapes``.
+        call_count: Number of launches (stamped as ``call_num``).
+
+    Returns:
+        A one-entry ``[{"call_num", "shape"}]`` list, or ``[]``.
+    """
+    dtypes = op_dtypes if isinstance(op_dtypes, (list, tuple)) else []
+    operands: list[str] = []
+    for i, dims in enumerate(op_shapes if isinstance(op_shapes, (list, tuple)) else []):
+        rendered = _format_operand_shape(dims, dtypes[i] if i < len(dtypes) else "")
+        if rendered:
+            operands.append(rendered)
+    if not operands:
+        return []
+    return [{"call_num": int(call_count) if call_count else 1, "shape": "<br>".join(operands)}]
+
 
 def _source_type_for_op(op_name: str) -> str:
     """Best-effort source-type guess from a launching op name.
@@ -220,10 +281,13 @@ def build_candidates(
             if source_file:
                 source_method = method
 
-        # Real per-arg dims/dtypes from the trace (values synthesized later by
-        # the harness); ``shape_provenance="torch_trace"`` marks the dims real.
+        # Real per-arg dims/dtypes from the trace, rendered into the downstream
+        # shape-string contract ([{"call_num","shape":"(dims) dtype<br>..."}]) the
+        # GEAK harness (_build_configs) + TraceLens candidates consume;
+        # ``shape_provenance="torch_trace"`` marks the dims real.
         op_shapes = k.get("op_shapes") or []
         op_dtypes = k.get("op_dtypes") or []
+        shape_entries = _trace_shape_entries(op_shapes, op_dtypes, k.get("count") or 0)
 
         cand: dict[str, Any] = {
             "kernel_id": kernel_id,
@@ -252,15 +316,15 @@ def build_candidates(
             "reusable_native_kernel": kc.reusable,
             "skip_reason": "" if kc.reusable else kc.skip_reason,
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
-            # ``shapes`` mirrors ``input_shapes`` (one representative call's
-            # per-arg dims). The orchestrator kernel-opt gate
-            # (_validate_kernel_shape_and_paths) reads ``shapes`` and rejects
-            # dispatch as ``empty_kernel_shape`` when absent, so a candidate with
-            # captured dims MUST expose it or it can never reach GEAK.
-            "shapes": [op_shapes] if op_shapes else [],
-            "input_shapes": [op_shapes] if op_shapes else [],
+            # ``shapes`` / ``input_shapes`` use the same downstream contract form.
+            # The orchestrator kernel-opt gate (_validate_kernel_shape_and_paths)
+            # reads ``shapes`` (rejects ``empty_kernel_shape`` when absent) and the
+            # GEAK harness parses ``shape`` strings, so a candidate with captured
+            # dims MUST expose them in this format or it can never reach/run GEAK.
+            "shapes": shape_entries,
+            "input_shapes": shape_entries,
             "input_dtypes": op_dtypes,
-            "shape_provenance": "torch_trace" if op_shapes else "unresolved",
+            "shape_provenance": "torch_trace" if shape_entries else "unresolved",
         }
         hot_kernels.append(cand)
         if not kc.reusable:
