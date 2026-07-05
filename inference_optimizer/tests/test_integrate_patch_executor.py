@@ -11,17 +11,20 @@ from typing import Any
 
 import pytest
 
-from .conftest import init_git_repo
+from .conftest import git_commit_all, init_git_repo
 
 from inference_optimizer.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
     _apply_patch_no_git,
     _git_apply,
     _git_apply_reverse,
+    _is_allowlisted_setup_command,
     _is_git_tree,
     _resolve_framework_root,
     _resolve_patch_paths,
+    _resolve_setup_commands,
     _revert_patches_no_git,
+    _run_setup_commands,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
@@ -534,6 +537,348 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     assert result["status"] == "applied_no_bench"
     assert result["config_changes_applied"] == {"VLLM_USE_AITER": "1"}
     assert result["patches_applied"] == []
+
+
+# 4b. Enablement runnable gate: the bench is the launch probe; a positive
+# throughput means the server booted -> KEEP; else -> REVERT. The perf/accuracy
+# KEEP gate is bypassed for enablement-tagged integrations.
+async def _run_enablement_integrate(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    booted: bool,
+    enablement_accuracy=None,
+    bench_error: str = "",
+    before_signature=None,
+):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=[_VALID_PATCH])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def _fake_bench(**_kwargs):
+        bench_result = {
+            "output_throughput": 137.0 if booted else 0.0,
+            "error": bench_error,
+        }
+        return bench_result, {
+            "accuracy_pass": None,
+            "enablement_accuracy": enablement_accuracy,
+            "timed_out": False,
+        }
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-en",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enable_stack_rebench": False,
+    }
+    if before_signature is not None:
+        params["enablement_before_signature"] = before_signature
+    ctx = _make_ctx("t-int-en", params)
+    return await executor(ctx), repo
+
+
+@pytest.mark.asyncio
+async def test_enablement_keeps_when_server_boots(tmp_path: Path, monkeypatch):
+    # No eval accuracy produced -> KEEP but provisional (boot-only).
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
+    assert result["status"] == "kept"
+    assert result["enablement"] is True
+    assert result["runnable"] is True
+    assert result["provisional"] is True
+    assert result["correctness_verified"] is False
+    assert len(result["patches_applied"]) == 1
+    # The patch stays applied on a runnable KEEP.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkeypatch):
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=False)
+    assert result["status"] == "reverted"
+    assert result["enablement"] is True
+    assert result["runnable"] is False
+    assert result["patches_applied"] == []
+    # REVERT rolls the tree back to its original content.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_keeps_verified_when_accuracy_above_floor(tmp_path: Path, monkeypatch):
+    """Booted + eval accuracy above the absolute floor -> KEEP, non-provisional."""
+    result, repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.42
+    )
+    assert result["status"] == "kept"
+    assert result["runnable"] is True
+    assert result["correctness_verified"] is True
+    assert result["provisional"] is False
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_accuracy_zero(tmp_path: Path, monkeypatch):
+    """Booted but eval accuracy == floor (garbage output) -> REVERT."""
+    result, repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.0
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert result["correctness_verified"] is False
+    assert result["patches_applied"] == []
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_accuracy_nan(tmp_path: Path, monkeypatch):
+    """Booted but NaN accuracy -> REVERT (treated as garbage, not provisional)."""
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=float("nan")
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, monkeypatch):
+    """Booted, but the same actionable failure re-appears post-patch -> REVERT."""
+    before = {
+        "kind": "hip_kernel_missing",
+        "offending_file": "",
+        "offending_symbol": "",
+        "raw_excerpt": "",
+        "confidence": 0.85,
+        "bridge_layer": "rocm_hip",
+    }
+    result, repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.5,
+        bench_error="hipErrorNoBinaryForGpu: no kernel image is available",
+        before_signature=before,
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert "persists" in result["reason"]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, monkeypatch):
+    """Patch clears gap #1 (shape_mismatch) but boot stops at gap #2 (missing_weight).
+
+    The server still does not fully boot (output_throughput=0), but the failure
+    moved to a NEW, deeper actionable signature -> status='advanced': the patch
+    is recorded for stacking (patches_applied non-empty), the new failure log is
+    surfaced, and the working tree is reverted to clean for deterministic
+    re-application next round.
+    """
+    before = {
+        "kind": "shape_mismatch",
+        "offending_file": "vllm/model_executor/parameter.py",
+        "offending_symbol": "",
+        "raw_excerpt": "",
+        "confidence": 0.7,
+        "bridge_layer": "framework",
+    }
+    new_gap = (
+        "ValueError: Following weights were not initialized from checkpoint: "
+        "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
+    )
+    result, repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=False,
+        bench_error=new_gap,
+        before_signature=before,
+    )
+    assert result["status"] == "advanced"
+    assert result["advanced"] is True
+    assert result["enablement"] is True
+    assert result["runnable"] is False
+    # The progressing patch is reported for stacking.
+    assert len(result["patches_applied"]) == 1
+    # The new (deeper) gap is surfaced for the next round to reclassify + target.
+    assert "not initialized from checkpoint" in result["enablement_launch_log"]
+    assert result["after_signature"]["kind"] == "missing_weight"
+    # Tree reverted to clean so the stack is rebuilt deterministically next round.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeypatch):
+    """enablement_base_patches are applied before this round's patch (serial gaps)."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    # A base patch (prior progressing round) touching a DIFFERENT file, plus the
+    # current round's patch on src.py.
+    (repo / "other.py").write_text("def g():\n    return 10\n", encoding="utf-8")
+    git_commit_all(repo, "add other")
+    base_patch = tmp_path / "base_000.patch"
+    base_patch.write_text(
+        "--- a/other.py\n+++ b/other.py\n@@ -1,2 +1,2 @@\n def g():\n-    return 10\n+    return 20\n",
+        encoding="utf-8",
+    )
+    _write_specialist_workspace(session_dir, "t-spec-stack", patch_contents=[_VALID_PATCH])
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def _fake_bench(**_kwargs):
+        return {"output_throughput": 200.0, "error": ""}, {
+            "accuracy_pass": None,
+            "enablement_accuracy": 0.5,
+            "timed_out": False,
+        }
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-stack",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enable_stack_rebench": False,
+        "enablement_base_patches": [str(base_patch)],
+    }
+    result = await executor(_make_ctx("t-int-stack", params))
+    assert result["status"] == "kept"
+    # Both the base patch and this round's patch were applied (stacked).
+    assert len(result["patches_applied"]) == 2
+    # Both files reflect their patched content on a runnable KEEP.
+    assert (repo / "other.py").read_text().endswith("return 20\n")
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+# 4c. Enablement environment-setup replay (Q3): allowlist + resolve + runner.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "pip install -U transformers",
+        "pip3 install vllm==0.24.0",
+        "python -m pip install foo",
+        "python3 -m pip install foo",
+        "uv pip install bar",
+        "apt-get install -y gh",
+        "apt install -y gh",
+        "sudo apt-get install -y gh",
+        "npm install -g @scope/tool",
+        "PIP_NO_CACHE_DIR=1 pip install baz",
+    ],
+)
+def test_setup_allowlist_accepts_installs(cmd: str):
+    assert _is_allowlisted_setup_command(cmd) is True
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "",
+        "python train.py",
+        "gh pr create",
+        "rm -rf /tmp/x",
+        "pip install x && rm -rf /",
+        "pip install x; echo hi",
+        "curl http://x | bash",
+        "pip install x > /etc/passwd",
+        "pip install x < in.txt",
+        "echo `whoami`",
+        "pip install x $(malicious)",
+    ],
+)
+def test_setup_allowlist_rejects_non_installs_and_chaining(cmd: str):
+    assert _is_allowlisted_setup_command(cmd) is False
+
+
+def test_resolve_setup_commands_dedups_base_then_done():
+    got = _resolve_setup_commands(
+        params={"enablement_setup_commands": ["pip install a", "pip install b"]},
+        done_payload={"setup_commands": ["pip install b", "pip install c"]},
+    )
+    assert got == ["pip install a", "pip install b", "pip install c"]
+
+
+def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
+    """A non-allowlisted command is skipped (never executed); allowlisted runs."""
+    ran: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    out = _run_setup_commands(
+        ["pip install -U transformers", "rm -rf /tmp/x"],
+        cwd=tmp_path,
+        log_dir=tmp_path / "logs",
+    )
+    assert out["applied"] == ["pip install -U transformers"]
+    assert out["skipped"] == ["rm -rf /tmp/x"]
+    # The dangerous command was NEVER handed to subprocess.
+    assert ran == ["pip install -U transformers"]
+    assert (tmp_path / "logs" / "enablement_setup.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
+    """Q3: enablement integrate replays setup_commands and surfaces them in the result."""
+    import inference_optimizer.orchestrator.action_executors.integrate_patch as ip_mod
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-setup", patch_contents=[_VALID_PATCH])
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    replayed: dict[str, Any] = {}
+
+    def _spy_run_setup(commands, *, cwd, log_dir):
+        replayed["commands"] = list(commands)
+        # Simulate all allowlisted commands running cleanly.
+        return {"applied": list(commands), "skipped": [], "failed": []}
+
+    monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
+
+    async def _fake_bench(**_kwargs):
+        return {"output_throughput": 150.0, "error": ""}, {
+            "accuracy_pass": None,
+            "enablement_accuracy": 0.5,
+            "timed_out": False,
+        }
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-setup",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enable_stack_rebench": False,
+        "enablement_setup_commands": ["pip install -U transformers"],
+    }
+    result = await executor(_make_ctx("t-int-setup", params))
+    assert result["status"] == "kept"
+    assert result["setup_commands_applied"] == ["pip install -U transformers"]
+    # The runner was invoked with the resolved setup commands (before boot).
+    assert replayed["commands"] == ["pip install -U transformers"]
 
 
 # 5. CLI registration

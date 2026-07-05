@@ -38,6 +38,31 @@ _TESTED_STATUSES: frozenset[str] = frozenset(
 )
 
 
+def candidate_key(row: dict[str, Any] | None) -> str:
+    """Canonical dedup/progress key for a FRAMEWORK candidate or progress row.
+
+    The single source of truth for "which candidate is this" across the whole
+    FRAMEWORK_AGENT pump: candidate selection, dedup, progress-row keying, task
+    idempotency, and the known-id set all derive from this so a candidate that
+    carries only a ``pr_url`` (no ``candidate_id``) can never dedup against a
+    progress row keyed on its ``candidate_id`` (and vice-versa).
+
+    Precedence mirrors the historical inline ``candidate_id or pr_url or ref``
+    fallback. Progress rows persist this value in their ``candidate_id`` field,
+    so passing a progress row back through here is idempotent.
+
+    Args:
+        row: A candidate dict or ``framework_agent_phase_progress`` row (or
+            ``None``).
+
+    Returns:
+        The candidate key, or ``""`` when none of the identity fields are set.
+    """
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("candidate_id") or row.get("pr_url") or row.get("ref") or "")
+
+
 def candidate_slug(candidate_id: str) -> str:
     """Filesystem-safe slug for a candidate id (PR url / ref / synthetic id).
 
@@ -218,6 +243,7 @@ def summarize_candidate_outcomes(
 
 
 __all__ = [
+    "candidate_key",
     "candidate_slug",
     "summarize_candidate_outcomes",
     "write_decision_json",
