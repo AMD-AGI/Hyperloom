@@ -113,6 +113,78 @@ def test_vae_conv_is_convolution():
     assert classify_kernel("conv2d_nhwc_kernel").category == "Convolution"
 
 
+def test_real_sana_dit_kernels_via_op_fallback():
+    # Real Sana xDiT trace (2026-07-05): bare device names attn_fwd / naive_conv
+    # are NOT matched by device rules, but their launching op names resolve them
+    # via the op-name fallback (generalizes better than per-name device regexes).
+    assert classify_kernel("attn_fwd").category == "Others"  # device name alone: unknown
+    assert classify_kernel("attn_fwd", op_name="aten::_efficient_attention_forward").category == "SDPA"
+    assert classify_kernel("naive_conv_ab_nonpacked_fwd_nchw_ushort").category == "Others"
+    assert (
+        classify_kernel("naive_conv_ab_nonpacked_fwd", op_name="aten::miopen_depthwise_convolution").category
+        == "Convolution"
+    )
+    # The dominant Sana VAE kernel (MIOpen conv) is caught by the device rule.
+    assert classify_kernel("miopenSp3AsmConv_v30_3_1_gfx9_fp32_f2x3_stride1").category == "Convolution"
+
+
+def test_op_name_fallback_rules():
+    # Op-name fallback maps stable aten/framework symbols when the device name
+    # is unclassifiable.
+    cases = {
+        "aten::conv2d": "Convolution",
+        "aten::scaled_dot_product_attention": "SDPA",
+        "aten::native_layer_norm": "Normalization",
+        "aten::rms_norm": "Normalization",
+        "aten::addmm": "GEMM",
+        "aten::mm": "GEMM",
+        "aten::bmm": "GEMM",
+        "aten::silu": "Elementwise",
+        "aten::mul": "Elementwise",
+    }
+    for op, cat in cases.items():
+        assert classify_kernel("some_unknown_device_kernel", op_name=op).category == cat, op
+
+
+def test_op_fallback_only_on_others_and_needs_op():
+    # A device name that already classifies is NOT overridden by the op name.
+    assert classify_kernel("paged_attention_v1", op_name="aten::mm").category == "SDPA"
+    assert classify_kernel("Cijk_gemm", op_name="aten::conv2d").category == "GEMM"
+    # No op name -> unclassifiable device name stays Others.
+    assert classify_kernel("totally_unknown_kernel_xyz").category == "Others"
+    # An unrecognized op name -> stays Others.
+    assert classify_kernel("totally_unknown_kernel_xyz", op_name="aten::weird_op").category == "Others"
+
+
+def test_op_fallback_category_does_not_override_vendor_verdict():
+    # op-fallback affects the CATEGORY only; the reusability verdict stays
+    # device-name based. A cuDNN attention kernel has an unclassifiable device
+    # name (Others) but is a vendor precompiled binary: the launching op resolves
+    # the category to SDPA, yet it must remain non-reusable (vendor), not become
+    # a rewritable-source candidate.
+    name = "cudnn_mha_fwd_bf16"
+    base = classify_kernel(name)
+    assert base.category == "Others"
+    assert base.reusable is False
+    assert "vendor" in base.skip_reason
+
+    resolved = classify_kernel(name, op_name="aten::scaled_dot_product_attention")
+    assert resolved.category == "SDPA"      # category filled from the op fallback
+    assert resolved.reusable is False       # but still a vendor binary
+    assert "vendor" in resolved.skip_reason
+
+
+def test_op_fallback_math_norm_is_not_normalization():
+    # F2 guard: a bare math reduction op (aten::norm / linalg_vector_norm) must
+    # NOT be mapped to Normalization — only explicit *_norm layer ops do. A bare
+    # \bnorm\b op rule would have mis-mapped these.
+    assert classify_kernel("unknown_reduce_kernel", op_name="aten::norm").category == "Others"
+    assert classify_kernel("unknown_reduce_kernel", op_name="aten::linalg_vector_norm").category == "Others"
+    # Explicit normalization layers still resolve via the fallback.
+    assert classify_kernel("unknown_kernel", op_name="aten::native_layer_norm").category == "Normalization"
+    assert classify_kernel("unknown_kernel", op_name="aten::group_norm").category == "Normalization"
+
+
 def test_non_conv_miopen_kernel_is_not_convolution():
     # MIOpen/cuDNN also emit non-conv kernels; those must not be mislabeled
     # Convolution, but are still vendor (non-reusable).

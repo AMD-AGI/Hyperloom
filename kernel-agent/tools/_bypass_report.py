@@ -205,7 +205,7 @@ def build_candidates(
     for idx, k in enumerate(kernels[: top_k if top_k and top_k > 0 else len(kernels)], start=1):
         kname = k.get("name", "") or ""
         op_name = k.get("op_name", "") or ""
-        kc = classify_kernel(kname)
+        kc = classify_kernel(kname, op_name=op_name)
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
@@ -252,6 +252,12 @@ def build_candidates(
             "reusable_native_kernel": kc.reusable,
             "skip_reason": "" if kc.reusable else kc.skip_reason,
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
+            # ``shapes`` mirrors ``input_shapes`` (one representative call's
+            # per-arg dims). The orchestrator kernel-opt gate
+            # (_validate_kernel_shape_and_paths) reads ``shapes`` and rejects
+            # dispatch as ``empty_kernel_shape`` when absent, so a candidate with
+            # captured dims MUST expose it or it can never reach GEAK.
+            "shapes": [op_shapes] if op_shapes else [],
             "input_shapes": [op_shapes] if op_shapes else [],
             "input_dtypes": op_dtypes,
             "shape_provenance": "torch_trace" if op_shapes else "unresolved",
@@ -369,7 +375,7 @@ def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
     cat_us: dict[str, float] = defaultdict(float)
     cat_cnt: dict[str, int] = defaultdict(int)
     for k in kernels:
-        kc = classify_kernel(k.get("name", "") or "")
+        kc = classify_kernel(k.get("name", "") or "", op_name=k.get("op_name", "") or "")
         us = float(k.get("gpu_time_us") or 0.0)
         cat_us[kc.category] += us
         cat_cnt[kc.category] += int(k.get("count") or 0)

@@ -83,6 +83,53 @@ _REUSABLE_RE = re.compile(
 )
 
 
+# Launching-op-name -> category fallback. The device-kernel name is the primary
+# signal (100% coverage); when it is unclassifiable (``Others``) but the trace
+# resolved a launching op via Kineto correlation, the op name — a stable
+# framework/aten symbol regardless of the backend kernel variant — generalizes
+# far better than accumulating a device-name regex per model. Consulted only on
+# the ``Others`` fallthrough.
+#
+# ORDER IS PRIORITY: ``_classify_by_op`` returns the FIRST matching row, so rows
+# MUST stay ordered most-specific-first. A broad rule (e.g. the generic
+# Elementwise catch-all) must never precede a specific one, or it will shadow it.
+# Norm keeps only explicit ``*_norm`` layer names — a bare ``\bnorm\b`` would
+# mis-map the math reduction ``aten::norm`` / ``linalg_vector_norm``.
+_OP_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(?i)convolution|conv[123]d|conv_transpose|_convolution"), "Convolution"),
+    (re.compile(r"(?i)scaled_dot_product_attention|efficient_attention|flash_attention|"
+                r"memory_efficient_attention|\bsdpa\b|_attention_forward|multi_head_attention"), "SDPA"),
+    (re.compile(r"(?i)layer_norm|layernorm|rms_norm|rmsnorm|group_norm|groupnorm|batch_norm"), "Normalization"),
+    (re.compile(r"(?i)reshape_and_cache|concat_and_cache"), "KVCacheStore"),
+    (re.compile(r"(?i)\bmoe\b|fused_moe|topk|routing|expert"), "MoE"),
+    (re.compile(r"(?i)quantize|\bquant\b|per_tensor|per_token"), "Quantization"),
+    (re.compile(r"(?i)addmm|baddbmm|\bbmm\b|\bmm\b|matmul|\blinear\b|\bgemm\b|scaled_mm"), "GEMM"),
+    (re.compile(r"(?i)silu|swish|\bgelu\b|\brelu\b|sigmoid|\btanh\b|gelu_and_mul|act_and_mul"), "Elementwise"),
+    (re.compile(r"(?i)rotary|\brope\b|embedding"), "Elementwise"),
+    (re.compile(r"(?i)elementwise|\bmul\b|\badd\b|\bsub\b|\bdiv\b|\bcopy_?\b|\bcat\b|concat|"
+                r"index_select|slice|\bview\b|reshape|transpose|permute|fill|clamp|to_copy"), "Elementwise"),
+]
+
+
+def _classify_by_op(op_name: str) -> str:
+    """Return a category from a launching op name, or ``""`` on no match.
+
+    Returns the FIRST matching :data:`_OP_RULES` row (rows are ordered
+    most-specific-first — see the note there).
+
+    Args:
+        op_name: Resolved launching op name (e.g. ``aten::miopen_convolution``).
+
+    Returns:
+        The matched category, or ``""`` when no op rule applies.
+    """
+    n = op_name or ""
+    for pat, cat in _OP_RULES:
+        if pat.search(n):
+            return cat
+    return ""
+
+
 class KernelClass(NamedTuple):
     """Classification result for one device-kernel name."""
 
@@ -91,13 +138,16 @@ class KernelClass(NamedTuple):
     skip_reason: str
 
 
-def classify_kernel(name: str, *, gpu_cat: str = "") -> KernelClass:
+def classify_kernel(name: str, *, gpu_cat: str = "", op_name: str = "") -> KernelClass:
     """Classify a device-kernel name into a category + reusability verdict.
 
     Args:
         name: The device (GPU) kernel name from the trace.
         gpu_cat: The Kineto ``cat`` of the event (``gpu_memcpy`` / ``gpu_memset``
             force the ``MemCpy`` category regardless of name).
+        op_name: Optional launching op name (from Kineto correlation). Used only
+            as a category fallback when the device name is unclassifiable
+            (``Others``); the reusability verdict stays device-name based.
 
     Returns:
         A :class:`KernelClass` with category, reusable flag, and a skip_reason
@@ -111,6 +161,11 @@ def classify_kernel(name: str, *, gpu_cat: str = "") -> KernelClass:
     for pat, cat, prio in _RULES:
         if prio > best_prio and pat.search(n):
             category, best_prio = cat, prio
+
+    # Op-name fallback: only when the device name was unclassifiable. The op name
+    # generalizes across backend kernel-name variants (aten/framework symbols).
+    if category == "Others" and op_name:
+        category = _classify_by_op(op_name) or "Others"
 
     if category == "MemCpy":
         return KernelClass("MemCpy", False, "device memcpy/memset (not a rewritable kernel)")

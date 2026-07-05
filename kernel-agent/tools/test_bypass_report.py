@@ -139,6 +139,38 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
     assert cand["shape_provenance"] == "torch_trace"
 
 
+def test_routable_candidate_carries_shapes_for_orchestrator_gate():
+    # Regression: the orchestrator kernel-opt shape gate
+    # (_validate_kernel_shape_and_paths in kernel_request_handlers.py) reads
+    # candidate["shapes"] and rejects dispatch with error_class
+    # "empty_kernel_shape" when it is missing/empty — even if input_shapes was
+    # captured. A routable candidate with real trace-captured dims MUST expose a
+    # non-empty "shapes" list (trusted provenance), or bypass candidates can
+    # never reach GEAK optimization.
+    kernels = [{
+        "name": "triton_silu", "op_name": "aten::silu", "gpu_time_us": 100.0, "count": 1,
+        "op_kernel_file": "/repo/aiter/triton/silu.py", "op_kernel_backend": "triton",
+        "op_shapes": [[8, 16]], "op_dtypes": ["c10::BFloat16"],
+    }]
+    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
+    shapes = cand.get("shapes")
+    assert isinstance(shapes, list) and shapes, "routable candidate must expose a non-empty 'shapes' for the orchestrator gate"
+    assert cand["shape_provenance"] in {"torch_trace", "tuning_csv"}
+    # shapes mirrors the captured input_shapes (one representative call).
+    assert cand["shapes"] == cand["input_shapes"] == [[[8, 16]]]
+
+
+def test_unresolved_shape_candidate_has_empty_shapes():
+    # A kernel with no captured dims stays shape-less: "shapes" is an empty list
+    # (present, not absent) and the gate will correctly reject it as
+    # empty_kernel_shape.
+    kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 1}]
+    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
+    assert cand.get("shapes") == []
+    assert cand["input_shapes"] == []
+    assert cand["shape_provenance"] == "unresolved"
+
+
 def test_source_file_from_op_to_source_when_no_kernel_file(monkeypatch):
     monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/act.cu", "op_to_source"))
     kernels = [{"name": "act_kernel", "op_name": "_C::silu_and_mul", "gpu_time_us": 100.0, "count": 1}]
