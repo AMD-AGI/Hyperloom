@@ -1997,8 +1997,13 @@ async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator)
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
+    from inference_optimizer.orchestrator import framework_agent_client as _fa_client
+
     _enter_framework(coord)
     coord.shared_state.framework_agent_discover_failures = 0
+    # An empty discovery is tolerated for a bounded number of consecutive ticks
+    # before giving up; prime the streak so this final empty flips phase done.
+    coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT - 1
     monkeypatch.setattr(coord, "_select_next_framework_agent_candidate", lambda: None)
 
     async def _disc():

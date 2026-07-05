@@ -68,6 +68,7 @@ import functools
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -101,11 +102,168 @@ log = logging.getLogger(__name__)
 
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
+# Absolute minimal-correctness floor for the enablement runnable gate: any
+# accuracy strictly above this counts as "not garbage" (a booted-but-broken
+# combo scores ~0.0).
+ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
+
+# Enablement environment-setup replay: allowlist of install-only command shapes.
+# A specialist may run arbitrary Bash in its own sandboxed session, but the
+# durable *replay* performed here (before applying patches + booting) is limited
+# to package/tool installation so a recorded ``setup_commands`` list can never be
+# a vector for arbitrary side effects (rm, curl|bash, service restarts, etc.).
+# Matched against the command with leading `sudo `/env-assignments stripped.
+_SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
+    r"pip3?\s+install\b",
+    r"(?:python3?|uv)\s+-m\s+pip\s+install\b",
+    r"uv\s+pip\s+install\b",
+    r"pip3?\s+uninstall\s+-y\b",
+    r"apt(?:-get)?\s+(?:install|update)\b",
+    r"npm\s+(?:install|i|ci)\b",
+    r"npm\s+install\s+-g\b",
+    r"pnpm\s+(?:install|add)\b",
+    r"yarn\s+(?:add|install)\b",
+    r"conda\s+install\b",
+    r"mamba\s+install\b",
+)
+_SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate (defense-in-depth)
+_SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
+
+
+def _is_allowlisted_setup_command(cmd: str) -> bool:
+    """True when ``cmd`` is an install-only command safe to replay.
+
+    Strips a leading ``sudo`` and any ``KEY=VALUE`` env-assignment prefixes, then
+    requires the remainder to start with a known package/tool installer. Rejects
+    anything with shell control operators that could smuggle a second command
+    (``;`` / ``&&`` / ``||`` / ``|`` / backticks / ``$(`` / redirects) so a
+    single allowlisted prefix cannot chain an arbitrary payload.
+
+    Args:
+        cmd: The raw command string.
+
+    Returns:
+        bool: ``True`` when the command is a single allowlisted installer.
+    """
+    text = (cmd or "").strip()
+    if not text:
+        return False
+    # Reject shell metacharacters that could chain/redirect a non-allowlisted
+    # command (command separators, pipes, subshells, redirects, newlines).
+    if re.search(r"[;&|`<>\n]|\$\(", text):
+        return False
+    # Strip a leading sudo and leading KEY=VALUE env assignments.
+    text = re.sub(r"^\s*sudo\s+", "", text)
+    text = re.sub(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", text)
+    return any(re.match(pat, text) for pat in _SETUP_CMD_ALLOWLIST)
 
 
 # Bare ``isoformat()`` (auto timespec): microseconds only when non-zero.
 _now_iso = functools.partial(now_iso, "auto")
+
+
+def _resolve_setup_commands(
+    *,
+    params: dict[str, Any],
+    done_payload: dict[str, Any] | None,
+) -> list[str]:
+    """Resolve the ordered, deduped enablement setup commands to replay.
+
+    Sources (in order; deduped preserving first occurrence): base commands
+    stacked from prior rounds (``params['enablement_setup_commands']``) then the
+    current specialist's ``specialist_done.setup_commands``. Non-string / blank
+    entries are dropped; the list is capped at :data:`_SETUP_CMD_MAX`.
+
+    Args:
+        params: The integrate_patch task params.
+        done_payload: The specialist ``specialist_done`` payload (may be None).
+
+    Returns:
+        list[str]: Ordered unique candidate setup commands (pre-allowlist).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    sources: list[Any] = []
+    base = params.get("enablement_setup_commands")
+    if isinstance(base, list):
+        sources.extend(base)
+    if isinstance(done_payload, dict):
+        dp = done_payload.get("setup_commands")
+        if isinstance(dp, list):
+            sources.extend(dp)
+    for c in sources:
+        s = str(c or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+        if len(out) >= _SETUP_CMD_MAX:
+            break
+    return out
+
+
+def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dict[str, Any]:
+    """Replay allowlisted enablement setup commands (installs) before boot.
+
+    Runs each allowlisted command non-interactively with a per-command timeout,
+    appending combined output to ``<log_dir>/enablement_setup.log``. Commands
+    that fail the allowlist are skipped (never executed). A non-zero install is
+    recorded but does NOT hard-fail the integration — the subsequent boot/gate
+    is the source of truth for runnability; a redundant/already-satisfied
+    install may legitimately exit non-zero.
+
+    Args:
+        commands: Candidate setup commands (already deduped / capped).
+        cwd: Working directory for the commands.
+        log_dir: Directory to write ``enablement_setup.log`` into.
+
+    Returns:
+        dict[str, Any]: ``{"applied": [...], "skipped": [...], "failed": [...]}``
+        where ``applied`` are the allowlisted commands that ran (rc==0).
+    """
+    applied: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    if not commands:
+        return {"applied": applied, "skipped": skipped, "failed": failed}
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    log_path = log_dir / "enablement_setup.log"
+    env = dict(os.environ)
+    env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    for cmd in commands:
+        if not _is_allowlisted_setup_command(cmd):
+            skipped.append(cmd)
+            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", cmd)
+            continue
+        log.info("integrate_patch: enablement setup replay: %s", cmd)
+        try:
+            proc = subprocess.run(  # noqa: S602 — allowlisted install-only shell command
+                cmd,
+                shell=True,
+                cwd=str(cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=_SETUP_CMD_TIMEOUT_SEC,
+            )
+            try:
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
+            except OSError:
+                pass
+            if proc.returncode == 0:
+                applied.append(cmd)
+            else:
+                failed.append(cmd)
+                log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            failed.append(cmd)
+            log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
+    return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
 def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
@@ -1138,6 +1296,22 @@ class IntegratePatchExecutor:
         # Read done payload for patches_written + config_changes_default.
         done_payload = _read_done_payload(specialist_workspace)
 
+        # Enablement environment setup (Q3): replay allowlisted install-only
+        # commands (base stacked from prior rounds + this specialist's
+        # ``setup_commands``) BEFORE applying patches / booting, so a package or
+        # tool a specialist relied on (e.g. a newer ``transformers`` for a new
+        # arch, or the ``gh`` CLI) is reproduced durably rather than lost after
+        # its session ends. Non-allowlisted commands are skipped, never run.
+        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
+        if bool(params.get("enablement")):
+            setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
+            if setup_cmds:
+                setup_result = _run_setup_commands(
+                    setup_cmds,
+                    cwd=self.session_dir,
+                    log_dir=runs_dir(self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "") or "setup")),
+                )
+
         # Patch resolution.
         explicit_patches = params.get("patches") or None
         patch_paths = _resolve_patch_paths(
@@ -1145,6 +1319,27 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
+        # Enablement stacking: serial gaps require prior *progressing* patches to
+        # be re-applied as a base before this round's patch, so a fix for gap #2
+        # composes on top of the (correct-but-incomplete) fix for gap #1 rather
+        # than being reverted and re-derived from the stale original log. Base
+        # patches are applied first, in order. Skip any that are missing / are
+        # already in patch_paths.
+        base_patches = params.get("enablement_base_patches")
+        if bool(params.get("enablement")) and isinstance(base_patches, list) and base_patches:
+            seen = {str(p) for p in patch_paths}
+            prefix: list[Path] = []
+            for bp in base_patches:
+                bp_path = Path(str(bp))
+                if bp_path.is_file() and str(bp_path) not in seen:
+                    prefix.append(bp_path)
+                    seen.add(str(bp_path))
+            if prefix:
+                log.info(
+                    "integrate_patch: enablement stacking %d base patch(es) before this round's patch",
+                    len(prefix),
+                )
+                patch_paths = prefix + list(patch_paths)
         config_changes = dict(params.get("config_changes") or {})
         # Seed config_changes from specialist_done when params didn't.
         if not config_changes and done_payload:
@@ -1161,7 +1356,11 @@ class IntegratePatchExecutor:
             done_payload=done_payload,
         )
 
-        if not patch_paths and not config_changes and not artifact_specs:
+        # A setup-only enablement round (installs, no source patch) is still a
+        # valid attempt: fall through to boot + gate so the install can be
+        # validated. Only bail as ``no_patches`` when there is truly nothing.
+        _setup_ran = bool(setup_result.get("applied"))
+        if not patch_paths and not config_changes and not artifact_specs and not _setup_ran:
             return {
                 "status": "no_patches",
                 "specialist_task_id": specialist_task_id,
@@ -1170,9 +1369,11 @@ class IntegratePatchExecutor:
                 "config_changes_applied": {},
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
+                "setup_commands_applied": list(setup_result.get("applied") or []),
                 "reason": (
-                    "neither patches, config_changes, nor installable artifacts "
-                    "were supplied / discoverable for this specialist task"
+                    "neither patches, config_changes, installable artifacts, nor "
+                    "allowlisted setup commands were supplied / discoverable for "
+                    "this specialist task"
                 ),
             }
 
@@ -1445,6 +1646,162 @@ class IntegratePatchExecutor:
                 "patches_reverted": [str(p) for p in reverted],
                 "config_changes_applied": {},
                 "reason": f"bench raised: {exc!r}",
+                "workspace": str(output_root),
+            })
+
+        # Stage 5 (enablement): RUNNABILITY + minimal-correctness gate. A
+        # positive ``output_throughput`` means the server booted and served at
+        # least one request. Accuracy is compared against an absolute floor
+        # (``ENABLEMENT_ACCURACY_FLOOR``). Three states:
+        #   * accuracy > floor      -> correctness_ok=True  (KEEP, verified)
+        #   * accuracy <= floor/NaN -> correctness_ok=False (REVERT, boots but
+        #                              output is garbage)
+        #   * accuracy is None      -> correctness_ok=None  (KEEP but provisional
+        #                              / boot-only; eval never produced a score)
+        # The post-patch failure signature is re-classified and compared to the
+        # pre-patch one: the same actionable failure re-appearing counts as
+        # "not fixed".
+        if params.get("enablement"):
+            import math as _math
+
+            from framework_agent.enablement import (
+                FailureSignature,
+                classify_failure,
+                enablement_made_progress,
+                runnable_decision,
+            )
+
+            new_tput = bench_result.get("output_throughput")
+            booted = isinstance(new_tput, (int, float)) and new_tput > 0
+            probe_timed_out = bool(gate_evidence.get("timed_out"))
+
+            enablement_accuracy = gate_evidence.get("enablement_accuracy")
+            correctness_ok: bool | None
+            if isinstance(enablement_accuracy, (int, float)) and not _math.isnan(float(enablement_accuracy)):
+                correctness_ok = float(enablement_accuracy) > ENABLEMENT_ACCURACY_FLOOR
+            elif isinstance(enablement_accuracy, float) and _math.isnan(enablement_accuracy):
+                correctness_ok = False
+            else:
+                # None (or non-numeric): eval never produced a score -> provisional.
+                correctness_ok = None
+
+            after_signature = classify_failure(str(bench_result.get("error") or ""))
+            before_signature: FailureSignature | None = None
+            raw_before = params.get("enablement_before_signature")
+            if isinstance(raw_before, dict):
+                try:
+                    before_signature = FailureSignature(**raw_before)
+                except (TypeError, ValueError):
+                    before_signature = None
+
+            runs, run_reason = runnable_decision(
+                probe_returncode=0 if booted else 1,
+                correctness_ok=correctness_ok,
+                probe_timed_out=probe_timed_out,
+                before_signature=before_signature,
+                after_signature=after_signature,
+            )
+            if not runs:
+                # Forward-progress case: the patch did not make the combo fully
+                # runnable, but it cleared the prior crash and the boot now
+                # stops at a *new, deeper* actionable failure. That diff is a
+                # necessary building block for a serial (gap #1 -> gap #2 -> ...)
+                # enablement — KEEP it applied ("advanced") and surface the new
+                # failure log so the next round targets gap #(n+1) instead of
+                # reverting and re-deriving gap #(n)'s fix from the stale log.
+                advanced = (not booted) and enablement_made_progress(before_signature, after_signature)
+                if advanced:
+                    # Record the applied patch paths for stacking, then revert
+                    # the working tree to clean. The stack is rebuilt fresh next
+                    # round via ``enablement_base_patches`` re-application, so
+                    # the tree never carries uncommitted patches across tasks
+                    # (which would be mis-stashed as user state / double-applied).
+                    stacked_patches = [str(p) for p in applied]
+                    new_log = str(bench_result.get("error") or "")
+                    artifacts_reverted = self._revert_artifacts(applied_artifacts)
+                    reverted = self._revert_patches(framework_root, applied)
+                    await self._maybe_write_framework_kb_record(
+                        done_payload=done_payload,
+                        outcome="integrated",
+                        tps_delta_pct=0.0,
+                        extra=extra,
+                    )
+                    return _with_stash_restore(framework_root, stash_state, stash_note, {
+                        "status": "advanced",
+                        "specialist_task_id": specialist_task_id,
+                        # Paths applied this round (base + new); recorded by the
+                        # Coordinator into enablement_kept_patches for re-apply.
+                        "patches_applied": stacked_patches,
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_reverted": artifacts_reverted,
+                        "config_changes_applied": {},
+                        "output_throughput": new_tput,
+                        "enablement": True,
+                        "advanced": True,
+                        "runnable": False,
+                        "correctness_verified": False,
+                        "reason": (
+                            f"enablement progressed: {run_reason}; boot advanced "
+                            f"to a new gap ({after_signature.kind}) — patch recorded "
+                            f"as a base for the next round"
+                        ),
+                        "after_signature": after_signature.to_dict(),
+                        "enablement_launch_log": new_log,
+                        "setup_commands_applied": list(setup_result.get("applied") or []),
+                        "bench_result": bench_result,
+                        "workspace": str(output_root),
+                    })
+                artifacts_reverted = self._revert_artifacts(applied_artifacts)
+                reverted = self._revert_patches(framework_root, applied)
+                await self._maybe_write_framework_kb_record(
+                    done_payload=done_payload,
+                    outcome="reverted_smoke_fail",
+                    tps_delta_pct=0.0,
+                    extra=extra,
+                )
+                return _with_stash_restore(framework_root, stash_state, stash_note, {
+                    "status": "reverted",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "config_changes_applied": {},
+                    "output_throughput": new_tput,
+                    "enablement": True,
+                    "runnable": False,
+                    "correctness_verified": correctness_ok is True,
+                    "reason": f"enablement not runnable: {run_reason}",
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                })
+            provisional = correctness_ok is None
+            reason = f"enablement runnable: {run_reason}"
+            if provisional:
+                reason += (
+                    " (provisional: booted but eval produced no accuracy; "
+                    "correctness not verified)"
+                )
+            await self._maybe_write_framework_kb_record(
+                done_payload=done_payload,
+                outcome="integrated",
+                tps_delta_pct=0.0,
+                extra=extra,
+            )
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
+                "status": "kept",
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [str(p) for p in applied],
+                "patches_reverted": [],
+                "artifacts_applied": applied_artifacts,
+                "config_changes_applied": config_changes_applied,
+                "output_throughput": new_tput,
+                "enablement": True,
+                "runnable": True,
+                "correctness_verified": correctness_ok is True,
+                "provisional": provisional,
+                "reason": reason,
+                "setup_commands_applied": list(setup_result.get("applied") or []),
+                "bench_result": bench_result,
                 "workspace": str(output_root),
             })
 
@@ -1950,18 +2307,35 @@ class IntegratePatchExecutor:
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
 
-        return bench, {"accuracy_pass": accuracy_pass}
+        # Enablement path: surface the raw accuracy (float / None) so the
+        # enablement branch can apply an absolute floor.
+        enablement_accuracy: float | None = None
+        if bool(params.get("enablement")) and bench.get("status") == "succeeded":
+            try:
+                eval_results = parse_eval_results(
+                    bench["workspace"],
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                )
+                acc = eval_results.get("accuracy")
+                if isinstance(acc, (int, float)):
+                    enablement_accuracy = float(acc)
+            except Exception:  # noqa: BLE001 — eval may not produce a result
+                log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
+
+        return bench, {"accuracy_pass": accuracy_pass, "enablement_accuracy": enablement_accuracy}
 
     @staticmethod
     def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
-        """Force ``RUN_EVAL=true`` for framework-authored source patches (G2).
+        """Force ``RUN_EVAL=true`` for framework-authored source patches.
 
-        Only forces when a comparable baseline accuracy exists
-        (``accuracy_baseline > 0``): if the run never produced a baseline
-        accuracy (e.g. eval is globally disabled), there is nothing to gate
-        against, so we must NOT force eval on the candidate (don't override an
-        operator's ``RUN_EVAL=false`` nor add a needless eval-failure surface);
-        the materializer's default RUN_EVAL handling applies instead.
+        Two independent triggers:
+
+        * **Enablement** (``params["enablement"]``): force ``RUN_EVAL=true``
+          unconditionally so ``_bench_patch`` can obtain a raw accuracy for the
+          runnable gate.
+        * **Perf framework authoring**: force only when a comparable baseline
+          accuracy exists (``accuracy_baseline > 0``); otherwise leave the
+          candidate's ``RUN_EVAL`` to the materializer's default handling.
 
         Generic EXPLORE integrate_patch is untouched (returns ``None``).
 
@@ -1969,9 +2343,12 @@ class IntegratePatchExecutor:
             params: The integrate_patch task params.
 
         Returns:
-            ``{"RUN_EVAL": "true"}`` for framework-authored patches that have a
-            positive baseline accuracy to compare against, else ``None``.
+            ``{"RUN_EVAL": "true"}`` for enablement patches, or for
+            framework-authored perf patches that have a positive baseline
+            accuracy to compare against; else ``None``.
         """
+        if bool(params.get("enablement")):
+            return {"RUN_EVAL": "true"}
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         try:
             baseline = float(params.get("accuracy_baseline") or 0.0)

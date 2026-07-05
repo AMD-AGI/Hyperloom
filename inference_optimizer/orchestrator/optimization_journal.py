@@ -32,6 +32,27 @@ OUTCOME_KEEP: str = "KEEP"
 OUTCOME_REVERT: str = "REVERT"
 OUTCOME_NO_PROMOTE: str = "no_promote"
 
+# Task kinds whose result carries an authoritative per-status verdict
+# (kept / reverted / …) that the journal outcome must follow rather than the
+# coarse dispatcher ``promotable`` flag. For these, ``status != "failed"`` (the
+# ``_is_promotable_result`` rule) is NOT the same as "the optimization was
+# adopted": a ``reverted`` patch is promotable (it still runs the pending-
+# integrate cleanup) yet was rolled back, so recording it as KEEP is a lie.
+_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "framework_agent"})
+
+# For the status-driven kinds: the only status that means "the change was
+# adopted into current_best".
+_JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
+
+# Statuses that mean "a real change was tested / applied and then rolled back
+# or rejected on measured grounds" → REVERT. Everything else for these kinds
+# (apply_failed / no_patch / fetch_failed / applied_no_bench / rejected_by_critic
+# / skipped / failed / the P0 terminal stamps …) never reached a KEEP/REVERT
+# measurement, so it is ``no_promote`` — neither a win nor a regression signal.
+_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset(
+    {"reverted", "accuracy_unavailable_reject", "regression"}
+)
+
 # Change-kind vocabulary — coarse dashboard grouping. Extend by appending; don't reuse old strings.
 KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...
 KIND_PARAM: str = "param"  # --max-num-batched-tokens, --gpu-memory-utilization, ...
@@ -357,6 +378,49 @@ def _variant_args(variant: dict[str, Any]) -> str:
     return str(variant.get("extra_server_args") or variant.get("extra_sglang_args") or "")
 
 
+def derive_journal_outcome(
+    task_kind: str,
+    result_dict: dict[str, Any] | None,
+    *,
+    promotable: bool,
+) -> str:
+    """Derive the journal ``outcome`` for a settled per-task result.
+
+    Fixes the "fake KEEP" bug: for source-patch kinds (``integrate_patch`` /
+    ``framework_agent``) the dispatcher's ``promotable`` flag is
+    ``status != "failed"``, which is TRUE for a ``reverted`` patch — so the old
+    ``if promotable: KEEP`` recorded rolled-back patches as KEEP. Here the
+    outcome follows the executor's authoritative per-status verdict instead:
+
+    - ``status == "kept"``                                  → ``OUTCOME_KEEP``
+    - ``status in {reverted, accuracy_unavailable_reject,
+      regression}``                                         → ``OUTCOME_REVERT``
+    - any other status (apply_failed / no_patch / failed /
+      applied_no_bench / rejected_by_critic / …)            → ``OUTCOME_NO_PROMOTE``
+
+    For every other task kind the historical binary behaviour is preserved
+    (``promotable`` → KEEP, else REVERT) so non-patch journalling never
+    regresses.
+
+    Args:
+        task_kind: The settled task's kind.
+        result_dict: The task result dict (``status`` drives the patch kinds).
+        promotable: The dispatcher's promotable flag (``_is_promotable_result``).
+
+    Returns:
+        One of :data:`OUTCOME_KEEP` / :data:`OUTCOME_REVERT` /
+        :data:`OUTCOME_NO_PROMOTE`.
+    """
+    if (task_kind or "").lower() in _STATUS_DRIVEN_JOURNAL_KINDS:
+        status = str((result_dict or {}).get("status") or "").strip().lower()
+        if status in _JOURNAL_KEEP_STATUSES:
+            return OUTCOME_KEEP
+        if status in _JOURNAL_REVERT_STATUSES:
+            return OUTCOME_REVERT
+        return OUTCOME_NO_PROMOTE
+    return OUTCOME_KEEP if promotable else OUTCOME_REVERT
+
+
 def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) -> str:
     """Map a task / variant to a ``KIND_*`` value (priority: env-only > kernel_file > integrate > backend > param).
 
@@ -500,5 +564,6 @@ __all__ = [
     "OUTCOME_NO_PROMOTE",
     "OUTCOME_REVERT",
     "classify_change_kind",
+    "derive_journal_outcome",
     "summarize_change",
 ]

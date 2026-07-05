@@ -61,12 +61,12 @@ For Critic specifically: when reviewing a proposal, emit
 """.strip()
 
 
-# Bare top-level {...} fallback containing "intents" (fenced case handled by helper).
+# Bare top-level {...} fallback carrying "intents" (fenced case handled by helper).
 _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
 def _extract_envelope(text: str) -> dict | None:
-    """Pull the first JSON envelope (containing ``"intents"``) from a model reply."""
+    """Pull the first valid ``{"intents": ...}`` envelope out of a model reply."""
     return extract_first_json_with_key(text, "intents", _BARE_JSON_RE)
 
 

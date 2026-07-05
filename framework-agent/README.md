@@ -10,7 +10,41 @@ integration uses the FRAMEWORK discovery path:
 - **Standalone PR exploration** (`fa candidates` / `fa explore`) —
   ad-hoc tooling outside the `inference_optimizer` runtime path.
 
+- **Enablement** (opt-in) — make a currently **non-runnable**
+  `(model, backend)` combo *run at all* by authoring a bridging patch. Unlike
+  the perf path (gated on throughput), enablement is gated on **runnability**
+  (server boots + minimal correctness). See
+  [Enablement path](#enablement-path-non-runnable-model--backend-combos).
+
 See [`SKILL.md`](./SKILL.md) for the full architectural overview.
+
+## Enablement path (non-runnable model + backend combos)
+
+When a `(model, backend)` combo will not start, the enablement building
+blocks turn the failure into an authored bridging patch, gated on *does it
+run* rather than *is it faster*:
+
+1. **Classify** — `framework_agent.enablement.classify_failure(log)` parses a
+   launch/import/build log into a `FailureSignature`
+   (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
+   `import_error` / `shape_mismatch` / `not_implemented` /
+   `capability_disabled`) with the offending file/symbol and a `bridge_layer`.
+2. **Discover** — `framework_agent.enablement_discovery.build_search_plan(...)`
+   picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via
+   `repo_map.bridge_repo_urls` for the failure's bridge layer) and ranks
+   candidate PR titles for *enablement* intent (`enable` / `support` / `add` /
+   `fix` / `port`).
+3. **Author** — `framework_agent.enablement_authoring.build_mandate(...)`
+   produces the `EnablementMandate` (allowed source roots + task description +
+   patch invariants) handed to Hyperloom's `enablement_specialist` /
+   `SpecialistRunner`, which writes the patch into an isolated worktree.
+4. **Verify** — `framework_agent.enablement.runnable_decision(...)` is the
+   KEEP/REVERT gate: the launch probe must exit 0 (no timeout) and any minimal
+   correctness check must pass; the same failure re-appearing is a reject.
+
+Editing ROCm/HIP source (`/opt/rocm`) is a **default-on** part of the
+enablement path — the IO-side allowlist always surfaces those roots (alongside
+the always-allowed `aiter`).
 
 ## Quick start
 
