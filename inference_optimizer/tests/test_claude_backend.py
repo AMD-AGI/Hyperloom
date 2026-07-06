@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-5 ClaudeBackend + emit_intent MCP server tests.
+"""ClaudeBackend + emit_intent MCP server tests.
 
 All tests use SDK test seams so no real Claude API calls are made and no
 ``ANTHROPIC_API_KEY`` is required.

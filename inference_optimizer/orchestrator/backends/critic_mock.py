@@ -2,7 +2,7 @@
 
 """Mock Critic backend — auto-approves every proposal it sees.
 
-Used in P0 main-path tests. Emits ``review_verdict{verdict="approve"}`` per
+Used in main-path tests. Emits ``review_verdict{verdict="approve"}`` per
 visible proposal, or a heartbeat when none are present.
 """
 
