@@ -16,14 +16,9 @@ These tests encode that contract:
   1. ``ensure_fd_limit`` raises a too-low soft limit up to the target,
   2. ``ensure_fd_limit`` is a no-op when the soft limit is already high,
   3. ``ensure_fd_limit`` clamps to the hard limit and warns when the
-     hard limit itself is below the target (the docker ``--ulimit``
-     requirement can only be satisfied at container-launch time), and
+     hard limit itself is below the target, and
   4. both ``ensure_ray_cluster`` and ``force_restart_local_cluster``
      run the preflight BEFORE ``ray start``.
-
-Until the preflight lands, every test below fails (no ``ensure_fd_limit``
-symbol / no ``resource.setrlimit`` call before ``ray start``), which is
-exactly the on-disk gap described in #433.
 """
 
 from __future__ import annotations

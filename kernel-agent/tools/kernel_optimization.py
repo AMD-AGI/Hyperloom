@@ -3040,11 +3040,6 @@ def invoke_backend(
             # preprocess produced the correct harness + 1.2647x. The prompt is the
             # only interface. (common_test_command is still computed above solely
             # for the rocprof before-snapshot, never handed to GEAK.)
-            is_multigpu = is_multigpu_common
-            # Prompt-only: do NOT copy a test_command/op_test into the workspace (the
-            # block main had here is intentionally dropped — GEAK builds its own harness
-            # from the prompt). Keep main's updated _apply_geak_env_overrides signature
-            # (now takes `candidate`).
             previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(

@@ -66,8 +66,8 @@ _PLATFORM_TO_GFX = {
     "mi355x": "gfx950",
 }
 
-# Stage 1: only triton maps to a fellow by default; compiled backends are
-# deferred (the autogen driver + in-place bench path are triton-validated).
+# Triton/python source maps to the triton fellow; compiled source types are
+# handled by _COMPILED_SOURCE_TYPE_TO_FELLOW below.
 _SOURCE_TYPE_TO_FELLOW = {
     "triton": "triton-fellow",
     "python": "triton-fellow",

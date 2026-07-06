@@ -122,7 +122,7 @@ def test_deterministic_pipeline_failure_cannot_return_partial_hot_kernels():
     with pytest.raises(RuntimeError, match="refusing to return partial hot_kernels"):
         tla._raise_on_failed_deterministic_pipeline(2)
 
-    tla._raise_on_failed_deterministic_pipeline(0)
+    assert tla._raise_on_failed_deterministic_pipeline(0) is None
 
 
 def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):
