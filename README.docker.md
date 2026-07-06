@@ -39,25 +39,38 @@ export SAFE_API_KEY=ak-...
 export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <your-key>"
 ```
 
-### 1 — Get the launcher script
+### 1 — Clone the repo (provides the launcher + gets mounted into the container)
 
-Only the launcher is needed on the host (the repo itself gets mounted or lives
-inside the image). Clone the branch, or just copy `run_hyperloom.sh`:
+Clone the `feat/vl-model-support-dev` branch to your workspace. This checkout is
+both the source of `run_hyperloom.sh` AND what gets bind-mounted into the
+container at `/workspace/Hyperloom`, so clone it somewhere persistent:
 
 ```bash
-git clone -b feat/vl-model-support-dev git@github.com:AMD-AGI/Hyperloom.git
-cd Hyperloom
+mkdir -p ~/workspace
+cd ~/workspace
+git clone -b feat/vl-model-support-dev \
+  git@github.com:AMD-AGI/Hyperloom.git \
+  Hyperloom-feat-vl-model-support
+cd ~/workspace/Hyperloom-feat-vl-model-support
 ```
 
-### 2 — Start it (pulls image if missing, then execs in)
+### 2 — Pull the image and start the container
+
+The launcher pulls the image automatically if it is not already local, but you
+can pre-pull it explicitly to see download progress:
 
 ```bash
+# (optional) pre-pull — ~51 GB, needs amdsiloai pull access
+docker pull amdsiloai/vllm-private:mlperf6.1-q3vl-r72-w4a4-fusemoe-20260620-hyperloom
+
+# start the container and drop into a shell (run from the repo root)
+cd ~/workspace/Hyperloom-feat-vl-model-support
 ./run_hyperloom.sh
 ```
 
-On a fresh machine this will `docker pull` the ~51 GB image
-(`amdsiloai/vllm-private:mlperf6.1-q3vl-r72-w4a4-fusemoe-20260620-hyperloom`),
-start the container, and open a shell. Subsequent runs reuse the local image.
+If you skip the manual pull, `./run_hyperloom.sh` does it for you on first run:
+image present locally → use it; else `docker pull`; else build from the
+Dockerfile. Subsequent runs reuse the local image and just exec back in.
 
 Common flags:
 
@@ -102,11 +115,20 @@ head — both handled by re-running `install.sh`, which is now near-instant sinc
 everything else is already installed:
 
 ```bash
-# You are already inside the container (run_hyperloom.sh dropped you into a shell)
+# You are already inside the container (run_hyperloom.sh dropped you into a shell).
+# The mounted repo lives at /workspace/Hyperloom — cd there first.
+cd /workspace/Hyperloom
+
 # builds the GEAK RAG index (~1 min on GPU) + starts Ray
-bash inference_optimizer/scripts/install.sh
+bash /workspace/Hyperloom/inference_optimizer/scripts/install.sh
+
+# load the generated kernel-agent env into your shell
 source /workspace/hyperloom/runtime/kernel-agent.env.sh
 ```
+
+> Note the two distinct paths: `/workspace/Hyperloom` (capital H) is your mounted
+> source checkout; `/workspace/hyperloom` (lowercase) is `$USER_DATA_PATH`, the
+> writable runtime dir where `install.sh` writes `runtime/kernel-agent.env.sh`.
 
 > The CLI preflight also auto-builds the index and starts Ray on first
 > `inference_optimizer optimize`, so this step is optional if you go straight
@@ -119,6 +141,7 @@ source /workspace/hyperloom/runtime/kernel-agent.env.sh
 Inside the container shell:
 
 ```bash
+cd /workspace/Hyperloom
 source /workspace/hyperloom/runtime/kernel-agent.env.sh
 
 MODEL=Qwen/Qwen2-VL-7B-Instruct \
