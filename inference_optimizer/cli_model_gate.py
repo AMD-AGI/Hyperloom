@@ -1734,6 +1734,23 @@ def _preflight_unsupported_model_arch(
         bool: ``True`` when the model is vision-only (caller should exit),
             ``False`` for plain text or coercible-with-fallback models.
     """
+    # Scriptable diffusion frameworks (xDiT) are server-less image workloads,
+    # not decoder-only causal LMs. Their root config.json legitimately has no
+    # ``architectures``/``model_type`` (those live in per-component subfolders),
+    # so this "must be a text-generation model" gate is a false positive for
+    # them. Skip it for scriptable frameworks; serving frameworks (sglang/vllm/
+    # atom) — and any unknown/empty framework, which falls back to the serving
+    # default — still run the full gate unchanged.
+    framework = getattr(args, "framework", "") or ""
+    try:
+        from . import framework_registry as _fr
+
+        is_scriptable = _fr.is_scriptable(framework)
+    except Exception:  # noqa: BLE001 — registry import must never block the gate
+        is_scriptable = str(framework).strip().lower() == "xdit"
+    if is_scriptable:
+        return False
+
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
     if hit is None:
