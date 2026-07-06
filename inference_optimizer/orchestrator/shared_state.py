@@ -1160,6 +1160,63 @@ class SharedState:
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
             log.debug("current_setting.sh render failed", exc_info=True)
+        # Live status mirror: reflect the just-persisted state.json snapshot into
+        # Langfuse so external consumers get structured, real-time status
+        # (phase / stop_reason / gain / streak / lifecycle) without waiting for
+        # the session-end flush. Runs only after the atomic replace succeeded;
+        # the emitter throttles (on-change or slow refresh) and swallows any
+        # failure, so a Langfuse hiccup never blocks or slows the save path.
+        try:
+            from .trace.langfuse_emitter import record_status as _lf_record_status
+
+            _lf_record_status(session_dir, self._langfuse_status_summary())
+        except Exception:  # noqa: BLE001 — status mirror must never block save
+            log.debug("langfuse status mirror failed", exc_info=True)
+
+    def _langfuse_status_summary(self) -> dict[str, Any]:
+        """Flatten the state into an OTEL-friendly scalar status snapshot.
+
+        Only top-level scalars (str/bool/int/float) are emitted so each key
+        lands as a directly-filterable Langfuse trace-metadata attribute
+        (nested values would be JSON-stringified). Float gains/throughput are
+        rounded so tiny per-tick deltas don't defeat the emitter's on-change
+        throttle. Best-effort: any field access is defensive.
+
+        Returns:
+            dict[str, Any]: The flat scalar status summary to mirror.
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        last = self.lifecycle[-1] if self.lifecycle else {}
+        summary: dict[str, Any] = {
+            "phase": self.phase or "",
+            "stop_reason": self.stop_reason or "",
+            "closing_phase": bool(self.closing_phase),
+            "degraded_mode": bool(self.degraded_mode),
+            "cumulative_gain": round(float(self.cumulative_gain or 0.0), 2),
+            "cumulative_gain_validated": round(
+                float(self.cumulative_gain_validated or 0.0), 2,
+            ),
+            "baseline_failure_streak": int(self.baseline_failure_streak or 0),
+            "macro_cycle": int(self.macro_cycle or 0),
+            "session_id": self.session_id or "",
+            "model_name": self.model_name or "",
+            "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
+        }
+        tput = cb.get("tput") if isinstance(cb, dict) else None
+        if isinstance(tput, (int, float)) and not isinstance(tput, bool):
+            summary["current_best_tput"] = round(float(tput), 1)
+        if isinstance(last, dict):
+            if last.get("seq") is not None:
+                summary["last_seq"] = last.get("seq")
+            if last.get("status"):
+                summary["last_lifecycle_status"] = str(last.get("status"))
+            if last.get("phase"):
+                summary["last_lifecycle_phase"] = str(last.get("phase"))
+        return {
+            k: v
+            for k, v in summary.items()
+            if isinstance(v, (str, bool, int, float))
+        }
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
