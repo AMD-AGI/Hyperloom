@@ -307,7 +307,7 @@ def test_trace_shape_entries_contract_format():
     # multi-operand <br>-joined "(dims) dtype", 1-D keeps trailing comma,
     # scalar/empty operand dropped, call_count stamped.
     out = report._trace_shape_entries([[4, 1024], [1024], []], ["c10::BFloat16", "float", "int"], 5)
-    assert out == [{"call_num": 5, "shape": "(4,1024) bf16<br>(1024,) f32"}]
+    assert out == [{"call_num": 5, "shape": "(4,1024) bf16<br>(1024,) fp32"}]
     # unmapped dtype -> bare shape (no suffix).
     assert report._trace_shape_entries([[8, 8]], ["weird"], 1) == [{"call_num": 1, "shape": "(8,8)"}]
     # no renderable operand -> empty (gate will reject as empty_kernel_shape).

@@ -74,10 +74,14 @@ def _build_suggestion(category: str, bound_type: str) -> str:
 # (e.g. ``(15360,2048) bf16``). Independent reimplementation of the TraceLens map
 # (this module never imports TraceLens); unmapped/empty types emit a bare shape.
 _DTYPE_SUFFIX: dict[str, str] = {
+    # Suffixes MUST match the shared harness dtype_map (bf16/fp16/fp32) + the
+    # roofline peak table; a compact "f16"/"f32" makes the harness emit an invalid
+    # ``torch.f16`` (crashes at runtime, e.g. under rocprof/GEAK). See
+    # test_bypass_downstream_contract::...valid_torch_dtype_in_harness.
     "c10::bfloat16": "bf16", "bfloat16": "bf16",
-    "c10::half": "f16", "half": "f16", "float16": "f16",
-    "float": "f32", "float32": "f32",
-    "double": "f64", "float64": "f64",
+    "c10::half": "fp16", "half": "fp16", "float16": "fp16",
+    "float": "fp32", "float32": "fp32",
+    "double": "fp64", "float64": "fp64",
     "int": "i32", "int32": "i32",
     "long": "i64", "int64": "i64",
     "short": "i16", "int16": "i16",

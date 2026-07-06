@@ -70,6 +70,25 @@ def test_bypass_candidate_feeds_real_shapes_to_geak_harness():
     assert "4096" in built[0] or "2560" in built[0]
 
 
+def test_bypass_fp16_shapes_build_valid_torch_dtype_in_harness():
+    # Regression: bypass emitted compact "f16"/"f32" dtype suffixes, which the
+    # shared harness dtype_map does not recognize -> it fell back to torch.f16 /
+    # torch.f32 (invalid; AttributeError at harness RUNTIME, surfaced only by the
+    # real rocprof roofline enrichment / GEAK execution). Suffixes must match the
+    # harness dtype_map (bf16/fp16/fp32) so the generated config is valid torch.
+    kernels = [{
+        "name": "triton_silu", "op_name": "aten::silu",
+        "gpu_time_us": 100.0, "count": 4,
+        "op_shapes": [[128, 2560], [128, 2560]], "op_dtypes": ["c10::Half", "c10::Half"],
+    }]
+    cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")
+    cand = cands["hot_kernels"][0]
+    joined = "\n".join(hg._build_configs(cand))
+    assert "torch.float16" in joined  # fp16 suffix -> harness dtype_map -> torch.float16
+    assert "torch.f16" not in joined  # the bug: invalid torch attribute
+    assert "torch.f32" not in joined
+
+
 def test_bypass_candidate_passes_orchestrator_gate(tmp_path: Path):
     # The kernel-opt gate accepts a bypass candidate with contract shapes,
     # trusted provenance, and an existing source. (Source resolution itself is
