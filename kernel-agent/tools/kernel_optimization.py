@@ -3378,6 +3378,32 @@ def _count_auth_failures(text: str) -> int:
     return total
 
 
+def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str | None:
+    """Read a text file, returning ``None`` when missing or unreadable."""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        if errors is None:
+            return p.read_text(encoding="utf-8")
+        return p.read_text(encoding="utf-8", errors=errors)
+    except Exception:
+        return None
+
+
+def _read_json_file(path: str | Path) -> Any | None:
+    """Read a JSON file, returning ``None`` when missing or unparseable."""
+    text = _read_text_file(path, errors=None)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     """Scan an OOB ``optimization_report.md`` for a speedup figure.
 
@@ -3390,14 +3416,8 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
         The estimated speedup, or ``None`` when the report is missing or no
         plausible figure is found.
     """
-    if not report_path:
-        return None
-    p = Path(report_path)
-    if not p.is_file():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    text = _read_text_file(report_path)
+    if text is None:
         return None
     found: list[float] = []
     for pat in _SPEEDUP_PATTERNS:
@@ -3427,16 +3447,13 @@ def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
         float | None: The reported ``best_speedup`` when positive, else None
             (also None when the file is missing or unparseable).
     """
-    if not final_report_path:
-        return None
-    p = Path(final_report_path)
-    if not p.is_file():
+    d = _read_json_file(final_report_path)
+    if not isinstance(d, dict):
         return None
     try:
-        d = json.loads(p.read_text(encoding="utf-8"))
         v = float(d.get("best_speedup") or 0.0)
         return v if v > 0 else None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -3453,14 +3470,8 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
         bool | None: True/False when a correctness signal is found, or None
             when the file is missing/unreadable or no signal is present.
     """
-    if not report_path:
-        return None
-    p = Path(report_path)
-    if not p.is_file():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    text = _read_text_file(report_path)
+    if text is None:
         return None
     lower = text.lower()
     marker = re.search(r"(?im)^\s*\[correctness\]\s*(pass|passed|fail|failed)\b", text)
@@ -3570,14 +3581,8 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
         bool | None: False if any correctness key is falsy, True if only
             truthy ones are found, or None when nothing relevant is present.
     """
-    if not final_report_path:
-        return None
-    p = Path(final_report_path)
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    data = _read_json_file(final_report_path)
+    if data is None:
         return None
 
     found: list[bool] = []
