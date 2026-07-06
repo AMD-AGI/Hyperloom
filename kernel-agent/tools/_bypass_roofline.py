@@ -203,13 +203,23 @@ def compute_roofline(
         "roofline_source": "analytical",
     }
     # Per-call achieved throughput from the real measured time -> efficiency.
+    # ``roofline_estimate_capped`` flags when a util exceeds 100% (the FLOP/byte
+    # estimate over-shot, e.g. the Convolution stride-1 approximation) and was
+    # clamped -- so a capped 100% is not mistaken for a real "perfectly efficient"
+    # measurement.
     calls = max(int(call_count or 1), 1)
     per_call_s = (float(gpu_time_us) / calls) / 1e6 if gpu_time_us else 0.0
     if per_call_s > 0 and peak_flops > 0:
-        out["efficiency_percent"] = round(min((flops / per_call_s) / peak_flops * 100.0, 100.0), 3)
+        raw_eff = (flops / per_call_s) / peak_flops * 100.0
+        out["efficiency_percent"] = round(min(raw_eff, 100.0), 3)
         out["compute_utilization_pct"] = out["efficiency_percent"]
+        if raw_eff > 100.0:
+            out["roofline_estimate_capped"] = True
     if per_call_s > 0 and peak_bw > 0:
-        out["bandwidth_utilization_pct"] = round(min((nbytes / per_call_s) / peak_bw * 100.0, 100.0), 3)
+        raw_bw = (nbytes / per_call_s) / peak_bw * 100.0
+        out["bandwidth_utilization_pct"] = round(min(raw_bw, 100.0), 3)
+        if raw_bw > 100.0:
+            out["roofline_estimate_capped"] = True
     return out
 
 

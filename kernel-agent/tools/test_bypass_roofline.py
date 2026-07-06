@@ -79,6 +79,35 @@ def test_unestimable_returns_none():
     assert compute_roofline(category="GEMM", shape_str="(128,) bf16", gpu_time_us=10.0) is None  # only 1-D
 
 
+def test_efficiency_capped_flag_when_estimate_overshoots():
+    # Implausibly tiny time -> estimated achieved FLOPS >> peak -> clamped to 100%
+    # AND flagged, so a capped 100% isn't mistaken for a real measurement.
+    r = compute_roofline(
+        category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
+        gpu_time_us=0.001, call_count=1, gpu_type="mi300x",
+    )
+    assert r["efficiency_percent"] == 100.0
+    assert r.get("roofline_estimate_capped") is True
+
+
+def test_efficiency_not_capped_or_flagged_in_normal_case():
+    r = compute_roofline(
+        category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
+        gpu_time_us=500.0, call_count=1, gpu_type="mi300x",
+    )
+    assert r["efficiency_percent"] < 100.0
+    assert "roofline_estimate_capped" not in r
+
+
+def test_sdpa_flops_match_attention_formula():
+    # Q/K/V (B,H,S,D): attention flops = 4*B*H*S*S*D; bytes = 3*B*H*S*D*dtype_bytes.
+    b, h, s, d = 2, 8, 1024, 64
+    shp = f"({b},{h},{s},{d}) bf16<br>({b},{h},{s},{d}) bf16<br>({b},{h},{s},{d}) bf16"
+    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
+    expected_ai = round((4.0 * b * h * s * s * d) / (2.0 * 3 * b * h * s * d), 4)
+    assert r["arithmetic_intensity"] == expected_ai
+
+
 def test_gpu_and_dtype_change_peak():
     # fp8 has ~2x the bf16 peak on MI300X -> same GEMM/time yields lower efficiency%.
     common = dict(category="GEMM", shape_str="(4096,4096) X<br>(4096,4096) X", gpu_time_us=500.0, call_count=1, gpu_type="mi300x")

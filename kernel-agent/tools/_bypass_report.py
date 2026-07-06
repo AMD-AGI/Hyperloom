@@ -994,11 +994,24 @@ def build_fusion(analyze_out: dict[str, Any]) -> dict[str, Any]:
         The ``kernel_sequence`` payload dict.
     """
     launches = analyze_out.get("kernel_launches") or []
+    # Memoize classification by (device name, op name): a trace has few distinct
+    # kernels but can have very many launches (decode loops -> 100k+), so per-launch
+    # classify_kernel (regex) would be O(launches x rules); cache -> O(distinct).
+    _cat_cache: dict[tuple[str, str], str] = {}
+
+    def _category(name: str, op_name: str) -> str:
+        key = (name, op_name)
+        cat = _cat_cache.get(key)
+        if cat is None:
+            cat = classify_kernel(name, op_name=op_name).category
+            _cat_cache[key] = cat
+        return cat
+
     categorized = [
         {
             "name": lc.get("name", ""),
             "op_name": lc.get("op_name", ""),
-            "category": classify_kernel(lc.get("name", "") or "", op_name=lc.get("op_name", "") or "").category,
+            "category": _category(lc.get("name", "") or "", lc.get("op_name", "") or ""),
             "ts": lc.get("ts", 0.0),
             "dur": lc.get("dur", 0.0),
         }

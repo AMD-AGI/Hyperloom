@@ -79,6 +79,21 @@ def test_analyze_fusion_payload():
     assert out["fusable_clusters"][0]["launch_count"] == 3
 
 
+def test_fusable_time_and_count_cover_all_clusters_not_just_top_k():
+    # 3 fusable clusters (2 Elementwise each), separated by GEMM. With top_k=1 the
+    # LIST is capped to 1, but the total count/time must reflect ALL 3 clusters.
+    seq = []
+    ts = 0.0
+    for i in range(3):
+        seq.append({"name": f"mm{i}", "category": "GEMM", "ts": ts, "dur": 5.0}); ts += 5
+        seq.append({"name": f"a{i}", "category": "Elementwise", "ts": ts, "dur": 1.0 + i}); ts += 1 + i
+        seq.append({"name": f"b{i}", "category": "Elementwise", "ts": ts, "dur": 1.0 + i}); ts += 1 + i
+    out = analyze_fusion(seq, top_k_clusters=1)
+    assert out["fusable_cluster_count"] == 3          # total, not truncated
+    assert len(out["fusable_clusters"]) == 1          # list capped to top_k
+    assert out["fusable_time_us"] == round(sum((1.0 + i) * 2 for i in range(3)), 3)  # 2+4+6=12
+
+
 def test_empty_and_all_nonfusable():
     assert analyze_fusion([])["fusable_cluster_count"] == 0
     only_gemm = [{"name": "mm", "category": "GEMM", "ts": 0.0, "dur": 5.0}]

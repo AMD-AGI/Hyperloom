@@ -111,15 +111,20 @@ def analyze_fusion(launches: list[dict[str, Any]], *, top_k_clusters: int = 20) 
 
     Returns:
         ``{launch_count, fusable_clusters, fusable_cluster_count,
-        fusable_time_us, adjacent_pairs}``.
+        fusable_time_us, adjacent_pairs}``. ``fusable_cluster_count`` /
+        ``fusable_time_us`` are totals over ALL clusters; ``fusable_clusters`` is
+        capped to the ``top_k_clusters`` largest (list-size bound only).
     """
-    clusters = fusable_clusters(launches, top_k=top_k_clusters)
-    fusable_time = sum(c["aggregate_dur_us"] for c in clusters)
+    # Count/time over ALL fusable clusters (totals must not be truncated); the
+    # returned cluster LIST is separately capped to top_k for payload size.
+    all_clusters = fusable_clusters(launches)
+    fusable_time = sum(c["aggregate_dur_us"] for c in all_clusters)
+    listed = all_clusters[:top_k_clusters] if top_k_clusters and top_k_clusters > 0 else all_clusters
     return {
         "launch_count": len(launches),
-        "fusable_cluster_count": len(clusters),
+        "fusable_cluster_count": len(all_clusters),
         "fusable_time_us": round(fusable_time, 3),
-        "fusable_clusters": clusters,
+        "fusable_clusters": listed,
         "adjacent_pairs": adjacent_pairs(launches),
     }
 
