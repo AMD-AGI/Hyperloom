@@ -3669,6 +3669,26 @@ def recover_other_bucket_candidates(
     return out
 
 
+def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] | None) -> None:
+    """Stamp routing, backend, and category metadata onto a finalized candidate."""
+    reusable, skip_reason = classify_patchability(item)
+    item["reusable_native_kernel"] = reusable
+    item["skip_reason"] = skip_reason
+    item["benchmark_files"] = find_benchmark_files(
+        item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
+    )
+    item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
+    item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
+    item["recommended_backends"] = recommend_backends(item)
+    item["optimization_notes"] = build_notes(item)
+    if op_cat_map and not str(item.get("tracelens_category") or "").strip():
+        csv_cat = op_cat_map.get(str(item.get("name") or ""))
+        if csv_cat:
+            item["tracelens_category"] = csv_cat
+    item["kernel_category"] = derive_kernel_category(item)
+    item.setdefault("source_path", item.get("source_file", ""))
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]],
     *,
@@ -3750,22 +3770,7 @@ def _finalize_candidates(
             item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
             item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
             item["runtime_generated_kernel"] = False
-            reusable, skip_reason = classify_patchability(item)
-            item["reusable_native_kernel"] = reusable
-            item["skip_reason"] = skip_reason
-            item["benchmark_files"] = find_benchmark_files(
-                item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
-            )
-            item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
-            item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
-            item["recommended_backends"] = recommend_backends(item)
-            item["optimization_notes"] = build_notes(item)
-            if op_cat_map and not str(item.get("tracelens_category") or "").strip():
-                csv_cat = op_cat_map.get(str(item.get("name") or ""))
-                if csv_cat:
-                    item["tracelens_category"] = csv_cat
-            item["kernel_category"] = derive_kernel_category(item)
-            item.setdefault("source_path", item.get("source_file", ""))
+            _stamp_candidate_metadata(item, op_cat_map)
             continue
         if res is not None and res.status in {"non_rewritable", "no_kernel"}:
             # Curated verdict: not rewritable. Keep the .py launcher as context but
@@ -3812,26 +3817,7 @@ def _finalize_candidates(
             item["source_type"] = "vendor_binary"
             item["vendor_dispatch_wrapper"] = True
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
-        # One classify_patchability call yields both the routing bool and the audit skip_reason.
-        reusable, skip_reason = classify_patchability(item)
-        item["reusable_native_kernel"] = reusable
-        item["skip_reason"] = skip_reason
-        item["benchmark_files"] = find_benchmark_files(
-            item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
-        )
-        item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
-        # Collective kernels need real multi-GPU launches; default to 2, compute kernels stay at 1.
-        item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
-        item["recommended_backends"] = recommend_backends(item)
-        item["optimization_notes"] = build_notes(item)
-        # CSV category only fills in when tracelens_category wasn't already set (analysis.md path).
-        if op_cat_map and not str(item.get("tracelens_category") or "").strip():
-            csv_cat = op_cat_map.get(str(item.get("name") or ""))
-            if csv_cat:
-                item["tracelens_category"] = csv_cat
-        # Stable kernel_category for GEAK dispatch + source_path mirror for consumers.
-        item["kernel_category"] = derive_kernel_category(item)
-        item.setdefault("source_path", item.get("source_file", ""))
+        _stamp_candidate_metadata(item, op_cat_map)
     return top
 
 
