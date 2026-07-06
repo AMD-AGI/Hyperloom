@@ -43,8 +43,11 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/QUICKSTART_LOCAL_MODE.md (SGLang v0.5.12,
 # ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
 # v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
-# is the nearest published ROCm 7.2 wheel.
+# is the nearest published ROCm 7.2 wheel. AITER_REF pins ROCm/aiter to a
+# released tag so source builds are reproducible (override to track another ref).
 SGLANG_REF="${SGLANG_REF:-v0.5.12}"
+AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
+AITER_REF="${AITER_REF:-v0.1.16.post3}"
 VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
@@ -94,7 +97,7 @@ OPENAI_BASE_URL+OPENAI_API_KEY) is accepted, matching cli.py credential rules.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR, HYPERLOOM_DEPS_ROOT / _OPEN_SOURCE_ROOT,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
-SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, AITER_ROOT, VLLM_VERSION,
+SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, AITER_REPO, AITER_REF, AITER_ROOT, VLLM_VERSION,
 VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX, VLLM_VENV_ROOT.
 EOF
 }
@@ -377,10 +380,11 @@ PY
   log "Phase 1: installing SGLang ROCm framework layer"
   log "framework python: ${py}"
   log "AITER_ROOT=${aiter_root}"
+  log "AITER_REF=${AITER_REF}"
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
     _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,rocm720])"
-    _py_has "$py" aiter && log "aiter import OK" || warn "aiter missing (check-only; would clone/install ROCm/aiter)"
+    _py_has "$py" aiter && log "aiter import OK" || warn "aiter missing (check-only; would clone/install ${AITER_REPO}@${AITER_REF})"
     _py_has "$py" sgl_kernel && log "sgl_kernel import OK" || warn "sgl_kernel missing (check-only; installed by amd-sglang)"
     return 0
   fi
@@ -391,7 +395,7 @@ PY
     else
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
     fi
-    log "would clone/update ROCm/aiter at ${aiter_root} and install it with editable_mode=compat"
+    log "would clone/update ${AITER_REPO}@${AITER_REF} at ${aiter_root} and install it with editable_mode=compat"
     return 0
   fi
 
@@ -409,8 +413,10 @@ PY
   if ! _py_has "$py" aiter; then
     mkdir -p "$(dirname "$aiter_root")"
     if [ ! -d "${aiter_root}/.git" ]; then
-      git clone --recursive https://github.com/ROCm/aiter.git "$aiter_root"
+      git clone --recursive --branch "$AITER_REF" "$AITER_REPO" "$aiter_root"
     else
+      git -C "$aiter_root" fetch --all --tags --prune
+      git -C "$aiter_root" checkout "$AITER_REF"
       git -C "$aiter_root" submodule sync
       git -C "$aiter_root" submodule update --init --recursive
     fi
@@ -466,7 +472,7 @@ PY
 
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 install_vllm_framework() {
-  local py base_py py_mm constraint_file package_spec
+  local py base_py py_mm constraint_file package_spec rocm_torch_ver
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
   py="$base_py"
   if [ "$FRAMEWORK_ENV" = "isolated" ]; then
@@ -515,6 +521,7 @@ PY
     fi
     if [ "$FRAMEWORK_ENV" = "isolated" ]; then
       log "would create/update isolated vLLM venv at ${VLLM_VENV_ROOT}"
+      log "would pin ROCm torch from ${VLLM_ROCM_INDEX}/torch/ before installing vLLM"
       log "would run: ${py} -m pip install --upgrade --extra-index-url ${VLLM_ROCM_INDEX} ${package_spec}"
     else
       log "would write ROCm torch/triton constraints"
@@ -531,6 +538,31 @@ PY
       "$base_py" -m venv "$VLLM_VENV_ROOT"
     fi
     "$py" -m pip install --upgrade pip wheel setuptools
+    # Pin the ROCm torch first so the vLLM install below cannot fall back to a
+    # CUDA torch from PyPI. The snapshot torch carries a local version tag (e.g.
+    # +git<sha>) that PyPI lacks, so an exact pin forces the ROCm build; vLLM then
+    # reuses the already-satisfied torch.
+    rocm_torch_ver="$("$py" - "$VLLM_ROCM_INDEX" <<'PY'
+import re, sys, urllib.request
+
+base = sys.argv[1].rstrip("/") + "/torch/"
+try:
+    html = urllib.request.urlopen(base, timeout=30).read().decode()
+except Exception:
+    raise SystemExit(0)
+# Match the plain "+local" form (e.g. 2.10.0+git8514f05); URL-encoded %2B
+# anchors are skipped so the pinned spec stays pip-usable.
+matches = re.findall(r"torch-([0-9][0-9A-Za-z.]*\+[0-9A-Za-z.]+)-cp", html)
+print(matches[-1] if matches else "")
+PY
+)"
+    if [ -n "$rocm_torch_ver" ]; then
+      log "pinning isolated ROCm torch==${rocm_torch_ver}"
+      "$py" -m pip install --upgrade --extra-index-url "$VLLM_ROCM_INDEX" "torch==${rocm_torch_ver}" \
+        || die "failed to install ROCm torch==${rocm_torch_ver} into ${VLLM_VENV_ROOT}"
+    else
+      warn "could not resolve a ROCm torch version from ${VLLM_ROCM_INDEX}/torch/; vLLM install will rely on its own torch pin"
+    fi
     if ! "$py" -m pip install --upgrade \
       --extra-index-url "$VLLM_ROCM_INDEX" \
       "$package_spec"; then
