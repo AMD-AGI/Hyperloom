@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cover the P2.b fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
+"""Cover the retry fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
 
 Tests ``_discover_next_framework_batch`` (bumps the failure counter, resets
 on success) and ``_pump_framework_agent_phase`` (flips done after the retry limit
@@ -188,7 +188,7 @@ def test_discover_timeout_default_used_when_override_zero(
     assert _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC == 180.0
 
 
-# P2.e — enqueue failure records progress row.
+# Enqueue failure records progress row.
 class _TasksStub:
     """Mimics ``Coordinator.tasks.create_or_return_existing``; raises to simulate an enqueue failure."""
 
@@ -208,7 +208,7 @@ async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
-    """Regression for P2.e: a registry failure records an ``enqueue_failed`` progress row so the next tick skips the candidate."""
+    """Regression: a registry failure records an ``enqueue_failed`` progress row so the next tick skips the candidate."""
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
     cand = {
