@@ -16,6 +16,8 @@ from typing import Optional
 
 import httpx
 
+from hyperloom.common.env import env_bool, env_int
+
 log = logging.getLogger(__name__)
 
 # Primary data source: cluster DNS first, then a local dev port-forward.
@@ -448,11 +450,10 @@ def _env_bool(name: str, default: bool) -> bool:
         ``True`` when the variable is set to one of ``1``, ``true``, ``yes``,
         or ``on`` (case-insensitive); ``False`` for any other set value; and
         ``default`` when the variable is unset.
+
+    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_bool`.
     """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -466,11 +467,7 @@ def _env_int(name: str, default: int) -> int:
     Returns:
         The parsed integer, or ``default`` when the variable is missing or
         cannot be parsed.
+
+    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_int`.
     """
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+    return env_int(name, default)

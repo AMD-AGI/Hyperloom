@@ -17,6 +17,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 
+from hyperloom.common.env import env_bool, env_int
+
 ProviderName = Literal["disabled", "tavily", "serper", "brave"]
 KNOWN_PROVIDERS: frozenset[str] = frozenset({"disabled", "tavily", "serper", "brave"})
 # Providers with a working backend in ``runtime.web_tools`` today. ``brave``
@@ -48,11 +50,10 @@ def _env_bool(name: str, default: bool) -> bool:
     Returns:
         bool: True when the value is one of ``1/true/yes/on`` (case-
         insensitive); otherwise False or ``default`` when unset.
+
+    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_bool`.
     """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -64,14 +65,10 @@ def _env_int(name: str, default: int) -> int:
 
     Returns:
         int: The parsed integer, or ``default``.
+
+    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_int`.
     """
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+    return env_int(name, default)
 
 
 def _parse_csv(raw: str) -> tuple[str, ...]:
