@@ -1498,13 +1498,9 @@ def maybe_generate_harness(
                 repo_root = str(parent)
                 break
 
-    filtered_imports: list[str] = []
-    for imp in imports:
-        filtered_imports.append(imp)
-
     harness_code = HARNESS_TEMPLATE.format(
         repo_root=repo_root,
-        imports_section="\n".join(filtered_imports),
+        imports_section="\n".join(imports),
         toplevel_stmts="\n".join(toplevel),
         function_defs="\n\n".join(func_defs_to_copy),
         all_configs=all_configs,
