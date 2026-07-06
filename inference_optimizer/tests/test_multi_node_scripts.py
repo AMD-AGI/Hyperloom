@@ -1186,6 +1186,9 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
     """create-dynamo must NOT bake *_API_KEY / SAFE_API_KEY / *_BASE_URL into the
     new inference pod's container env; only operator --extra-env is forwarded."""
     from inference_optimizer.multi_node import cli as mn_cli
+    # tree-reform.MD P2.2: cmd_create_dynamo (and its ssh_client/workload_spec
+    # usage) moved to the ``commands.dynamo`` sibling; patch it there.
+    from inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
     # Credentials present in the controller env (would previously fan out).
     for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OOB_API_KEY", "LLM_API_KEY"):
@@ -1193,7 +1196,7 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")
 
     monkeypatch.setattr(
-        mn_cli.ssh_client, "generate_session_keypair", lambda d: (Path("/tmp/k"), "pubkey")
+        mn_dynamo.ssh_client, "generate_session_keypair", lambda d: (Path("/tmp/k"), "pubkey")
     )
 
     captured: dict = {}
@@ -1205,7 +1208,7 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
         captured["extra_env"] = kwargs.get("extra_env")
         raise _Sentinel()
 
-    monkeypatch.setattr(mn_cli.workload_spec, "build_dynamo_workload_body", _capture)
+    monkeypatch.setattr(mn_dynamo.workload_spec, "build_dynamo_workload_body", _capture)
 
     args = argparse.Namespace(
         workspace="ws",

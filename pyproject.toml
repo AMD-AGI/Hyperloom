@@ -355,6 +355,12 @@ ignore = ["E501", "E741"]
 # helpers/constants they close over (cycle-safe ordering), so the mixin import
 # sits below the top import block.
 "inference_optimizer/orchestrator/shared_state.py" = ["E402"]
+# tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,dynamo}.py
+# after the base helpers/constants they import back are already defined
+# (cycle-safe ordering), so the import sits below the top import block.
+"inference_optimizer/multi_node/cli.py" = ["E402"]
+"inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
+"inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
 "inference_optimizer/orchestrator/specialist_runner.py" = ["E402"]
 "inference_optimizer/orchestrator/roofline_ceiling.py" = ["E402"]
 "inference_optimizer/orchestrator/system_prompts/specialist_prompt_builder.py" = ["E402"]
