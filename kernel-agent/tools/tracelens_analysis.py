@@ -4162,6 +4162,18 @@ def _run_deterministic_tracelens_steps(
     return rc
 
 
+def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
+    """Read all rows from ``perf_report_csvs/gpu_timeline.csv``, empty if absent."""
+    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
+    if not csv_path.exists():
+        return []
+    try:
+        with open(csv_path, encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return []
+
+
 def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
     """Read GPU idle percentage directly from gpu_timeline.csv.
 
@@ -4173,17 +4185,11 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
         The GPU idle percentage, or ``None`` when the CSV is absent or has no
         idle-time row.
     """
-    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
-    if not csv_path.exists():
-        return None
     try:
-        with open(csv_path, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                row_type = (row.get("type") or "").strip().lower()
-                if row_type == "idle_time":
-                    return float(row.get("percent", 0))
-    except (OSError, csv.Error, ValueError):
+        for row in _load_gpu_timeline_rows(output_dir):
+            if (row.get("type") or "").strip().lower() == "idle_time":
+                return float(row.get("percent", 0))
+    except ValueError:
         pass
     return None
 
@@ -4199,15 +4205,11 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
         The trace total time in microseconds, or ``None`` when the CSV is
         absent or has no total-time row.
     """
-    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
-    if not csv_path.exists():
-        return None
     try:
-        with open(csv_path, encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                if (row.get("type") or "").strip().lower() == "total_time":
-                    return float(row.get("time ms", 0)) * 1000.0
-    except (OSError, csv.Error, ValueError):
+        for row in _load_gpu_timeline_rows(output_dir):
+            if (row.get("type") or "").strip().lower() == "total_time":
+                return float(row.get("time ms", 0)) * 1000.0
+    except ValueError:
         pass
     return None
 
@@ -4567,14 +4569,7 @@ def generate_minimal_analysis_md(
         except (TypeError, ValueError):
             return default
 
-    gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
-    gpu_rows: list[dict[str, str]] = []
-    if gpu_timeline_path.exists():
-        try:
-            with open(gpu_timeline_path, encoding="utf-8") as fh:
-                gpu_rows = list(csv.DictReader(fh))
-        except (OSError, csv.Error):
-            pass
+    gpu_rows = _load_gpu_timeline_rows(output_dir)
 
     lines.append("# TraceLens Performance Analysis Report")
     lines.append("")
