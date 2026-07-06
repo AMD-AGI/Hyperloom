@@ -2,7 +2,7 @@
 
 """Roofline comparison renderer — one block per discovered ``final.json``.
 
-Silently skipped when ``roofline`` is absent/empty (pre-P3-roofline JSONs).
+Silently skipped when ``roofline`` is absent/empty (older roofline JSONs).
 """
 
 from __future__ import annotations

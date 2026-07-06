@@ -2,7 +2,7 @@
 
 """Mock Kernel backend — auto-responds to every REQUEST it sees.
 
-Used in P0 main-path tests. Emits one ``response`` per visible request, or
+Used in main-path tests. Emits one ``response`` per visible request, or
 a heartbeat when none are present.
 """
 
