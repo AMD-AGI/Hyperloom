@@ -57,6 +57,16 @@ def kernel_row_matches(row: dict[str, Any], target_kernel: str) -> bool:
     return any(name == target for name in names)
 
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce int/float/numeric-str to float; None/empty/malformed -> default."""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 _COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
 
 
@@ -100,6 +110,7 @@ __all__ = [
     "atomic_write_json",
     "kernel_row_matches",
     "read_last_lines",
+    "safe_float",
     "source_text_looks_complete",
     "utc_now",
 ]

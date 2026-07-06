@@ -26,6 +26,7 @@ from _io_utils import (  # noqa: E402
     atomic_write_json,
     kernel_row_matches,
     read_last_lines,
+    safe_float,
     source_text_looks_complete,
     utc_now,
 )
@@ -1266,29 +1267,8 @@ def _build_priority_block(candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Mirror of ``tracelens_skill_runner._safe_float`` — coerce
-    ``int / float / numeric str`` to ``float``; everything else (None,
-    empty string, malformed) → ``default``. Used by hypothesis-block
-    helpers so per-row impact numbers from ``all_pitem_prose`` survive
-    JSON round-trips that may have already converted them to strings.
-
-    Args:
-        value (Any): Value to coerce to ``float``.
-        default (float): Fallback returned when ``value`` is None/empty or
-            cannot be parsed.
-
-    Returns:
-        float: The parsed float, or ``default`` on any failure.
-    """
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
+# Shared numeric coercion (see _io_utils.safe_float).
+_safe_float = safe_float
 def _format_impact_range(
     low_ms: float,
     low_e2e: float,
