@@ -305,7 +305,7 @@ async def test_warm_replay_enqueues_with_warm_best_config_args_envs(tmp_path):
 
 @pytest.mark.asyncio
 async def test_warm_replay_enqueues_with_v2_arbor_top_level_best_config(tmp_path):
-    """Regression (P0): warm-replay must read best_config from the v2 arbor TOP LEVEL, else it skips with best_config_empty."""
+    """Regression: warm-replay must read best_config from the v2 arbor TOP LEVEL, else it skips with best_config_empty."""
     recipe = _warm_recipe_v2_arbor(
         extra_sglang_args="--attention-backend AITER",
         extra_envs={"VLLM_ROCM_USE_AITER": "1"},
@@ -313,7 +313,7 @@ async def test_warm_replay_enqueues_with_v2_arbor_top_level_best_config(tmp_path
     )
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
-    assert task is not None, "v2 arbor top-level best_config not read (P0)"
+    assert task is not None, "v2 arbor top-level best_config not read"
     params = coord.tasks.calls[0]["params"]
     assert params["extra_sglang_args"] == "--attention-backend AITER"
     assert params["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
@@ -762,7 +762,7 @@ def test_inject_warm_recipe_history_adds_what_failed_rows(tmp_path):
 
 
 def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
-    """Regression (P0-B): the injector must read v2 ``what_failed`` at the TOP LEVEL, else negative-history injection no-ops."""
+    """Regression: the injector must read v2 ``what_failed`` at the TOP LEVEL, else negative-history injection no-ops."""
     recipe = {
         "tier": "exact",
         "confidence": 1.0,
@@ -783,7 +783,7 @@ def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     coord.shared_state.explore_search = {}
     added = coord._inject_warm_recipe_history_into_ledger()
-    assert added == 1, "v2 arbor top-level what_failed not read (P0-B)"
+    assert added == 1, "v2 arbor top-level what_failed not read"
     rejected = coord.shared_state.explore_search["rejected"]
     assert len(rejected) == 1
     assert rejected[0]["source"] == "warm_start_recipe"

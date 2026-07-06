@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P5 decision-framework regression tests.
+"""Decision-framework regression tests.
 
 Covers that ``_handle_request`` for ``run_optimization`` mirrors the
 handler result into ``shared_state.last_kernel_opt``.
