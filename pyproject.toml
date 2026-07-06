@@ -99,7 +99,10 @@ testpaths = [
 ]
 # ``ci`` is on the import path and is now both collected for tests (see
 # ``testpaths``) and measured for coverage (see ``[tool.coverage.run].source``).
-pythonpath = [".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
+# Tree-reform transition (tree-reform.MD P2.0): ``src`` (new ``hyperloom.*``
+# namespace) is added alongside the legacy import roots so both resolve during
+# the migration window (dual-importable). Legacy roots are removed only in P2.7.
+pythonpath = ["src", ".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
