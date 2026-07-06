@@ -1553,3 +1553,34 @@ class KernelPhase(PhaseHandler):
             self._ROOFLINE_WATERMARK_RATIO,
         )
         return True
+
+    def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze).
+
+        Args:
+            kind: The kernel request kind; only ``trace_analyze`` is cacheable.
+            payload: The merged request payload; its ``trace_input`` /
+                ``trace_dir`` must match the cached entry for a hit.
+
+        Returns:
+            A synthesized cached result dict on a cache hit, else ``None``.
+        """
+        if kind != "trace_analyze":
+            return None
+        cached = self.shared_state.last_trace_analyze or {}
+        if not isinstance(cached, dict) or not cached:
+            return None
+        trace_input = payload.get("trace_input") or payload.get("trace_dir")
+        if not trace_input or trace_input != cached.get("trace_input"):
+            return None
+        candidates_path = cached.get("candidates_path")
+        if not candidates_path or not Path(candidates_path).exists():
+            return None
+        return {
+            "status": "ok",
+            "candidates_path": candidates_path,
+            "hot_kernels_top15": cached.get("hot_kernels_top15", []),
+            "reusable_native_kernel_ids": cached.get("reusable_native_kernel_ids", []),
+            "cached_at": cached.get("ts"),
+            "note": "served from shared_state.last_trace_analyze cache",
+        }

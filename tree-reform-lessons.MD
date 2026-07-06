@@ -218,3 +218,17 @@
 **验收**: `ruff check`(9 个新文件 + coordinator.py)全绿;`python -c "import ..."` 全部 10 个 `_phase_*` 模块 + coordinator 冒烟通过;`Coordinator._DELEGATED` 的 256 个方法名逐一 `hasattr` 校验命中其属主协作者类;`Coordinator` 的 20 个 `@property` 与 `_COLLAB_MODULES` 的 20 条映射一一对应;9 个 targeted 测试文件 + 全量非-e2e 门 `8489 passed, 3 skipped, 47 deselected`(较 3b-1 完成时的 8479 净增 10,均来自本次会话之前已完成但未提交的其它 P2.2 步骤的测试增量,与 3b-2 本身无关)。
 
 **给 P2.3(迁 `src/hyperloom/orchestrator/`)的补充前瞻**:相位 handler 落地后,coordinator façade 只剩 `__init__`/`router`/`recorder`/`__getattr__`/`_collaborator`/20 个 `@property`/`stop`/`tick`/`run`/`_reactor_pass` 等核心方法 + 全部常量表,已非常接近 §6.1 设想的"瘦 façade + 装配"形态。迁移到 `orchestrator/loop/coordinator.py` + `orchestrator/phases/*.py` 时,9 个 `_phase_*.py` 文件到 `phases/{machine,prelude,sweep,close,internal,kernel_stack,kernel,explore,framework}.py` 是纯改名(内容和类名不用动),`_DELEGATED`/`_COLLAB_MODULES` 里的模块路径字符串同步改写即可,风险与 3b-1 的 9 个叶子协作者迁移一致(低)。
+
+---
+
+## 9. coordinator.py 3b-3 实战(已完成,门绿 8498)= 3b-2 收尾:补漏 + 注册表顺序修正
+
+3b-2 提交(`e570641e`)后用一个独立只读子代理对照 tree-reform.MD §6.1 的方法映射表逐条复核,发现 3b-2 **并未 100% 完成**,有两处需要补的尾巴:
+
+1. **漏迁一个方法**:`_cached_kernel_request`(§6.1 `kernel.py(~28)` 簇里列出的方法)在 3b-2 时被遗漏,仍作为完整方法体留在 `coordinator.py`(既不在 `_phase_kernel.py`,也未登记进 `_DELEGATED`)。它被 `intent_router.py` 以 `self._cached_kernel_request(...)` 调用,两个测试(`test_lifecycle_wiring.py`)用 `monkeypatch.setattr(c, "_cached_kernel_request", ...)` 直接 patch **真实 Coordinator 实例**(instance-attr patch,§3.2 的"安全"形态)。**修法**:原样搬到 `_phase_kernel.py`(`KernelPhase` 类尾部,复用该文件已有的 `Path`/`Any` import),在 `_DELEGATED` 里补一行 `"_cached_kernel_request": "phase_kernel"`。因为是 instance-attr patch 而非同簇 monkeypatch 旁路(§3b-1 点 3 的坑),**两个测试无需改动**,搬完直接绿。搬完 `phase_kernel` 簇计数 27→28,与设计文档 "kernel.py(~28)" 的估计精确吻合(证实此前一直少 1 个)。
+
+2. **注册表顺序与设计意图相反**:3b-2 提交时 `_COLLAB_MODULES` 字典字面量与 `@property` 声明顺序实际是 `framework→explore→kernel→kernel_stack→internal→close→sweep→prelude→machine`(**framework 在最前**),与用户要求、`tree-reform-lessons.MD` §8 原文、以及该 commit message 自己写的"machine→prelude→sweep→close→internal→kernel_stack→kernel→explore→framework(framework 因方法数最多放最后)"**完全相反**——这是文档正确但代码顺序做反了的纯疏漏(3b-2 抽取工具按"抽取顺序"而非"要求顺序"追加条目,事后未手工重排)。**修法**:把 `_COLLAB_MODULES` 的 9 个 `phase_*` 键、9 个 `@property` 方法定义、以及 `_DELEGATED` 里 9 个簇各自的方法块,全部按 `machine→prelude→sweep→close→internal→kernel_stack→kernel→explore→framework` 重排(`router`/`recorder`/9 个 3b-1 叶子协作者的顺序不变,仍跟在 9 个相位后面)。**这纯粹是 dict/声明顺序调整,不改变任何方法归属或行为**,回归门无净变化(8498 passed 不变)。
+
+**教训**:批量抽取工具(`extract_collaborator.py` 之类)如果按"处理簇的顺序"逐条 `dict[key] = value` 追加,产出的注册表顺序是**工具遍历顺序**而不是**设计要求的语义顺序**;若设计文档对顺序有明确要求(如本例"最大的放最后"),必须在**每次抽取批次完成后**额外跑一次"顺序审计"(读 dict/property 声明的字面量顺序,和设计文档比对),不能假设"抽取脚本产出即最终形态"。同时,"每个簇的方法数是否与设计文档的估计值(如 `~28`)吻合"是检测漏迁的一个廉价信号——`27` vs 估计的 `~28` 这种"差 1"的小偏差,在数量级对得上时很容易被忽略为"约数误差",但用一个独立只读审计子代理对照映射表逐条 `grep`/`hasattr` 复核,是唯一可靠的完备性验证手段(比单纯看"测试全绿"更严格,因为像 `_cached_kernel_request` 这种遗漏方法本身没有被拆分破坏、只是"没搬家",测试完全绿,不会暴露问题)。
+
+**验收**: `ruff check` coordinator.py + `_phase_kernel.py` 全绿;`Coordinator._COLLAB_MODULES`/`_DELEGATED` 的 9 个 phase 键顺序程序化验证与要求顺序完全一致;`phase_kernel` 簇 28 个方法(含新补的 `_cached_kernel_request`)hasattr 全部命中 `KernelPhase`;`phase_framework` 确认为 9 个簇中方法数最多(48)且位于注册表/属性声明的最后;targeted 测试(`test_lifecycle_wiring.py` 等 1246 个 coordinator/kernel/intent_router/lifecycle 相关测试)+ 全量非-e2e 门 `8498 passed, 3 skipped, 47 deselected`(与 3b-2 完成时的数字完全一致,证明这是纯内部重排 + 补漏,无行为变化)。

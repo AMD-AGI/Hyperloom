@@ -507,15 +507,20 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # (instance-level uses the lazy properties directly). Kept in sync with the
     # lazy collaborator properties + ``_DELEGATED``.
     _COLLAB_MODULES = {
-        "phase_framework": ("_phase_framework", "FrameworkPhase"),
-        "phase_explore": ("_phase_explore", "ExplorePhase"),
-        "phase_kernel": ("_phase_kernel", "KernelPhase"),
-        "phase_kernel_stack": ("_phase_kernel_stack", "KernelStackPhase"),
-        "phase_internal": ("_phase_internal", "InternalTasksPhase"),
-        "phase_close": ("_phase_close", "ClosePhase"),
-        "phase_sweep": ("_phase_sweep", "SweepPhase"),
-        "phase_prelude": ("_phase_prelude", "PreludePhase"),
+        # Phase handlers, registered in call-chain order (tree-reform.MD P2.2
+        # 3b-2/3b-3): machine -> prelude -> sweep -> close -> internal ->
+        # kernel_stack -> kernel -> explore -> framework. ``framework`` is
+        # placed last because it owns the most delegated methods (48, the
+        # largest of the 9 phase clusters).
         "phase_machine": ("_phase_machine", "MachinePhase"),
+        "phase_prelude": ("_phase_prelude", "PreludePhase"),
+        "phase_sweep": ("_phase_sweep", "SweepPhase"),
+        "phase_close": ("_phase_close", "ClosePhase"),
+        "phase_internal": ("_phase_internal", "InternalTasksPhase"),
+        "phase_kernel_stack": ("_phase_kernel_stack", "KernelStackPhase"),
+        "phase_kernel": ("_phase_kernel", "KernelPhase"),
+        "phase_explore": ("_phase_explore", "ExplorePhase"),
+        "phase_framework": ("_phase_framework", "FrameworkPhase"),
         "router": ("intent_router", "IntentRouter"),
         "recorder": ("result_recorder", "ResultRecorder"),
         "maintenance": ("_maintenance", "MaintenanceCollaborator"),
@@ -982,7 +987,112 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # recorder (3b-0)
         "_aggregate_research_evidence": "recorder", "_harvest_research_scout": "recorder",
         "_record_specialist_result": "recorder",
-        # 3b-1 leaf collaborators (entries appended by extraction)
+        # Phase handlers (tree-reform.MD P2.2 3b-2/3b-3), grouped in the same
+        # call-chain order as _COLLAB_MODULES/the @property block above:
+        # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->
+        # kernel -> explore -> framework (framework last: largest cluster).
+        "_ensure_phase_initialised": "phase_machine",
+        "_ensure_cortex_t0_anchored": "phase_machine",
+        "_kernel_enabled": "phase_machine",
+        "_explore_enabled": "phase_machine",
+        "_advance_phase_if_needed": "phase_machine",
+        "_on_phase_entered": "phase_machine",
+        "_record_phase_entry_evidence": "phase_machine",
+        "_internal_analysis_kind": "phase_prelude",
+        "_warm_recipe_proven_items": "phase_prelude",
+        "_inject_warm_recipe_history_into_ledger": "phase_prelude",
+        "_filter_warm_patches_with_kg": "phase_prelude",
+        "_maybe_enqueue_warm_replay": "phase_prelude",
+        "_promote_warm_replay": "phase_prelude",
+        "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
+        "_enqueue_internal_analysis_task": "phase_prelude",
+        "_on_enter_sweep": "phase_sweep",
+        "_enqueue_internal_conc_sweep_task": "phase_sweep",
+        "_enqueue_internal_sweep_task": "phase_sweep",
+        "_build_sweep_params_from_recipe": "phase_sweep",
+        "_derive_close_stop_reason": "phase_close",
+        "_session_integrated_kernel_patch": "phase_close",
+        "_maybe_run_close_post_opt_roofline": "phase_close",
+        "_on_enter_close": "phase_close",
+        "_enqueue_internal_report_task": "phase_close",
+        "_enqueue_internal_session_breakdown_task": "phase_close",
+        "_record_close_step": "phase_close",
+        "_enter_closing_phase": "phase_close",
+        "_closing_report_terminal": "phase_close",
+        "_enqueue_internal_research_scout_task": "phase_internal",
+        "_maybe_enqueue_prelude_research_scout": "phase_internal",
+        "_maybe_enqueue_explore_research_scout": "phase_internal",
+        "_enqueue_internal_static_recon_task": "phase_internal",
+        "_maybe_enqueue_prelude_static_recon": "phase_internal",
+        "_maybe_enqueue_trajectory_reviewer": "phase_internal",
+        "_consume_static_recon": "phase_internal",
+        "_drain_pending_keep_integrates": "phase_kernel_stack",
+        "_positive_needs_review_integrates": "phase_kernel_stack",
+        "_stack_resolved_kernel_ids": "phase_kernel_stack",
+        "_mark_stack_validation_entries_resolved": "phase_kernel_stack",
+        "_stack_component_identities": "phase_kernel_stack",
+        "_mark_stack_validation_in_progress": "phase_kernel_stack",
+        "_clear_stack_validation_in_progress": "phase_kernel_stack",
+        "_clear_pending_stack_validation_checkpoints": "phase_kernel_stack",
+        "_recover_interrupted_stack_validation": "phase_kernel_stack",
+        "_stack_entries_for_validation": "phase_kernel_stack",
+        "_finalize_stack_validation_outcome": "phase_kernel_stack",
+        "_maybe_validate_positive_needs_review_stack": "phase_kernel_stack",
+        "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
+        "_auto_enqueue_pending_integrations": "phase_kernel_stack",
+        "_maybe_reprofile_for_kernel": "phase_kernel",
+        "_perfskills_enabled": "phase_kernel",
+        "_on_enter_kernel": "phase_kernel",
+        "_run_bf16_dense_gemm_fallback": "phase_kernel",
+        "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
+        "_bf16_dense_gemm_fallback_pending": "phase_kernel",
+        "_bf16_dense_gemm_fallback_attempted": "phase_kernel",
+        "_is_bf16_dense_gemm_fallback_attempt": "phase_kernel",
+        "_resolve_bench_protocol": "phase_kernel",
+        "_perfskills_timeouts": "phase_kernel",
+        "_run_perfskills_kernel_phase": "phase_kernel",
+        "_perfskills_win_already_recorded": "phase_kernel",
+        "_promote_perfskills_result": "phase_kernel",
+        "_record_perfskills_kernel_journey": "phase_kernel",
+        "_ck_blockscale_switch_eligible": "phase_kernel",
+        "_ck_switch_precision_is_fp8": "phase_kernel",
+        "_handle_gemm_tuning_result": "phase_kernel",
+        "_journal_gemm_tuning_keep": "phase_kernel",
+        "_promote_gemm_tuning_keep": "phase_kernel",
+        "_replace_latest_gemm_tuning_attempt": "phase_kernel",
+        "_validate_forge_gemm_tuning_e2e": "phase_kernel",
+        "_should_continue_kernel_after_gemm": "phase_kernel",
+        "_run_kernel_opt_after_gemm": "phase_kernel",
+        "_current_tput_from_validated_gain": "phase_kernel",
+        "_last_measured_roofline_tput": "phase_kernel",
+        "_needs_roofline_for_watermark": "phase_kernel",
+        "_maybe_enqueue_watermark_roofline": "phase_kernel",
+        "_cached_kernel_request": "phase_kernel",
+        "_negative_ledger_domain_counts": "phase_explore",
+        "_plan_cycle_focus": "phase_explore",
+        "_record_cycle_strategy_for_current_cycle": "phase_explore",
+        "_cycle_strategy_seed_block": "phase_explore",
+        "_apply_macro_cycle_reloop": "phase_explore",
+        "_run_cycle_soft_restart": "phase_explore",
+        "_restart_inference_servers": "phase_explore",
+        "_on_enter_explore": "phase_explore",
+        "_maybe_force_stalled_domain_specialist": "phase_explore",
+        "_seed_gaps_from_research_hints": "phase_explore",
+        "_scan_stale_specialists": "phase_explore",
+        "_fan_out_specialist_wave": "phase_explore",
+        "_maybe_auto_retry_specialist": "phase_explore",
+        "_warm_specialist_params": "phase_explore",
+        "_pr_summary_to_dict": "phase_explore",
+        "_refresh_gaps": "phase_explore",
+        "_extract_gaps_from_baseline": "phase_explore",
+        "_extract_gaps_from_attempts": "phase_explore",
+        "_gap_layer_for_action": "phase_explore",
+        "_record_explore_round_gaps": "phase_explore",
+        "_task_id_from_specialist_source": "phase_explore",
+        "_maybe_materialize_mn_explore": "phase_explore",
+        "_maybe_autosubmit_specialist_patches": "phase_explore",
+        "_maybe_autosubmit_framework_config": "phase_explore",
+        "_build_specialist_round_entry": "phase_explore",
         "_on_enter_framework": "phase_framework",
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
@@ -1031,107 +1141,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_enablement_safely": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
-        "_negative_ledger_domain_counts": "phase_explore",
-        "_plan_cycle_focus": "phase_explore",
-        "_record_cycle_strategy_for_current_cycle": "phase_explore",
-        "_cycle_strategy_seed_block": "phase_explore",
-        "_apply_macro_cycle_reloop": "phase_explore",
-        "_run_cycle_soft_restart": "phase_explore",
-        "_restart_inference_servers": "phase_explore",
-        "_on_enter_explore": "phase_explore",
-        "_maybe_force_stalled_domain_specialist": "phase_explore",
-        "_seed_gaps_from_research_hints": "phase_explore",
-        "_scan_stale_specialists": "phase_explore",
-        "_fan_out_specialist_wave": "phase_explore",
-        "_maybe_auto_retry_specialist": "phase_explore",
-        "_warm_specialist_params": "phase_explore",
-        "_pr_summary_to_dict": "phase_explore",
-        "_refresh_gaps": "phase_explore",
-        "_extract_gaps_from_baseline": "phase_explore",
-        "_extract_gaps_from_attempts": "phase_explore",
-        "_gap_layer_for_action": "phase_explore",
-        "_record_explore_round_gaps": "phase_explore",
-        "_task_id_from_specialist_source": "phase_explore",
-        "_maybe_materialize_mn_explore": "phase_explore",
-        "_maybe_autosubmit_specialist_patches": "phase_explore",
-        "_maybe_autosubmit_framework_config": "phase_explore",
-        "_build_specialist_round_entry": "phase_explore",
-        "_maybe_reprofile_for_kernel": "phase_kernel",
-        "_perfskills_enabled": "phase_kernel",
-        "_on_enter_kernel": "phase_kernel",
-        "_run_bf16_dense_gemm_fallback": "phase_kernel",
-        "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
-        "_bf16_dense_gemm_fallback_pending": "phase_kernel",
-        "_bf16_dense_gemm_fallback_attempted": "phase_kernel",
-        "_is_bf16_dense_gemm_fallback_attempt": "phase_kernel",
-        "_resolve_bench_protocol": "phase_kernel",
-        "_perfskills_timeouts": "phase_kernel",
-        "_run_perfskills_kernel_phase": "phase_kernel",
-        "_perfskills_win_already_recorded": "phase_kernel",
-        "_promote_perfskills_result": "phase_kernel",
-        "_record_perfskills_kernel_journey": "phase_kernel",
-        "_ck_blockscale_switch_eligible": "phase_kernel",
-        "_ck_switch_precision_is_fp8": "phase_kernel",
-        "_handle_gemm_tuning_result": "phase_kernel",
-        "_journal_gemm_tuning_keep": "phase_kernel",
-        "_promote_gemm_tuning_keep": "phase_kernel",
-        "_replace_latest_gemm_tuning_attempt": "phase_kernel",
-        "_validate_forge_gemm_tuning_e2e": "phase_kernel",
-        "_should_continue_kernel_after_gemm": "phase_kernel",
-        "_run_kernel_opt_after_gemm": "phase_kernel",
-        "_current_tput_from_validated_gain": "phase_kernel",
-        "_last_measured_roofline_tput": "phase_kernel",
-        "_needs_roofline_for_watermark": "phase_kernel",
-        "_maybe_enqueue_watermark_roofline": "phase_kernel",
-        "_drain_pending_keep_integrates": "phase_kernel_stack",
-        "_positive_needs_review_integrates": "phase_kernel_stack",
-        "_stack_resolved_kernel_ids": "phase_kernel_stack",
-        "_mark_stack_validation_entries_resolved": "phase_kernel_stack",
-        "_stack_component_identities": "phase_kernel_stack",
-        "_mark_stack_validation_in_progress": "phase_kernel_stack",
-        "_clear_stack_validation_in_progress": "phase_kernel_stack",
-        "_clear_pending_stack_validation_checkpoints": "phase_kernel_stack",
-        "_recover_interrupted_stack_validation": "phase_kernel_stack",
-        "_stack_entries_for_validation": "phase_kernel_stack",
-        "_finalize_stack_validation_outcome": "phase_kernel_stack",
-        "_maybe_validate_positive_needs_review_stack": "phase_kernel_stack",
-        "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
-        "_auto_enqueue_pending_integrations": "phase_kernel_stack",
-        "_enqueue_internal_research_scout_task": "phase_internal",
-        "_maybe_enqueue_prelude_research_scout": "phase_internal",
-        "_maybe_enqueue_explore_research_scout": "phase_internal",
-        "_enqueue_internal_static_recon_task": "phase_internal",
-        "_maybe_enqueue_prelude_static_recon": "phase_internal",
-        "_maybe_enqueue_trajectory_reviewer": "phase_internal",
-        "_consume_static_recon": "phase_internal",
-        "_derive_close_stop_reason": "phase_close",
-        "_session_integrated_kernel_patch": "phase_close",
-        "_maybe_run_close_post_opt_roofline": "phase_close",
-        "_on_enter_close": "phase_close",
-        "_enqueue_internal_report_task": "phase_close",
-        "_enqueue_internal_session_breakdown_task": "phase_close",
-        "_record_close_step": "phase_close",
-        "_enter_closing_phase": "phase_close",
-        "_closing_report_terminal": "phase_close",
-        "_on_enter_sweep": "phase_sweep",
-        "_enqueue_internal_conc_sweep_task": "phase_sweep",
-        "_enqueue_internal_sweep_task": "phase_sweep",
-        "_build_sweep_params_from_recipe": "phase_sweep",
-        "_internal_analysis_kind": "phase_prelude",
-        "_warm_recipe_proven_items": "phase_prelude",
-        "_inject_warm_recipe_history_into_ledger": "phase_prelude",
-        "_filter_warm_patches_with_kg": "phase_prelude",
-        "_maybe_enqueue_warm_replay": "phase_prelude",
-        "_promote_warm_replay": "phase_prelude",
-        "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
-        "_enqueue_internal_analysis_task": "phase_prelude",
-        "_ensure_phase_initialised": "phase_machine",
-        "_ensure_cortex_t0_anchored": "phase_machine",
-        "_kernel_enabled": "phase_machine",
-        "_explore_enabled": "phase_machine",
-        "_advance_phase_if_needed": "phase_machine",
-        "_on_phase_entered": "phase_machine",
-        "_record_phase_entry_evidence": "phase_machine",
         "_orchestration_conversational": "conversation",
         "_reset_orchestration_conversation": "conversation",
         "_conversation_progress_signal": "conversation",
@@ -1242,40 +1251,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.__dict__[attr] = obj
         return obj
 
+    # Phase handlers, in call-chain order (machine -> prelude -> sweep ->
+    # close -> internal -> kernel_stack -> kernel -> explore -> framework);
+    # ``framework`` is last as it owns the most delegated methods (48).
     @property
-    def phase_framework(self):
-        from ._phase_framework import FrameworkPhase
-        return self._collaborator("_phase_framework", FrameworkPhase)
-
-    @property
-    def phase_explore(self):
-        from ._phase_explore import ExplorePhase
-        return self._collaborator("_phase_explore", ExplorePhase)
-
-    @property
-    def phase_kernel(self):
-        from ._phase_kernel import KernelPhase
-        return self._collaborator("_phase_kernel", KernelPhase)
-
-    @property
-    def phase_kernel_stack(self):
-        from ._phase_kernel_stack import KernelStackPhase
-        return self._collaborator("_phase_kernel_stack", KernelStackPhase)
-
-    @property
-    def phase_internal(self):
-        from ._phase_internal import InternalTasksPhase
-        return self._collaborator("_phase_internal", InternalTasksPhase)
-
-    @property
-    def phase_close(self):
-        from ._phase_close import ClosePhase
-        return self._collaborator("_phase_close", ClosePhase)
-
-    @property
-    def phase_sweep(self):
-        from ._phase_sweep import SweepPhase
-        return self._collaborator("_phase_sweep", SweepPhase)
+    def phase_machine(self):
+        from ._phase_machine import MachinePhase
+        return self._collaborator("_phase_machine", MachinePhase)
 
     @property
     def phase_prelude(self):
@@ -1283,9 +1265,39 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return self._collaborator("_phase_prelude", PreludePhase)
 
     @property
-    def phase_machine(self):
-        from ._phase_machine import MachinePhase
-        return self._collaborator("_phase_machine", MachinePhase)
+    def phase_sweep(self):
+        from ._phase_sweep import SweepPhase
+        return self._collaborator("_phase_sweep", SweepPhase)
+
+    @property
+    def phase_close(self):
+        from ._phase_close import ClosePhase
+        return self._collaborator("_phase_close", ClosePhase)
+
+    @property
+    def phase_internal(self):
+        from ._phase_internal import InternalTasksPhase
+        return self._collaborator("_phase_internal", InternalTasksPhase)
+
+    @property
+    def phase_kernel_stack(self):
+        from ._phase_kernel_stack import KernelStackPhase
+        return self._collaborator("_phase_kernel_stack", KernelStackPhase)
+
+    @property
+    def phase_kernel(self):
+        from ._phase_kernel import KernelPhase
+        return self._collaborator("_phase_kernel", KernelPhase)
+
+    @property
+    def phase_explore(self):
+        from ._phase_explore import ExplorePhase
+        return self._collaborator("_phase_explore", ExplorePhase)
+
+    @property
+    def phase_framework(self):
+        from ._phase_framework import FrameworkPhase
+        return self._collaborator("_phase_framework", FrameworkPhase)
 
     @property
     def conversation(self):
@@ -2124,39 +2136,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
 
-
-
-
-    def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze).
-
-        Args:
-            kind: The kernel request kind; only ``trace_analyze`` is cacheable.
-            payload: The merged request payload; its ``trace_input`` /
-                ``trace_dir`` must match the cached entry for a hit.
-
-        Returns:
-            A synthesized cached result dict on a cache hit, else ``None``.
-        """
-        if kind != "trace_analyze":
-            return None
-        cached = self.shared_state.last_trace_analyze or {}
-        if not isinstance(cached, dict) or not cached:
-            return None
-        trace_input = payload.get("trace_input") or payload.get("trace_dir")
-        if not trace_input or trace_input != cached.get("trace_input"):
-            return None
-        candidates_path = cached.get("candidates_path")
-        if not candidates_path or not Path(candidates_path).exists():
-            return None
-        return {
-            "status": "ok",
-            "candidates_path": candidates_path,
-            "hot_kernels_top15": cached.get("hot_kernels_top15", []),
-            "reusable_native_kernel_ids": cached.get("reusable_native_kernel_ids", []),
-            "cached_at": cached.get("ts"),
-            "note": "served from shared_state.last_trace_analyze cache",
-        }
 
 
 
