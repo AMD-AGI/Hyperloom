@@ -36,31 +36,13 @@ sys.path.pop(0)
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write ``data`` as pretty-printed, sorted JSON, creating parents.
-
-    Args:
-        path (Path): Destination file; parent directories are created.
-        data (dict[str, Any]): JSON-serializable mapping to write.
-    """
+    """Write pretty-printed sorted JSON, creating parents."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """Parse a ``KEY=VALUE`` env file and derive provider-key aliases.
-
-    Reads simple ``KEY=VALUE`` lines (ignoring blanks/comments, stripping
-    surrounding quotes), then fills common cross-provider fallbacks
-    (e.g. deriving Anthropic/OpenAI/OOB/GEAK keys and base URLs from
-    ``SAFE_API_KEY`` / ``AMD_API_KEY`` / ``*_BASE_URL``).
-
-    Args:
-        path (Path): Path to the env file. A missing file yields ``{}``.
-
-    Returns:
-        dict[str, str]: The parsed environment with derived aliases
-            applied.
-    """
+    """Parse a ``KEY=VALUE`` env file and derive provider-key aliases."""
     env: dict[str, str] = {}
     if not path.exists():
         return env
@@ -105,21 +87,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 def _extract_trailing_json(text: str) -> dict[str, Any]:
-    """Parse the last top-level JSON object in *text*.
-
-    kernel_optimization.py prints non-JSON lines (e.g. ray.init banner) before
-    its result JSON; we tolerate that by scanning from the end.
-
-    Args:
-        text (str): Combined stdout text that ends with a JSON object.
-
-    Returns:
-        dict[str, Any]: The parsed trailing JSON object.
-
-    Raises:
-        ValueError: If ``text`` is empty.
-        json.JSONDecodeError: If no valid JSON object can be parsed.
-    """
+    """Parse the last top-level JSON object from mixed stdout text."""
     if not text:
         raise ValueError("empty stdout")
     end = text.rfind("}")
@@ -151,22 +119,7 @@ def _extract_trailing_json(text: str) -> dict[str, Any]:
 
 
 def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: Path) -> dict[str, Any]:
-    """Run a subprocess, tee output to a log, and parse trailing JSON.
-
-    Args:
-        cmd (list[str]): The command vector to execute.
-        env (dict[str, str]): Environment for the subprocess. Keyword-only.
-        timeout_s (int): Subprocess timeout in seconds. Keyword-only.
-        log_path (Path): File to append the command and its combined
-            stdout/stderr to. Keyword-only.
-
-    Returns:
-        dict[str, Any]: The parsed trailing JSON object from stdout.
-
-    Raises:
-        RuntimeError: If the command exits non-zero.
-        subprocess.TimeoutExpired: If it exceeds ``timeout_s``.
-    """
+    """Run a subprocess, tee output to a log, and parse trailing JSON."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
         log.write("$ " + " ".join(cmd) + "\n")
@@ -186,16 +139,7 @@ def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: P
 
 
 def _ensure_ray_via_helper(num_gpus: int, log_path: Path) -> bool:
-    """Use the kernel-agent self-contained ray_runtime helper.
-
-    Args:
-        num_gpus (int): GPUs to request when starting a head node.
-        log_path (Path): File for Ray lifecycle output.
-
-    Returns:
-        bool: True if this call started Ray (caller should stop it),
-            False if a cluster was already running.
-    """
+    """Use the kernel-agent self-contained ray_runtime helper."""
     sys.path.insert(0, str(ROOT / "tools" / "backends"))
     from ray_runtime import ensure_ray_cluster  # type: ignore
 

@@ -158,9 +158,7 @@ def main() -> int:
     md = Path(a.analysis)
     csv_dir = Path(a.csv_dir) if a.csv_dir else None
 
-    # 1) HL: analysis.md -> candidates (parse + finalize with CSV-resolved shapes/source).
-    # --candidates: use the STRUCTURED kernel_candidates.json hot_kernels directly so the
-    # precise op names survive (analysis.md re-parse loses them -> composite ops can't resolve).
+    # Prefer structured candidates so exact op names survive composite resolution.
     if a.candidates:
         _cd = json.loads(Path(a.candidates).read_text())
         parsed = [c for c in (_cd.get("hot_kernels") or []) if isinstance(c, dict)][: a.top_k]
@@ -179,10 +177,7 @@ def main() -> int:
     editable = [c for c in cands if c.get("reusable_native_kernel") is True]
     print(f"[driver] candidates={len(cands)} editable={len(editable)}", flush=True)
 
-    # 1b) OPTIONAL enrichment: attach authoritative WORKLOAD CONTEXT per candidate so GEAK's
-    # harness-gen pins the TRUE serving regime instead of guessing the decode context (the proven
-    # reason kernel wins fail to reach E2E). Pass everything we have; let GEAK figure out the rest.
-    # Default-off: with no --enrich the candidate dict is untouched and the prompt is byte-identical.
+    # Optional enrichment pins workload context without changing the default prompt.
     if a.enrich:
         analysis_dir = md.parent
         fusion = _load_fusion_cues(analysis_dir)
@@ -190,7 +185,7 @@ def main() -> int:
             c["extra_dispatch_context"] = _build_workload_context(c, a, cands, fusion)
         print(f"[driver] --enrich: attached extra_dispatch_context to {len(cands)} candidates", flush=True)
 
-    # 2) HL: write kernel_candidates.json (the dispatch payload artifact)
+    # Write the dispatch payload artifact.
     wr_args = Namespace(
         model_name=a.model,
         framework=a.framework,
