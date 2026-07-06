@@ -269,7 +269,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    # ``analysis_degraded`` distinguishes "analysis actually failed" (bad/unparsable
+    # trace) from a genuine empty result: the pipeline still degrades gracefully
+    # (status stays ``ok``, never aborts) but downstream/record_trace_analyze can
+    # tell the LLM the analysis did NOT really succeed instead of trusting empty.
+    analysis_degraded = False
     if analyze.get("status") != "ok":
+        analysis_degraded = True
         trace_health_warnings.append(
             {
                 "code": "bypass_trace_parse_failed",
@@ -292,12 +298,14 @@ def main(argv: list[str] | None = None) -> int:
     scope = analyze.get("aggregation_scope", AGGREGATION_SCOPE_FULL)
     steady_window = analyze.get("steady_window")
 
-    # xDiT is heuristic ONLY when it cannot anchor to a real per-step denoising
-    # window. When steady-state windowing locks onto the repeating ProfilerStep
-    # (real annotated trace), per-step kernel shares are trace-anchored, so the
-    # result is not "estimated" (parity with text-gen). Without such a window the
-    # full-trace fallback mixes text-encode / VAE / all steps -> estimated.
-    estimated = framework_l == "xdit" and scope != AGGREGATION_SCOPE_STEADY
+    # ``estimated`` marks shares that are NOT anchored to a real per-step window.
+    # It applies to ANY framework that requested steady-state windowing (xDiT
+    # auto-on, or text-gen via --steady-state-mode/env) but fell back to full
+    # trace: the shares then mix warmup/all-steps and are a mixed estimate. When
+    # the window locks on (scope==steady_state), shares are trace-anchored -> not
+    # estimated. Text-gen WITHOUT steady requested keeps full-trace as its norm
+    # (enable_steady False -> not estimated).
+    estimated = enable_steady and scope != AGGREGATION_SCOPE_STEADY
     if framework_l == "xdit" and estimated:
         trace_health_warnings.append(
             {
@@ -387,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     # summary.json is written below, after the optional rocprof enrichment, so
     # its ``rocprof_enrich`` audit field reflects the enrichment outcome.
     summary["estimated"] = estimated
+    summary["analysis_degraded"] = analysis_degraded
     # Always present (may be null) so the summary/manifest/result schemas match.
     summary["steady_window"] = steady_window
 
@@ -400,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
             "aggregation_scope": scope,
             "steady_window": steady_window,
             "estimated": estimated,
+            "analysis_degraded": analysis_degraded,
             "analyzed_rank": analyzed_rank,
             "rank_count": rank_count,
             "event_total": analyze.get("event_total", 0),
@@ -431,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         "aggregation_scope": scope,
         "steady_window": steady_window,
         "estimated": estimated,
+        "analysis_degraded": analysis_degraded,
         "analyzed_rank": analyzed_rank,
         "rank_count": rank_count,
         "framework": args.framework,

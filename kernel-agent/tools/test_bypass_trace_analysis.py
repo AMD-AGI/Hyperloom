@@ -342,6 +342,59 @@ def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
     assert summ["estimated"] is True
 
 
+def test_parse_failure_flags_analysis_degraded(tmp_path, capsys, monkeypatch):
+    # An unresolvable/failed trace must NOT masquerade as a successful empty
+    # analysis: the pipeline still degrades gracefully (status=ok, no abort) but
+    # flags analysis_degraded so record_trace_analyze / the LLM know it actually
+    # failed (rather than trusting the forced-empty result).
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    missing = tmp_path / "does_not_exist.trace.json"  # resolve_trace_file -> None -> status failed
+    rc, result, _ = _run(_base_argv(tmp_path, str(missing)), capsys)
+    assert rc == 0
+    assert result["status"] == "ok"  # graceful: never aborts the pipeline
+    assert result["analysis_degraded"] is True
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    assert "bypass_trace_parse_failed" in codes
+    summ = json.loads(Path(result["artifact_paths"]["tracelens_summary"]).read_text())
+    assert summ["analysis_degraded"] is True
+    manifest = json.loads(Path(result["artifact_paths"]["trace_input_manifest"]).read_text())
+    assert manifest["analysis_degraded"] is True
+
+
+def test_healthy_trace_is_not_degraded(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    trace = tmp_path / "ok.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert result["analysis_degraded"] is False
+
+
+def test_text_gen_steady_fallback_is_estimated(tmp_path, capsys, monkeypatch):
+    # Parity with xDiT: when steady-state windowing is requested for text-gen but
+    # no repeating window is found, the full-trace shares are equally a mixed
+    # estimate -> estimated=True (not silently False).
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "ng.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))  # no ProfilerStep
+    argv = _base_argv(tmp_path, str(trace), extra=["--steady-state-mode", "auto"])
+    _, result, _ = _run(argv, capsys)
+    assert result["aggregation_scope"] == "full_trace"
+    assert result["estimated"] is True
+
+
+def test_text_gen_default_full_trace_not_estimated(tmp_path, capsys, monkeypatch):
+    # Default text-gen (no steady-state requested): full-trace IS the norm, so it
+    # is NOT flagged estimated.
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "d.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert result["aggregation_scope"] == "full_trace"
+    assert result["estimated"] is False
+
+
 def test_rocprof_enrich_opt_in_runs_and_degrades(tmp_path, capsys, monkeypatch):
     # Enrichment on: with no benchmark files / no rocprof, it degrades to a
     # summary (rows skipped) but never aborts and never leaks logs to stdout.
