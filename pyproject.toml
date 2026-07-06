@@ -351,6 +351,10 @@ ignore = ["E501", "E741"]
 # Modules that intentionally place imports after a module docstring + early
 # constants / conditional setup (lazy or ordering-sensitive imports).
 "inference_optimizer/orchestrator/coordinator.py" = ["E402"]
+# tree-reform.MD P2.2: SharedState mixins are imported after the module-level
+# helpers/constants they close over (cycle-safe ordering), so the mixin import
+# sits below the top import block.
+"inference_optimizer/orchestrator/shared_state.py" = ["E402"]
 "inference_optimizer/orchestrator/specialist_runner.py" = ["E402"]
 "inference_optimizer/orchestrator/roofline_ceiling.py" = ["E402"]
 "inference_optimizer/orchestrator/system_prompts/specialist_prompt_builder.py" = ["E402"]
