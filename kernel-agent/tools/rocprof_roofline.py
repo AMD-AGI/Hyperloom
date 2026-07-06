@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common import io as _common_io
+
 
 FP_METRICS = (
     "VALU FLOPs (F16)",
@@ -475,16 +477,14 @@ def build_text_report(payload: dict[str, Any]) -> str:
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """Write JSON to ``path`` atomically via a temp file and rename.
 
+    tree-reform.MD §7/P2.1: delegates to
+    :func:`hyperloom.common.io.atomic_write_json`.
+
     Args:
         path: Destination file path.
         data: JSON-serializable data to write.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
-        json.dump(data, tmp, indent=2, sort_keys=True)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
+    _common_io.atomic_write_json(path, data, trailing_newline=True)
 
 
 def _kernel_name_matches(row: dict[str, Any], target_kernel: str) -> bool:

@@ -15,11 +15,12 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common import io as _common_io
 
 from ..message_bus import MessageBus
 from ..shared_state import SharedState
@@ -36,22 +37,13 @@ def _atomic_write_text(path: Path, text: str) -> None:
     Guarantees a reader never observes a half-written file: either the old
     contents or the complete new contents, never a truncated/partial one.
 
+    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.io.atomic_write_text`.
+
     Args:
         path: Destination file path.
         text: Full file contents to write.
     """
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        raise
+    _common_io.atomic_write_text(path, text)
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:

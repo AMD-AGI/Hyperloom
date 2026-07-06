@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common import io as _common_io
+
 from ..session_paths import runs_dir, specialist_intel_path
 from ._time import now_iso
 from .backends.base import BackendError
@@ -1520,16 +1522,14 @@ class SpecialistRunner:
         concurrent reader (or a high-frequency incremental rewrite)
         never observes a half-written file.
 
+        tree-reform.MD §7/P2.1: delegates to
+        :func:`hyperloom.common.io.atomic_write_json`.
+
         Args:
             path (Path): Destination file path.
             payload (dict[str, Any]): JSON-serialisable payload to persist.
         """
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(payload, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
+        _common_io.atomic_write_json(path, payload, make_parents=False)
 
     def _write_specialist_done(
         self,

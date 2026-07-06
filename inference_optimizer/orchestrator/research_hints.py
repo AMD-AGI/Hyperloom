@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common import io as _common_io
 
 from .. import session_paths
 
@@ -124,13 +125,13 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
 def _atomic_write(path: Path, text: str) -> None:
     """Write text to a file atomically via a temp file and rename.
 
+    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.io.atomic_write_text`.
+
     Args:
         path: Destination file path.
         text: Text content to write.
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    _common_io.atomic_write_text(path, text)
 
 
 def write_hints_skeleton(session_dir: Path) -> None:
