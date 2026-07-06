@@ -798,6 +798,18 @@ def _build_high_idle_warning(
     }
 
 
+def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple[float, dict[str, Any] | None]:
+    """Return the idle threshold plus a warning when the gate is exceeded."""
+    threshold = _resolve_idle_pct_threshold()
+    if idle_pct is None or idle_pct <= threshold:
+        return threshold, None
+    return threshold, _build_high_idle_warning(
+        idle_pct=idle_pct,
+        threshold_pct=threshold,
+        report_path=report_path,
+    )
+
+
 def _build_trace_split_warning(
     *,
     trace_input: Path,
@@ -6386,19 +6398,15 @@ def main() -> int:
                 idle_pct_value = _extract_idle_pct_from_gpu_timeline(
                     tracelens_dir,
                 )
-                idle_pct_threshold = _resolve_idle_pct_threshold()
-                high_idle_detected = idle_pct_value is not None and idle_pct_value > idle_pct_threshold
-                if high_idle_detected:
+                idle_pct_threshold, high_idle_warning = _evaluate_high_idle_gate(
+                    idle_pct_value,
+                    tracelens_dir / "analysis.md",
+                )
+                if high_idle_warning is not None:
                     assert idle_pct_value is not None
                     agent_candidates = []
                     allow_empty_candidates = True
-                    trace_health_warnings.append(
-                        _build_high_idle_warning(
-                            idle_pct=idle_pct_value,
-                            threshold_pct=idle_pct_threshold,
-                            report_path=tracelens_dir / "analysis.md",
-                        )
-                    )
+                    trace_health_warnings.append(high_idle_warning)
                     append_log(
                         log_path,
                         f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
@@ -6488,19 +6496,15 @@ def main() -> int:
                     idle_pct_value = extract_idle_pct_from_analysis_md(
                         skill_result.report_path,
                     )
-                    idle_pct_threshold = _resolve_idle_pct_threshold()
-                    high_idle_detected = idle_pct_value is not None and idle_pct_value > idle_pct_threshold
-                    if high_idle_detected:
+                    idle_pct_threshold, high_idle_warning = _evaluate_high_idle_gate(
+                        idle_pct_value,
+                        skill_result.report_path,
+                    )
+                    if high_idle_warning is not None:
                         assert idle_pct_value is not None
                         agent_candidates = []
                         allow_empty_candidates = True
-                        trace_health_warnings.append(
-                            _build_high_idle_warning(
-                                idle_pct=idle_pct_value,
-                                threshold_pct=idle_pct_threshold,
-                                report_path=skill_result.report_path,
-                            )
-                        )
+                        trace_health_warnings.append(high_idle_warning)
                         report_source = "skipped:high_gpu_idle_pct"
                         append_log(
                             log_path,
