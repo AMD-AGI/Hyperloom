@@ -2,7 +2,7 @@
 
 """Mock Robustness backend — heartbeat-only, non-intervening.
 
-Used in P0 main-path tests. Emits a heartbeat every tick, optionally one
+Used in main-path tests. Emits a heartbeat every tick, optionally one
 ``alert`` after N ticks (``alert_after_ticks``) to exercise the alert pipe.
 """
 
