@@ -85,6 +85,7 @@ testpaths = [
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
     "kernel-agent/tools/test_gemm_tuning.py",
+    "kernel-agent/tools/test_io_utils.py",
     "kernel-agent/tools/test_rocprof_roofline.py",
     "kernel-agent/tools/test_harness_generator.py",
     "kernel-agent/tools/test_op_to_source_resolver.py",
