@@ -2987,15 +2987,12 @@ def invoke_backend(
                     _fr = json.loads(final_report.read_text(encoding="utf-8"))
                     _fr_sp = float(_fr.get("best_speedup_verified") or _fr.get("best_speedup") or 0.0)
                     if _fr_sp > 0:
-                        result["geak_per_task_best_speedup"] = _fr_sp
-                        if _fr.get("best_task"):
-                            result["geak_per_task_best_task"] = str(_fr["best_task"])
-                        _fr_patch = str(_fr.get("best_patch") or "")
-                        if _fr_patch:
-                            result["geak_per_task_best_patch"] = _fr_patch
-                            _fr_wt = _geak_best_worktree(_fr_patch)
-                            if _fr_wt:
-                                result["geak_per_task_best_worktree"] = str(_fr_wt)
+                        _surface_geak_per_task_best(
+                            result,
+                            speedup=_fr_sp,
+                            task=str(_fr.get("best_task") or ""),
+                            patch_path=str(_fr.get("best_patch") or ""),
+                        )
                 except (ValueError, OSError, TypeError) as exc:
                     # Non-fatal: final_report.json salvage is best-effort. Fall
                     # through to the results/ rglob below, but record why the
@@ -3039,15 +3036,12 @@ def invoke_backend(
                             best_task = bj.parent.name
                             best_patch_path = str(d.get("best_patch_file") or "")
                     if best_speedup > 0:
-                        result["geak_per_task_best_speedup"] = best_speedup
-                        result["geak_per_task_best_task"] = best_task
-                        if best_patch_path:
-                            result["geak_per_task_best_patch"] = best_patch_path
-                        # Surface the worktree dir with the rewritten files, so the artifact
-                        # extractor can recover a real .py source (not just the .patch diff).
-                        wt = _geak_best_worktree(best_patch_path)
-                        if wt:
-                            result["geak_per_task_best_worktree"] = str(wt)
+                        _surface_geak_per_task_best(
+                            result,
+                            speedup=best_speedup,
+                            task=best_task,
+                            patch_path=best_patch_path,
+                        )
             return result
         if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
@@ -3713,6 +3707,26 @@ def _geak_best_worktree(best_patch_path: str) -> Path | None:
     if not worktree.is_dir():
         return None
     return worktree
+
+
+def _surface_geak_per_task_best(
+    result: dict[str, Any],
+    *,
+    speedup: float,
+    task: str = "",
+    patch_path: str = "",
+) -> None:
+    """Expose GEAK's best per-task speedup artifacts on the backend result."""
+    if speedup <= 0:
+        return
+    result["geak_per_task_best_speedup"] = speedup
+    if task:
+        result["geak_per_task_best_task"] = str(task)
+    if patch_path:
+        result["geak_per_task_best_patch"] = patch_path
+        worktree = _geak_best_worktree(patch_path)
+        if worktree:
+            result["geak_per_task_best_worktree"] = str(worktree)
 
 
 def _worktree_source_paths(
