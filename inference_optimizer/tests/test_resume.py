@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-4 Coordinator resume tests.
+"""Coordinator resume tests.
 
 Covers resume detection, ``replay_for_resume`` rebuilding undecided
 pending_proposals (skipping approved/rejected), pruned_families preservation,
