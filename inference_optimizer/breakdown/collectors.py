@@ -1220,8 +1220,15 @@ def collect_baseline(
             "tried server.log + yaml"
         )
 
+    from .. import framework_registry
+
     return {
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
+        # Throughput unit is framework-dependent: serving frameworks report
+        # tok/s, scriptable xDiT diffusion reports img/s. The numeric field name
+        # is kept for backwards compatibility; this records the true unit so the
+        # value is not silently read as tokens/s.
+        "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
         "accuracy": _to_float(state.get("baseline_accuracy")) or 0.0,
         "ttft_mean_ms": ttft,
         "e2el_mean_ms": e2el,
@@ -1355,12 +1362,15 @@ def collect_final(
 
     ttft = _to_float(cb.get("ttft_mean_ms"))
     e2el = _to_float(cb.get("e2el_mean_ms"))
-    ttft_e2el_source = "current_best" if ttft is not None else "unavailable"
+    ttft_e2el_source = "current_best" if (ttft is not None or e2el is not None) else "unavailable"
 
     # Disk-walk reconstruction when ``current_best.ttft_mean_ms`` is unset:
     # validate_stack first (authoritative), then current_best, then stack top.
     reconstructed_report: Path | None = None
-    if ttft is None:
+    # Reconstruct from disk when EITHER latency metric is missing. For scriptable
+    # xDiT diffusion ttft is a meaningless 0.0/None and e2el is the meaningful
+    # signal, so gating only on ttft dropped e2el from the final section.
+    if ttft is None or e2el is None:
         reconstructed_report = _find_latest_validate_stack_report(session_dir)
         if reconstructed_report is not None:
             ttft_e2el_source = "validate_stack_disk"
@@ -1392,8 +1402,13 @@ def collect_final(
         warnings,
     )
 
+    from .. import framework_registry
+
     return {
         "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
+        # See collect_baseline: records the true throughput unit (tok/s vs img/s
+        # for scriptable xDiT) alongside the compat-named numeric field.
+        "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
         "validated_at_stack_len": val_stack_len,
