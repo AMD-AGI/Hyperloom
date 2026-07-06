@@ -14,17 +14,14 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ._canonical_fingerprint import canonical_fingerprint
 from ._robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
@@ -38,31 +35,81 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 
+# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
+# re-exported here so the module namespace + monkeypatch surface is intact.
+from ._grid_base import (
+    variant_fingerprint as variant_fingerprint,
+    _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
+    _VARIANT_TIMEOUT_SEC_DEFAULT as _VARIANT_TIMEOUT_SEC_DEFAULT,
+    GridVariant as GridVariant,
+    coerce_extra_envs as coerce_extra_envs,
+    VariantResult as VariantResult,
+)
+from ._grid_server_args import (
+    server_args_env_name as server_args_env_name,
+    merge_server_args as merge_server_args,
+    compact_json_server_args as compact_json_server_args,
+    _SPACE_VALUE_FLAGS as _SPACE_VALUE_FLAGS,
+    _MULTI_VALUE_FLAGS as _MULTI_VALUE_FLAGS,
+    _VLLM_SINGLE_VALUE_FLAGS as _VLLM_SINGLE_VALUE_FLAGS,
+    dedup_vllm_server_args as dedup_vllm_server_args,
+    _shell_safe_dedupe as _shell_safe_dedupe,
+    DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC as DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+    SGLANG_WATCHDOG_TIMEOUT_ENV as SGLANG_WATCHDOG_TIMEOUT_ENV,
+    _SGLANG_WATCHDOG_FLAG as _SGLANG_WATCHDOG_FLAG,
+    _SGLANG_WATCHDOG_RE as _SGLANG_WATCHDOG_RE,
+    resolve_sglang_watchdog_timeout as resolve_sglang_watchdog_timeout,
+    inject_sglang_watchdog_timeout as inject_sglang_watchdog_timeout,
+    DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS as DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+    DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS as DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
+    SGLANG_CONTEXT_HEADROOM_ENV as SGLANG_CONTEXT_HEADROOM_ENV,
+    SGLANG_CONTEXT_FLOOR_ENV as SGLANG_CONTEXT_FLOOR_ENV,
+    _SGLANG_CONTEXT_LENGTH_FLAG as _SGLANG_CONTEXT_LENGTH_FLAG,
+    _SGLANG_CONTEXT_LENGTH_RE as _SGLANG_CONTEXT_LENGTH_RE,
+    _SGLANG_ATTN_BACKEND_FLAG as _SGLANG_ATTN_BACKEND_FLAG,
+    _SGLANG_ATTN_BACKEND_RE as _SGLANG_ATTN_BACKEND_RE,
+    _SGLANG_DUAL_CHUNK_BACKEND as _SGLANG_DUAL_CHUNK_BACKEND,
+    _resolve_nonneg_int_env as _resolve_nonneg_int_env,
+    _coerce_optional_positive_int as _coerce_optional_positive_int,
+    resolve_sglang_context_cap as resolve_sglang_context_cap,
+    inject_sglang_context_length as inject_sglang_context_length,
+    _resolve_dual_chunk_backend as _resolve_dual_chunk_backend,
+    inject_sglang_attention_backend as inject_sglang_attention_backend,
+    HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV as HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,
+    DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND as DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
+    _SGLANG_MOE_RUNNER_BACKEND_FLAG as _SGLANG_MOE_RUNNER_BACKEND_FLAG,
+    _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
+    inject_sglang_moe_runner_backend as inject_sglang_moe_runner_backend,
+    apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides,
+)
+from ._grid_variant_filter import (
+    resolve_skip_spec as resolve_skip_spec,
+    _parse_skip_spec as _parse_skip_spec,
+    _RE_CUDA_GRAPH_MAX_BS as _RE_CUDA_GRAPH_MAX_BS,
+    _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
+    _MN_BACKENDS_PRIORITY as _MN_BACKENDS_PRIORITY,
+    _mn_priority_index as _mn_priority_index,
+    reorder_grid_for_multi_node as reorder_grid_for_multi_node,
+    apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
+    _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
+    _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
+    _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
+    _is_truthy_env as _is_truthy_env,
+    xdit_blacklist_reason as xdit_blacklist_reason,
+    _HELP_TEXT_CACHE as _HELP_TEXT_CACHE,
+    _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
+    _probe_server_help_text as _probe_server_help_text,
+    _probe_sglang_help_text as _probe_sglang_help_text,
+    _detect_model_class as _detect_model_class,
+    apply_compatibility_filter as apply_compatibility_filter,
+    apply_user_skip_list as apply_user_skip_list,
+)
+
+
 
 log = logging.getLogger(__name__)
 
 
-# Content-based variant fingerprint (cross-action dedup ledger key). Delegates
-# to :func:`canonical_fingerprint` (the single source of truth); both produce
-# the identical 16-char content hash.
-def variant_fingerprint(
-    extra_server_args: str | None,
-    extra_envs: dict[str, Any] | None,
-) -> str:
-    """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
-
-    Name and note are NOT inputs — variants with identical content but
-    different names collapse to the same fingerprint. Delegates to
-    :func:`canonical_fingerprint` so the two never drift.
-
-    Args:
-        extra_server_args (str | None): Backend server args for the variant.
-        extra_envs (dict[str, Any] | None): Per-variant environment overrides.
-
-    Returns:
-        str: The 16-char content fingerprint of the pair.
-    """
-    return canonical_fingerprint(extra_server_args, extra_envs)
 
 
 def _resolve_magpie_python() -> str:
@@ -184,368 +231,42 @@ def _resolve_session_dir() -> Path:
     return _sd()
 
 
-_MAGPIE_CWD_DEFAULT = "/tmp"
-_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
 
 
 # User-declared variant skip list: SKIP_VARIANTS is a comma/whitespace list of
 # patterns matched (exact or fnmatch glob) against ``GridVariant.name``.
 # Resolution order: params["skip_variants"] > $SKIP_VARIANTS > "". Name-based
 # only; model/TP predicates live in each executor's filter.
-import fnmatch as _fnmatch  # noqa: E402  (kept near callers for grep-ability)
 
 
-def resolve_skip_spec(params: dict | None) -> str:
-    """Resolve the active skip spec from task params + process env.
-
-    ``params["skip_variants"]`` may be a list[str] or a single str; both are
-    flattened to comma-joined form before pattern parsing. Resolution order
-    is ``params["skip_variants"]`` > ``$SKIP_VARIANTS`` > ``""``.
-
-    Args:
-        params (dict | None): Task params; ``skip_variants`` (list/tuple/str)
-            takes precedence over the environment when present and non-empty.
-
-    Returns:
-        str: The stripped skip spec string, or ``""`` when neither source
-        supplies a value.
-    """
-    val = ""
-    if params and "skip_variants" in params:
-        raw = params.get("skip_variants")
-        if isinstance(raw, (list, tuple)):
-            val = ",".join(str(x) for x in raw if x is not None)
-        elif raw is not None:
-            val = str(raw)
-    if not val.strip():
-        val = os.environ.get("SKIP_VARIANTS", "")
-    return (val or "").strip()
 
 
-def _parse_skip_spec(spec: str) -> list[str]:
-    """Split ``spec`` on commas and whitespace; drop empties.
-
-    Newlines are treated as commas, then each comma-separated token is
-    further split on whitespace so mixed separators all flatten into one
-    list of patterns.
-
-    Args:
-        spec (str): Raw skip spec (e.g. ``"attn_*, sched_dfs\nvllm_aiter"``).
-
-    Returns:
-        list[str]: Non-empty, stripped pattern tokens in source order.
-    """
-    if not spec:
-        return []
-    out: list[str] = []
-    for token in spec.replace("\n", ",").split(","):
-        for sub in token.split():
-            t = sub.strip()
-            if t:
-                out.append(t)
-    return out
 
 
-# Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures
-# the integer value.
-_RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
 
-# ---------------------------------------------------------------------------
-# Multi-node grid prioritisation + invalid-variant filtering
-# ---------------------------------------------------------------------------
-#
-# In multi-node mode a ``--max-hours`` cut may stop the explore loop before the
-# whole grid is benched, so we (a) drop variants that are known regressions on
-# multi-node fabrics and (b) reorder the survivors so the strongest candidates
-# run first. Both are STRICT no-ops outside multi-node mode (single-node grid
-# order is a hard "never alter" invariant).
-#
-# ``priority_tags`` is an ordered list of category tags; a variant's priority is
-# the index of the first tag that appears (as a substring) in its ``note`` (or,
-# when ``note`` is empty, its ``name``). Lower index == higher priority; an
-# untagged variant sinks to the end. ``_MN_PARAMS_PRIORITY`` is concatenated
-# ahead of ``_MN_BACKENDS_PRIORITY`` by callers, so param-tuning variants
-# (cheap, high-yield) are surfaced before heavier comm/backend variants.
-_MN_PARAMS_PRIORITY: tuple[str, ...] = (
-    "cuda_graph_max_bs",
-    "max_running_requests",
-    "chunked_prefill",
-    "schedule",
-    "decode_steps",
-    "torch_compile",
-    "mem_fraction",
-)
-_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
-    "tier1",
-    "tier2",
-    "tier3",
-    "tier4",
-    "tier5_comm",
-    "tier5",
-    "comm_custom_ar",
-)
 
 
-def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]") -> int:
-    """Return the rank of ``variant`` against ``priority_tags`` (lower = first).
-
-    Matches the first ``priority_tags`` entry that is a substring of the
-    variant's ``note`` (falling back to ``name`` when ``note`` is empty).
-    Untagged variants return ``len(priority_tags)`` so a stable sort sinks them
-    to the end while preserving their relative order.
-
-    Args:
-        variant (GridVariant): The variant to rank.
-        priority_tags (tuple[str, ...] | list[str]): Ordered category tags;
-            lower index == higher priority.
-
-    Returns:
-        int: The index of the first matching tag, or ``len(priority_tags)`` when
-        none match.
-    """
-    haystack = variant.note or variant.name or ""
-    for idx, tag in enumerate(priority_tags):
-        if tag and tag in haystack:
-            return idx
-    return len(priority_tags)
 
 
-def reorder_grid_for_multi_node(
-    grid: list["GridVariant"],
-    *,
-    priority_tags: "tuple[str, ...] | list[str]",
-) -> list["GridVariant"]:
-    """Stable-sort ``grid`` so likely multi-node winners run first.
-
-    Single-node mode (``is_multi_node()`` False) returns ``grid`` unchanged,
-    bit-for-bit (hard requirement: never alter single-node grid order). In
-    multi-node mode variants are stably sorted by ``_mn_priority_index`` so
-    tagged variants surface ahead of untagged ones and a ``--max-hours`` cut
-    still benches the strong candidates.
-
-    Args:
-        grid (list[GridVariant]): The variants to reorder.
-        priority_tags (tuple[str, ...] | list[str]): Ordered category tags used
-            to rank variants.
-
-    Returns:
-        list[GridVariant]: ``grid`` unchanged in single-node mode, else a stably
-        sorted copy with higher-priority variants first.
-    """
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return grid
-    # ``sorted`` is stable, so ties (same priority index) keep input order.
-    return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
 
 
-def apply_multi_node_invalid_variants(
-    grid: list["GridVariant"],
-) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants that are known regressions/invalid on multi-node fabrics.
-
-    Returns ``(kept, dropped)``. ``dropped`` entries carry ``name`` / ``source``
-    / ``reason`` keys (matching the explore-loop ``skipped_dup`` shape). A
-    STRICT no-op outside multi-node mode: returns ``(grid, [])`` so single-node
-    behaviour is never altered.
-
-    Current rule: ``--cuda-graph-max-bs N`` with ``N < $CONC`` regresses ~50%
-    in multi-node mode (cuda-graph cache misses every cross-node decode tick),
-    so it is dropped from the explore grid here.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason``; ``(grid, [])`` outside
-        multi-node mode.
-    """
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return grid, []
-    try:
-        conc = int(os.environ.get("CONC", "64") or 64)
-    except ValueError:
-        conc = 64
-    kept: list["GridVariant"] = []
-    dropped: list[dict] = []
-    for v in grid:
-        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
-        if conc > 0 and m and int(m.group(1)) < conc:
-            dropped.append(
-                {
-                    "name": v.name,
-                    "source": "multi_node_invalid",
-                    "reason": (
-                        f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
-                        "(multi-node graph-cache miss is a known ~50% regression)"
-                    ),
-                }
-            )
-            continue
-        kept.append(v)
-    return kept, dropped
 
 
-# Framework / hardware compatibility filter: drops variants whose flag literals
-# are unsupported by the live framework + model class (real incompatibility,
-# not a strategy gate). Each entry maps an ``extra_server_args`` substring to a
-# required model class.
-_COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
-    ("--enable-flashinfer-mla", "mla"),
-    ("--enable-deepep-moe", "moe"),
-    ("--enable-ep-moe", "moe"),
-)
 
 
-# xDiT (diffusion) do-not-set blacklist — env knobs proven to crash or regress
-# on FLUX.2-class DiT models with Ulysses SP (source: arbor empirical KB /
-# flux2-dev recipe). Each entry maps an env key to the set of forbidden values
-# (``"*"`` = any truthy value) and a short reason. Precision keys are locked
-# OFF (a precision change is a different model). Enforced for the ``xdit``
-# framework only, in :func:`apply_compatibility_filter`.
-_XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
-    "XDIT_ATTENTION_BACKEND": (
-        frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
-        "approximate/quantized attention regresses on Ulysses>=4 "
-        "(attention is ~2% of FLOPS at small tokens/GPU)",
-    ),
-    "XDIT_USE_FP4_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP4 = different model)"),
-    "XDIT_USE_FP8_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
-    "RCCL_MSCCL_ENABLE": (frozenset({"*"}), "MSCCL overhead > savings for 2.53MB per-pair A2A"),
-    "PYTORCH_TUNABLEOP_TUNING": (frozenset({"*"}), "GPU memory fault when combined with torch.compile"),
-    "TRITON_HIP_USE_ASYNC_COPY": (frozenset({"*"}), "crashes on MI355X (gfx950)"),
-    "NCCL_PROTO": (frozenset({"ll", "LL"}), "NCCL_PROTO=LL regresses 10-22%; use LL128/SIMPLE"),
-}
-
-# Known crash combinations (all keys present + truthy → drop).
-_XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
-    (
-        ("AMD_DIRECT_DISPATCH", "AMDGCN_USE_BUFFER_OPS"),
-        "AMD_DIRECT_DISPATCH=1 + AMDGCN_USE_BUFFER_OPS=1 is a known crash (-28.6%)",
-    ),
-)
 
 
-def _is_truthy_env(value: Any) -> bool:
-    """Return whether an env-string value is truthy (set and not 0/false/off).
-
-    Args:
-        value (Any): Candidate env value.
-
-    Returns:
-        bool: ``True`` when the value is set to a non-falsey token.
-    """
-    return str(value).strip().lower() not in ("", "0", "false", "off", "no")
 
 
-def xdit_blacklist_reason(
-    extra_envs: dict[str, str] | None,
-) -> str | None:
-    """Return a drop reason if a variant trips the xDiT do-not-set blacklist.
-
-    Args:
-        extra_envs (dict[str, str] | None): The variant's env overrides.
-
-    Returns:
-        str | None: A human-readable reason when blacklisted, else ``None``.
-    """
-    envs = {str(k): str(v) for k, v in (extra_envs or {}).items()}
-    for key, (bad_values, reason) in _XDIT_ENV_BLACKLIST.items():
-        if key not in envs:
-            continue
-        val = envs[key]
-        if "*" in bad_values:
-            if _is_truthy_env(val):
-                return f"{key}={val}: {reason}"
-        elif val.strip().lower() in {b.lower() for b in bad_values}:
-            return f"{key}={val}: {reason}"
-    for keys, reason in _XDIT_ENV_COMBO_BLACKLIST:
-        if all(k in envs and _is_truthy_env(envs[k]) for k in keys):
-            return reason
-    return None
 
 
-# Per-framework cache for ``_probe_server_help_text`` (avoids a subprocess per
-# variant). Empty results are NOT cached so a transient failure re-probes.
-_HELP_TEXT_CACHE: dict[str, str] = {}
-
-# Per-framework ``--help`` extraction commands. Each is a single-shot
-# ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
-_HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
-    "sglang": (
-        "python3",
-        "-c",
-        "from sglang.launch_server import parser; parser.print_help()",
-    ),
-    "vllm": (
-        "python3",
-        "-c",
-        "from vllm.entrypoints.openai.api_server import make_arg_parser; make_arg_parser(None).print_help()",
-    ),
-    # atom exposes EngineArgs.add_cli_args on ``atom.model_engine.arg_utils``
-    # (mirrors vLLM); populate a throwaway parser and print its help.
-    "atom": (
-        "python3",
-        "-c",
-        "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
-        "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
-        "p.print_help()",
-    ),
-}
 
 
-def _probe_server_help_text(framework: str) -> str:
-    """Best-effort fetch of ``<framework> --help`` text for flag validation.
-
-    Supported: ``sglang``, ``vllm``, ``atom``; unknown values return ``""``.
-    Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
-    fall through to NOT filtering. Empty results are NOT cached. The broad
-    ``except`` is deliberate: this probe is a perf optimisation only and must
-    never crash the optimizer.
-
-    Args:
-        framework (str): Framework name; matched case-insensitively.
-
-    Returns:
-        str: The combined stdout+stderr ``--help`` text, or ``""`` on any
-        failure or unknown framework.
-    """
-    fw = (framework or "").strip().lower()
-    if fw in _HELP_TEXT_CACHE:
-        return _HELP_TEXT_CACHE[fw]
-    cmd = _HELP_PROBE_COMMANDS.get(fw)
-    if cmd is None:
-        return ""
-    try:
-        proc = subprocess.run(
-            list(cmd),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        out = (proc.stdout or "") + (proc.stderr or "")
-    except Exception:  # noqa: BLE001 — best-effort, see docstring
-        out = ""
-    if out:
-        _HELP_TEXT_CACHE[fw] = out
-    return out
 
 
-def _probe_sglang_help_text() -> str:
-    """Back-compat shim — defer to the framework-keyed probe.
 
-    Kept so tests that monkey-patch this exact name still work; new call
-    sites should use ``_probe_server_help_text("sglang")``.
 
-    Returns:
-        str: The sglang ``--help`` text, or ``""`` on failure.
-    """
-    return _probe_server_help_text("sglang")
 
 
 # ── Env-flag capability probe (build-accurate, not version-string based) ──
@@ -671,407 +392,16 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
     return _probe_vllm_aiter_shared_expert_unsupported()
 
 
-def _detect_model_class(model_path: str) -> tuple[bool, bool]:
-    """Heuristic detect of (is_mla_model, is_moe_model) from model path.
-
-    Lowercased substring match — a cheap check to skip an obviously-wrong
-    variant before a 10-min doomed sglang restart. Misclassifications cost at
-    most one restart. MLA: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2; MoE: MLA set +
-    Qwen3-MoE.
-
-    Args:
-        model_path (str): Model path/identifier; matched as a lowercased
-            substring.
-
-    Returns:
-        tuple[bool, bool]: ``(is_mla_model, is_moe_model)``.
-    """
-    p = model_path.lower()
-    mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
-    moe_keys = (
-        "glm-5",
-        "glm5",
-        "deepseek-v2",
-        "deepseek-v3",
-        "deepseek-r1",
-        "kimi",
-        "qwen3-moe",
-        "qwen3_moe",
-        "mixtral",
-    )
-    is_mla = any(k in p for k in mla_keys)
-    is_moe = any(k in p for k in moe_keys)
-    return is_mla, is_moe
 
 
-def apply_compatibility_filter(
-    grid: list["GridVariant"],
-) -> tuple[list["GridVariant"], list[dict]]:
-    """Skip variants known to be incompatible with current model/sglang.
-
-    Two dimensions, each conservative (assume compatible) on probe failure:
-    model class (MLA / MoE flags dropped when ``$MODEL_PATH`` lacks the family
-    keyword), and sglang version (flags absent from ``launch_server --help``
-    dropped). Returns the ``(kept, dropped)`` shape of ``apply_user_skip_list``.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason``.
-    """
-    model_path = os.environ.get("MODEL_PATH", "")
-    if model_path:
-        is_mla, is_moe = _detect_model_class(model_path)
-    else:
-        # No MODEL_PATH set -> can't detect -> assume compatible.
-        is_mla, is_moe = True, True
-
-    # Live framework's --help text; defaults to sglang for fixtures/callers
-    # that don't thread ``benchmark.framework``.
-    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
-    help_text = _probe_server_help_text(fw)
-    help_available = bool(help_text)
-
-    is_xdit = fw == "xdit"
-
-    kept: list[GridVariant] = []
-    dropped: list[dict] = []
-    for v in grid:
-        args = v.extra_server_args or ""
-        skip_reason: str | None = None
-        # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
-        if is_xdit:
-            skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
-        if skip_reason:
-            dropped.append(
-                {
-                    "name": v.name,
-                    "source": "xdit_blacklist",
-                    "reason": skip_reason,
-                }
-            )
-            continue
-        for flag, required_class in _COMPATIBILITY_FLAG_RULES:
-            if flag not in args:
-                continue
-            # Model-class predicate
-            class_ok = (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe)
-            if not class_ok:
-                skip_reason = (
-                    f"{flag} requires {required_class.upper()} model; "
-                    f"MODEL_PATH={model_path!r} not recognised as "
-                    f"{required_class.upper()}-class"
-                )
-                break
-            # Framework flag-support predicate (only when help is readable).
-            if help_available and flag not in help_text:
-                skip_reason = f"{flag} not present in `{fw} --help` output; current {fw} version likely too old"
-                break
-        if skip_reason:
-            dropped.append(
-                {
-                    "name": v.name,
-                    "source": "compatibility_filter",
-                    "reason": skip_reason,
-                }
-            )
-        else:
-            kept.append(v)
-    return kept, dropped
 
 
-def apply_user_skip_list(
-    grid: list["GridVariant"],
-    *,
-    skip_spec: str,
-) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants whose name matches any pattern in ``skip_spec``.
-
-    Returns ``(kept, dropped)`` where each dropped entry is
-    ``{"name", "reason", "source"}`` with source=``"user_skip"``.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-        skip_spec (str): Comma/whitespace skip patterns (exact or fnmatch glob)
-            matched against ``GridVariant.name``.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason``.
-    """
-    patterns = _parse_skip_spec(skip_spec)
-    if not patterns:
-        return list(grid), []
-
-    kept: list[GridVariant] = []
-    dropped: list[dict] = []
-    for v in grid:
-        matched_pat: str | None = None
-        for pat in patterns:
-            # Exact name first (cheaper), then fnmatch for globs.
-            if pat == v.name or _fnmatch.fnmatchcase(v.name, pat):
-                matched_pat = pat
-                break
-        if matched_pat is None:
-            kept.append(v)
-            continue
-        dropped.append(
-            {
-                "name": v.name,
-                "source": "user_skip",
-                "reason": f"matched SKIP_VARIANTS pattern '{matched_pat}'",
-            }
-        )
-    return kept, dropped
 
 
-@dataclass(init=False)
-class GridVariant:
-    """One row of the grid we're going to test.
-
-    Describes a single server-config candidate: the flags/env overrides to
-    apply on top of the base Magpie config for one benchmark run.
-
-    Attributes:
-        name (str): Human-readable label for the variant.
-        extra_server_args (str): Backend server args appended via
-            ``EXTRA_{SGLANG,VLLM,ATOM}_ARGS``. Defaults to ``""``.
-        extra_envs (dict[str, str]): Per-variant environment overrides.
-            Defaults to an empty dict.
-        note (str): Optional reason/category tag (e.g. ``multi_node_only_*``).
-            Defaults to ``""``.
-    """
-
-    name: str  # human-readable label
-    extra_server_args: str = ""  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
-    extra_envs: dict[str, str] = field(default_factory=dict)
-    note: str = ""  # optional reason / category
-
-    def __init__(
-        self,
-        name: str,
-        extra_server_args: str = "",
-        extra_envs: dict[str, str] | None = None,
-        note: str = "",
-        *,
-        extra_sglang_args: str | None = None,
-    ) -> None:
-        """Initialize a grid variant descriptor.
-
-        Args:
-            name: Variant name.
-            extra_server_args: Extra server CLI args for this variant.
-            extra_envs: Extra environment variables for this variant.
-            note: Optional reason/category note.
-            extra_sglang_args: Deprecated alias for ``extra_server_args``;
-                routed into the canonical attribute with a warning.
-        """
-        # Back-compat alias for the historical ``extra_sglang_args`` kwarg;
-        # routed into the canonical attribute with a DeprecationWarning.
-        if extra_sglang_args is not None:
-            import warnings as _warnings
-
-            _warnings.warn(
-                "GridVariant(extra_sglang_args=...) is a deprecation "
-                "alias for GridVariant(extra_server_args=...) and will "
-                "be removed in the next Hyperloom release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if not extra_server_args:
-                extra_server_args = extra_sglang_args
-        self.name = name
-        self.extra_server_args = extra_server_args
-        self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
-        self.note = note
-
-    @property
-    def fingerprint(self) -> str:
-        """Content fingerprint used as dedup-ledger key. See module doc.
-
-        Returns:
-            str: :func:`variant_fingerprint` of this variant's
-            ``extra_server_args`` and ``extra_envs``.
-        """
-        return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
 
-def coerce_extra_envs(value: Any) -> dict[str, str]:
-    """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
-
-    Accepts the three shapes the LLM emits — canonical dict, shell-style
-    ``"FOO=1 BAR=2"`` string, and ``["FOO=1", "BAR=2"]`` token list — so
-    downstream ``.items()`` callers never crash on a non-dict. Unknown shapes
-    coerce to an empty dict.
-
-    Args:
-        value (Any): The Orchestration-supplied ``extra_envs`` in any of the
-            accepted shapes (dict, shell-style string, or token list).
-
-    Returns:
-        dict[str, str]: The normalized env mapping; empty for unknown shapes.
-    """
-    if isinstance(value, dict):
-        return {str(k): str(v) for k, v in value.items() if k is not None}
-    if isinstance(value, str):
-        out: dict[str, str] = {}
-        # Split on the first ``=`` only to preserve URL-style assignments
-        # like ``HF_ENDPOINT=https://...``.
-        tokens = re.split(r"[\s;]+", value.strip())
-        for tok in tokens:
-            if not tok:
-                continue
-            if "=" not in tok:
-                continue
-            k, v = tok.split("=", 1)
-            k = k.strip()
-            if not k:
-                continue
-            out[k] = v.strip()
-        return out
-    if isinstance(value, (list, tuple)):
-        out_l: dict[str, str] = {}
-        for item in value:
-            if isinstance(item, dict):
-                # ``[{"FOO": "1"}, {"BAR": "2"}]`` — later entries win.
-                for k, v in item.items():
-                    if k is None:
-                        continue
-                    out_l[str(k)] = str(v)
-                continue
-            if not isinstance(item, str) or "=" not in item:
-                continue
-            k, v = item.split("=", 1)
-            k = k.strip()
-            if not k:
-                continue
-            out_l[k] = v.strip()
-        return out_l
-    return {}
 
 
-@dataclass
-class VariantResult:
-    """One bench run's parsed result.
-
-    Captures the parsed outcome of a single variant's Magpie run: identity,
-    status, the headline throughput/latency metrics, artifact paths, and
-    failure-classification metadata.
-
-    Attributes:
-        name (str): Variant label (mirrors :attr:`GridVariant.name`).
-        extra_server_args (str): Server args used for this run.
-        extra_envs (dict[str, str]): Env overrides used for this run.
-        status (str): ``"succeeded"`` or ``"failed"``.
-        output_throughput (float | None): Output tokens/sec, if measured.
-        request_throughput (float | None): Requests/sec, if measured.
-        total_token_throughput (float | None): Total tokens/sec, if measured.
-        completed_requests (int | None): Number of completed requests.
-        duration_seconds (float | None): Benchmark duration in seconds.
-        ttft_mean_ms (float | None): Mean time-to-first-token (ms).
-        e2el_mean_ms (float | None): Mean end-to-end latency (ms).
-        workspace (str | None): Path to the located ``benchmark_*`` workspace.
-        report_path (str | None): Path to ``benchmark_report.json`` if present.
-        raw_result_path (str | None): Path to the raw result JSON, if salvaged.
-        reported_success (bool | None): Magpie's own success flag, if known.
-        returncode (int | None): Magpie subprocess return code.
-        nonfatal_warnings (list[str]): Non-fatal warning tags (e.g. harvested
-            leaked artifacts).
-        error (str | None): Error summary for failed/nonzero runs.
-        error_class (str): Short failure-classification tag (empty on success).
-        note (str): Optional reason/category tag carried from the variant.
-        runtime_sec (float | None): Wall-clock seconds the subprocess consumed.
-        killed_overtime (bool): ``True`` iff reaped by the soft overtime
-            deadline rather than crashing/timing-out/succeeding.
-        estimated_output_throughput (float | None): Rough output tokens/sec
-            estimated from the engine's periodic ``server.log`` throughput
-            logs when the variant was killed before finishing. Informational
-            only — never a real measurement and never used for winner
-            selection; ``output_throughput`` stays ``None`` on the kill path.
-    """
-
-    name: str
-    extra_server_args: str
-    extra_envs: dict[str, str]
-    status: str
-    output_throughput: float | None = None
-    request_throughput: float | None = None
-    total_token_throughput: float | None = None
-    completed_requests: int | None = None
-    duration_seconds: float | None = None
-    ttft_mean_ms: float | None = None
-    e2el_mean_ms: float | None = None
-    tpot_mean_ms: float | None = None
-    workspace: str | None = None
-    report_path: str | None = None
-    raw_result_path: str | None = None
-    reported_success: bool | None = None
-    returncode: int | None = None
-    nonfatal_warnings: list[str] = field(default_factory=list)
-    error: str | None = None
-    # Short failure-classification tag matching ``_write_variant_abort_marker``
-    # (e.g. ``magpie_timeout``, ``yaml_build_error``); empty for successes.
-    # Surfaced in the LLM critic prompt as ``failed_variants[*].error_class``.
-    error_class: str = ""
-    note: str = ""
-    # Wall-clock seconds the Magpie subprocess consumed; populated on
-    # success AND on the ``killed_overtime`` path.
-    runtime_sec: float | None = None
-    # True iff reaped by the overtime soft deadline; caller demotes to
-    # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
-    killed_overtime: bool = False
-    # Rough output tok/s salvaged from the engine's periodic ``server.log``
-    # throughput logs on the killed_overtime path. Informational only: the
-    # variant stays ``failed``/``killed_overtime`` and this never feeds winner
-    # selection (which keys off ``output_throughput``).
-    estimated_output_throughput: float | None = None
-
-    @property
-    def fingerprint(self) -> str:
-        """Same fingerprint scheme as :class:`GridVariant`.
-
-        Returns:
-            str: :func:`variant_fingerprint` of this result's
-            ``extra_server_args`` and ``extra_envs``.
-        """
-        return variant_fingerprint(self.extra_server_args, self.extra_envs)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize this result to a plain JSON-friendly dict.
-
-        Returns:
-            dict[str, Any]: All result fields plus the computed
-            ``fingerprint``, keyed by attribute name.
-        """
-        return {
-            "name": self.name,
-            "extra_server_args": self.extra_server_args,
-            "extra_envs": self.extra_envs,
-            "fingerprint": self.fingerprint,
-            "status": self.status,
-            "output_throughput": self.output_throughput,
-            "request_throughput": self.request_throughput,
-            "total_token_throughput": self.total_token_throughput,
-            "completed_requests": self.completed_requests,
-            "duration_seconds": self.duration_seconds,
-            "ttft_mean_ms": self.ttft_mean_ms,
-            "e2el_mean_ms": self.e2el_mean_ms,
-            "tpot_mean_ms": self.tpot_mean_ms,
-            "workspace": self.workspace,
-            "report_path": self.report_path,
-            "raw_result_path": self.raw_result_path,
-            "reported_success": self.reported_success,
-            "returncode": self.returncode,
-            "nonfatal_warnings": self.nonfatal_warnings,
-            "error": self.error,
-            "error_class": self.error_class,
-            "note": self.note,
-            "runtime_sec": self.runtime_sec,
-            "killed_overtime": self.killed_overtime,
-            "estimated_output_throughput": self.estimated_output_throughput,
-        }
 
 
 # Shared sanitization for Orchestration-supplied overrides (benchmark_script /
@@ -1140,779 +470,44 @@ def sanitize_result_dir(value: Any) -> str | None:
     return text
 
 
-def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args.
-
-    Resolution is exact (registry-keyed) with a substring fallback so a
-    framework string carrying a version suffix (e.g. ``"vllm@0.21"``) still
-    maps correctly. Unknown names fall back to the default framework's env.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str: The ``EXTRA_*_ARGS`` env name for the framework (e.g.
-        ``"EXTRA_XDIT_ARGS"`` for xDiT, ``"EXTRA_SGLANG_ARGS"`` default).
-    """
-    from ... import framework_registry
-
-    name = str(framework or "").strip().lower()
-    if framework_registry.is_supported(name):
-        return framework_registry.extra_args_env(name)
-    # Substring fallback for version-suffixed names; check longest/specific
-    # names first so an overlapping substring cannot match the wrong branch.
-    for fw in framework_registry.names():
-        if fw in name:
-            return framework_registry.extra_args_env(fw)
-    return framework_registry.extra_args_env(framework_registry.DEFAULT_FRAMEWORK)
-
-
-def merge_server_args(*parts: str | None) -> str:
-    """Merge server arg strings preserving left-to-right override semantics.
-
-    Only removes empty chunks; does NOT de-duplicate option names, because
-    repeated flags are how later args override base args (e.g. ``--block-size
-    1`` then ``--block-size 256``).
-
-    Args:
-        *parts (str | None): Server-arg chunks to merge, in override order;
-            empty/``None`` chunks are dropped.
-
-    Returns:
-        str: The space-joined non-empty chunks.
-    """
-    return " ".join(str(p).strip() for p in parts if str(p or "").strip())
-
-
-def compact_json_server_args(
-    server_args: str | None,
-    framework: str | None,
-) -> str:
-    """Strip separator spaces inside JSON-valued vLLM/atom server args.
-
-    Magpie's scripts expand ``vllm serve ... $EXTRA_VLLM_ARGS`` UNQUOTED, so any
-    token with an embedded space is word-split by the shell before vLLM sees it.
-    LLM/specialist explore variants routinely pass JSON-valued flags with the
-    conventional separator spaces, e.g. ``--compilation-config '{"full_cuda_
-    graph": true}'`` or ``--speculative-config '{"method": "eagle"}'``; the
-    space after ``:`` (or ``,``) splits the value into two shell words and the
-    server dies at boot with an argparse/JSON error (observed: ``Value
-    {"method": cannot be converted``). Re-serialising each JSON object/array
-    with compact separators removes the SEPARATOR spaces only — ``json.dumps``
-    deliberately preserves spaces *inside* string values. This mirrors the
-    deliberately space-free ``--hf-overrides`` injection in ``_workload_envs``
-    and is the same round-trip-safe contract the dedup helpers rely on.
-
-    LIMITATION — separator spaces only: the value becomes a single shell word
-    only when the JSON has no space *inside* a string value. A value like
-    ``{"model":"draft model name"}`` still contains a literal space, and under
-    Magpie's unquoted ``$EXTRA_VLLM_ARGS`` expansion that space word-splits no
-    matter what — there is no way to keep a space-bearing token as one word via
-    unquoted expansion. Such flags (string values holding spaces — a free-text
-    name, a path with spaces) are NOT supported: they are left intact rather
-    than corrupted (stripping the inner space would change the value), and the
-    server will still fail to boot. Callers must avoid space-bearing JSON string
-    values for vLLM/atom. See
-    ``test_compact_json_server_args_internal_space_unsupported``.
-
-    No-op for sglang (its Magpie path differs and tolerates the quoting), for
-    empty strings, and for strings with no ``{``/``[``. Any blob that does not
-    parse as JSON is left verbatim (vLLM reports it rather than us mangling it).
-    """
-    args = str(server_args or "").strip()
-    if not args or ("{" not in args and "[" not in args):
-        return args
-    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
-        return args
-    out: list[str] = []
-    i = 0
-    n = len(args)
-    while i < n:
-        ch = args[i]
-        if ch in "{[":
-            # Walk to the balanced close, honouring quoted strings so braces
-            # inside a JSON string value do not throw off the depth count.
-            depth = 0
-            in_str = False
-            esc = False
-            j = i
-            while j < n:
-                c = args[j]
-                if in_str:
-                    if esc:
-                        esc = False
-                    elif c == "\\":
-                        esc = True
-                    elif c == '"':
-                        in_str = False
-                elif c == '"':
-                    in_str = True
-                elif c in "{[":
-                    depth += 1
-                elif c in "}]":
-                    depth -= 1
-                    if depth == 0:
-                        j += 1
-                        break
-                j += 1
-            blob = args[i:j]
-            try:
-                out.append(json.dumps(json.loads(blob), separators=(",", ":")))
-            except Exception:
-                out.append(blob)
-            i = j
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
-
-
-# Flags whose value can contain spaces / JSON; never tokenize-dedupe these
-# because the downstream Magpie scripts expand $EXTRA_*_ARGS unquoted and the
-# value would be word-split anyway. If any is present, the dedup helpers leave
-# the WHOLE arg string untouched (the only behaviour that round-trips safely).
-_SPACE_VALUE_FLAGS = (
-    "--json-model-override-args",
-    "--override-generation-config",
-    "--tool-call-parser",
-)
-_MULTI_VALUE_FLAGS = (
-    "--cuda-graph-bs",
-    "--cuda-graph-max-bs",
-)
-
-
-# vLLM / atom expose argparse-style single-value options that are safe to
-# collapse last-wins. Unlike sglang (where a repeated flag is harmless
-# last-wins), vLLM hard-errors on a duplicate / conflicting
-# ``--attention-backend`` — the crash propagates through ``EngineCoreClient``
-# -> ``wait_for_engine_startup`` -> RuntimeError, then NCCL ``Broken pipe`` on
-# every rank. The duplication arises when
-# the operator's YAML ``EXTRA_VLLM_ARGS`` already pins a flag and a sweep /
-# kernel variant appends the same flag via ``extra_server_args``; ``merge_
-# server_args`` keeps BOTH tokens by design. This set lists the single-value
-# flags safe to collapse to last-wins so the variant override survives.
-_VLLM_SINGLE_VALUE_FLAGS = frozenset(
-    {
-        "--attention-backend",
-        "--gpu-memory-utilization",
-        "--max-model-len",
-        "--max-num-seqs",
-        "--max-num-batched-tokens",
-        "--block-size",
-        "--kv-cache-dtype",
-        "--quantization",
-        "--dtype",
-        "--swap-space",
-        "--tensor-parallel-size",
-        "--pipeline-parallel-size",
-    }
-)
-
-
-def dedup_vllm_server_args(
-    server_args: str | None,
-    framework: str | None,
-) -> str:
-    """Collapse repeated vLLM/atom single-value flags to last-wins (#520).
-
-    vLLM v0.21.0 crashes ``EngineCoreProc`` on a duplicated
-    ``--attention-backend`` (and conflicting copies of other single-value
-    flags); sglang tolerates repeats. So this is scoped to the vllm/atom
-    framework envs and is a no-op for sglang. Only the flags in
-    :data:`_VLLM_SINGLE_VALUE_FLAGS` are touched; every other token (unknown
-    flags, store-true switches, positional values) is preserved verbatim and
-    in order. For each affected flag the LAST occurrence wins, matching the
-    left-to-right override intent of :func:`merge_server_args` (so a
-    sweep/kernel ``extra_args`` value overrides the YAML base).
-
-    Returns ``server_args`` unchanged when the framework is sglang, the string
-    is empty, it carries a space/JSON-valued flag (see
-    :data:`_SPACE_VALUE_FLAGS` / :data:`_MULTI_VALUE_FLAGS`), or it cannot be
-    shell-parsed.
-
-    Args:
-        server_args (str | None): The server-arg string to dedupe.
-        framework (str | None): Framework name; matched case-insensitively
-            (sglang is a no-op).
-
-    Returns:
-        str: The deduped server-arg string, or the input unchanged when no
-        dedupe applies.
-    """
-    args = str(server_args or "").strip()
-    if not args:
-        return args
-    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
-        return args
-    # Never tokenize a string carrying a space/JSON-valued (or multi-value)
-    # flag: the unquoted ``$EXTRA_*_ARGS`` expansion in Magpie's scripts cannot
-    # round-trip a value with embedded spaces, so re-joining ``shlex`` tokens
-    # would corrupt it (e.g. ``--override-generation-config '{"temperature":
-    # 0.7}'`` would be split into separate words). Mirrors the guard in
-    # :func:`_shell_safe_dedupe`; leave the whole string untouched.
-    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
-        return args
-    try:
-        tokens = shlex.split(args)
-    except ValueError:
-        # Unparseable: leave it to vLLM to report rather than mangling it.
-        return args
-    # Collect the token span of every recognized single-value flag.
-    spans: list[tuple[str, int, int]] = []
-    i = 0
-    n = len(tokens)
-    while i < n:
-        tok = tokens[i]
-        name = tok.split("=", 1)[0] if tok.startswith("--") else None
-        if name in _VLLM_SINGLE_VALUE_FLAGS:
-            if "=" in tok:
-                # ``--flag=value`` is self-contained.
-                spans.append((name, i, i))
-                i += 1
-            elif i + 1 < n and not tokens[i + 1].startswith("-"):
-                # ``--flag value`` consumes the following token.
-                spans.append((name, i, i + 1))
-                i += 2
-            else:
-                # Bare ``--flag`` with no value: treat as a single token.
-                spans.append((name, i, i))
-                i += 1
-        else:
-            i += 1
-    drop: set[int] = set()
-    by_name: dict[str, list[tuple[str, int, int]]] = {}
-    for span in spans:
-        by_name.setdefault(span[0], []).append(span)
-    for occurrences in by_name.values():
-        # Keep only the last occurrence; drop the token span of the earlier ones.
-        for _name, start, end in occurrences[:-1]:
-            drop.update(range(start, end + 1))
-    if not drop:
-        return args
-    kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
-    return " ".join(kept)
-
-
-def _shell_safe_dedupe(args: str) -> str:
-    """Last-wins dedupe for single-token-valued flags only.
-
-    Targeted and conservative: collapses repeated ``--flag value`` (or
-    ``--flag=value``) pairs whose value is a single whitespace-free token,
-    keeping the last occurrence. If the string contains a flag known to carry
-    a space/JSON value (which the unquoted ``$EXTRA_*_ARGS`` expansion in the
-    Magpie scripts cannot safely round-trip anyway), the string is returned
-    unchanged to avoid mangling it.
-
-    Args:
-        args (str): The server-arg string to dedupe.
-
-    Returns:
-        str: The last-wins deduped string, or the input unchanged when it
-        carries a space/JSON-valued flag.
-    """
-    if not args.strip():
-        return ""
-    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
-        return args
-    tokens = args.split()
-    pairs: dict[str, list[str]] = {}
-    order: list[str] = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t.startswith("--"):
-            if "=" in t:
-                # Normalize ``--flag=value`` so it dedupes against ``--flag value``.
-                flag, _, val = t.partition("=")
-                pair = [flag, val]
-                i += 1
-            else:
-                flag = t
-                i += 1
-                if i < len(tokens) and not tokens[i].startswith("--"):
-                    pair = [flag, tokens[i]]
-                    i += 1
-                else:
-                    pair = [flag]
-            if flag not in pairs:
-                order.append(flag)
-            pairs[flag] = pair
-        else:
-            key = f"__pos_{len(order)}__"
-            order.append(key)
-            pairs[key] = [t]
-            i += 1
-    out: list[str] = []
-    for k in order:
-        out.extend(pairs[k])
-    return " ".join(out)
-
-
-# sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
-# request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
-# watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
-# timeout via ``EXTRA_SGLANG_ARGS`` unless the user already pinned one.
-DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC = 1800
-SGLANG_WATCHDOG_TIMEOUT_ENV = "SGLANG_WATCHDOG_TIMEOUT"
-_SGLANG_WATCHDOG_FLAG = "--watchdog-timeout"
-# Matches space- or equals-separated form so a user-pinned value suppresses
-# injection without false-matching a longer flag.
-_SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
-
-
-def resolve_sglang_watchdog_timeout() -> int:
-    """Resolve the sglang scheduler watchdog timeout in seconds.
-
-    Reads ``$SGLANG_WATCHDOG_TIMEOUT`` (integer seconds) and falls back to
-    :data:`DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC` when the env var is unset,
-    empty, non-integer, or non-positive. A malformed value logs a warning
-    and uses the default rather than crashing the YAML materialization.
-
-    Returns:
-        int: The resolved watchdog timeout in seconds.
-    """
-    raw = os.environ.get(SGLANG_WATCHDOG_TIMEOUT_ENV, "").strip()
-    if not raw:
-        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
-    try:
-        val = int(raw)
-    except ValueError:
-        log.warning(
-            "%s=%r is not an integer; using default %ds.",
-            SGLANG_WATCHDOG_TIMEOUT_ENV,
-            raw,
-            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
-        )
-        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
-    if val <= 0:
-        log.warning(
-            "%s=%d is not positive; using default %ds.",
-            SGLANG_WATCHDOG_TIMEOUT_ENV,
-            val,
-            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
-        )
-        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
-    return val
-
-
-def inject_sglang_watchdog_timeout(
-    server_args: str | None,
-    framework: str | None,
-) -> str:
-    """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
-
-    Returns ``server_args`` unchanged when the framework is not sglang
-    (empty/unknown is treated as sglang) or the flag is already present.
-    Otherwise appends the value from :func:`resolve_sglang_watchdog_timeout`;
-    no other flag is touched.
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-
-    Returns:
-        str: ``server_args`` with ``--watchdog-timeout`` appended, or unchanged
-        for non-sglang frameworks or when the flag is already present.
-    """
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    if _SGLANG_WATCHDOG_RE.search(args):
-        return args
-    timeout = resolve_sglang_watchdog_timeout()
-    return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
-
-
-# sglang ``--context-length`` cap injection: sglang sizes ``max_total_tokens``
-# off the model's ``max_position_embeddings``, so a huge native window (e.g.
-# Mistral-Nemo's 1024000) balloons the aiter workspace_buffer past GPU memory
-# -> HIP OOM -> baseline_failed. vllm already caps via ``--max-model-len``, so
-# this fixes the sglang-only asymmetry: cap to ISL+OSL+headroom (floored,
-# clamped to the native window) unless the flag is already pinned.
-DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS = 2048
-DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS = 8192
-SGLANG_CONTEXT_HEADROOM_ENV = "SGLANG_CONTEXT_HEADROOM_TOKENS"
-SGLANG_CONTEXT_FLOOR_ENV = "SGLANG_CONTEXT_FLOOR_TOKENS"
-_SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
-# Matches space- or equals-separated form so an operator-pinned value
-# suppresses injection without false-matching a longer flag.
-_SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
-_SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
-_SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")
-_SGLANG_DUAL_CHUNK_BACKEND = "dual_chunk_flash_attn"
-
-
-def _resolve_nonneg_int_env(name: str, default: int) -> int:
-    """Read a non-negative integer env override, else return ``default``.
-
-    A blank/non-integer/negative value logs a warning and falls back to the
-    default rather than crashing the YAML materialization.
-
-    Args:
-        name (str): Environment variable name to read.
-        default (int): Fallback value when unset/invalid.
-
-    Returns:
-        int: The parsed non-negative integer, or ``default``.
-    """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        val = int(raw)
-    except ValueError:
-        log.warning(
-            "%s=%r is not an integer; using default %d.",
-            name,
-            raw,
-            default,
-        )
-        return default
-    if val < 0:
-        log.warning(
-            "%s=%d is negative; using default %d.",
-            name,
-            val,
-            default,
-        )
-        return default
-    return val
-
-
-def _coerce_optional_positive_int(value: int | str | None) -> int | None:
-    """Coerce ``value`` to a positive int, or ``None`` when unset/invalid.
-
-    Used to validate an optional ``MAX_MODEL_LEN`` ceiling sourced from the
-    workload envs (where it may be an int, a numeric string, or absent) before
-    it clamps ``--context-length``.
-
-    Args:
-        value (int | str | None): Candidate ceiling.
-
-    Returns:
-        int | None: The positive integer, or ``None`` when unset, non-positive,
-        or non-integer.
-    """
-    if value is None:
-        return None
-    try:
-        parsed = int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def resolve_sglang_context_cap(isl: int, osl: int) -> int:
-    """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
-
-    Returns ``max(isl + osl + headroom, floor)`` (headroom / floor are
-    operator-tunable via ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` /
-    ``$SGLANG_CONTEXT_FLOOR_TOKENS``). Caller clamps to the model's native
-    window before injecting.
-
-    Args:
-        isl (int): Input sequence length.
-        osl (int): Output sequence length.
-
-    Returns:
-        int: ``max(isl + osl + headroom, floor)``.
-    """
-    headroom = _resolve_nonneg_int_env(
-        SGLANG_CONTEXT_HEADROOM_ENV,
-        DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
-    )
-    floor = _resolve_nonneg_int_env(
-        SGLANG_CONTEXT_FLOOR_ENV,
-        DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
-    )
-    return max(int(isl) + int(osl) + headroom, floor)
-
-
-def inject_sglang_context_length(
-    server_args: str | None,
-    framework: str | None,
-    model_path: str | None,
-    isl: int,
-    osl: int,
-    max_model_len: int | str | None = None,
-) -> str:
-    """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
-
-    Returns ``server_args`` unchanged when the framework is not sglang
-    (empty/unknown treated as sglang), the flag is already present, or the
-    model's ``max_position_embeddings`` cannot be read. Otherwise appends
-    ``min(max_pos, max_model_len, cap)`` from :func:`resolve_sglang_context_cap`;
-    only this flag is added.
-
-    sglang sizes its window off ``--context-length`` (it does not honor
-    ``--max-model-len``), so without this clamp a workload cap above the run's
-    explicit ``--max-model-len`` would inject a self-contradictory config (#697:
-    ``--context-length 84048`` while ``--max-model-len 82000``). The
-    ``max_model_len`` ceiling is applied only when it is a positive value;
-    an unset / non-positive value preserves the prior ``min(max_pos, cap)``
-    behaviour.
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-        model_path (str | None): Model path used to read
-            ``max_position_embeddings``.
-        isl (int): Input sequence length.
-        osl (int): Output sequence length.
-        max_model_len (int | str | None): The run's explicit ``MAX_MODEL_LEN``
-            ceiling; clamps ``--context-length`` so it never exceeds it. Ignored
-            when unset, non-positive, or non-integer.
-
-    Returns:
-        str: ``server_args`` with ``--context-length`` appended, or unchanged
-        for non-sglang frameworks, when the flag is present, or when the model
-        window cannot be read.
-    """
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    if _SGLANG_CONTEXT_LENGTH_RE.search(args):
-        return args
-    # Lazy import to avoid a module-level cycle through the heavy cli.py.
-    from ...cli import _load_model_max_position_embeddings
-
-    max_pos = _load_model_max_position_embeddings(str(model_path or ""))
-    if not max_pos:
-        return args
-    cap = resolve_sglang_context_cap(isl, osl)
-    context_length = min(int(max_pos), cap)
-    max_model_len_int = _coerce_optional_positive_int(max_model_len)
-    if max_model_len_int is not None:
-        context_length = min(context_length, max_model_len_int)
-    return merge_server_args(
-        args,
-        f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
-    )
-
-
-def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
-    """Pick the dual-chunk attention backend for the current hardware.
-
-    ``dual_chunk_flash_attn`` is the only backend sglang accepts when the
-    model declares ``dual_chunk_attention_config``. It requires sm90+
-    (NVIDIA Hopper); on AMD/ROCm the preflight gate
-    (``_detect_incompatible_model_config``) blocks these models before
-    they reach this point. If a session somehow arrives here on AMD
-    (e.g. operator override), return the canonical backend and let sglang
-    raise the clear error rather than silently injecting triton which
-    sglang also rejects.  Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
-
-    Args:
-        gpu_type (str | None): Caller-known GPU type; accepted for parity but
-            the canonical backend is returned regardless.
-
-    Returns:
-        str: ``$HYPERLOOM_DUAL_CHUNK_BACKEND`` when set, else
-        ``dual_chunk_flash_attn``.
-    """
-    override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
-    if override:
-        return override
-    return _SGLANG_DUAL_CHUNK_BACKEND
-
-
-def inject_sglang_attention_backend(
-    server_args: str | None,
-    framework: str | None,
-    model_path: str | None,
-    gpu_type: str | None = None,
-) -> str:
-    """Append an ``--attention-backend`` for dual-chunk sglang models.
-
-    Models that declare ``dual_chunk_attention_config`` (Qwen 1M) make
-    sglang hard-reject its default aiter backend with ``ValueError: Dual
-    chunk attention is enabled, but attention backend is set to aiter.``.
-    On NVIDIA sm90+ the fix is ``dual_chunk_flash_attn``; on AMD/ROCm that
-    kernel is unsupported (``sm90 and above``), so we inject ``triton``
-    instead (see :func:`_resolve_dual_chunk_backend`). ``gpu_type`` (when
-    known by the caller) takes precedence over runtime autodetect.
-
-    Returns ``server_args`` unchanged when: framework is not sglang, an
-    ``--attention-backend`` is already pinned (operator wins), or the model
-    config has no dual-chunk block (fail-safe: inject nothing).
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-        model_path (str | None): Model path checked for a dual-chunk config.
-        gpu_type (str | None): Caller-known GPU type; takes precedence over
-            autodetect.
-
-    Returns:
-        str: ``server_args`` with ``--attention-backend`` appended, or unchanged
-        for non-sglang frameworks, when already pinned, or for non-dual-chunk
-        models.
-    """
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    if _SGLANG_ATTN_BACKEND_RE.search(args):
-        return args
-    from ...cli import _model_has_dual_chunk_attention
-
-    if not _model_has_dual_chunk_attention(str(model_path or "")):
-        return args
-    backend = _resolve_dual_chunk_backend(gpu_type)
-    if backend != _SGLANG_DUAL_CHUNK_BACKEND:
-        log.info(
-            "dual-chunk model on AMD/ROCm: injecting --attention-backend %s (dual_chunk_flash_attn needs sm90+).",
-            backend,
-        )
-    return merge_server_args(
-        args,
-        f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
-    )
-
-
-# sglang MoE runner backend injection: on MI300X/MI355X with aiter, sglang's
-# default ``--moe-runner-backend auto`` routes Mixture-of-Experts models
-# through aiter's CK 2-stage fused-MoE kernel. Its first-request JIT build
-# (``module_moe_ck2stages_*``) is broken in some ROCm images — ``thrust`` pulls
-# in a missing ``<cub/detail/detect_cuda_runtime.cuh>`` so hipcc fails to
-# compile, and the killed build leaves a stale lock that makes the next
-# attempts hang on "waiting for baton release" until sglang's 600s warmup
-# read-timeout fires -> baseline_failed. ``triton`` is the ROCm-capable
-# fused-MoE backend sglang itself falls back to (same "aiter CK kernel doesn't
-# support all GEMM dimensions" reason), so inject it for MoE models on AMD
-# unless the operator already pinned a backend. Override via
-# ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND``.
-HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV = "HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND"
-DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND = "triton"
-_SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
-# Matches space- or equals-separated form so a user-pinned value suppresses
-# injection without false-matching a longer flag.
-_SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
-
-
-def inject_sglang_moe_runner_backend(
-    server_args: str | None,
-    framework: str | None,
-    model_path: str | None,
-    gpu_type: str | None = None,
-) -> str:
-    """Append a ``--moe-runner-backend`` for MoE sglang models on AMD/ROCm.
-
-    Returns ``server_args`` unchanged when: framework is not sglang, a
-    ``--moe-runner-backend`` is already pinned (operator wins), the GPU is not
-    an AMD/ROCm runner, or the model is not Mixture-of-Experts (fail-safe:
-    inject nothing). Otherwise appends the backend from
-    ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND`` (default ``triton``); only this
-    flag is added.
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-        model_path (str | None): Model path checked for Mixture-of-Experts.
-        gpu_type (str | None): Caller-known GPU type; used to gate AMD/ROCm.
-
-    Returns:
-        str: ``server_args`` with ``--moe-runner-backend`` appended, or unchanged
-        for non-sglang frameworks, when already pinned, off AMD/ROCm, or for
-        non-MoE models.
-    """
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
-        return args
-    from ...cli import _model_is_moe, _resolve_amd_gpu_type
-
-    if not _resolve_amd_gpu_type(gpu_type):
-        return args
-    if not _model_is_moe(str(model_path or "")):
-        return args
-    backend = (
-        os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip() or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND
-    )
-    log.info(
-        "MoE model on AMD/ROCm: injecting --moe-runner-backend %s (aiter CK "
-        "2-stage fused-MoE JIT build is broken in this image).",
-        backend,
-    )
-    return merge_server_args(
-        args,
-        f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
-    )
-
-
-def apply_runtime_benchmark_overrides(
-    bench: dict[str, Any],
-    *,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    benchmark_script: str | None = None,
-) -> dict[str, Any]:
-    """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
-
-    Single shared path for baseline/profile and grid executors so
-    backends/params/sweep no longer fall back to shipped YAML defaults.
-    ``benchmark_script`` (must be pre-sanitized via :func:`sanitize_script_name`)
-    force-selects a specific Magpie script, applied AFTER the
-    ``gpu_type``-derived generic script so the operator pick wins.
-
-    Args:
-        bench (dict[str, Any]): The Magpie ``benchmark`` config to mutate.
-        model_path (str | None): Overrides ``benchmark.model`` when set.
-        gpu_type (str | None): Pins ``runner_type`` and the generic
-            ``{framework}_{gpu_type}.sh`` script.
-        benchmark_script (str | None): Pre-sanitized script name that
-            force-selects a Magpie script (applied last).
-
-    Returns:
-        dict[str, Any]: The mutated ``benchmark["envs"]`` mapping.
-    """
-    if model_path:
-        bench["model"] = str(model_path)
-
-    precision = os.environ.get("PRECISION", "").strip()
-    if precision:
-        bench["precision"] = precision
-
-    if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's
-        # resolver doesn't fall through to InferenceX native scripts that
-        # hardcode ``--result-dir /workspace/`` and ignore ``EXTRA_*_ARGS``.
-        # See ``design/magpie-generic-script-and-user-data-path.md``.
-        framework = str(bench.get("framework") or "").lower()
-        if framework:
-            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
-        else:
-            bench.pop("benchmark_script", None)
-
-    if benchmark_script:
-        bench["benchmark_script"] = str(benchmark_script)
-
-    envs = bench.setdefault("envs", {})
-    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
-        val = os.environ.get(env_key, "").strip()
-        if not val:
-            continue
-        # TP yaml-explicit wins: a stale state.tp re-exported on resume must
-        # not downgrade a YAML-pinned TP.
-        if env_key == "TP":
-            yaml_tp = envs.get("TP")
-            if yaml_tp not in (None, 0, "", "0"):
-                continue
-        envs[env_key] = int(val)
-
-    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if explicit_rocr:
-        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
-    else:
-        tp_val = int(envs.get("TP", 1) or 1)
-        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
-        existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
-        if tp_val > 1 and existing_count < tp_val:
-            envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
-
-    return envs
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _build_variant_yaml(

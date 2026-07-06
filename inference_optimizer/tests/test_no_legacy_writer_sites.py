@@ -16,21 +16,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Allowlist: repo-relative POSIX path -> justification. Meant to shrink, not grow.
 ALLOWED_FILES: dict[str, str] = {
-    # Compat helper modules (the only canonical reader of the legacy
-    # key). Mentions are mechanical: constants, docstrings, error
-    # messages naming both keys.
+    # Canonical compat helper (tree-reform.MD §7/P2.1): the single reader of
+    # the legacy key now lives in hyperloom.common; the compat + sub-agent
+    # shims re-export it and no longer carry the literal themselves.
+    "src/hyperloom/common/payload_aliases.py": "canonical payload-aliases compat helper (tree-reform.MD §7)",
+    # Compat helper modules (docstrings naming both keys; re-export the
+    # canonical helper above).
     "inference_optimizer/compat/__init__.py": "compat package docstring naming the rename",
-    "inference_optimizer/compat/payload_aliases.py": "compat helper for the legacy alias",
-    # Sub-agent shims — duplicated by design (sub-agents are
-    # standalone packages, see framework_agent.repo_map).
-    "kernel-agent/tools/_payload_aliases.py": "kernel-agent payload-aliases shim",
+    "inference_optimizer/compat/payload_aliases.py": "compat re-export shim docstring names the rename",
+    # Sub-agent reader site (kernel-agent) that falls back to the legacy key.
     "kernel-agent/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
-    "robustness-agent/src/robustness_agent/_payload_aliases.py": "robustness-agent payload-aliases shim",
     # Back-compat injection points in production code (renamed kwarg
     # alias on GridVariant, walk-and-rewrite on SharedState loader).
     "inference_optimizer/actions/_meta/replay_warm_recipe.yaml": "warm-replay internal action schema mirrors RecipeKB best_config "
     "field names",
-    "inference_optimizer/orchestrator/action_executors/_grid_runner.py": "GridVariant(extra_sglang_args=...) back-compat kwarg",
+    "inference_optimizer/orchestrator/action_executors/_grid_base.py": "GridVariant(extra_sglang_args=...) back-compat kwarg (tree-reform.MD P2.2: GridVariant extracted from _grid_runner.py to the _grid_base sibling)",
     "inference_optimizer/orchestrator/shared_state.py": "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
     "inference_optimizer/orchestrator/research_hints.py": "priors-match scorer builds a token blob from variant fields and "
     "reads the legacy extra_sglang_args key alongside the canonical "

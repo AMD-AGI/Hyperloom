@@ -13,6 +13,11 @@ import yaml
 
 from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
 
+# tree-reform.MD P2.2: compatibility-filter helpers were extracted to the
+# ``_grid_variant_filter`` sibling; patch them there (apply_compatibility_filter
+# resolves them in that module's namespace, not via the _grid_runner re-export).
+from inference_optimizer.orchestrator.action_executors import _grid_variant_filter as vf
+
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:
     return gr.GridVariant(name=name, extra_server_args=args, extra_envs=envs or {})
@@ -21,8 +26,8 @@ def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVari
 # -- apply_compatibility_filter -------------------------------------------
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setenv("MODEL_PATH", "meta-llama-3-8b")
-    monkeypatch.setattr(gr, "_detect_model_class", lambda mp: (False, False))
-    monkeypatch.setattr(gr, "_probe_server_help_text", lambda fw: "")
+    monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
+    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "")
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
     kept, dropped = gr.apply_compatibility_filter(grid)
     assert [v.name for v in kept] == ["plain"]
@@ -33,8 +38,8 @@ def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
 
 def test_compatibility_filter_drops_on_missing_help_flag(monkeypatch) -> None:
     monkeypatch.setenv("MODEL_PATH", "deepseek-moe")
-    monkeypatch.setattr(gr, "_detect_model_class", lambda mp: (True, True))
-    monkeypatch.setattr(gr, "_probe_server_help_text", lambda fw: "--some-other-flag")
+    monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
+    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--some-other-flag")
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid)
     assert kept == []
@@ -43,7 +48,7 @@ def test_compatibility_filter_drops_on_missing_help_flag(monkeypatch) -> None:
 
 def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> None:
     monkeypatch.delenv("MODEL_PATH", raising=False)
-    monkeypatch.setattr(gr, "_probe_server_help_text", lambda fw: "--enable-ep-moe")
+    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--enable-ep-moe")
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid)
     assert [v.name for v in kept] == ["moe"] and dropped == []
