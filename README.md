@@ -17,6 +17,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | | |
 |---|---|
 | **[Local Mode Quickstart (Cursor)](docs/QUICKSTART_LOCAL_MODE.md)** | Run Hyperloom in Docker on your own AMD GPU machine and drive it from Cursor |
+| **[Bare-Metal Quickstart (No Docker)](docs/QUICKSTART_BAREMETAL.md)** | Install Hyperloom directly on a ROCm host — no container |
 | **[Quantization (AMD Quark)](docs/QUANTIZATION_QUARK.md)** | Optional `--quantize` prelude: Quark checkout requirement and `QUARK_ROOT` resolution |
 | **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Conversational orchestration, phase sequencing, action gates, and KB-driven priors |
 | **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
@@ -54,6 +55,12 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 ## Quickstart — Local Mode (Cursor)
 
 Local Mode runs Hyperloom in a Docker container on your AMD GPU machine. Cursor attaches to the container and launches optimization. See **[docs/QUICKSTART_LOCAL_MODE.md](docs/QUICKSTART_LOCAL_MODE.md)** for the full setup guide (own-GPU quickstart, optional Primus-SaFE path, and launch instructions).
+
+---
+
+## Quickstart — Bare-Metal (No Docker)
+
+Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `inference_optimizer/scripts/install_baremetal.sh`, then drive it from Cursor. See **[docs/QUICKSTART_BAREMETAL.md](docs/QUICKSTART_BAREMETAL.md)** for the full setup guide (prerequisites, credential setup, optional SGLang/vLLM install, and launch instructions).
 
 ---
 
