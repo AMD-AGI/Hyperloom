@@ -1810,7 +1810,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                     time.time() - started, skipped=True)
             log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
-        # P0 baseline-correctness gate: a structurally broken auto-generated
+        # baseline-correctness gate: a structurally broken auto-generated
         # harness fails correctness even on the unmodified kernel, which makes
         # the agent spin the entire budget reverting every iteration (0 gain).
         # Verify the baseline up front and skip forge cleanly (fall through to

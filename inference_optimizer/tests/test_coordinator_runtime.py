@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P0-3 Coordinator + MockBackend + SubAgentRunner tests."""
+"""Coordinator + MockBackend + SubAgentRunner tests."""
 
 from __future__ import annotations
 

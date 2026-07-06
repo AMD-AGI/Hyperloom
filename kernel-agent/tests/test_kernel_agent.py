@@ -100,7 +100,7 @@ def write_vendor_trace(path: Path) -> None:
 
 
 class UpdateStatusTimingTests(unittest.TestCase):
-    """Hyperloom P2-3: ``update_status`` writes ``ended_at``/``duration_seconds`` on terminal states."""
+    """``update_status`` writes ``ended_at``/``duration_seconds`` on terminal states."""
 
     def _import_module(self):
         # tools dir must be on sys.path so the sibling import resolves.
