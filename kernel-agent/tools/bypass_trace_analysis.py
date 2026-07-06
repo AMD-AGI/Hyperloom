@@ -375,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
     roofline_name = args.roofline_output_name or "kernel_roofline.json"
     kernel_roofline_path = reports_dir / roofline_name
     kernel_sequence_path = bypass_dir / "kernel_sequence.json"
+    kernel_metrics_csv_path = bypass_dir / "kernel_metrics.csv"
+    kernel_summary_csv_path = bypass_dir / "kernel_summary.csv"
 
     # Stamp the report path onto each candidate (downstream reads it).
     for cand in candidates.get("hot_kernels", []):
@@ -390,9 +392,15 @@ def main(argv: list[str] | None = None) -> int:
             framework=args.framework,
             target_platform=args.target_platform,
             throughput_unit=throughput_unit,
+            metrics_csv_path=str(kernel_metrics_csv_path),
+            summary_csv_path=str(kernel_summary_csv_path),
         ),
     )
     _atomic_write_json(candidates_path, candidates)
+    # Structured, code-generated CSV exports (full per-kernel metrics + category
+    # summary); machine-readable ground truth that downstream code can load by path.
+    _write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
+    _write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
 
     summary = _report.build_summary(
         candidates,
@@ -470,6 +478,8 @@ def main(argv: list[str] | None = None) -> int:
         "kernel_roofline_path": str(kernel_roofline_path),
         "tracelens_summary_path": str(summary_path),
         "kernel_sequence_path": str(kernel_sequence_path),
+        "kernel_metrics_csv_path": str(kernel_metrics_csv_path),
+        "kernel_summary_csv_path": str(kernel_summary_csv_path),
         "fusion": {
             "launch_count": fusion.get("launch_count", 0),
             "fusable_cluster_count": fusion.get("fusable_cluster_count", 0),
@@ -486,6 +496,8 @@ def main(argv: list[str] | None = None) -> int:
             "kernel_roofline": str(kernel_roofline_path),
             "tracelens_summary": str(summary_path),
             "kernel_sequence": str(kernel_sequence_path),
+            "kernel_metrics_csv": str(kernel_metrics_csv_path),
+            "kernel_summary_csv": str(kernel_summary_csv_path),
             "trace_input_manifest": str(manifest_path),
         },
     }

@@ -20,8 +20,10 @@ stage (M6).
 
 from __future__ import annotations
 
+import csv
+import io
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
@@ -50,6 +52,23 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 
 _UNKNOWN_BOUND = "\u2014"  # em dash, matching the golden "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak", "claude", "codex"]
+
+# Bound-type display prefixes for the (deterministic) per-kernel suggestion.
+_BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound": "Memory-bound"}
+
+
+def _build_suggestion(category: str, bound_type: str) -> str:
+    """Deterministic optimization hint from ``category`` + ``bound_type``.
+
+    Pure category->text lookup (``_ACTION_BY_CATEGORY``) optionally prefixed with
+    the analytical bound; NOT LLM-generated, so the ``suggestion`` column is
+    reproducible and attributable. Feeds the specialist prompt's ``action`` slot
+    (reads ``suggestion``/``recommended_actions``), which is otherwise empty for
+    bypass candidates.
+    """
+    action = _ACTION_BY_CATEGORY.get(category, _ACTION_BY_CATEGORY["Others"])
+    prefix = _BOUND_PREFIX.get(bound_type, "")
+    return f"{prefix}: {action}" if prefix else action
 
 # torch ``Input type`` token -> compact dtype suffix for the shape-string contract
 # (e.g. ``(15360,2048) bf16``). Independent reimplementation of the TraceLens map
@@ -365,6 +384,18 @@ def build_candidates(
         )
         if rl:
             cand.update(rl)
+        # Optimization ROI = share of GPU time x headroom (1 - efficiency).
+        # High-impact + low-efficiency kernels rank first. With no analytical
+        # efficiency (placeholder), headroom=1 so it degrades to gpu_pct (pure
+        # cost) -- a sensible fallback. Deterministic + reproducible.
+        eff = cand.get("efficiency_percent")
+        eff = float(eff) if isinstance(eff, (int, float)) else 0.0
+        headroom = 1.0 - min(max(eff, 0.0), 100.0) / 100.0
+        cand["optimization_priority"] = round(float(cand.get("gpu_pct") or 0.0) * headroom, 4)
+        # Deterministic per-kernel hint (fills the specialist prompt's action slot).
+        suggestion = _build_suggestion(kc.category, str(cand.get("bound_type") or ""))
+        cand["suggestion"] = suggestion
+        cand["recommended_actions"] = [suggestion]
         hot_kernels.append(cand)
         if not kc.reusable:
             skipped_kernels.append(cand)
@@ -379,6 +410,12 @@ def build_candidates(
         g = kid_to_group.get(c["kernel_id"])
         if g is not None:
             c["task_group"] = g
+
+    # 1-based rank by optimization ROI. Stamped as a field WITHOUT reordering
+    # hot_kernels (that list stays gpu_pct-sorted for downstream/top15 stability);
+    # the CSV / md Top-N views sort by this rank themselves.
+    for rank, c in enumerate(sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1):
+        c["priority_rank"] = rank
 
     return {
         "source": "bypass",
@@ -495,6 +532,142 @@ def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Structured CSV export (deterministic, code-generated; NOT LLM).
+# ---------------------------------------------------------------------------
+#: Stable column order for the per-kernel metrics CSV. Every numeric column is
+#: reproducible from the trace (measured) or a documented formula
+#: (optimization_priority = gpu_pct * (1 - efficiency/100)); roofline_source /
+#: shape_provenance state each value's provenance so the CSV is fully attributable.
+_METRICS_COLUMNS: list[str] = [
+    "priority_rank", "optimization_priority", "kernel_id", "name", "kernel_category",
+    "device_kernel_name", "duration_us", "gpu_pct", "call_count",
+    "bound_type", "arithmetic_intensity", "efficiency_percent",
+    "compute_utilization_pct", "bandwidth_utilization_pct", "roofline_source", "roofline_measured",
+    "reusable_native_kernel", "source_file", "source_type", "recommended_backends",
+    "benchmark_files_count", "skip_reason", "representative_shape", "input_dtypes",
+    "shape_provenance", "suggestion",
+]
+
+_SUMMARY_COLUMNS: list[str] = [
+    "kernel_category", "kernel_count", "total_gpu_pct", "total_duration_us",
+    "mean_efficiency_percent", "dominant_bound_type", "routable_count",
+]
+
+
+def _join_list(value: Any) -> str:
+    """Render a list cell as a ``;``-joined string (CSV-cell friendly)."""
+    return ";".join(str(x) for x in value) if isinstance(value, list) else ""
+
+
+def build_metrics_rows(candidates: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten ALL hot kernels (routable + skipped) into per-kernel metric rows.
+
+    Args:
+        candidates: Output of :func:`build_candidates`.
+
+    Returns:
+        One flat dict per hot kernel keyed by :data:`_METRICS_COLUMNS`.
+    """
+    rows: list[dict[str, Any]] = []
+    for c in candidates.get("hot_kernels") or []:
+        shapes = c.get("shapes") or []
+        rep = shapes[0].get("shape", "") if shapes and isinstance(shapes[0], dict) else ""
+        rows.append({
+            "priority_rank": c.get("priority_rank", ""),
+            "optimization_priority": c.get("optimization_priority", ""),
+            "kernel_id": c.get("kernel_id", ""),
+            "name": c.get("name", ""),
+            "kernel_category": c.get("kernel_category", ""),
+            "device_kernel_name": c.get("device_kernel_name", ""),
+            "duration_us": c.get("duration_us", ""),
+            "gpu_pct": c.get("gpu_pct", ""),
+            "call_count": c.get("call_count", ""),
+            "bound_type": c.get("bound_type", ""),
+            "arithmetic_intensity": c.get("arithmetic_intensity", ""),
+            "efficiency_percent": c.get("efficiency_percent", ""),
+            "compute_utilization_pct": c.get("compute_utilization_pct", ""),
+            "bandwidth_utilization_pct": c.get("bandwidth_utilization_pct", ""),
+            "roofline_source": c.get("roofline_source", ""),
+            "roofline_measured": c.get("roofline_measured", ""),
+            "reusable_native_kernel": c.get("reusable_native_kernel", ""),
+            "source_file": c.get("source_file", ""),
+            "source_type": c.get("source_type", ""),
+            "recommended_backends": _join_list(c.get("recommended_backends")),
+            "benchmark_files_count": len(c.get("benchmark_files") or []),
+            "skip_reason": c.get("skip_reason", ""),
+            "representative_shape": rep,
+            "input_dtypes": _join_list(c.get("input_dtypes")),
+            "shape_provenance": c.get("shape_provenance", ""),
+            "suggestion": c.get("suggestion", ""),
+        })
+    return rows
+
+
+def build_category_summary(candidates: dict[str, Any]) -> list[dict[str, Any]]:
+    """Aggregate hot kernels by category (the CSV 'summary' view).
+
+    Args:
+        candidates: Output of :func:`build_candidates`.
+
+    Returns:
+        One row per category (keyed by :data:`_SUMMARY_COLUMNS`), GPU%-descending.
+    """
+    agg: dict[str, dict[str, Any]] = {}
+    for c in candidates.get("hot_kernels") or []:
+        cat = c.get("kernel_category") or "Others"
+        a = agg.setdefault(cat, {
+            "kernel_count": 0, "total_gpu_pct": 0.0, "total_duration_us": 0.0,
+            "eff_sum": 0.0, "eff_n": 0, "bounds": Counter(), "routable": 0,
+        })
+        a["kernel_count"] += 1
+        a["total_gpu_pct"] += float(c.get("gpu_pct") or 0.0)
+        a["total_duration_us"] += float(c.get("duration_us") or 0.0)
+        eff = c.get("efficiency_percent")
+        if isinstance(eff, (int, float)) and eff > 0:
+            a["eff_sum"] += float(eff)
+            a["eff_n"] += 1
+        bt = c.get("bound_type") or ""
+        if bt in ("compute_bound", "memory_bound"):
+            a["bounds"][bt] += 1
+        if c.get("reusable_native_kernel"):
+            a["routable"] += 1
+    rows = [
+        {
+            "kernel_category": cat,
+            "kernel_count": a["kernel_count"],
+            "total_gpu_pct": round(a["total_gpu_pct"], 4),
+            "total_duration_us": round(a["total_duration_us"], 3),
+            "mean_efficiency_percent": round(a["eff_sum"] / a["eff_n"], 3) if a["eff_n"] else "",
+            "dominant_bound_type": a["bounds"].most_common(1)[0][0] if a["bounds"] else "",
+            "routable_count": a["routable"],
+        }
+        for cat, a in agg.items()
+    ]
+    rows.sort(key=lambda r: r["total_gpu_pct"], reverse=True)
+    return rows
+
+
+def _rows_to_csv(columns: list[str], rows: list[dict[str, Any]]) -> str:
+    """Serialize rows to CSV text (stdlib ``csv``; empty cell for None/missing)."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    for r in rows:
+        writer.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in columns})
+    return buf.getvalue()
+
+
+def build_metrics_csv(candidates: dict[str, Any]) -> str:
+    """Per-kernel metrics as CSV text (all hot kernels; see :data:`_METRICS_COLUMNS`)."""
+    return _rows_to_csv(_METRICS_COLUMNS, build_metrics_rows(candidates))
+
+
+def build_category_summary_csv(candidates: dict[str, Any]) -> str:
+    """Category-aggregated summary as CSV text (see :data:`_SUMMARY_COLUMNS`)."""
+    return _rows_to_csv(_SUMMARY_COLUMNS, build_category_summary(candidates))
+
+
 def render_analysis_md(
     candidates: dict[str, Any],
     analyze_out: dict[str, Any],
@@ -503,6 +676,8 @@ def render_analysis_md(
     framework: str,
     target_platform: str,
     throughput_unit: str = "tok/s",
+    metrics_csv_path: str = "",
+    summary_csv_path: str = "",
 ) -> str:
     """Render the human/downstream ``analysis.md`` report (bypass route).
 
@@ -535,8 +710,9 @@ def render_analysis_md(
         f"> Generated via bypass route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass). "
         f"framework={framework or 'unknown'}, platform={target_platform or 'unknown'}, "
         f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
-        f"Not a TraceLens report; hardware roofline (bound/efficiency) is filled by "
-        f"the rocprof-compute enrichment stage when available."
+        f"Not a TraceLens report; per-kernel roofline (bound/AI/efficiency) is computed "
+        f"analytically from captured operand shapes + measured kernel time "
+        f"(roofline_source=analytical), with optional rocprof-compute refinement."
     )
     L.append("")
 
@@ -561,6 +737,39 @@ def render_analysis_md(
         L.append("|------|----------|-------|-----------|---------|")
         for i, r in enumerate(rollup, start=1):
             L.append(f"| {i} | {r['category']} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
+    else:
+        L.append("_No GPU kernels found in trace._")
+    L.append("")
+    # Analytical roofline bound distribution (one-liner).
+    n_compute = sum(1 for c in hot if c.get("bound_type") == "compute_bound")
+    n_memory = sum(1 for c in hot if c.get("bound_type") == "memory_bound")
+    if n_compute or n_memory:
+        L.append(f"_Analytical roofline bound: {n_compute} compute-bound, {n_memory} memory-bound hot kernel(s)._")
+        L.append("")
+
+    # Top 10 kernels by optimization ROI (priority = gpu_pct x (1 - efficiency);
+    # high-impact + low-efficiency first). Full per-kernel table lives in the CSV.
+    L.append("## Top 10 Kernels by Optimization Priority")
+    L.append("")
+    ranked = sorted(hot, key=lambda c: c.get("optimization_priority") or 0.0, reverse=True)[:10]
+    if ranked:
+        L.append(
+            "_Priority = GPU% x (1 - efficiency): high-impact, low-efficiency kernels "
+            "first. Full per-kernel metrics in the CSV linked below._"
+        )
+        L.append("")
+        L.append("| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |")
+        L.append("|---|-----------|------|----------|------|-------|----|----|---------|------------|")
+        for i, c in enumerate(ranked, start=1):
+            ai = c.get("arithmetic_intensity")
+            ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "\u2014"
+            eff = c.get("efficiency_percent")
+            eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
+            L.append(
+                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {c.get('kernel_category', '')} "
+                f"| {float(c.get('gpu_pct') or 0.0):.2f}% | {c.get('bound_type', '')} | {ai_str} | {eff_str} "
+                f"| {float(c.get('optimization_priority') or 0.0):.2f} | {c.get('suggestion', '')} |"
+            )
     else:
         L.append("_No GPU kernels found in trace._")
     L.append("")
@@ -607,9 +816,13 @@ def render_analysis_md(
                     "but no editable source was located for its launching op)."
                 )
             L.append("")
+            bound = c.get("bound_type") or "\u2014"
+            eff = c.get("efficiency_percent")
+            eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
             L.append(
-                f"**Impact**: {c['gpu_pct']:.2f}% of GPU time "
-                f"(bound type pending rocprof-compute enrichment)."
+                f"**Impact**: {c['gpu_pct']:.2f}% of GPU time; bound={bound}, "
+                f"efficiency={eff_str}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
+                f"(roofline_source={c.get('roofline_source', 'placeholder')})."
             )
             L.append("")
 
@@ -667,7 +880,18 @@ def render_analysis_md(
             f"(shape provenance: {c.get('shape_provenance', 'unresolved')})."
         )
         L.append("")
-        L.append("**Impact estimate:** bound type / efficiency pending rocprof-compute enrichment.")
+        _eff = c.get("efficiency_percent")
+        _eff_s = f"{float(_eff):.1f}%" if isinstance(_eff, (int, float)) else _UNKNOWN_BOUND
+        _ai = c.get("arithmetic_intensity")
+        _ai_s = f"{float(_ai):.3g}" if isinstance(_ai, (int, float)) else _UNKNOWN_BOUND
+        _bound = c.get("bound_type") or _UNKNOWN_BOUND
+        L.append(
+            f"**Roofline:** bound={_bound}, AI={_ai_s}, "
+            f"efficiency={_eff_s}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
+            f"(roofline_source={c.get('roofline_source', 'placeholder')})."
+        )
+        L.append("")
+        L.append(f"**Suggested action:** {c.get('suggestion', '')}")
         L.append("")
 
     # Appendix
@@ -684,6 +908,18 @@ def render_analysis_md(
         f"({attribution.get('attributed_pct', 0)}% of GPU time)"
     )
     L.append("")
+
+    # Structured CSV export (full data; code-generated, machine-readable).
+    if metrics_csv_path or summary_csv_path:
+        L.append("## Structured Metrics (CSV)")
+        L.append("")
+        L.append("_Code-generated (no LLM). The Top-10 table above is a preview; these CSVs carry the full data._")
+        L.append("")
+        if metrics_csv_path:
+            L.append(f"- Per-kernel metrics (all hot kernels): `{metrics_csv_path}`")
+        if summary_csv_path:
+            L.append(f"- Category summary: `{summary_csv_path}`")
+        L.append("")
     return "\n".join(L)
 
 

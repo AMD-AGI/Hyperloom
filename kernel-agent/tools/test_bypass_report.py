@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import sys
 from pathlib import Path
 
@@ -102,6 +104,83 @@ def test_build_candidates_no_shapes_stays_placeholder_roofline():
     assert cand["arithmetic_intensity"] is None
 
 
+def test_optimization_priority_and_suggestion_are_attributable():
+    kernels = [{
+        "name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm",
+        "gpu_time_us": 500.0, "count": 1,
+        "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+    }]
+    cand = report.build_candidates(_analyze(kernels), framework="xdit", target_platform="mi300x")["hot_kernels"][0]
+    # priority = gpu_pct * (1 - eff/100): reproducible from two columns in the row.
+    expected = round(cand["gpu_pct"] * (1.0 - cand["efficiency_percent"] / 100.0), 4)
+    assert cand["optimization_priority"] == expected
+    assert cand["priority_rank"] == 1
+    # 4096^3 GEMM is compute-bound -> suggestion carries the bound prefix + GEMM action.
+    assert cand["suggestion"].startswith("Compute-bound:")
+    assert cand["recommended_actions"] == [cand["suggestion"]]
+
+
+def test_priority_falls_back_to_gpu_pct_without_efficiency():
+    kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 10.0, "count": 1}]
+    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")["hot_kernels"][0]
+    # No analytical efficiency -> headroom 1 -> priority == gpu_pct; no bound prefix.
+    assert cand["optimization_priority"] == round(cand["gpu_pct"], 4)
+    assert not cand["suggestion"].startswith(("Compute-bound", "Memory-bound"))
+
+
+def test_priority_rank_orders_by_roi():
+    kernels = [
+        {"name": "big_elementwise_kernel", "op_name": "aten::add", "gpu_time_us": 900.0, "count": 1,
+         "op_shapes": [[8192, 8192], [8192, 8192]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {"name": "small_mm_kernel", "op_name": "aten::mm", "gpu_time_us": 100.0, "count": 1,
+         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+    ]
+    hot = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")["hot_kernels"]
+    # The big high-share kernel out-ranks the small one by ROI.
+    big = max(hot, key=lambda c: c["duration_us"])
+    assert big["priority_rank"] == 1
+
+
+def test_metrics_csv_has_all_kernels_and_columns():
+    kernels = [
+        {"name": "Cijk_x", "op_name": "aten::mm", "gpu_time_us": 500.0, "count": 1,
+         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {"name": "mystery", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 2},
+    ]
+    cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")
+    rows = list(csv.DictReader(io.StringIO(report.build_metrics_csv(cands))))
+    assert len(rows) == 2  # all hot kernels, incl. the non-routable mystery one
+    assert set(report._METRICS_COLUMNS).issubset(rows[0].keys())
+    assert all(r["suggestion"] for r in rows)  # deterministic hint present
+    assert all(r["optimization_priority"] for r in rows)
+
+
+def test_category_summary_aggregates_by_category():
+    kernels = [
+        {"name": "Cijk_a", "op_name": "aten::mm", "gpu_time_us": 300.0, "count": 1,
+         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {"name": "Cijk_b", "op_name": "aten::mm", "gpu_time_us": 300.0, "count": 1,
+         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {"name": "add_elementwise", "op_name": "aten::add", "gpu_time_us": 100.0, "count": 1,
+         "op_shapes": [[1024, 1024], [1024, 1024]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+    ]
+    cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")
+    summ = report.build_category_summary(cands)
+    by_cat = {r["kernel_category"]: r for r in summ}
+    assert by_cat["GEMM"]["kernel_count"] == 2
+    assert by_cat["GEMM"]["total_gpu_pct"] > by_cat["Elementwise"]["total_gpu_pct"]
+    assert summ[0]["total_gpu_pct"] >= summ[-1]["total_gpu_pct"]  # GPU%-descending
+    assert by_cat["GEMM"]["dominant_bound_type"] in ("compute_bound", "memory_bound")
+
+
+def test_summary_csv_parseable():
+    kernels = [{"name": "Cijk_a", "op_name": "aten::mm", "gpu_time_us": 300.0, "count": 1,
+                "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]}]
+    cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")
+    rows = list(csv.DictReader(io.StringIO(report.build_category_summary_csv(cands))))
+    assert rows and rows[0]["kernel_category"] == "GEMM"
+
+
 def test_roofline_rows_flag_placeholder_not_measured():
     # The bypass roofline is a structural placeholder (bound_type "—", AI/util
     # null/0) until the opt-in rocprof-compute enrichment runs. Mark it
@@ -135,6 +214,26 @@ def test_render_analysis_md_sections_textgen():
     assert "Throughput unit: tok/s" in md
     # routable SDPA candidate rendered as a P-item
     assert "P1:" in md
+
+
+def test_render_analysis_md_top10_and_csv_and_no_stale_text():
+    kernels = [{
+        "name": "Cijk_x", "op_name": "aten::mm", "gpu_time_us": 500.0, "count": 1,
+        "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+    }]
+    analyze = _analyze(kernels)
+    cands = report.build_candidates(analyze, framework="vllm", target_platform="mi300x")
+    md = report.render_analysis_md(
+        cands, analyze, model_name="M", framework="vllm", target_platform="mi300x",
+        metrics_csv_path="/x/kernel_metrics.csv", summary_csv_path="/x/kernel_summary.csv",
+    )
+    assert "## Top 10 Kernels by Optimization Priority" in md
+    assert "| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |" in md
+    assert "Analytical roofline bound:" in md
+    assert "## Structured Metrics (CSV)" in md
+    assert "kernel_metrics.csv" in md and "kernel_summary.csv" in md
+    # stale placeholder phrasing must be gone (bound now analytical)
+    assert "pending rocprof-compute enrichment" not in md
 
 
 def test_render_analysis_md_xdit_unit():

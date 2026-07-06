@@ -13,7 +13,9 @@ stdout-is-a-single-result-JSON invariant the handler relies on.
 
 from __future__ import annotations
 
+import csv
 import gzip
+import io
 import json
 import sys
 from pathlib import Path
@@ -419,6 +421,22 @@ def test_fusion_artifact_and_result(tmp_path, capsys, monkeypatch):
     seq = json.loads(Path(seq_path).read_text())
     assert seq["fusable_clusters"][0]["launch_count"] == 2
     assert "Elementwise" in seq["fusable_clusters"][0]["categories"]
+
+
+def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    trace = tmp_path / "m.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
+    _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    mpath = result["artifact_paths"]["kernel_metrics_csv"]
+    spath = result["artifact_paths"]["kernel_summary_csv"]
+    assert Path(mpath).is_file() and Path(spath).is_file()
+    assert result["kernel_metrics_csv_path"] == mpath
+    rows = list(csv.DictReader(io.StringIO(Path(mpath).read_text())))
+    assert rows  # the two elementwise launches -> rows
+    assert "optimization_priority" in rows[0] and "suggestion" in rows[0]
+    srows = list(csv.DictReader(io.StringIO(Path(spath).read_text())))
+    assert srows and "kernel_category" in srows[0]
 
 
 def test_rocprof_enrich_opt_in_runs_and_degrades(tmp_path, capsys, monkeypatch):
