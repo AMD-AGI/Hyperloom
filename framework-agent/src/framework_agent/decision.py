@@ -4,7 +4,149 @@
 
 from __future__ import annotations
 
-from .models import ExploreRequest
+from typing import Any, Iterable
+
+from .models import Candidate, ExploreRequest
+
+
+def _field(obj: Candidate | dict[str, Any], name: str, default: Any = "") -> Any:
+    """Read ``name`` from a Candidate-like object or dict."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _keywords(values: Iterable[str] | None) -> set[str]:
+    """Normalize keyword strings for prior-score association."""
+    return {str(v).strip().lower() for v in (values or []) if str(v).strip()}
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    """Return Jaccard overlap for two keyword sets."""
+    if not left and not right:
+        return 0.0
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+
+def _float_value(value: Any, default: float = 0.0) -> float:
+    """Coerce a ledger numeric field without letting bad rows abort ranking."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def prior_score(
+    candidate: Candidate | dict[str, Any],
+    *,
+    gap_canonical_id: str = "",
+    gap_keywords: Iterable[str] | None = None,
+    ledger: list[dict[str, Any]] | None = None,
+    min_samples: int = 1,
+) -> float:
+    """Compute a KB-derived pre-benchmark priority for a PR candidate.
+
+    The score is advisory only: callers should use it to sort candidates
+    before expensive benchmarking, never to bypass throughput/accuracy gates.
+    Cold starts (no matching history) return ``0.0``.
+
+    Args:
+        candidate: Candidate object or candidate dict.
+        gap_canonical_id: Current canonical gap id; falls back to the candidate.
+        gap_keywords: Current gap keywords; falls back to the candidate.
+        ledger: Historical ``lessons.jsonl`` records.
+        min_samples: Minimum associated records needed to emit a non-zero score.
+
+    Returns:
+        A score in ``[0, 1]`` combining exact/fuzzy association, historical
+        throughput gain, and historical integration success.
+    """
+    records = ledger or []
+    if not records:
+        return 0.0
+
+    cand_framework = str(_field(candidate, "framework", "") or "").strip().lower()
+    current_gap = str(gap_canonical_id or _field(candidate, "gap_canonical_id", "") or "").strip()
+    current_keywords = _keywords(gap_keywords or _field(candidate, "gap_keywords", []) or [])
+    param_fields = ("model_class", "gpu_type", "precision")
+    candidate_params = {
+        field: str(_field(candidate, field, "") or "").strip().lower()
+        for field in param_fields
+        if str(_field(candidate, field, "") or "").strip()
+    }
+    candidate_urls = {
+        str(v).strip()
+        for v in (
+            _field(candidate, "pr_url", ""),
+            _field(candidate, "html_url", ""),
+        )
+        if str(v).strip()
+    }
+    candidate_shas = {
+        str(v).strip()
+        for v in (
+            _field(candidate, "pr_sha", ""),
+            _field(candidate, "head_sha", ""),
+        )
+        if str(v).strip()
+    }
+
+    exact_pr_records: list[tuple[float, dict[str, Any]]] = []
+    associated: list[tuple[float, dict[str, Any]]] = []
+    for rec in records:
+        rec_framework = str(rec.get("framework") or "").strip().lower()
+        if cand_framework and rec_framework and cand_framework != rec_framework:
+            continue
+        rec_url = str(rec.get("pr_url") or "").strip()
+        rec_sha = str(rec.get("pr_sha") or "").strip()
+        exact_pr = bool((rec_url and rec_url in candidate_urls) or (rec_sha and rec_sha in candidate_shas))
+        rec_gap = str(rec.get("gap_canonical_id") or "").strip()
+        exact = bool(current_gap and rec_gap and current_gap == rec_gap)
+        fuzzy = _jaccard(current_keywords, _keywords(rec.get("gap_keywords") or []))
+        if exact_pr:
+            exact_pr_records.append((1.0, rec))
+            continue
+        if not exact and fuzzy <= 0.0:
+            continue
+        association = 1.0 if exact else fuzzy
+        associated.append((association, rec))
+
+    if exact_pr_records:
+        associated = exact_pr_records
+    if len(associated) < max(1, min_samples):
+        return 0.0
+
+    weights = [score for score, _ in associated]
+    weight_sum = sum(weights) or 1.0
+    avg_association = sum(weights) / len(weights)
+    gain = sum(_float_value(rec.get("tps_delta_pct")) * w for w, rec in associated) / weight_sum
+    gain_score = max(0.0, min(1.0, gain / 20.0))
+    param_score = 0.0
+    if candidate_params:
+        param_hits = 0.0
+        for weight, rec in associated:
+            matches = 0
+            for field, wanted in candidate_params.items():
+                if str(rec.get(field) or "").strip().lower() == wanted:
+                    matches += 1
+            if matches == len(candidate_params):
+                param_hits += weight
+        param_score = param_hits / weight_sum
+
+    def _success_value(outcome: str) -> float:
+        if outcome == "integrated":
+            return 1.0
+        if outcome == "already_present":
+            return 0.5
+        return 0.0
+
+    apply_score = (
+        sum(_success_value(str(rec.get("outcome") or "")) * w for w, rec in associated) / weight_sum
+    )
+    quality = 0.45 * apply_score + 0.35 * gain_score + 0.20 * param_score
+    score = min(1.0, avg_association) * quality
+    return round(max(0.0, min(1.0, score)), 4)
 
 
 def winner_decision(
@@ -86,4 +228,4 @@ def candidate_score(
     return ratio
 
 
-__all__ = ["candidate_score", "winner_decision"]
+__all__ = ["candidate_score", "prior_score", "winner_decision"]
