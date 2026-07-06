@@ -18,7 +18,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,19 +29,10 @@ OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 # Local sibling import for the collective-name fallback (tools/ on sys.path).
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+from _io_utils import utc_now  # noqa: E402
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
-
-
-def utc_now() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Returns:
-        str: The timezone-aware current time formatted via
-            ``datetime.isoformat()``.
-    """
-    return datetime.now(timezone.utc).isoformat()
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:

@@ -1,0 +1,48 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Shared stdlib-only IO helpers for the standalone kernel-agent tools.
+
+Deduplicates the run-status / log / JSON helpers that were copied across
+kernel_optimization.py, tracelens_analysis.py, and sibling tools.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write JSON to ``path`` via a temp file then rename, creating parents."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
+        json.dump(data, tmp, indent=2, sort_keys=True)
+        tmp.write("\n")
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
+def append_log(log_path: Path, message: str) -> None:
+    """Append one line to ``log_path`` (rstripped + newline), creating parents."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(message.rstrip() + "\n")
+
+
+def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of ``log_path``, empty when missing."""
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return lines[-limit:]
+
+
+__all__ = ["append_log", "atomic_write_json", "read_last_lines", "utc_now"]

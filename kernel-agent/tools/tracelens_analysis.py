@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -59,6 +58,7 @@ from tracelens_skill_runner import (
 )
 
 # Standalone-tool workspace-root resolver (cannot import inference_optimizer.paths; see _paths.py).
+from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
 from _paths import workspace_root
 
 
@@ -1193,63 +1193,6 @@ RUNTIME_API_NAMES = {
 # No in-process default for the TraceLens roots: TRACELENS_ROOT comes from env / --tracelens-root
 # (fail loudly if absent), and the internal extension is opt-in via TRACELENS_INTERNAL_ROOT.
 DEFAULT_TRACELENS_INTERNAL_ROOT = ""
-
-
-def utc_now() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp in ISO-8601 format.
-    """
-    return datetime.now(timezone.utc).isoformat()
-
-
-def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write ``data`` as pretty-printed JSON to ``path``.
-
-    Writes to a temporary file in the same directory then replaces the
-    target so readers never observe a partially-written file.
-
-    Args:
-        path (Path): Destination JSON file; parent dirs are created.
-        data (dict[str, Any]): JSON-serializable payload to write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
-        json.dump(data, tmp, indent=2, sort_keys=True)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
-
-
-def append_log(log_path: Path, message: str) -> None:
-    """Append a single line to a log file, creating parent dirs as needed.
-
-    Args:
-        log_path (Path): Log file to append to.
-        message (str): Text to append; trailing whitespace is stripped and a
-            newline is added.
-    """
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(message.rstrip() + "\n")
-
-
-def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
-    """Return the last ``limit`` lines of a log file.
-
-    Args:
-        log_path (Path): Log file to read.
-        limit (int): Maximum number of trailing lines to return.
-
-    Returns:
-        list[str]: The trailing lines, or an empty list when the file does
-            not exist.
-    """
-    if not log_path.exists():
-        return []
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return lines[-limit:]
 
 
 def update_status(
