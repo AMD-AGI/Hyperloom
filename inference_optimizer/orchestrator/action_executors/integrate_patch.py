@@ -1125,6 +1125,15 @@ class IntegratePatchExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
+        # Thread the run's baseline accuracy into the accuracy gate when the
+        # dispatching path (generic / EXPLORE integrate) did not carry one, so a
+        # source patch that regresses image quality is caught instead of being
+        # KEEP-ed on throughput alone. Only fills a missing / zero value; an
+        # explicit param is never overridden.
+        if shared_state is not None and not params.get("accuracy_baseline"):
+            _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
+            if isinstance(_base_acc, (int, float)) and _base_acc > 0:
+                params["accuracy_baseline"] = float(_base_acc)
         # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = runs_dir(self.session_dir, "specialist", specialist_task_id)
         if not specialist_workspace.is_dir():
@@ -2068,7 +2077,13 @@ class IntegratePatchExecutor:
             magpie_python=params.get("magpie_python") or None,
         )
         accuracy_pass = (
-            self._grade_accuracy(rebench.workspace, params.get("accuracy_baseline")) if rebench.workspace else None
+            self._grade_accuracy(
+                rebench.workspace,
+                params.get("accuracy_baseline"),
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            )
+            if rebench.workspace
+            else None
         )
         return {
             "stable": rebench.stable,
