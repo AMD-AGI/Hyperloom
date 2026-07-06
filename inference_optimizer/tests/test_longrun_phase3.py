@@ -249,7 +249,7 @@ async def test_soft_restart_invokes_server_deep_clean(cyclic_coordinator):
     # /proc kill so the test never touches host processes.
     c._cycle_restart_servers = True
     calls: list[int] = []
-    c._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
+    c.phase_explore._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
     summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert calls == [1]
     assert summary["servers_restarted"] is True
@@ -261,7 +261,7 @@ async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator)
     # Fixture left server restart disabled.
     assert c._cycle_restart_servers is False
     calls: list[int] = []
-    c._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
+    c.phase_explore._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
     summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert calls == []
     assert "servers_restarted" not in summary

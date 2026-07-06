@@ -566,7 +566,7 @@ async def test_select_best_framework_agent_candidate_falls_back_to_linear(
     ]
     ss.framework_agent_phase_progress = []
     # Force the ranker client to be unavailable.
-    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: None)
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: None)
     chosen = await coord._select_best_framework_agent_candidate()
     assert chosen == {"candidate_id": "c1"}
 
@@ -593,7 +593,7 @@ async def test_select_best_framework_agent_candidate_uses_ranker_choice(
     async def _fake_rank(cands):
         return cands[-1]  # pick the last → c3
 
-    monkeypatch.setattr(coord, "_rank_framework_agent_candidates_llm", _fake_rank)
+    monkeypatch.setattr(coord.phase_framework, "_rank_framework_agent_candidates_llm", _fake_rank)
     chosen = await coord._select_best_framework_agent_candidate()
     assert chosen == {"candidate_id": "c3"}
 

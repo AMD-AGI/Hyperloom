@@ -270,16 +270,16 @@ class TestBf16DenseFallback:
             return None
 
         coord.bus.append_and_seq = _append_and_seq
-        coord._kernel_enabled = lambda: True
-        coord._perfskills_enabled = lambda: False
+        coord.phase_machine._kernel_enabled = lambda: True
+        coord.phase_kernel._perfskills_enabled = lambda: False
         coord._gemm_tuning_required_before_kernel_opt = lambda: True
-        coord._record_phase_entry_evidence = lambda **_kwargs: None
-        coord._should_continue_kernel_after_gemm = lambda: False
+        coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
+        coord.phase_kernel._should_continue_kernel_after_gemm = lambda: False
 
         async def _noop(*_args, **_kwargs):
             return None
 
-        coord._maybe_reprofile_for_kernel = _noop
+        coord.phase_kernel._maybe_reprofile_for_kernel = _noop
 
         calls: list[dict] = []
         responses = [
@@ -354,11 +354,11 @@ class TestBf16DenseFallback:
             return None
 
         coord.bus.append_and_seq = _append_and_seq
-        coord._kernel_enabled = lambda: True
-        coord._perfskills_enabled = lambda: False
-        coord._record_phase_entry_evidence = lambda **_kwargs: None
-        coord._should_continue_kernel_after_gemm = lambda: False
-        coord._maybe_reprofile_for_kernel = _noop
+        coord.phase_machine._kernel_enabled = lambda: True
+        coord.phase_kernel._perfskills_enabled = lambda: False
+        coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
+        coord.phase_kernel._should_continue_kernel_after_gemm = lambda: False
+        coord.phase_kernel._maybe_reprofile_for_kernel = _noop
         monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
 
         calls: list[dict] = []
@@ -619,7 +619,7 @@ class TestHandleGemmTuningResult:
         async def _fake_validate(result):
             called["result"] = result
 
-        coord._validate_forge_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
+        coord.phase_kernel._validate_forge_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
 
         await coord._handle_gemm_tuning_result(
             {
@@ -685,7 +685,7 @@ class TestHandleGemmTuningResult:
         async def _fake_validate(result):
             called["result"] = result
 
-        coord._validate_forge_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
+        coord.phase_kernel._validate_forge_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
 
         await coord._handle_gemm_tuning_result(
             {

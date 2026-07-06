@@ -71,6 +71,30 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
         "intent / sub-agent envelope read boundaries",
+    # tree-reform.MD P2.2 3b-1: Coordinator method clusters extracted into
+    # collaborator objects; the read_extra_server_args envelope-read comments /
+    # KB best_config arg handling moved with them.
+    "inference_optimizer/orchestrator/_resume.py": "resume/replay collaborator carries the coordinator envelope-read surface",
+    "inference_optimizer/orchestrator/_writeback.py": "writeback collaborator carries the KB best_config / recipe-attrs arg surface",
+    "inference_optimizer/orchestrator/_gating.py": "gating collaborator carries the sequence-denial envelope-read surface",
+    "inference_optimizer/orchestrator/_dispatcher.py": "dispatcher collaborator carries the delegate/dispatch envelope-read surface",
+    "inference_optimizer/orchestrator/_proposals.py": "proposals collaborator carries the KB recipe best_config arg surface",
+    "inference_optimizer/orchestrator/_advisory.py": "advisory collaborator carries the proposed-variant arg surface",
+    "inference_optimizer/orchestrator/_inline_actions.py": "inline-actions collaborator carries the inline delegate envelope-read surface",
+    "inference_optimizer/orchestrator/_conversation.py": "conversation collaborator carries the inbox/context envelope-read surface",
+    "inference_optimizer/orchestrator/_maintenance.py": "maintenance collaborator carries the checkpoint/observation arg surface",
+    # tree-reform.MD P2.2 3b-2: Coordinator phase-handler clusters extracted
+    # into collaborator objects; the read_extra_server_args envelope-read
+    # comments / warm-recipe KB best_config arg handling moved with them.
+    "inference_optimizer/orchestrator/_phase_machine.py": "phase-machine handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_prelude.py": "prelude handler carries the warm-recipe KB best_config/extra_sglang_args read+merge surface",
+    "inference_optimizer/orchestrator/_phase_sweep.py": "sweep handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_close.py": "close handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_internal.py": "internal-tasks handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_kernel_stack.py": "kernel-stack handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_kernel.py": "kernel handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_explore.py": "explore handler carries the cumulative-merge helper import",
+    "inference_optimizer/orchestrator/_phase_framework.py": "framework handler carries the cumulative-merge helper import",
     "inference_optimizer/orchestrator/result_recorder.py":
         "result-recording / fact-synthesis methods extracted verbatim from "
         "coordinator.py (phase 1B); same read_extra_server_args envelope-read "

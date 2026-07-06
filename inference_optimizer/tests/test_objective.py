@@ -320,7 +320,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
         calls_at_closing.append(spy.calls)
         return await real_enter(grace_sec=grace_sec)
 
-    c._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
+    c.phase_close._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
     try:
         await c.run(
             max_minutes=0.0001,
@@ -380,7 +380,7 @@ async def test_run_records_tick_exception_and_continues(session_dir, monkeypatch
         if calls["n"] == 1:
             raise RuntimeError("dispatcher boom")
 
-    monkeypatch.setattr(c, "_pump_dispatcher_once", flaky_dispatcher_once)
+    monkeypatch.setattr(c.dispatcher, "_pump_dispatcher_once", flaky_dispatcher_once)
     try:
         reason = await c.run(max_ticks=2)
         assert reason == "max_ticks"
@@ -403,7 +403,7 @@ async def test_run_repeated_tick_exceptions_stop_as_emergency(
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("persistent dispatcher boom")
 
-    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(c.dispatcher, "_pump_dispatcher_once", broken_dispatcher_once)
     try:
         reason = await c.run(max_ticks=10, crash_emergency_threshold=2)
         assert reason == "emergency"
@@ -427,7 +427,7 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
     def broken_stop_when(_c) -> bool:
         raise ValueError("stop callback failed")
 
-    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(c.dispatcher, "_pump_dispatcher_once", broken_dispatcher_once)
     try:
         with pytest.raises(ValueError, match="stop callback failed"):
             await c.run(stop_when=broken_stop_when, max_ticks=10)

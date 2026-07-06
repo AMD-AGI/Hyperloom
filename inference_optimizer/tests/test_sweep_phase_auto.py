@@ -138,7 +138,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
         "inference_optimizer.orchestrator.kernel_request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
-    c._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._drain_pending_keep_integrates()
 
@@ -352,8 +352,8 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     async def _noop_roofline(*, reason: str):
         return None
 
-    c._run_kernel_stack_validation_e2e = _fake_stack_validation
-    c._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._maybe_validate_positive_needs_review_stack()
 
@@ -435,8 +435,8 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     async def _noop_roofline(*, reason: str):
         return None
 
-    c._run_kernel_stack_validation_e2e = _should_not_run
-    c._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel_stack._run_kernel_stack_validation_e2e = _should_not_run
+    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._recover_interrupted_stack_validation()
 
@@ -531,8 +531,8 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     async def _noop_roofline(*, reason: str):
         return None
 
-    c._run_kernel_stack_validation_e2e = _fake_stack_validation
-    c._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._on_enter_sweep(from_phase="KERNEL")
 
@@ -585,7 +585,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
         "inference_optimizer.orchestrator.kernel_request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
-    c._maybe_enqueue_watermark_roofline = _noop_roofline
+    c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
 
     await c._drain_pending_keep_integrates()
 
@@ -827,7 +827,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated DB outage")
 
-    monkeypatch.setattr(coord, "_enqueue_internal_sweep_task", _boom)
+    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_sweep_task", _boom)
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]

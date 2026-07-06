@@ -387,23 +387,23 @@ class _FakeClient:
 
 
 def _install_ranker(coord: Coordinator, monkeypatch, client) -> None:
-    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: client)
-    monkeypatch.setattr(coord, "_framework_agent_ranker_model", lambda: "m")
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: client)
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_model", lambda: "m")
 
 
 @pytest.mark.asyncio
 async def test_select_best_empty_and_single(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: [])
+    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: [])
     assert await coord._select_best_framework_agent_candidate() is None
     only = {"candidate_id": "solo"}
-    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: [only])
+    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: [only])
     assert await coord._select_best_framework_agent_candidate() is only
 
 
 @pytest.mark.asyncio
 async def test_select_best_ranker_picks(coord: Coordinator, monkeypatch) -> None:
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
+    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(coord, monkeypatch, _FakeClient('{"candidate_id": "c2", "reason": "moe"}'))
     chosen = await coord._select_best_framework_agent_candidate()
     assert chosen["candidate_id"] == "c2"
@@ -412,22 +412,22 @@ async def test_select_best_ranker_picks(coord: Coordinator, monkeypatch) -> None
 @pytest.mark.asyncio
 async def test_select_best_ranker_failure_falls_back(coord: Coordinator, monkeypatch) -> None:
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
+    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
 
     async def _raise(_c):
         raise RuntimeError("rank boom")
 
-    monkeypatch.setattr(coord, "_rank_framework_agent_candidates_llm", _raise)
+    monkeypatch.setattr(coord.phase_framework, "_rank_framework_agent_candidates_llm", _raise)
     chosen = await coord._select_best_framework_agent_candidate()
     assert chosen["candidate_id"] == "c1"  # deterministic fallback (discovery order)
 
 
 @pytest.mark.asyncio
 async def test_rank_llm_no_client_or_model(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: None)
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: None)
     assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}]) is None
-    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: _FakeClient("{}"))
-    monkeypatch.setattr(coord, "_framework_agent_ranker_model", lambda: "")
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: _FakeClient("{}"))
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_model", lambda: "")
     assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}]) is None
 
 
@@ -824,7 +824,7 @@ async def test_ranker_applicable_false_falls_back_to_discovery_order(
     coord: Coordinator, monkeypatch
 ) -> None:
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
+    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(
         coord,
         monkeypatch,

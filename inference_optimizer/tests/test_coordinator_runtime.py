@@ -1454,7 +1454,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 
-    c._advance_phase_if_needed = _boom  # type: ignore[assignment]
+    c.phase_machine._advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
         reason = await c.run(max_ticks=5)

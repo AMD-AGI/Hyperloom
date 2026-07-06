@@ -184,8 +184,8 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     """KERNEL entry (no-GEMM path) reprofiles inline when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
-    monkeypatch.setattr(coord, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord, "_gemm_tuning_required_before_kernel_opt", lambda: False)
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.gating, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord._on_enter_kernel(from_phase="EXPLORE")

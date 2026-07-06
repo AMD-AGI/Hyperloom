@@ -74,7 +74,7 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
         osl=1024,
         conc=64,
     )
-    coord._record_perfskills_kernel_journey = lambda _result: None
+    coord.phase_kernel._record_perfskills_kernel_journey = lambda _result: None
 
     def _runner_should_not_be_needed(_name: str) -> Path:
         raise RuntimeError("runner should not be resolved when result.json exists")

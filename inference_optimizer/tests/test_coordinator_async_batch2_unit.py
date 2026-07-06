@@ -213,7 +213,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
         "patches": ["/tmp/p.diff"],
     }
     monkeypatch.setattr(
-        coord,
+        coord.resume_helper,
         "_resume_rollback_pending_integrate",
         lambda pending: {"reversed": list(pending["patches"]), "failed": []},
     )
@@ -1036,9 +1036,9 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
     monkeypatch.setattr(ss, "to_gaps_summary", lambda: "GAPS-BLOCK")
     monkeypatch.setattr(ss, "to_proposal_scores_summary", lambda: "SCORES-BLOCK")
     monkeypatch.setattr(ss, "to_intervention_mix_summary", lambda: "MIX-BLOCK")
-    monkeypatch.setattr(coord, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
-    monkeypatch.setattr(coord, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
-    monkeypatch.setattr(coord, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
+    monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
+    monkeypatch.setattr(coord.advisory, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
+    monkeypatch.setattr(coord.advisory, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
     from inference_optimizer.orchestrator import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-BLOCK")
@@ -1073,9 +1073,9 @@ async def test_compose_prompt_orchestration_advisory_blocks_raise(
     monkeypatch.setattr(ss, "to_gaps_summary", _boom)
     monkeypatch.setattr(ss, "to_proposal_scores_summary", _boom)
     monkeypatch.setattr(ss, "to_intervention_mix_summary", _boom)
-    monkeypatch.setattr(coord, "_target_gap_advisory_block", _boom)
-    monkeypatch.setattr(coord, "_priors_match_advisory_block", _boom)
-    monkeypatch.setattr(coord, "_plateau_advisory_block", _boom)
+    monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", _boom)
+    monkeypatch.setattr(coord.advisory, "_priors_match_advisory_block", _boom)
+    monkeypatch.setattr(coord.advisory, "_plateau_advisory_block", _boom)
     from inference_optimizer.orchestrator import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", _boom)
@@ -1098,8 +1098,8 @@ async def test_compose_prompt_robustness_telemetry_raises(
     async def _scan_boom():
         raise RuntimeError("scan failed")
 
-    monkeypatch.setattr(coord, "_scan_stale_specialists", _scan_boom)
-    monkeypatch.setattr(coord, "_conversation_progress_signal", _boom)
+    monkeypatch.setattr(coord.phase_explore, "_scan_stale_specialists", _scan_boom)
+    monkeypatch.setattr(coord.conversation, "_conversation_progress_signal", _boom)
     out = await coord._compose_prompt("robustness")
     assert "Specialist health" in out
 
@@ -1112,7 +1112,7 @@ async def test_compose_prompt_robustness_lists_stale_specialists(
     async def _stale():
         return [{"task_id": "spec-stale", "running_seconds": 999}]
 
-    monkeypatch.setattr(coord, "_scan_stale_specialists", _stale)
+    monkeypatch.setattr(coord.phase_explore, "_scan_stale_specialists", _stale)
     out = await coord._compose_prompt("robustness")
     assert "stale specialists" in out
     assert "spec-stale" in out
@@ -1131,7 +1131,9 @@ async def test_promote_baseline_no_warmup_parses_materialized(
     monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"  # skip cascade
-    import inference_optimizer.orchestrator.coordinator as mod
+    # tree-reform.MD P2.2 3b-1: _promote_to_shared_state moved to the _writeback
+    # collaborator, which binds _parse_baseline_workload_extra in its own module.
+    import inference_optimizer.orchestrator._writeback as mod
 
     monkeypatch.setattr(mod, "_parse_baseline_workload_extra", lambda path: {"isl": 256})
     await coord._promote_to_shared_state(
@@ -1362,7 +1364,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "attempts": [{"r": 1}],
         },
     )
-    monkeypatch.setattr(coord, "_target_gap_advisory_block", lambda: "GAP-NOTES")
+    monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", lambda: "GAP-NOTES")
     from inference_optimizer.orchestrator import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
@@ -1393,7 +1395,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
-    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
     coord._record_fact_per_task(
         task=task,
@@ -1410,8 +1412,8 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 
     coord.cortex_kb = object()
     amends: list[dict] = []
-    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
-    monkeypatch.setattr(coord, "_pitfall_severity_for", lambda rd: "high")
+    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
     task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
     coord._record_fact_per_task(
         task=task,
@@ -1570,7 +1572,7 @@ async def test_cortex_finalize_amends_recipe(coord: Coordinator, monkeypatch) ->
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     coord.cortex_finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
@@ -1589,14 +1591,14 @@ def test_run_action_now_sync_requires_name(coord: Coordinator) -> None:
 
 def test_run_action_now_sync_not_whitelisted(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord.inline_actions, "_inline_action_whitelist", lambda: {"report"})
     out = coord._run_action_now_sync("explore")
     assert "not inline-eligible" in out
 
 
 def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord.inline_actions, "_inline_action_whitelist", lambda: {"report"})
     coord._coordinator_loop = None
     out = coord._run_action_now_sync("report")
     assert "coordinator loop not running" in out
@@ -1617,7 +1619,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
     async def _rec(source, intent, denied):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
     await coord._handle_intent("orchestration", _heartbeat())
     assert recorded
 
@@ -1674,7 +1676,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
     async def _scout():
         return None
 
-    monkeypatch.setattr(coord, "_maybe_enqueue_explore_research_scout", _scout)
+    monkeypatch.setattr(coord.phase_internal, "_maybe_enqueue_explore_research_scout", _scout)
     await coord._advance_phase_if_needed()  # target == current -> early return
 
 
@@ -1690,7 +1692,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
     async def _entered(*, from_phase, to_phase):
         return None
 
-    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == "EXPLORE"
 
@@ -1708,7 +1710,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
     async def _entered(*, from_phase, to_phase):
         return None
 
-    monkeypatch.setattr(coord, "_on_phase_entered", _entered)
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert coord.shared_state.stop_reason == "target_reached"
 
@@ -1779,7 +1781,7 @@ def _delegate(action_name: str, key: str, params=None) -> Intent:
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a: None)
+    monkeypatch.setattr(coord.gating, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     # advisory observation recorded but the task is still queued
     assert await coord.tasks.queued()
@@ -1790,7 +1792,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     from inference_optimizer.orchestrator.policy import PolicyDenied
 
     monkeypatch.setattr(
-        coord,
+        coord.gating,
         "_sequence_denial_for_action",
         lambda a: PolicyDenied(
             "blocked",
@@ -1803,7 +1805,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
@@ -1811,14 +1813,14 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a: None)
+    monkeypatch.setattr(coord.gating, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord, "_record_policy_denied", _rec)
+    monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
     await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded
@@ -1945,7 +1947,7 @@ async def test_cortex_finalize_merges_existing_row(coord: Coordinator, monkeypat
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     coord.cortex_finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]
@@ -2004,13 +2006,13 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     # An empty discovery is tolerated for a bounded number of consecutive ticks
     # before giving up; prime the streak so this final empty flips phase done.
     coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT - 1
-    monkeypatch.setattr(coord, "_select_next_framework_agent_candidate", lambda: None)
+    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
 
     async def _disc():
         return False
 
-    monkeypatch.setattr(coord, "_discover_next_framework_batch", _disc)
-    monkeypatch.setattr(coord, "_record_framework_agent_phase_done", lambda **k: None)
+    monkeypatch.setattr(coord.phase_framework, "_discover_next_framework_batch", _disc)
+    monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
     await coord._pump_framework_agent_phase()
     assert coord.shared_state.framework_agent_phase_done is True
 
@@ -2023,13 +2025,13 @@ async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinato
     async def _select():
         return {"candidate_id": "c1", "pr_url": "https://example.com/pr/1", "batch_id": "b1"}
 
-    monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
+    monkeypatch.setattr(coord.phase_framework, "_select_best_framework_agent_candidate", _select)
 
     async def _audit(cand):
         return {"recommended_next_step": "direct_framework"}
 
-    monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
-    monkeypatch.setattr(coord, "_framework_agent_roots_have_git", lambda: True)
+    monkeypatch.setattr(coord.phase_framework, "_audit_framework_agent_candidate", _audit)
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_roots_have_git", lambda: True)
 
     await coord._pump_framework_agent_phase()
 
@@ -2051,13 +2053,13 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
     async def _select():
         return {"candidate_id": "c1", "batch_id": "b1"}
 
-    monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
+    monkeypatch.setattr(coord.phase_framework, "_select_best_framework_agent_candidate", _select)
 
     async def _audit(cand):
         return {"recommended_next_step": "direct_framework"}
 
-    monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
-    monkeypatch.setattr(coord, "_framework_agent_roots_have_git", lambda: True)
+    monkeypatch.setattr(coord.phase_framework, "_audit_framework_agent_candidate", _audit)
+    monkeypatch.setattr(coord.phase_framework, "_framework_agent_roots_have_git", lambda: True)
 
     await coord._pump_framework_agent_phase()
     await coord._pump_framework_agent_phase()  # pending proposal -> no second submit
@@ -2095,7 +2097,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
     async def _enqueue(cand):
         enq.append(cand)
 
-    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", _enqueue)
+    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", _enqueue)
     pending = PendingProposal(
         proposal_msg_id="m2",
         from_agent="coordinator",

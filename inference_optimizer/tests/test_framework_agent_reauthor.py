@@ -99,7 +99,7 @@ def _record_reauthor_calls(coord: Coordinator) -> list[dict[str, Any]]:
         )
         return f"spec-{len(calls)}"
 
-    coord._enqueue_framework_agent_authoring_specialist = _fake_enqueue  # type: ignore[method-assign]
+    coord.phase_framework._enqueue_framework_agent_authoring_specialist = _fake_enqueue  # type: ignore[method-assign]
     return calls
 
 

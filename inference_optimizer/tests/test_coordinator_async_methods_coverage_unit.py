@@ -523,7 +523,7 @@ async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord, "_orchestration_conversational", lambda: True)
+    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
     coord._orchestration_seeded = True  # DELTA turn -> push_full False
     out = await coord._compose_prompt("orchestration")
     assert "Context (pull on demand)" in out
@@ -531,7 +531,7 @@ async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypat
 
 @pytest.mark.asyncio
 async def test_compose_prompt_conversational_seed_memory(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord, "_orchestration_conversational", lambda: True)
+    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
     coord._orchestration_seeded = False  # SEED turn -> push_full True
     coord._orchestration_seed_memory = "=== recovered memory ==="
     out = await coord._compose_prompt("orchestration")
@@ -541,7 +541,7 @@ async def test_compose_prompt_conversational_seed_memory(coord: Coordinator, mon
 @pytest.mark.asyncio
 async def test_compose_prompt_robustness_high_no_progress(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(
-        coord,
+        coord.conversation,
         "_conversation_progress_signal",
         lambda: {
             "ticks_without_progress": 9,
