@@ -45,7 +45,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-xxxxx
 ```
 
-> To change the artifact directory, set `USER_DATA_PATH` in `.env` (default `/workspace/hyperloom`). For the full credential reference, see [Auth & Environment Guide](ENV_AND_AUTH.md).
+> To change the artifact directory, set `USER_DATA_PATH` in `.env` (default `/workspace/hyperloom`). See [Auth & Environment Guide](ENV_AND_AUTH.md) for credentials and [Path environment](ENV_AND_AUTH.md#4-path-environment) for path variables.
 
 ## 3. Run the bare-metal installer
 
