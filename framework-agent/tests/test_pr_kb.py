@@ -11,6 +11,7 @@ import pytest
 
 from framework_agent import pr_kb, pr_kb_slug
 from framework_agent.gbrain_page_client import (
+    GbrainPageClient,
     _iter_sse_objects,
     _select_mcp_response,
     build_gbrain_page_client_from_env,
@@ -154,7 +155,8 @@ def test_build_client_from_env_none_when_unset(monkeypatch):
 
 # --- P2: discovery source ---------------------------------------------------
 
-from framework_agent.models import ExploreRequest  # noqa: E402
+from framework_agent import sources  # noqa: E402
+from framework_agent.models import Candidate, ExploreRequest  # noqa: E402
 from framework_agent.sources import pr_kb as pr_kb_source  # noqa: E402
 
 
@@ -259,8 +261,6 @@ def test_enumerate_pr_kb_unconfigured(monkeypatch):
 
 
 def test_query_uses_search_tool():
-    from framework_agent.gbrain_page_client import GbrainPageClient
-
     called = {}
     client = GbrainPageClient("http://x", "tok")
     client.call = lambda tool, args: called.update(tool=tool, args=args) or []  # type: ignore[method-assign]
@@ -287,10 +287,7 @@ def test_default_search_modes_stay_legacy():
 
 
 def test_enumerate_candidates_dispatches_gbrain_pr_kb(monkeypatch):
-    from framework_agent import sources as src
-    from framework_agent.models import Candidate
-
-    monkeypatch.setattr(src, "_run_pr_kb", lambda request: [
+    monkeypatch.setattr(sources, "_run_pr_kb", lambda request: [
         Candidate(ref="PR:5", repo=request.repo_url, source="gbrain_pr_kb")
     ])
     req = ExploreRequest.from_dict(
@@ -298,6 +295,6 @@ def test_enumerate_candidates_dispatches_gbrain_pr_kb(monkeypatch):
          "work_dir": "/tmp/x", "baseline": {"throughput": 1.0},
          "search_perf_prs": True, "search_modes": ["gbrain_pr_kb"]}
     )
-    out = src.enumerate_candidates(req)
+    out = sources.enumerate_candidates(req)
     assert [c.ref for c in out] == ["PR:5"]
     assert out[0].source == "gbrain_pr_kb"

@@ -310,6 +310,9 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
     src_framework = str(request.get("framework") or "").strip().lower()
     dst_framework = str(request.get("target_framework") or "").strip().lower()
     if dst_framework and dst_framework != src_framework:
+        # Lazy import on purpose: keeps audit -> cross_framework off the
+        # module-level import graph so the audit<->cross_framework cycle stays
+        # broken (shared helpers live in the leaf module _audit_common).
         from .cross_framework import run_cross_framework_audit
 
         result = run_cross_framework_audit(request)

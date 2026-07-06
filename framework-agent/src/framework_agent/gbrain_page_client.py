@@ -49,6 +49,7 @@ def _iter_sse_objects(raw: str):
         try:
             yield json.loads(payload)
         except json.JSONDecodeError:
+            # Skip a malformed SSE event block and keep scanning the rest.
             continue
 
 
