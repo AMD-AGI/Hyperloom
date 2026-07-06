@@ -99,6 +99,7 @@ testpaths = [
     "kernel-agent/tools/test_bypass_report.py",
     "kernel-agent/tools/test_bypass_source_resolver.py",
     "kernel-agent/tools/test_bypass_benchmark_resolver.py",
+    "kernel-agent/tools/test_bypass_roofline.py",
     "kernel-agent/tools/test_bypass_trace_analysis.py",
     "kernel-agent/tools/test_bypass_replay.py",
     # ci/ inference-optimization pipeline: the genuine unit tests

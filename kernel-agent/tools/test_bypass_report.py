@@ -76,6 +76,32 @@ def test_build_kernel_roofline_shape():
     assert all(r["rocprof_roofline"] is None for r in rows)
 
 
+def test_build_candidates_fills_analytical_roofline_incl_vendor():
+    # A vendor GEMM (Cijk_, non-reusable) with captured shapes gets an analytical
+    # bound purely from shapes + measured time -- the xDiT/vendor gap fix (rocprof
+    # skips vendor kernels). Not the "—" placeholder.
+    kernels = [{
+        "name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm",
+        "gpu_time_us": 500.0, "count": 1,
+        "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+    }]
+    cand = report.build_candidates(_analyze(kernels), framework="xdit", target_platform="mi300x")["hot_kernels"][0]
+    assert cand["reusable_native_kernel"] is False  # vendor, non-rewritable
+    assert cand["bound_type"] == "compute_bound"
+    assert cand["arithmetic_intensity"] > 1000
+    assert cand["roofline_source"] == "analytical"
+    assert cand["roofline_measured"] is False  # analytical, not hardware-measured
+    assert 0.0 < cand["efficiency_percent"] <= 100.0
+
+
+def test_build_candidates_no_shapes_stays_placeholder_roofline():
+    kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 10.0, "count": 1}]
+    cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")["hot_kernels"][0]
+    assert cand["bound_type"] == "\u2014"
+    assert cand["roofline_source"] == "placeholder"
+    assert cand["arithmetic_intensity"] is None
+
+
 def test_roofline_rows_flag_placeholder_not_measured():
     # The bypass roofline is a structural placeholder (bound_type "—", AI/util
     # null/0) until the opt-in rocprof-compute enrichment runs. Mark it

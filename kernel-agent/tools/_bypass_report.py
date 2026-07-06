@@ -26,6 +26,7 @@ from typing import Any
 
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from _bypass_classify import classify_kernel
+from _bypass_roofline import compute_roofline
 from _bypass_source_resolver import editable_trace_source, resolve_source
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
@@ -319,10 +320,12 @@ def build_candidates(
             "bandwidth_utilization_pct": None,
             "rocprof_roofline": None,
             # Placeholder roofline: bound_type/AI/util above are structural
-            # defaults, NOT measured. Flipped True only by the opt-in
-            # rocprof-compute enrichment. Lets downstream/LLM distinguish the
-            # "—" unknown-bound sentinel from a real measured roofline.
+            # defaults, NOT measured. ``roofline_source`` tracks how the bound was
+            # derived: "placeholder" (unestimable) -> "analytical" (from shapes +
+            # measured time, below) -> "rocprof" (opt-in measured, sets
+            # roofline_measured=True). Lets downstream/LLM distinguish them.
             "roofline_measured": False,
+            "roofline_source": "placeholder",
             "library": "",
             "backend": framework,
             "framework": framework,
@@ -347,6 +350,20 @@ def build_candidates(
             "input_dtypes": op_dtypes,
             "shape_provenance": "torch_trace" if shape_entries else "unresolved",
         }
+        # Analytical roofline: derive bound_type / AI / efficiency from the
+        # captured shapes + measured time for EVERY estimable kernel — including
+        # vendor kernels (hipBLASLt GEMM / MIOpen conv) that the reusable-gated
+        # rocprof enrichment skips (this is what gives xDiT a real bound). The
+        # opt-in rocprof enrichment later refines it to a measured roofline.
+        rl = compute_roofline(
+            category=kc.category,
+            shape_str=shape_entries[0]["shape"] if shape_entries else "",
+            gpu_time_us=float(cand["duration_us"] or 0.0),
+            call_count=int(cand["call_count"] or 1),
+            gpu_type=target_platform,
+        )
+        if rl:
+            cand.update(rl)
         hot_kernels.append(cand)
         if not kc.reusable:
             skipped_kernels.append(cand)
@@ -706,9 +723,11 @@ def build_kernel_roofline(
                 "reusable_native_kernel": c["reusable_native_kernel"],
                 "source_file": c["source_file"],
                 "rocprof_roofline": c["rocprof_roofline"],
-                # False = structural placeholder (see build_candidates); the
-                # opt-in rocprof enrichment flips this True when it fills real bound.
+                "flops_per_byte": c.get("flops_per_byte"),
+                # False = not hardware-measured; roofline_source is how the bound
+                # was derived (placeholder / analytical / rocprof).
                 "roofline_measured": c.get("roofline_measured", False),
+                "roofline_source": c.get("roofline_source", "placeholder"),
             }
         )
     return {
