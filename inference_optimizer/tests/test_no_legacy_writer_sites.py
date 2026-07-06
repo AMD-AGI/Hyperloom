@@ -78,6 +78,11 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/coordinator_helpers.py":
         "holds the extracted _merge_cumulative_extra_sglang_args helper "
         "that merges the legacy KB best_config arg stacks",
+    "inference_optimizer/orchestrator/_kernel_decisions.py":
+        "tree-reform.MD P2.2: kernel-decision write-owner functions extracted "
+        "from kernel_request_handlers.py to this sibling module (re-exported "
+        "back); carries _resolve_kernel_patch_identity's read_extra_server_args "
+        "call + docstring naming the legacy extra_sglang_args alias",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary; also holds the "
