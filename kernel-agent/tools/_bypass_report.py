@@ -26,6 +26,7 @@ from typing import Any
 
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from _bypass_classify import classify_kernel
+from _bypass_fusion import analyze_fusion
 from _bypass_roofline import compute_roofline
 from _bypass_source_resolver import editable_trace_source, resolve_source
 
@@ -736,3 +737,34 @@ def build_kernel_roofline(
         "kernel_candidates_path": kernel_candidates_path,
         "kernels": rows,
     }
+
+
+def build_fusion(analyze_out: dict[str, Any]) -> dict[str, Any]:
+    """Build the kernel-fusion opportunity payload from the launch sequence.
+
+    Classifies each time-ordered launch (device name + launching op) and finds
+    fusable clusters + adjacent transitions (see :mod:`_bypass_fusion`). Returns
+    an empty payload when the reader did not emit ``kernel_launches``.
+
+    Args:
+        analyze_out: Result of :func:`_bypass_trace_reader.analyze_trace`
+            (with ``emit_launches=True``).
+
+    Returns:
+        The ``kernel_sequence`` payload dict.
+    """
+    launches = analyze_out.get("kernel_launches") or []
+    categorized = [
+        {
+            "name": lc.get("name", ""),
+            "op_name": lc.get("op_name", ""),
+            "category": classify_kernel(lc.get("name", "") or "", op_name=lc.get("op_name", "") or "").category,
+            "ts": lc.get("ts", 0.0),
+            "dur": lc.get("dur", 0.0),
+        }
+        for lc in launches
+    ]
+    payload = analyze_fusion(categorized)
+    payload["source"] = "bypass"
+    payload["aggregation_scope"] = analyze_out.get("aggregation_scope", "full_trace")
+    return payload

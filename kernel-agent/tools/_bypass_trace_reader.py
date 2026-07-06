@@ -309,6 +309,7 @@ def _finalize(
     *,
     window: tuple[float, float] | None,
     top_k: int,
+    emit_launches: bool = False,
 ) -> dict[str, Any]:
     """Build timeline + op/kernel aggregates from buffered device events.
 
@@ -463,7 +464,19 @@ def _finalize(
         rows.sort(key=lambda r: r["gpu_time_ms"], reverse=True)
         return rows if top_k is None or top_k <= 0 else rows[:top_k]
 
+    # Time-ordered per-launch sequence (opt-in): powers fusion analysis, which
+    # needs kernel adjacency the name-aggregation above discards. Built from the
+    # already-buffered (window-filtered) device events, so no extra trace pass.
+    kernel_launches: list[dict[str, Any]] = []
+    if emit_launches:
+        for _name, _dur, _corr, _ts, _e in k_events:
+            _ex = corr_to_extid.get(_corr) if _corr is not None else None
+            _op = extid_to_opname.get(_ex) if _ex is not None else None
+            kernel_launches.append({"name": _name, "op_name": _op or "", "ts": _ts, "dur": _dur})
+        kernel_launches.sort(key=lambda r: r["ts"])
+
     return {
+        "kernel_launches": kernel_launches,
         "timeline": {
             "total_time_ms": round(total_ms, 4),
             "busy_time_ms": round(busy_ms, 4),
@@ -496,6 +509,7 @@ def analyze_trace(
     top_k: int = 10,
     steady_state: bool = False,
     framework: str = "",
+    emit_launches: bool = False,
 ) -> dict[str, Any]:
     """Stream a Kineto trace and return timeline + op/kernel aggregates.
 
@@ -607,7 +621,8 @@ def analyze_trace(
             scope = "steady_state"
 
     body = _finalize(
-        k_events, m_events, corr_to_extid, extid_to_opname, extid_to_opmeta, window=window, top_k=top_k
+        k_events, m_events, corr_to_extid, extid_to_opname, extid_to_opmeta,
+        window=window, top_k=top_k, emit_launches=emit_launches,
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
 

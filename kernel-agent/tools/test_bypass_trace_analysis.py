@@ -395,6 +395,32 @@ def test_text_gen_default_full_trace_not_estimated(tmp_path, capsys, monkeypatch
     assert result["estimated"] is False
 
 
+_FUSION_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::add", "args": {"External id": 1}},
+    {"cat": "cpu_op", "name": "aten::mul", "args": {"External id": 2}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 11, "External id": 1}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 12, "External id": 2}},
+    {"cat": "kernel", "ph": "X", "name": "elementwise_add_kernel", "ts": 100, "dur": 10, "args": {"correlation": 11}},
+    {"cat": "kernel", "ph": "X", "name": "elementwise_mul_kernel", "ts": 110, "dur": 10, "args": {"correlation": 12}},
+]
+
+
+def test_fusion_artifact_and_result(tmp_path, capsys, monkeypatch):
+    # Two consecutive Elementwise launches -> one fusable cluster; emitted both in
+    # the result summary and the kernel_sequence.json artifact.
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    trace = tmp_path / "f.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
+    _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert result["fusion"]["launch_count"] == 2
+    assert result["fusion"]["fusable_cluster_count"] == 1
+    seq_path = result["artifact_paths"]["kernel_sequence"]
+    assert Path(seq_path).is_file()
+    seq = json.loads(Path(seq_path).read_text())
+    assert seq["fusable_clusters"][0]["launch_count"] == 2
+    assert "Elementwise" in seq["fusable_clusters"][0]["categories"]
+
+
 def test_rocprof_enrich_opt_in_runs_and_degrades(tmp_path, capsys, monkeypatch):
     # Enrichment on: with no benchmark files / no rocprof, it degrades to a
     # summary (rows skipped) but never aborts and never leaks logs to stdout.

@@ -265,7 +265,8 @@ def main(argv: list[str] | None = None) -> int:
             # top_k=0 -> keep all device-kernel aggregates so the category
             # rollup in the report is complete; candidate slicing uses ``top_k``.
             analyze = _reader.analyze_trace(
-                args.trace_input, top_k=0, steady_state=enable_steady, framework=args.framework
+                args.trace_input, top_k=0, steady_state=enable_steady,
+                framework=args.framework, emit_launches=True,
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
@@ -373,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = run_dir / "trace_input_manifest.json"
     roofline_name = args.roofline_output_name or "kernel_roofline.json"
     kernel_roofline_path = reports_dir / roofline_name
+    kernel_sequence_path = bypass_dir / "kernel_sequence.json"
 
     # Stamp the report path onto each candidate (downstream reads it).
     for cand in candidates.get("hot_kernels", []):
@@ -441,6 +443,12 @@ def main(argv: list[str] | None = None) -> int:
     summary["rocprof_enrich"] = rocprof_enrich
     _atomic_write_json(summary_path, summary)
 
+    # Kernel-fusion opportunities: time-ordered launch adjacency -> fusable
+    # clusters (Elementwise/Norm/Quant chains). A separate artifact carrying the
+    # kernel-relationship data the name-aggregated candidates cannot express.
+    fusion = _report.build_fusion(analyze)
+    _atomic_write_json(kernel_sequence_path, fusion)
+
     hot_kernels = candidates.get("hot_kernels", [])
     result: dict[str, Any] = {
         "status": "ok",
@@ -461,6 +469,12 @@ def main(argv: list[str] | None = None) -> int:
         "trace_report_path": str(analysis_md_path),
         "kernel_roofline_path": str(kernel_roofline_path),
         "tracelens_summary_path": str(summary_path),
+        "kernel_sequence_path": str(kernel_sequence_path),
+        "fusion": {
+            "launch_count": fusion.get("launch_count", 0),
+            "fusable_cluster_count": fusion.get("fusable_cluster_count", 0),
+            "fusable_time_us": fusion.get("fusable_time_us", 0.0),
+        },
         "orchestrator_mode": "bypass",
         "timeline": analyze.get("timeline") or {},
         "attribution": analyze.get("attribution") or {},
@@ -471,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
             "kernel_candidates": str(candidates_path),
             "kernel_roofline": str(kernel_roofline_path),
             "tracelens_summary": str(summary_path),
+            "kernel_sequence": str(kernel_sequence_path),
             "trace_input_manifest": str(manifest_path),
         },
     }
