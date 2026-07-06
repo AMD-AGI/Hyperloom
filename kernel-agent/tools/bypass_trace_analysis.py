@@ -356,8 +356,15 @@ def main(argv: list[str] | None = None) -> int:
         _emit_quality_warnings(analyze, trace_health_warnings)
 
     # --- build downstream artifacts from classified device kernels ---
+    # Discover per-kernel benchmark files only when the rocprof roofline
+    # enrichment (the sole consumer) is enabled, so default runs skip the grep.
+    enrich_enabled = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower() in {"1", "true", "yes", "on"}
     candidates = _report.build_candidates(
-        analyze, framework=args.framework, target_platform=args.target_platform, top_k=top_k
+        analyze,
+        framework=args.framework,
+        target_platform=args.target_platform,
+        top_k=top_k,
+        discover_benchmarks=enrich_enabled and not args.dry_run,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"

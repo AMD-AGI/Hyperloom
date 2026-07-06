@@ -24,6 +24,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from _bypass_classify import classify_kernel
 from _bypass_source_resolver import editable_trace_source, resolve_source
 
@@ -247,6 +248,7 @@ def build_candidates(
     framework: str,
     target_platform: str,
     top_k: int = 15,
+    discover_benchmarks: bool = False,
 ) -> dict[str, Any]:
     """Turn classified top device kernels into the candidate payload.
 
@@ -289,6 +291,16 @@ def build_candidates(
         op_dtypes = k.get("op_dtypes") or []
         shape_entries = _trace_shape_entries(op_shapes, op_dtypes, k.get("count") or 0)
 
+        # Benchmark discovery (opt-in; gated by the caller because only the
+        # rocprof-compute roofline enrichment consumes it). A routable kernel's
+        # on-disk test/benchmark seeds the shared GEAK harness that rocprof
+        # profiles for real bound/AI — without it the enrichment skips the row.
+        bench_files: list[str] = []
+        kernel_repo = ""
+        if discover_benchmarks and kc.reusable and source_file:
+            kernel_repo = repo_root_from_source(source_file)
+            bench_files = find_benchmark_files(op_name, source_file)
+
         cand: dict[str, Any] = {
             "kernel_id": kernel_id,
             "name": display,
@@ -321,6 +333,10 @@ def build_candidates(
             "reusable_native_kernel": kc.reusable,
             "skip_reason": "" if kc.reusable else kc.skip_reason,
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
+            # Seeds for the shared GEAK harness + rocprof roofline enrichment
+            # (populated only when discover_benchmarks is set; else empty).
+            "benchmark_files": bench_files,
+            "kernel_repo": kernel_repo,
             # ``shapes`` / ``input_shapes`` use the same downstream contract form.
             # The orchestrator kernel-opt gate (_validate_kernel_shape_and_paths)
             # reads ``shapes`` (rejects ``empty_kernel_shape`` when absent) and the

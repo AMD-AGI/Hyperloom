@@ -347,6 +347,31 @@ def test_source_type_python_from_trace_kernel_file():
     assert cand["source_type"] == "python"
 
 
+def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monkeypatch):
+    # discover_benchmarks populates benchmark_files/kernel_repo on a routable
+    # candidate (seeds the rocprof roofline enrichment); off by default.
+    repo = tmp_path / "aiter"
+    (repo / "op_tests").mkdir(parents=True)
+    (repo / "csrc").mkdir(parents=True)
+    src = repo / "csrc" / "foo_kernel.cu"
+    src.write_text("// foo_op\n", encoding="utf-8")
+    (repo / "op_tests" / "test_foo.py").write_text("def test():\n    foo_op(x)\n", encoding="utf-8")
+    monkeypatch.setattr(report, "resolve_source", lambda op, **k: (str(src), "op_to_source"))
+    base = [{"name": "triton_foo_kernel", "op_name": "aiter::foo_op", "gpu_time_us": 100.0, "count": 1}]
+
+    on = report.build_candidates(
+        _analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X", discover_benchmarks=True
+    )["hot_kernels"][0]
+    assert on["reusable_native_kernel"] and on["source_file"] == str(src)
+    assert any(Path(f).name == "test_foo.py" for f in on["benchmark_files"])
+    assert on["kernel_repo"] == str(repo.resolve())
+
+    off = report.build_candidates(
+        _analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X"
+    )["hot_kernels"][0]
+    assert off["benchmark_files"] == [] and off["kernel_repo"] == ""
+
+
 def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
     # Two candidates resolve to the same .cu -> one group attached to both.
     monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/quant.cu", "op_to_source"))
