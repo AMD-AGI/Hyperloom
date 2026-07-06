@@ -89,34 +89,7 @@ def update_status(
 
 
 def resolve_candidates_path(run_dir: Path) -> Path:
-    """Locate the ``kernel_candidates.json`` TraceLens wrote for this session.
-
-    PR-C (``tracelens_analysis.py``) moved every TraceLens invocation's
-    outputs into a per-run sub-directory
-    ``runs/<session_id>/<compact_ts>_<run_id>/`` so successive watermark
-    refreshes no longer overwrite each other. ``kernel_optimization.py``
-    still keys its own artifacts off the flat ``runs/<session_id>/`` root,
-    so the candidates file is no longer where the pre-PR-C lookup expected
-    it. Resolve it here with the same "latest pointer" semantics the
-    roofline sidecar uses:
-
-    * honour the flat legacy path (``run_dir/kernel_candidates.json``) when
-      present so pre-PR-C sessions / callers that drop the file at the
-      session root keep working;
-    * otherwise descend into the newest ``<ts>_<run_id>`` sub-directory that
-      actually carries a ``kernel_candidates.json`` — the compact-timestamp
-      prefix sorts chronologically, so ``max()`` is the most recent run.
-
-    Falls back to the flat path (which ``load_candidates`` will surface as a
-    clean ``FileNotFoundError``) when nothing matches, preserving the
-    "no fabricated target" failure mode for genuinely missing analyses.
-
-    Args:
-        run_dir: The ``runs/<session_id>/`` root for the session.
-
-    Returns:
-        The resolved ``kernel_candidates.json`` path (possibly non-existent).
-    """
+    """Resolve the latest per-run ``kernel_candidates.json`` or the flat fallback."""
     flat = run_dir / "kernel_candidates.json"
     if flat.is_file():
         return flat
@@ -2947,16 +2920,8 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # GEAK is dispatched PROMPT-ONLY. It owns harness construction in its
-            # preprocess_v3 orchestrator: it discovers the op and builds the harness
-            # from the dispatch prompt (device source + captured serving shapes +
-            # #703 WORKLOAD CONTEXT) alone. HL does NOT pass a test_command/op_test
-            # to GEAK -- a hardcoded op->test map (tracelens_analysis) can mis-pick
-            # (e.g. test_pa.py for paged attention) and seed a wrong harness. The
-            # canonical baseline run dispatched with no test_command and GEAK's
-            # preprocess produced the correct harness + 1.2647x. The prompt is the
-            # only interface. (common_test_command is still computed above solely
-            # for the rocprof before-snapshot, never handed to GEAK.)
+            # GEAK owns harness construction from the prompt; HL never passes
+            # common_test_command to avoid stale op->test mappings.
             previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(
@@ -2978,11 +2943,8 @@ def invoke_backend(
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
                 result["geak_final_report"] = str(final_report)
-                # Primary salvage: final_report.json already carries the verified
-                # best speedup + patch (best_speedup / best_patch / best_task).
-                # Read it directly — one small file — so a real win survives even
-                # when the results/ rglob below is SIGKILLed mid-scan on a huge
-                # worktree (the round-2 timeout that lost a verified 4.33x).
+                # Prefer the small final_report fast-path before scanning large
+                # results/ worktrees for partial artifacts.
                 try:
                     _fr = json.loads(final_report.read_text(encoding="utf-8"))
                     _fr_sp = float(_fr.get("best_speedup_verified") or _fr.get("best_speedup") or 0.0)
@@ -3004,11 +2966,7 @@ def invoke_backend(
                             f"({type(exc).__name__}: {exc}); falling back to results/ scan",
                         )
             results_dir = out_dir / "results"
-            # The results/ rglobs walk the per-round worktrees, which can hold
-            # 100k+ JIT/cache files — on a SIGTERM'd run the scan itself can be
-            # SIGKILLed before it returns. Skip it entirely when final_report.json
-            # already gave us the verified best speedup + patch above; only fall
-            # back to scanning when that primary salvage was absent.
+            # Fall back to scanning results/ only when final_report lacked a win.
             if results_dir.is_dir() and not result.get("geak_per_task_best_speedup"):
                 # Any *.patch under results/ is evidence of partial work.
                 patches = sorted(results_dir.rglob("*.patch"))

@@ -895,37 +895,8 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     return {"status": "ok", "restored_to": str(src)}
 
 
-# ---------------------------------------------------------------------------
-# PR-K2: aiter cpp_itfs RUNTIME-compiled cache invalidation.
-#
-# Distinct from the ``@compile_ops`` jit/build cache handled above. aiter's
-# ``csrc/cpp_itfs`` kernels (e.g. paged_attention -> ``pa_ragged``) are NOT
-# produced by ``setup.py develop``; they are runtime-compiled on first call
-# by ``compile_template_op`` (aiter ``csrc/cpp_itfs/utils.py``) into
-# ``$AITER_ROOT_DIR/build/<md_name>_<md5(params)>/lib.so`` (default
-# ``$HOME/.aiter/build``). The cache folder name hashes kernel *parameters*,
-# NOT source content, so the pristine and the patched build of the same
-# kernel collide on the SAME directory. ``compile_template_op`` rebuilds only
-# when ``lib.so`` is missing (``not_built``), so after we patch the ``.cuh``
-# and run the (no-op for this class) ``setup.py develop``, the next server
-# reuses the STALE pristine ``lib.so``; the integrate re-baseline then
-# measures ~0% and a genuinely-good kernel is flagged NEEDS_REVIEW / REVERT
-# (observed -0.17% on a +2.5% paged_attention kernel; see GH #458).
-#
-# ``setup.py develop`` cannot refresh this kernel class, and the jit/build
-# move above never touches ``$HOME/.aiter/build``. So for cpp_itfs targets we
-# ALSO move the affected runtime-cache dirs aside before the rebuild step --
-# scoped to the patched module's ``MD_NAME`` prefix(es) when determinable,
-# else the whole cpp_itfs build root the scheduler uses -- so the re-baseline
-# server runtime-recompiles the patched kernel from clean state.
-# ``shutil.move`` keeps it reversible; :func:`_restore_aiter_cpp_itfs_cache`
-# moves the backup back on revert. ``integrate_handler`` additionally sets
-# ``AITER_REBUILD=1`` on the re-baseline server and gates KEEP on a verified
-# fresh rebuild via :func:`verify_cpp_itfs_rebuilt`.
-#
-# Scope: ONLY aiter cpp_itfs targets. Non-cpp_itfs aiter targets, sglang and
-# vllm keep their current behaviour bit-for-bit (this is a no-op for them).
-# ---------------------------------------------------------------------------
+# aiter cpp_itfs kernels are runtime-compiled into parameter-keyed caches.
+# Move matching cache dirs aside so patched sources rebuild, then restore on revert.
 _AITER_CPP_ITFS_MARKER = "/aiter/csrc/cpp_itfs/"
 _MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
 

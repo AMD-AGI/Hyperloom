@@ -62,25 +62,8 @@ from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
 from _paths import workspace_root
 
 
-# ---------------------------------------------------------------------------
-# Kernel-candidate pool size (issue #667).
-#
-# ``--top-k`` caps how many analysis.md p-items / hot kernels are written into
-# ``kernel_candidates.json``. Historically this defaulted to 10, which capped
-# the candidate POOL at candidate-build time -- *before* the dispatch layer's
-# own narrowing (source-fn grouping into ``task_groups[]``, op-fanout dedup,
-# and the per-group dispatch attempt cap) had a chance to run. A tight
-# build-time cap disproportionately drops GEAK-editable ops (rmsnorm,
-# add_rmsnorm, mha_batch_prefill, fused RoPE/reshape) while non-editable ops
-# (asm ``fmoe_g1u1`` with a compiled ``.co``, hipblaslt ``aten::mm``) consume
-# the top slots.
-#
-# The two caps are now decoupled: candidate-building uses a large pool by
-# default so the dispatch layer -- which already groups/dedups and caps
-# attempts -- is the real budget gate. Override via
-# ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` (this standalone tool) or the
-# ``top_k`` request param on the orchestrator side. A value of ``0`` (or
-# negative) means "no build-time cap".
+# Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
+# Override with HYPERLOOM_KERNEL_CANDIDATES_TOP_K; non-positive means unbounded.
 _DEFAULT_KERNEL_CANDIDATES_TOP_K = 100
 
 
@@ -105,38 +88,8 @@ def _default_top_k() -> int:
     return val if val > 0 else 1_000_000
 
 
-# ---------------------------------------------------------------------------
-# Dict-first op -> .cu resolver (ground-truth ``op_to_source.json``).
-#
-# TraceLens emits only a CPU op name, a ``.py`` launcher, and (assumed) a device
-# ``Kernel Name`` column. Hyperloom owns the op -> editable ``.cu`` mapping via a
-# curated JSON that is the ground truth (it may be edited over time). This block
-# is the single reader of that JSON.
-#
-# Each entry stores, per container, the device kernels seen under ``vllm`` /
-# ``sglang`` as ``{device_kernel_name: {kernel_source_path, kernel_source_line,
-# kernel_kind, patchable}}``. Routability is *derived* (no stored ``status``): an
-# op is routable iff its selected container holds a ``patchable`` kernel whose
-# ``kernel_source_path`` is an editable source -- native ``.cu``/``.cuh``/``.hip``
-# or a repo ``.py`` Triton kernel (inductor-generated ``.py`` is excluded).
-#
-# Resolution by ``kind``:
-#   * ``single``    -> the container's editable source(s); N sources fan out to
-#                      one GEAK run each.
-#   * ``dispatch``  -> the single kernel whose name matches the trace device
-#                      ``Kernel Name``.
-#   * ``composite`` -> all editable kernels in the container run (fan-out).
-#
-# ``single`` and ``composite`` route IDENTICALLY (both dedup the container's
-# editable sources by path and emit one GEAK run per distinct file); they differ
-# only in ownership semantics -- ``single`` is one logical op whose kernels are
-# its own (variants/phases that may span files), while ``composite`` is an
-# explicit fusion of heterogeneous, independently-owned kernels. ``dispatch`` is
-# the only kind that changes the resolved result (it narrows to one kernel).
-#
-# ``kernel_source_path`` values are absolute. A dictionary miss returns ``None``
-# so the caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
-# ---------------------------------------------------------------------------
+# Dict-first op-to-source resolver; op_to_source.json is the curated ground truth.
+# Dispatch entries narrow by trace kernel name; single/composite fan out editable sources.
 
 # Vendored ground-truth dictionary (committed under tools/data/).
 _OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
@@ -5068,21 +5021,8 @@ def build_kernel_roofline_payload(
 
 
 def kernel_roofline_path_for_run(run_dir: Path, filename: str = "kernel_roofline.json") -> Path:
-    """Return the session-level kernel roofline report path (stable dashboard pointer).
-
-    PR-C layout is ``.../runs/<session_id>/<ts>_<run_id>/``; the pre-PR-C
-    ``.../runs/<session_id>/`` layout is still handled by the fallback branch.
-
-    Args:
-        run_dir: The ``runs/<session_id>/`` root for the session.
-        filename: Report file name; use ``kernel_roofline_opt.json`` for the
-            post-kernel-opt snapshot so it does not overwrite the baseline.
-
-    Returns:
-        The stable session-level kernel roofline report path.
-    """
+    """Return the stable session-level kernel roofline report path."""
     try:
-        # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
         session_sub = run_dir.parent
         runs_dir = session_sub.parent
         kernel_agent_dir = runs_dir.parent
@@ -5091,7 +5031,7 @@ def kernel_roofline_path_for_run(run_dir: Path, filename: str = "kernel_roofline
     if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
         session_dir = kernel_agent_dir.parent
         return session_dir / "reports" / filename
-    # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
+    # Backward-compatible flat run-dir layout.
     try:
         runs_dir_legacy = run_dir.parent
         kernel_agent_dir_legacy = runs_dir_legacy.parent
@@ -5969,7 +5909,7 @@ def main() -> int:
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
-    # PR-C: per-invocation sub-directory ``<compact_timestamp>_<run_id>`` so each run keeps its own artifacts.
+    # Keep each TraceLens invocation's artifacts in its own run subdirectory.
     ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
     if not ts_compact.endswith("Z"):
         ts_compact = ts_compact + "Z"
@@ -6078,7 +6018,7 @@ def main() -> int:
                 log_path=log_path,
                 timeout_s=max(60, int(args.budget_minutes * 60)),
             )
-            # TraceLens v0.3 (#148): analysis-orchestrator.md under Agent/Analysis/, with the legacy path as fallback below.
+            # Prefer the v0.3 skill path, then fall back to the legacy layout.
             skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
                 skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
