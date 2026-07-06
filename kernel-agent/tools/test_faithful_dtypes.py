@@ -1,10 +1,4 @@
-"""Faithful per-arg dtype propagation.
-
-TraceLens records each kernel arg's dtype INLINE in the analysis.md ``Args``
-column ("(64,5120) bf16"). HL parsed the shape but left ``input_dtypes`` empty,
-so the GEAK harness could not allocate correct-dtype tensors (fp8 weight vs bf16
-activation). These tests verify HL now surfaces the real, ordered per-arg dtypes.
-"""
+"""Regression tests for ordered per-arg dtype propagation from TraceLens args."""
 import sys
 from argparse import Namespace
 
