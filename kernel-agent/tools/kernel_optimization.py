@@ -26,6 +26,7 @@ from _io_utils import (  # noqa: E402
     atomic_write_json,
     kernel_row_matches,
     read_last_lines,
+    source_text_looks_complete,
     utc_now,
 )
 from _paths import workspace_root  # noqa: E402
@@ -3650,48 +3651,8 @@ _FENCE_RE = re.compile(
 )
 
 
-def _source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically decide whether ``text`` is a complete source file.
-
-    For ``.py`` it must parse and contain Python markers; for C/C++/CUDA
-    suffixes it must contain typical source markers. Text containing a code
-    fence is rejected (handled by :func:`_extract_source_block` instead).
-
-    Args:
-        text (str): Candidate file contents.
-        suffix (str): File suffix that selects the language heuristic.
-
-    Returns:
-        bool: True when ``text`` plausibly is a complete source file for the
-            given suffix; False otherwise.
-    """
-    stripped = text.strip()
-    if not stripped or "```" in stripped:
-        return False
-    if suffix == ".py":
-        try:
-            compile(stripped + "\n", "<optimized_kernel>", "exec")
-        except SyntaxError:
-            return False
-        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
-    if suffix in {".cu", ".cuh", ".hip", ".cpp", ".cc", ".c", ".h", ".hpp"}:
-        return any(
-            marker in stripped
-            for marker in (
-                "#include",
-                "__global__",
-                "__device__",
-                "extern ",
-                "namespace ",
-                "template",
-                "void ",
-                "int ",
-                "float ",
-                "half",
-                "torch::",
-            )
-        )
-    return False
+# Shared source-completeness heuristic (see _io_utils.source_text_looks_complete).
+_source_text_looks_complete = source_text_looks_complete
 
 
 def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path) -> str:

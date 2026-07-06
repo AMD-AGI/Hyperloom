@@ -21,6 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+# Sibling import works whether run as a script or loaded via importlib.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import source_text_looks_complete  # noqa: E402
+
+sys.path.pop(0)
+
 log = logging.getLogger(__name__)
 
 
@@ -292,49 +298,8 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
     return {"path": str(path), "backup_path": str(dst)}
 
 
-def _source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically check that the patch text is a full source file.
-
-    For Python, requires the text to compile and contain a recognisable
-    top-level marker; for compiled sources, requires a C/C++/HIP marker.
-
-    Args:
-        text (str): The candidate source text.
-        suffix (str): The lower-cased target file suffix (e.g. ``.py``).
-
-    Returns:
-        bool: ``True`` when the text looks like a complete source file of the
-            given suffix, else ``False``.
-    """
-    stripped = text.strip()
-    if not stripped or "```" in stripped:
-        return False
-    if suffix == ".py":
-        try:
-            compile(stripped + "\n", "<optimized_kernel>", "exec")
-        except SyntaxError:
-            return False
-        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
-    if suffix in COMPILED_SOURCE_SUFFIXES:
-        return any(
-            marker in stripped
-            for marker in (
-                "#include",
-                "__global__",
-                "__device__",
-                "extern ",
-                "namespace ",
-                "template",
-                "void ",
-                "int ",
-                "float ",
-                "half",
-                "torch::",
-            )
-        )
-    return False
-
-
+# Shared source-completeness heuristic (see _io_utils.source_text_looks_complete).
+_source_text_looks_complete = source_text_looks_complete
 def _validate_patch_source(patch: Path, target: Path) -> None:
     """Validate that ``patch`` is a complete drop-in replacement for ``target``.
 
