@@ -1665,6 +1665,38 @@ async def test_trace_analyze_handler_text_gen_defaults_to_bypass(session_dir, mo
 
 
 @pytest.mark.asyncio
+async def test_trace_analyze_handler_invalid_route_falls_back_to_bypass(session_dir, monkeypatch):
+    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route to
+    TraceLens; it falls back to the default bypass backend and surfaces a warning."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "analysis_route": "foobar",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert not any("tracelens_analysis.py" in c for c in cmd)
+    assert "--tracelens-root" not in cmd
+    codes = {w.get("code") for w in res.get("trace_health_warnings", [])}
+    assert "invalid_analysis_route" in codes
+
+
+@pytest.mark.asyncio
 async def test_trace_analyze_handler_text_gen_deterministic_escapes_to_tracelens(session_dir, monkeypatch):
     """TraceLens stays reachable as an explicit escape hatch: text-gen with
     analysis_route=deterministic runs the TraceLens tool, not bypass."""

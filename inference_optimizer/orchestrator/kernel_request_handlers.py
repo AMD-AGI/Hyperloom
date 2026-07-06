@@ -39,6 +39,11 @@ from .trace.parse_usage import (
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+
+# Recognized trace-analysis routes: ``bypass`` (independent backend, default) and
+# the TraceLens escape hatches ``deterministic`` / ``agent``. An unknown value
+# (e.g. an LLM typo) must not silently mis-route — it falls back to ``bypass``.
+_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
@@ -2441,6 +2446,26 @@ async def trace_analyze_handler(
     explicit_route = (
         str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
     )
+    # Reject an unknown route rather than silently mis-routing: an LLM typo like
+    # ``"foobar"`` would otherwise be truthy, skip bypass, and quietly run the
+    # TraceLens default. Warn + fall back to the default ``bypass`` instead.
+    route_health_warnings: list[dict[str, Any]] = []
+    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
+        log.warning(
+            "trace_analyze: unknown analysis_route %r (expected one of %s); "
+            "falling back to the default 'bypass' route",
+            explicit_route, sorted(_VALID_ANALYSIS_ROUTES),
+        )
+        route_health_warnings.append({
+            "code": "invalid_analysis_route",
+            "severity": "warning",
+            "message": (
+                f"unknown analysis_route {explicit_route!r} (expected one of "
+                f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'bypass' route."
+            ),
+            "requested_route": explicit_route,
+        })
+        explicit_route = ""
     analysis_route = explicit_route or "bypass"
     is_bypass = analysis_route == "bypass"
     # Resolve TraceLens root independently of inherited env (the coordinator may
@@ -2615,7 +2640,9 @@ async def trace_analyze_handler(
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
         # Guarantee ``trace_health_warnings`` is always a list (empty = nothing wrong).
-        result.setdefault("trace_health_warnings", [])
+        # Prepend any route-validation warning (e.g. an unknown analysis_route that
+        # fell back to bypass) so it is surfaced to record_trace_analyze / the LLM.
+        result["trace_health_warnings"] = route_health_warnings + list(result.get("trace_health_warnings") or [])
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
