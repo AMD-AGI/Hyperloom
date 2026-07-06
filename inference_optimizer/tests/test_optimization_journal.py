@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.optimization_journal import (
+from hyperloom.orchestrator.optimization_journal import (
     JOURNAL_FILENAME,
     Journal,
     JournalEntry,
@@ -207,7 +207,7 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
 
 def test_append_entry_dedupe_per_task_id(session_dir: Path):
     """``task_id`` breaks the dedupe tie for two same-kind tasks in one tick."""
-    from inference_optimizer.orchestrator.optimization_journal import (
+    from hyperloom.orchestrator.optimization_journal import (
         KIND_KERNEL_FILE,
     )
 
@@ -407,7 +407,7 @@ def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
 
 
 def test_operation_kind_for_maps_kind_and_action():
-    from inference_optimizer.orchestrator.optimization_journal import (
+    from hyperloom.orchestrator.optimization_journal import (
         operation_kind_for,
     )
 
@@ -425,7 +425,7 @@ def test_operation_kind_for_maps_kind_and_action():
 
 
 def test_proposer_for_resolves_provenance():
-    from inference_optimizer.orchestrator.optimization_journal import proposer_for
+    from hyperloom.orchestrator.optimization_journal import proposer_for
 
     assert proposer_for("specialist:serving_specialist") == "specialist:serving_specialist"
     assert proposer_for("llm_direct") == "orchestration"
@@ -435,7 +435,7 @@ def test_proposer_for_resolves_provenance():
 
 
 def test_journal_entry_roundtrips_proposer_and_metrics():
-    from inference_optimizer.orchestrator.optimization_journal import JournalEntry
+    from hyperloom.orchestrator.optimization_journal import JournalEntry
 
     e = JournalEntry(
         phase="EXPLORE",
@@ -470,7 +470,7 @@ def test_journal_entry_roundtrips_proposer_and_metrics():
 
 
 def test_journal_entry_roundtrips_predicted_gain():
-    from inference_optimizer.orchestrator.optimization_journal import JournalEntry
+    from hyperloom.orchestrator.optimization_journal import JournalEntry
     e = JournalEntry(
         phase="EXPLORE", iter=1, kind="backend", change="x", outcome="KEEP",
         gain_pct=4.2, predicted_gain_pct=9.0,

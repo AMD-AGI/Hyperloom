@@ -63,7 +63,7 @@ def test_headroom_default_and_override(monkeypatch):
 def _seed_state(session_dir: Path, monkeypatch):
     """Create a minimal seeded session so the preflight can load/save state."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session_dir))
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -148,7 +148,7 @@ def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
 
 # follow-up #1: the preflight stop_reason must be a canonical STOP_REASON_VOCAB term written via set_stop_reason().
 def test_context_window_stop_reason_is_canonical_vocab():
-    from inference_optimizer.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phase_state import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )

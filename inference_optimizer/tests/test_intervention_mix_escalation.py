@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.task_registry import Task
 
 
 def test_empty_ledger_renders_nothing():

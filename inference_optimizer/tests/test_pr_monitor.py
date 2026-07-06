@@ -9,18 +9,18 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.knowledge_plane import (
+from hyperloom.orchestrator.knowledge_plane import (
     KnowledgePlane,
     load_domain_repos,
 )
-from inference_optimizer.orchestrator.pr_monitor import (
+from hyperloom.orchestrator.pr_monitor import (
     DEFAULT_PR_MONITOR_URL,
     PRMonitorClient,
     PRMonitorError,
     PRSummary,
     _matches_keywords,
 )
-from inference_optimizer.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialist_runner import (
     CORTEX_KB_READONLY_MCP_TOOLS,
     DEFAULT_SPECIALIST_TOOLS,
     PR_MONITOR_MCP_TOOLS,
@@ -71,7 +71,7 @@ def test_pr_monitor_list_repos_parses_items(monkeypatch):
         ]
     }
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
+        "hyperloom.orchestrator.pr_monitor.urllib.request.urlopen",
         lambda *_a, **_kw: _make_response(payload),
     )
     repos = c.list_repos()
@@ -98,7 +98,7 @@ def test_pr_monitor_list_repos_parses_real_rest_shape(monkeypatch):
         },
     ]
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
+        "hyperloom.orchestrator.pr_monitor.urllib.request.urlopen",
         lambda *_a, **_kw: _make_response(payload),
     )
     repos = c.list_repos()
@@ -124,7 +124,7 @@ def test_pr_monitor_pr_feed_warm_keyword_filter_and_warning(monkeypatch):
         raise urllib.error.URLError("no route")
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
+        "hyperloom.orchestrator.pr_monitor.urllib.request.urlopen",
         _stub,
     )
     prs, warns = c.pr_feed_warm(
@@ -242,7 +242,7 @@ def test_plane_pr_feed_warm_dispatches_to_repos(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
+        "hyperloom.orchestrator.pr_monitor.urllib.request.urlopen",
         _stub,
     )
     prs, warns = plane.pr_feed_warm("serving_specialist")
@@ -269,7 +269,7 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
+        "hyperloom.orchestrator.pr_monitor.urllib.request.urlopen",
         _stub,
     )
     prs, warns = plane.pr_feed_warm("pr_intel_specialist")
@@ -351,7 +351,7 @@ def test_specialist_runner_without_plane_keeps_default_tools():
 
 # 5b. Specialist MCP config writer (pr_monitor + cortex_kb servers)
 def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
-    from inference_optimizer.orchestrator.specialist_mcp_config import (
+    from hyperloom.orchestrator.specialist_mcp_config import (
         SPECIALIST_MCP_CONFIG_FILENAME,
         write_specialist_mcp_config,
     )
@@ -372,7 +372,7 @@ def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
 
 
 def test_mcp_config_omits_cortex_kb_when_url_absent(tmp_path):
-    from inference_optimizer.orchestrator.specialist_mcp_config import (
+    from hyperloom.orchestrator.specialist_mcp_config import (
         write_specialist_mcp_config,
     )
 
@@ -387,7 +387,7 @@ def test_mcp_config_omits_cortex_kb_when_url_absent(tmp_path):
 
 
 def test_mcp_config_returns_none_when_nothing_wireable(tmp_path):
-    from inference_optimizer.orchestrator.specialist_mcp_config import (
+    from hyperloom.orchestrator.specialist_mcp_config import (
         write_specialist_mcp_config,
     )
 

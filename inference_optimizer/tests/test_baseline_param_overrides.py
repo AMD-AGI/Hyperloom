@@ -13,14 +13,14 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from inference_optimizer.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.action_executors._workload_envs import (
     materialize_config_with_envs,
 )
-from inference_optimizer.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.action_executors.baseline import (
     BaselineExecutor,
 )
 
@@ -372,7 +372,7 @@ def test_materialize_config_with_envs_clamps_tp_to_visible_gpus(
     monkeypatch.delenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", raising=False)
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._workload_envs._visible_gpu_count",
+        "hyperloom.orchestrator.action_executors._workload_envs._visible_gpu_count",
         return_value=4,
     ):
         materialized = materialize_config_with_envs(base, out)
@@ -396,7 +396,7 @@ def test_materialize_config_with_envs_clamp_respects_env_override(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._workload_envs._visible_gpu_count",
+        "hyperloom.orchestrator.action_executors._workload_envs._visible_gpu_count",
         return_value=4,
     ):
         materialized = materialize_config_with_envs(base, out)
@@ -421,7 +421,7 @@ def test_materialize_config_with_envs_no_clamp_when_visible_zero(
     monkeypatch.delenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", raising=False)
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._workload_envs._visible_gpu_count",
+        "hyperloom.orchestrator.action_executors._workload_envs._visible_gpu_count",
         return_value=0,
     ):
         materialized = materialize_config_with_envs(base, out)
@@ -503,7 +503,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -545,7 +545,7 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -595,7 +595,7 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -628,7 +628,7 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -674,7 +674,7 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -707,7 +707,7 @@ def test_baseline_executor_rejects_bad_param(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -739,7 +739,7 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

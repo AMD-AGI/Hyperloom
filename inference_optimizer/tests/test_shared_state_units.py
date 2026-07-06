@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.shared_state import (
+from hyperloom.orchestrator.shared_state import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,

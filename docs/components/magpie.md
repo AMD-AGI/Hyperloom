@@ -60,7 +60,7 @@ default branch rather than the install-time `MAGPIE_REF` pin. Magpie subprocesse
 are launched with the interpreter
 resolved from `$MAGPIE_PYTHON` (validated to be able to `import Magpie`, else
 auto-detected; see
-`inference_optimizer/orchestrator/action_executors/_grid_runner.py`).
+`src/hyperloom/orchestrator/action_executors/_grid_runner.py`).
 ```
 
 ## Usage
@@ -95,7 +95,7 @@ python -m Magpie.mcp
 
 The optimization loop drives Magpie's **benchmark** mode as a subprocess. The
 grid runner builds the command line and launches one run per variant in
-`inference_optimizer/orchestrator/action_executors/_grid_runner.py`:
+`src/hyperloom/orchestrator/action_executors/_grid_runner.py`:
 
 ```python
 cmd = [
@@ -108,7 +108,7 @@ cmd = [
 
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. To make concurrent benchmark runs
-robust, `inference_optimizer/orchestrator/action_executors/_magpie_patcher.py`
+robust, `src/hyperloom/orchestrator/action_executors/_magpie_patcher.py`
 applies an idempotent, atomic-write patch to Magpie's cloned `benchmarker.py`
 (`_prepare_benchmark_scripts`) so a concurrent reader never sees a half-copied
 script. See [How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORKS.md).

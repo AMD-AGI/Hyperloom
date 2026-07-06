@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.message_bus import (
+from hyperloom.orchestrator.message_bus import (
     Message,
     MessageBus,
     TOPIC_ALLOWLIST,
@@ -24,8 +24,8 @@ from inference_optimizer.storage import SqliteConnection
 
 
 _COORDINATOR_SRC = (
-    Path(__file__).resolve().parents[1]
-    / "orchestrator" / "coordinator.py"
+    Path(__file__).resolve().parents[2]
+    / "src" / "hyperloom" / "orchestrator" / "coordinator.py"
 )
 
 

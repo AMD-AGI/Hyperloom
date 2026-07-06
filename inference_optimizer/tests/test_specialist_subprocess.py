@@ -22,19 +22,19 @@ import pytest
 
 from .conftest import init_git_repo
 
-from inference_optimizer.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialist_runner import (
     DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
-from inference_optimizer.orchestrator.specialist_subprocess import (
+from hyperloom.orchestrator.specialist_subprocess import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _pick_worktree_base,
     _setup_worktree,
 )
-from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.task_registry import Task
 
 
 # Fixtures

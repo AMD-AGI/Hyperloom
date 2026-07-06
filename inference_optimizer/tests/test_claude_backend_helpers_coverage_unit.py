@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     ClaudeBackend,
     EMIT_INTENT_TOOL_NAME,
 )

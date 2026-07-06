@@ -17,12 +17,12 @@ from typing import Any, Callable
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     CriticAgentBackend,
     RuntimeCall,
 )
-from inference_optimizer.orchestrator.backends.base import BackendError
-from inference_optimizer.orchestrator.backends.critic_agent import (
+from hyperloom.orchestrator.backends.base import BackendError
+from hyperloom.orchestrator.backends.critic_agent import (
     _extract_review_json,
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
@@ -1024,7 +1024,7 @@ async def test_missing_manifest_falls_back_to_empty_context(
         "required_context": [],
     }
     fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
-    with caplog.at_level("WARNING", logger="inference_optimizer.orchestrator.backends.critic_agent"):
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.backends.critic_agent"):
         backend = CriticAgentBackend(
             critic_agent_root=fake_critic_root,
             session_dir=fake_session_dir,
@@ -1050,7 +1050,7 @@ async def test_malformed_manifest_logs_warning_and_falls_back(
         "{ this is not json",
         encoding="utf-8",
     )
-    with caplog.at_level("WARNING", logger="inference_optimizer.orchestrator.backends.critic_agent"):
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.backends.critic_agent"):
         backend = CriticAgentBackend(
             critic_agent_root=fake_critic_root,
             session_dir=fake_session_dir,
@@ -1147,7 +1147,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.cli import _resolve_critic_agent_root
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     CriticAgentBackend,
     MockBackend,
     MockKernelBackend,
@@ -1155,7 +1155,7 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -1580,7 +1580,7 @@ async def test_run_mirrors_kb_trace_to_langfuse(
     monkeypatch,
 ):
     fake_em = _FakeKbEmitter()
-    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
@@ -1605,7 +1605,7 @@ async def test_run_skips_langfuse_mirror_when_disabled(
 ):
     fake_em = _FakeKbEmitter()
     fake_em.enabled = False
-    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'

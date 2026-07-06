@@ -12,13 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from inference_optimizer.orchestrator import framework_paths as fp
-from inference_optimizer.orchestrator.action_registry import ActionRegistry
-from inference_optimizer.orchestrator.framework_paths import (
+from hyperloom.orchestrator import framework_paths as fp
+from hyperloom.orchestrator.action_registry import ActionRegistry
+from hyperloom.orchestrator.framework_paths import (
     probe_framework_source_roots_for_env,
     resolve_source_file_allowlist,
 )
-from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
 )
@@ -344,7 +344,7 @@ class TestAtomPathPresentInAllThreeLocations:
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
-        from inference_optimizer.orchestrator import (
+        from hyperloom.orchestrator import (
             kernel_request_handlers as krh,
         )
 
@@ -358,7 +358,7 @@ class TestAtomPathPresentInAllThreeLocations:
         text = ka_path.read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
             "kernel-agent/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
-            "is out of sync with inference_optimizer/orchestrator/"
+            "is out of sync with src/hyperloom/orchestrator/"
             "kernel_request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
 
@@ -367,7 +367,7 @@ class TestAtomPathPresentInAllThreeLocations:
         ka_path = Path(__file__).resolve().parents[2] / "kernel-agent" / "tools" / "tracelens_analysis.py"
         if not ka_path.is_file():
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
-        from inference_optimizer.orchestrator import (
+        from hyperloom.orchestrator import (
             kernel_request_handlers as krh,
         )
 
@@ -452,7 +452,7 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     ws = tmp_path / "sgl-workspace" / "sglang"
     ws.mkdir(parents=True)
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.framework_paths._DEFAULT_SOURCE_ROOTS",
+        "hyperloom.orchestrator.framework_paths._DEFAULT_SOURCE_ROOTS",
         (str(ws) + "/",),
     )
     out = probe_framework_source_roots_for_env()

@@ -289,10 +289,25 @@ def asset_actions_dir() -> Path:
 def asset_system_prompts_dir() -> Path:
     """Return the directory of shipped agent system prompts.
 
+    tree-reform.MD P2.3: the orchestrator (and its ``system_prompts/``)
+    moved out of ``inference_optimizer/`` into the ``hyperloom.orchestrator``
+    package. When an operator has set ``$INFERENCE_OPTIMIZER_ASSET_ROOT``
+    (see SKILL.md's per-run asset override, which symlinks ``orchestrator/``
+    into the override root), the override is honoured as before. Otherwise
+    the path is resolved via the ``hyperloom.orchestrator`` package's own
+    ``__file__``, which is correct both in a source checkout (``src/``
+    layout) and in a real installed distribution (sibling site-packages
+    directory) — unlike a hardcoded relative filesystem path.
+
     Returns:
-        Path: ``<asset_root>/orchestrator/system_prompts``.
+        Path: ``<asset_root>/orchestrator/system_prompts`` (override) or
+            ``<hyperloom.orchestrator package dir>/system_prompts`` (default).
     """
-    return asset_root() / "orchestrator" / "system_prompts"
+    if os.environ.get(ENV_OVERRIDE_ASSET_ROOT):
+        return asset_root() / "orchestrator" / "system_prompts"
+    import hyperloom.orchestrator as _orchestrator_pkg
+
+    return Path(_orchestrator_pkg.__file__).resolve().parent / "system_prompts"
 
 
 def asset_kernel_opt_dir() -> Path:

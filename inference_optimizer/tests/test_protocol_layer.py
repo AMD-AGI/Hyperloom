@@ -8,26 +8,26 @@ import time
 
 import pytest
 
-from inference_optimizer.orchestrator.cursor_store import CursorStore
+from hyperloom.orchestrator.cursor_store import CursorStore
 from inference_optimizer.protocol.intent import (
     EMIT_INTENT_TOOL_SCHEMA,
     IntentType,
     IntentValidationError,
     validate_envelope,
 )
-from inference_optimizer.orchestrator.message_bus import (
+from hyperloom.orchestrator.message_bus import (
     TOPIC_ALLOWLIST,
     Message,
     MessageBus,
 )
-from inference_optimizer.orchestrator.resource_lock import (
+from hyperloom.orchestrator.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
     LaneBusy,
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from inference_optimizer.orchestrator.task_registry import (
+from hyperloom.orchestrator.task_registry import (
     IllegalTransition,
     TASK_STATES,
     TERMINAL_STATES,

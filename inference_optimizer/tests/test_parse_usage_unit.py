@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from inference_optimizer.orchestrator.trace import parse_usage as pu
+from hyperloom.orchestrator.trace import parse_usage as pu
 
 
 # ---- _coerce_optional_int ----

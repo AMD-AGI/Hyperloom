@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import benchmark_result as br
-from inference_optimizer.orchestrator.action_executors.benchmark_result import (
+from hyperloom.orchestrator.action_executors import benchmark_result as br
+from hyperloom.orchestrator.action_executors.benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
 )

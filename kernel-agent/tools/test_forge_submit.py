@@ -592,7 +592,7 @@ def test_sidecar_usage_roundtrips_through_parser(tmp_path):
     marker (as ``submit`` emits it) -> ``parse_forge_usage`` recovers counters."""
     import json
 
-    from inference_optimizer.orchestrator.trace.parse_usage import parse_forge_usage
+    from hyperloom.orchestrator.trace.parse_usage import parse_forge_usage
 
     out_dir = _write_forge_sidecar(tmp_path, {
         "llm_usage": {"input_tokens": 7, "output_tokens": 11},

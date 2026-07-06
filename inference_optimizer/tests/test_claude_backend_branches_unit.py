@@ -12,8 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import claude as cl
-from inference_optimizer.orchestrator.backends.base import BackendError
+from hyperloom.orchestrator.backends import claude as cl
+from hyperloom.orchestrator.backends.base import BackendError
 from inference_optimizer.protocol.intent import NoIntentEmitted
 
 

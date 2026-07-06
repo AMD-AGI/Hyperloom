@@ -349,7 +349,7 @@ class TestCandidateEnvForwarding(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         sys.path.insert(0, str(repo_root))
-        from inference_optimizer.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator import kernel_request_handlers
 
         self.h = kernel_request_handlers
 
@@ -377,7 +377,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         sys.path.insert(0, str(repo_root))
-        from inference_optimizer.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator import kernel_request_handlers
 
         self.handlers = kernel_request_handlers
 

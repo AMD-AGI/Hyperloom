@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
 
 # -- _to_ns ----------------------------------------------------------------

@@ -8,7 +8,7 @@ import json
 from types import SimpleNamespace
 
 
-from inference_optimizer.orchestrator.backends import mcp_context_tools as mct
+from hyperloom.orchestrator.backends import mcp_context_tools as mct
 
 
 def _shared_state():

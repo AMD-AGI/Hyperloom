@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from inference_optimizer.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.action_executors.baseline import (
     BaselineExecutor,
     _is_truthy,
 )
@@ -181,7 +181,7 @@ def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
         }
     )
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -226,7 +226,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         }
     )
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -262,7 +262,7 @@ def test_non_eval_failure_does_not_retry(tmp_path):
         }
     )
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -299,7 +299,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
         }
     )
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

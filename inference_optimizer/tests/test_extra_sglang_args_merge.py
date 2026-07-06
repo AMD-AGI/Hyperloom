@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.coordinator import (
+from hyperloom.orchestrator.coordinator import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_sglang_args,
 )

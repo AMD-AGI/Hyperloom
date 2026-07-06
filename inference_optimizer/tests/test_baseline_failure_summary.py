@@ -15,7 +15,7 @@ into ``SharedState`` via :meth:`SharedState.record_action_attempt` /
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.action_executors.report import (
+from hyperloom.orchestrator.action_executors.report import (
     _build_failure_summary,
     _build_summary_dict,
     _classify_root_cause_type,
@@ -24,7 +24,7 @@ from inference_optimizer.orchestrator.action_executors.report import (
     _is_benign_failure_text,
     _partition_benign_lines,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 _BENIGN_WARN = (
     "[WARN] Error: [Errno 2] No such file or directory: '/app/.../transformers/models/cohere2/modeling_cohere2.py'"

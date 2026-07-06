@@ -41,14 +41,14 @@ def _build_coord(
     whole-machine ``framework_gpu_pool`` resolve deterministically (the pools
     are baked at construction). ``TP`` is cleared so the serving carve is 0.
     """
-    from inference_optimizer.orchestrator.agent_role import default_role_registry
-    from inference_optimizer.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.agent_role import default_role_registry
+    from hyperloom.orchestrator.backends.mock_backend import (
         MockBackend,
         MockTurn,
         ScriptedPlan,
     )
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.shared_state import SharedState
 
     for _var in (
         "TP",

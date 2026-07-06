@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+from hyperloom.orchestrator.action_executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,

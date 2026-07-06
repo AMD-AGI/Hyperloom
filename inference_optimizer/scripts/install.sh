@@ -701,7 +701,7 @@ ensure_magpie_atomic_scripts_patch() {
   # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
   if MAGPIE_PATH="$MAGPIE_PATH" "$PYTHON" - <<'PY'
 import os, sys
-from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
+from hyperloom.orchestrator.action_executors._magpie_patcher import (
     magpie_scripts_patch_status,
 )
 status = magpie_scripts_patch_status(os.environ["MAGPIE_PATH"])
@@ -1200,7 +1200,7 @@ _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
   roots="$("$PYTHON" - <<'PY'
-from inference_optimizer.orchestrator.framework_paths import probe_framework_source_roots_for_env
+from hyperloom.orchestrator.framework_paths import probe_framework_source_roots_for_env
 print(probe_framework_source_roots_for_env())
 PY
 )"
@@ -1214,7 +1214,7 @@ PY
   local roots_summary
   roots_summary="$(ROOTS_INPUT="$roots" "$PYTHON" - <<'PY'
 import os
-from inference_optimizer.orchestrator.framework_paths import summarise_framework_root_discovery
+from hyperloom.orchestrator.framework_paths import summarise_framework_root_discovery
 print(summarise_framework_root_discovery(os.environ.get("ROOTS_INPUT", "")))
 PY
 )"

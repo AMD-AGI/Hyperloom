@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def _ok_result(

@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from inference_optimizer.orchestrator.shared_state import (
+from hyperloom.orchestrator.shared_state import (
     LATEST_STATE_SCHEMA_VERSION,
     SharedState,
 )
@@ -142,7 +142,7 @@ def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
         "session_id": "fresh-v08",
         "baseline_tput": 100.0,
     }
-    with caplog.at_level(logging.INFO, logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.INFO, logger="hyperloom.orchestrator.shared_state"):
         SharedState.from_dict(payload)
     migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
     assert migrated == [], "fresh v0.8 payload should not log a migration line"
@@ -157,7 +157,7 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
         "baseline_tput": 100.0,
         "action_scores": {"backends": {"base_score": 5.0}},
     }
-    with caplog.at_level(logging.INFO, logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.INFO, logger="hyperloom.orchestrator.shared_state"):
         SharedState.from_dict(payload)
     migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
     assert migrated, "v0.6 payload should log a migration line"
@@ -178,7 +178,7 @@ def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
         "session_id": "legacy",
         "baseline_tput": 100.0,
     }
-    with caplog.at_level(logging.WARNING, logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.shared_state"):
         loaded = SharedState.from_dict(payload)
     assert loaded.session_id == "legacy"
     warned = [r for r in caplog.records if "Inv-10.1 violation" in r.getMessage()]
@@ -294,7 +294,7 @@ def test_cli_exposes_reset_state_flag():
 # 8. Inv-10.2 — CORE_STATE_FIELDS blocks LLM update_state phase change
 def test_core_state_fields_contains_v08_new_additions():
     """KB_design §3.10 §6.2 — the v0.8 §4.1 new fields are locked in CORE_STATE_FIELDS."""
-    from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+    from hyperloom.orchestrator.policy import CORE_STATE_FIELDS
 
     must_be_locked = {
         "phase",
@@ -319,14 +319,14 @@ def test_core_state_fields_contains_v08_new_additions():
 
 def test_policy_blocks_llm_phase_write():
     """KB_design §3.10 §9 — LLM ``update_state`` setting ``phase=KERNEL`` is denied."""
-    from inference_optimizer.orchestrator.agent_role import (
+    from hyperloom.orchestrator.agent_role import (
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
         Intent,
         IntentType,
     )
-    from inference_optimizer.orchestrator.policy import (
+    from hyperloom.orchestrator.policy import (
         PolicyDenied,
         PolicyGate,
     )
@@ -342,14 +342,14 @@ def test_policy_blocks_llm_phase_write():
 
 def test_policy_blocks_llm_schema_version_write():
     """KB_design §3.10 §5.1 — an LLM cannot rewrite the ``schema_version`` migration breadcrumb."""
-    from inference_optimizer.orchestrator.agent_role import (
+    from hyperloom.orchestrator.agent_role import (
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
         Intent,
         IntentType,
     )
-    from inference_optimizer.orchestrator.policy import (
+    from hyperloom.orchestrator.policy import (
         PolicyDenied,
         PolicyGate,
     )
@@ -365,14 +365,14 @@ def test_policy_blocks_llm_schema_version_write():
 
 def test_policy_blocks_llm_optimization_stack_write():
     """KB_design §3.10 §6.2 — an LLM update_state with ``optimization_stack`` is denied (Coordinator-only)."""
-    from inference_optimizer.orchestrator.agent_role import (
+    from hyperloom.orchestrator.agent_role import (
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
         Intent,
         IntentType,
     )
-    from inference_optimizer.orchestrator.policy import (
+    from hyperloom.orchestrator.policy import (
         PolicyDenied,
         PolicyGate,
     )
@@ -389,7 +389,7 @@ def test_policy_blocks_llm_optimization_stack_write():
 # 9. KB_gaps/Gap-14 — search ledgers locked under CORE_STATE_FIELDS
 def test_search_ledgers_in_core_state_fields():
     """KB_design §3.10 §6.2 — the ``explore_search`` ledger is locked as CORE (KB_gaps/Gap-14)."""
-    from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+    from hyperloom.orchestrator.policy import CORE_STATE_FIELDS
 
     assert "explore_search" in CORE_STATE_FIELDS, (
         "'explore_search' must be in CORE_STATE_FIELDS so LLM update_state cannot rewrite the search ledger"
@@ -399,14 +399,14 @@ def test_search_ledgers_in_core_state_fields():
 @pytest.mark.parametrize("field_name", ["explore_search"])
 def test_policy_blocks_llm_search_ledger_write(field_name):
     """LLM ``update_state`` of a search ledger surfaces a ``state_field`` denial."""
-    from inference_optimizer.orchestrator.agent_role import (
+    from hyperloom.orchestrator.agent_role import (
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
         Intent,
         IntentType,
     )
-    from inference_optimizer.orchestrator.policy import (
+    from hyperloom.orchestrator.policy import (
         PolicyDenied,
         PolicyGate,
     )

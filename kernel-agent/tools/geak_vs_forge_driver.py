@@ -34,7 +34,7 @@ sys.path.insert(0, str(REPO))
 # are intentionally not at module top -> E402 suppressed.
 import tracelens_skill_runner as tlr  # noqa: E402  # HL
 import tracelens_analysis as tla  # noqa: E402  # HL
-from inference_optimizer.orchestrator import kernel_request_handlers as krh  # noqa: E402  # HL
+from hyperloom.orchestrator import kernel_request_handlers as krh  # noqa: E402  # HL
 
 
 def _load_fusion_cues(analysis_dir: Path) -> str:

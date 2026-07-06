@@ -1,5 +1,5 @@
 # Magpie baseline benchmark config for SGLang.
-# Used by inference_optimizer.orchestrator.action_executors.baseline /
+# Used by hyperloom.orchestrator.action_executors.baseline /
 # sweep / backends / params as the default benchmark config.
 #
 # Two fields are FALLBACK ONLY and overridden at run time by the executor:

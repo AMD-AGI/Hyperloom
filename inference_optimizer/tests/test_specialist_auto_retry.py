@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.specialist_domains import FREEFORM_DOMAIN
-from inference_optimizer.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialist_domains import FREEFORM_DOMAIN
+from hyperloom.orchestrator.specialist_runner import (
     RETRYABLE_SPECIALIST_FAILURES,
     SpecialistFailureType,
     classify_specialist_failure,
 )
-from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
 )

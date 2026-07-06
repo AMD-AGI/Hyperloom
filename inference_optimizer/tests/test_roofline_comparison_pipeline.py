@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors.report import (
+from hyperloom.orchestrator.action_executors.report import (
     _build_summary_dict,
     _format_roofline_comparison_section,
 )
@@ -277,7 +277,7 @@ def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
     tmp_path,
 ):
     """``build_roofline_snapshot`` always exposes ``kernel_roofline_path`` (empty when not injected)."""
-    from inference_optimizer.orchestrator.roofline_snapshot import (
+    from hyperloom.orchestrator.roofline_snapshot import (
         build_roofline_snapshot,
     )
 
@@ -325,7 +325,7 @@ class TestBuildSnapshotCeilingFields:
     """``build_roofline_snapshot`` derives within/gap from peak + achieved."""
 
     def test_default_kwargs_yield_none_ceiling_fields(self, tmp_path):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
 
@@ -342,7 +342,7 @@ class TestBuildSnapshotCeilingFields:
         assert snap["gap_to_roofline_pct"] is None
 
     def test_peak_plus_achieved_yields_within_and_gap(self, tmp_path):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
 
@@ -361,7 +361,7 @@ class TestBuildSnapshotCeilingFields:
         assert snap["gap_to_roofline_pct"] == pytest.approx(47.25, abs=0.01)
 
     def test_zero_peak_keeps_within_gap_none(self, tmp_path):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
 
@@ -383,7 +383,7 @@ class TestComparisonDeltaIncludesWithinRoofline:
     """The comparison delta carries both within_roofline_pct and gap_to_roofline_pct."""
 
     def test_before_after_delta_gap_to_roofline_pct(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
 
@@ -410,7 +410,7 @@ class TestComparisonDeltaIncludesWithinRoofline:
         assert pytest.approx(delta.get("gap_to_roofline_pct"), abs=0.01) == -16.34
 
     def test_format_table_renders_gap_delta(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
 
@@ -446,7 +446,7 @@ class TestComparisonDeltaIncludesWithinRoofline:
         assert "-16.3" in text
 
     def test_before_after_delta_within_roofline_pct(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
 
@@ -503,7 +503,7 @@ class TestFormatTableRendersCeiling:
     """``format_roofline_metrics_table`` renders the ceiling once plus achieved/within/gap rows."""
 
     def test_single_snapshot_renders_ceiling_and_within_rows(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
 
@@ -533,7 +533,7 @@ class TestFormatTableRendersCeiling:
         assert "Gap to roofline %" in text
 
     def test_before_after_renders_ceiling_once_and_within_delta(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
 
@@ -571,7 +571,7 @@ class TestFormatTableRendersCeiling:
         assert "+16.3" in text
 
     def test_table_without_ceiling_omits_ceiling_row(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
 
@@ -601,8 +601,8 @@ class TestRecordTraceAnalyzeStampsCeiling:
     @staticmethod
     def _mock_breakdown(monkeypatch, *, mem=0.0, cmp=0.0, peak=0.0, kind="unknown"):
         """Patch ``compute_roofline_breakdown_from_state`` to return a stub ``RooflineBreakdown``."""
-        from inference_optimizer.orchestrator import roofline_ceiling
-        from inference_optimizer.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
 
@@ -614,7 +614,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         )
 
     def test_stamps_ceiling_and_achieved_into_history(self, tmp_path, monkeypatch):
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -647,8 +647,8 @@ class TestRecordTraceAnalyzeStampsCeiling:
         """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as
         baseline even after warm-replay promoted a fp8 current_best — the ceiling
         is computed for the baseline arm and achieved uses baseline_tput."""
-        from inference_optimizer.orchestrator import roofline_ceiling
-        from inference_optimizer.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
 
@@ -663,7 +663,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
             "compute_roofline_breakdown_from_state",
             _capture,
         )
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         md = tmp_path / "analysis.md"
         md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
@@ -689,7 +689,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 527.5
 
     def test_falls_back_to_baseline_tput_when_no_current_best(self, tmp_path, monkeypatch):
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -718,7 +718,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
     def test_baseline_arm_falls_back_to_last_baseline_tput(self, tmp_path, monkeypatch):
         """When baseline_tput is lost, a baseline-arm snapshot still stamps
         achieved from last_baseline so within/gap pct are not empty."""
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -748,7 +748,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
     def test_unknown_roofline_arm_falls_back_to_inference(self, tmp_path, monkeypatch):
         """An invalid roofline_arm is ignored and the recorder infers from
         current_best.tput (here a promoted optimized arm)."""
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -776,8 +776,8 @@ class TestRecordTraceAnalyzeStampsCeiling:
     def test_current_best_arm_keeps_arm_when_tput_missing(self, tmp_path, monkeypatch):
         """A current_best-tagged snapshot keeps its arm even when current_best
         carries no live tput; the ceiling must not downgrade to baseline."""
-        from inference_optimizer.orchestrator import roofline_ceiling
-        from inference_optimizer.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
 
@@ -792,7 +792,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
             "compute_roofline_breakdown_from_state",
             _capture,
         )
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         md = tmp_path / "analysis.md"
         md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
@@ -817,7 +817,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 690.0
 
     def test_zero_peak_keeps_within_gap_none(self, tmp_path, monkeypatch):
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(monkeypatch)
         md = tmp_path / "analysis.md"
@@ -842,7 +842,7 @@ class TestBuildSnapshotTwoSidedRoofline:
     """``build_roofline_snapshot`` carries T_mem / T_cmp / bound_kind alongside the legacy peak field."""
 
     def test_two_sided_fields_default_to_unknown_for_legacy_callers(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
 
@@ -859,7 +859,7 @@ class TestBuildSnapshotTwoSidedRoofline:
         assert snap["roofline_bound_kind"] == "unknown"
 
     def test_two_sided_fields_populated_when_provided(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
 
@@ -880,7 +880,7 @@ class TestBuildSnapshotTwoSidedRoofline:
         assert snap["theoretical_peak_tok_per_sec"] == 8000.0
 
     def test_zero_mem_cmp_serialize_as_none(self):
-        from inference_optimizer.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
 
@@ -904,8 +904,8 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
 
     @staticmethod
     def _mock_breakdown(monkeypatch, *, mem, cmp, peak, kind):
-        from inference_optimizer.orchestrator import roofline_ceiling
-        from inference_optimizer.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
 
@@ -934,7 +934,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         tmp_path,
         monkeypatch,
     ):
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -958,7 +958,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         tmp_path,
         monkeypatch,
     ):
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -979,7 +979,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         tmp_path,
         monkeypatch,
     ):
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,
@@ -1003,8 +1003,8 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         tmp_path,
         monkeypatch,
     ):
-        from inference_optimizer.orchestrator import roofline_ceiling
-        from inference_optimizer.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
             monkeypatch,

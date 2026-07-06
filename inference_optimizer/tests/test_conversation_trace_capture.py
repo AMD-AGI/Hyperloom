@@ -19,11 +19,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from inference_optimizer.orchestrator.trace.conversation_trace import (
+from hyperloom.orchestrator.trace.conversation_trace import (
     ConversationRecord,
     append_conversation,
 )
-from inference_optimizer.orchestrator.trace.parse_usage import (
+from hyperloom.orchestrator.trace.parse_usage import (
     parse_claude_stream_json_response,
 )
 from inference_optimizer.session_paths import conversations_path

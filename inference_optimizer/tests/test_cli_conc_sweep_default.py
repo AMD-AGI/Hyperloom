@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from inference_optimizer.cli import _build_parser
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def _parse(*extra: str):

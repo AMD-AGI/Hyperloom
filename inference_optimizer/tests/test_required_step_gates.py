@@ -9,18 +9,18 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     MockBackend,
     MockCriticBackend,
     MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.policy import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 
@@ -298,7 +298,7 @@ def test_run_optimization_handler_reports_missing_trace_analyze(session_dir):
     """No candidates_path + empty cache → handler returns ``missing_trace_analyze``."""
     import asyncio
 
-    from inference_optimizer.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel_request_handlers import (
         run_optimization_handler,
     )
 
@@ -323,7 +323,7 @@ def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    from inference_optimizer.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel_request_handlers import (
         get_handler,
     )
 

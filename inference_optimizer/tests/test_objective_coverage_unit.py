@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from inference_optimizer.orchestrator.objective import (
+from hyperloom.orchestrator.objective import (
     ObjectiveError,
     TargetBaselineObjective,
     TargetGainObjective,
@@ -16,7 +16,7 @@ from inference_optimizer.orchestrator.objective import (
     TimeOnlyObjective,
     build_objective,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def test_target_gain_pressure_and_describe():

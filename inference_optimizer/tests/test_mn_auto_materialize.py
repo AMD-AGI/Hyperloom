@@ -15,10 +15,10 @@ import asyncio
 from types import SimpleNamespace
 
 
-from inference_optimizer.orchestrator.action_executors import (
+from hyperloom.orchestrator.action_executors import (
     _multi_node_env as mne,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.coordinator import Coordinator
 
 
 class _FakeTasks:

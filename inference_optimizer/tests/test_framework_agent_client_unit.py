@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator import framework_agent_client as fac
+from hyperloom.orchestrator import framework_agent_client as fac
 
 
 # -- repo_url_for_framework -----------------------------------------------

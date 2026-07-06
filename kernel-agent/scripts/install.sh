@@ -76,7 +76,7 @@ MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 # `pip install -e $MAGPIE_PATH` into the driver Python's site-packages
 # (or the container image pre-installs it that way) — no venv is ever
 # created at $MAGPIE_PATH/venv. Mirrors _resolve_magpie_python() in
-# inference_optimizer/orchestrator/action_executors/_grid_runner.py:
+# src/hyperloom/orchestrator/action_executors/_grid_runner.py:
 #   $MAGPIE_PYTHON env > python3 on PATH that can `import Magpie`
 #     > /opt/venv/bin/python (if it exists) > python3 on PATH.
 _resolve_magpie_python() {
@@ -527,7 +527,7 @@ PY
 # PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
 # binaries it expects on every deployment.
 #
-# Background: `inference_optimizer/orchestrator/action_executors/_server_patcher.py`
+# Background: `src/hyperloom/orchestrator/action_executors/_server_patcher.py`
 # uses two binaries to apply TraceLens patches to vLLM/SGLang installs:
 #   * `git apply` — strict path, default; bails immediately on context drift.
 #   * `patch -p<N> --fuzz=2` — PR-C fuzzy fallback (tightened from

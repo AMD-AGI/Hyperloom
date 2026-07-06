@@ -93,7 +93,7 @@ For the full CLI reference and module deep-dives, see the
 ## Role in Hyperloom
 
 The orchestration runtime enters TraceLens through the kernel request path:
-`inference_optimizer/orchestrator/kernel_request_handlers.py` dispatches
+`src/hyperloom/orchestrator/kernel_request_handlers.py` dispatches
 `trace_analyze` requests as subprocesses that run
 `kernel-agent/tools/tracelens_analysis.py` (and the skill runner when needed).
 The composite roofline executor first profiles the workload with Magpie, then
@@ -101,7 +101,7 @@ hands the trace to that `trace_analyze` path.
 
 Before profiling, Hyperloom can patch the active vLLM/SGLang server tree with
 TraceLens-specific runtime flags through
-`inference_optimizer/orchestrator/action_executors/_server_patcher.py` and the
+`src/hyperloom/orchestrator/action_executors/_server_patcher.py` and the
 workload environment helpers. The generated report feeds the roofline ceilings
 and bottleneck list used to score candidate optimizations. See
 [How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORKS.md).

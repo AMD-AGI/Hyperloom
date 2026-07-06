@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.coordinator import Coordinator
 
 
 @dataclass

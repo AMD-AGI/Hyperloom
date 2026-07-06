@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator import kernel_request_handlers as krh
+from hyperloom.orchestrator import kernel_request_handlers as krh
 
 
 def _candidate(**over):

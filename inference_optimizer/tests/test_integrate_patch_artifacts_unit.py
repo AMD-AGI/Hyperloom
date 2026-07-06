@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from inference_optimizer.orchestrator.action_executors import integrate_patch as ip
-from inference_optimizer.orchestrator.action_executors.integrate_patch import (
+from hyperloom.orchestrator.action_executors import integrate_patch as ip
+from hyperloom.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
 )
 

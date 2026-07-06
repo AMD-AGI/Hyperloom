@@ -16,13 +16,14 @@ def _try_import_inference_optimizer():
         Path.home() / "Hyperloom-rs-build" / "Hyperloom",
     ]
     for root in candidate_roots:
-        if (root / "inference_optimizer" / "orchestrator").is_dir():
+        if (root / "src" / "hyperloom" / "orchestrator").is_dir():
             sys.path.insert(0, str(root))
+            sys.path.insert(0, str(root / "src"))
             break
     try:
         import inference_optimizer.protocol.intent as upstream_ip
-        import inference_optimizer.orchestrator.policy as upstream_policy
-        import inference_optimizer.orchestrator.agent_role as upstream_role
+        import hyperloom.orchestrator.policy as upstream_policy
+        import hyperloom.orchestrator.agent_role as upstream_role
     except ImportError:
         return None
     return upstream_ip, upstream_policy, upstream_role

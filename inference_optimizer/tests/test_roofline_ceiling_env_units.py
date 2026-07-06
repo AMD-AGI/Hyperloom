@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator import roofline_ceiling as rc
+from hyperloom.orchestrator import roofline_ceiling as rc
 
 
 def test_benchmark_envs():

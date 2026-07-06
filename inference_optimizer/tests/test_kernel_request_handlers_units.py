@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator import kernel_request_handlers as krh
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator import kernel_request_handlers as krh
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 class TestForgeGemmHelperCoverage:
@@ -182,7 +182,7 @@ class TestForgeGemmHelperCoverage:
         # Empty session precision + no fp8/fp4 quantization → bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        import inference_optimizer.orchestrator.roofline_ceiling as rc
+        import hyperloom.orchestrator.roofline_ceiling as rc
 
         def _raise(*_a, **_k):
             raise RuntimeError("no runtime workload")

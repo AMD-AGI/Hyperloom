@@ -143,7 +143,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
 
     breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
 
-    from .orchestrator.trace.langfuse_emitter import read_receipt
+    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
 
     receipt = read_receipt(session_dir) or {}
     counts = receipt.get("counts") or {}
@@ -205,7 +205,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
     try:
         from .breakdown import patch_breakdown_langfuse
-        from .orchestrator.trace.langfuse_emitter import (
+        from hyperloom.orchestrator.trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )

@@ -35,7 +35,7 @@ def test_no_explore_has_no_env_fallback(monkeypatch):
 
 # explore_enabled flows into SharedState construction.
 def test_shared_state_explore_enabled_defaults_true():
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     assert SharedState(session_id="t").explore_enabled is True
 

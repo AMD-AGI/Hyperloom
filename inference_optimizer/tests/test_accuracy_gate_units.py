@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import _accuracy_gate as ag
+from hyperloom.orchestrator.action_executors import _accuracy_gate as ag
 
 
 class TestIsHighAccuracyRisk:

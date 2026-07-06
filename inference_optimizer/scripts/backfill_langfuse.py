@@ -4,10 +4,10 @@
 """Backfill one hyperloom session's trace JSONL into Langfuse (offline).
 
 Sibling of the *live* emitter
-(:mod:`inference_optimizer.orchestrator.trace.langfuse_emitter`): the live
+(:mod:`hyperloom.orchestrator.trace.langfuse_emitter`): the live
 path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
-projection (:mod:`inference_optimizer.orchestrator.trace.langfuse_mapping`)
+projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`)
 so a backfilled trace and a live-pushed trace are shaped identically.
 
 Mapping (trace -> phase span -> agent span -> generation)::
@@ -71,8 +71,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from inference_optimizer.orchestrator.trace import langfuse_mapping as lfmap
-from inference_optimizer.orchestrator.trace.langfuse_emitter import (
+from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
+from hyperloom.orchestrator.trace.langfuse_emitter import (
     _end_obs,
     _set_trace_attrs,
     _start_obs,

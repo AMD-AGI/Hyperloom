@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.specialist_domains import (
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.specialist_domains import (
     get_domain,
 )
-from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _section_roofline_evidence,
     build_specialist_prompts,

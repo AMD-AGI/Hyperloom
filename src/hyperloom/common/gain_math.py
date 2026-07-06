@@ -2,8 +2,8 @@
 
 """Throughput percentage-gain helpers (tree-reform.MD §7 — ``gain_math``).
 
-Relocated from ``inference_optimizer.orchestrator.gain_math`` (which now
-re-exports from here). One home per edge contract; stdlib-only.
+Relocated from ``hyperloom.orchestrator.gain_math`` (which now re-exports
+from here). One home per edge contract; stdlib-only.
 """
 
 from __future__ import annotations

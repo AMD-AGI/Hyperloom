@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors import _grid_runner as gr
+from hyperloom.orchestrator.action_executors._grid_runner import (
     GridVariant,
     run_grid,
 )
@@ -28,13 +28,13 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
 @pytest.fixture(autouse=True)
 def _single_node(monkeypatch):
     """Default every test in this module to single-node mode."""
-    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+    from hyperloom.orchestrator.action_executors import _multi_node_env
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
 
 
 def test_kill_stale_servers_noop_in_multi_node(monkeypatch):
-    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+    from hyperloom.orchestrator.action_executors import _multi_node_env
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
     slept: list = []

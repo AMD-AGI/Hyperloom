@@ -13,14 +13,14 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     ClaudeBackend,
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
     build_emit_intent_server,
     validate_emit_intent_input,
 )
-from inference_optimizer.orchestrator.backends.base import BackendError
+from hyperloom.orchestrator.backends.base import BackendError
 from inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,

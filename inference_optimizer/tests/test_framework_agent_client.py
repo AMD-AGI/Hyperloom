@@ -7,7 +7,7 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from inference_optimizer.orchestrator import framework_agent_client as fac
+from hyperloom.orchestrator import framework_agent_client as fac
 
 
 def _write_fake_fa(

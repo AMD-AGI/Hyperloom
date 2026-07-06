@@ -10,19 +10,19 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
 def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
-    from inference_optimizer.orchestrator.agent_role import default_role_registry
-    from inference_optimizer.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.agent_role import default_role_registry
+    from hyperloom.orchestrator.backends.mock_backend import (
         MockBackend,
         MockTurn,
         ScriptedPlan,
     )
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     state = SharedState(session_id="ws2-lane")
     state.gpu_specialist_capacity = gpu_capacity

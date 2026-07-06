@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import session_breakdown as sb
+from hyperloom.orchestrator.action_executors import session_breakdown as sb
 
 
 # Helpers

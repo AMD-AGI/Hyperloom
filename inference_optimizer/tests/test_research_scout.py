@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer import session_paths
-from inference_optimizer.orchestrator import research_hints
-from inference_optimizer.orchestrator import specialist_domains as sd
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.system_prompts import (
+from hyperloom.orchestrator import research_hints
+from hyperloom.orchestrator import specialist_domains as sd
+from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.system_prompts import (
     specialist_prompt_builder as spb,
 )
 
@@ -118,13 +118,13 @@ def test_scout_counters_and_seen_pr_roundtrip():
 
 @pytest.mark.asyncio
 async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
-    from inference_optimizer.orchestrator.agent_role import default_role_registry
-    from inference_optimizer.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.agent_role import default_role_registry
+    from hyperloom.orchestrator.backends.mock_backend import (
         MockBackend,
         MockTurn,
         ScriptedPlan,
     )
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     state = SharedState(session_id="research-scout-readonly")
     state.save(tmp_path)

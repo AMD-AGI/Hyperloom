@@ -33,7 +33,7 @@ def _args(model: str, *, allow_mm_text_fallback: bool = True) -> argparse.Namesp
 def _seed_state(session_dir: Path, monkeypatch) -> None:
     """Create a minimal seeded session so the preflight can load/save state."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session_dir))
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -425,7 +425,7 @@ def test_preflight_allows_missing_config(tmp_path, monkeypatch):
 
 # 3. stop_reason vocabulary registration
 def test_stop_reason_is_canonical_vocab():
-    from inference_optimizer.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phase_state import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )
@@ -533,8 +533,8 @@ def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
 
 # 5. report rendering of the degraded-mode section
 def test_report_renders_degraded_mode_section():
-    from inference_optimizer.orchestrator.action_executors import report
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.action_executors import report
+    from hyperloom.orchestrator.shared_state import SharedState
 
     state = SharedState(session_id="s", model_name="kimi", model_path="/m/kimi")
     state.degraded_mode = True
@@ -559,8 +559,8 @@ def test_report_renders_degraded_mode_section():
 
 
 def test_report_no_degraded_section_when_clean():
-    from inference_optimizer.orchestrator.action_executors import report
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.action_executors import report
+    from hyperloom.orchestrator.shared_state import SharedState
 
     state = SharedState(session_id="s", model_name="llama", model_path="/m/llama")
     summary = report._build_summary_dict(state, {}, [], external_baseline=None)

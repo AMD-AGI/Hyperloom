@@ -16,10 +16,10 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from inference_optimizer.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.action_executors.baseline import (
     BaselineExecutor,
 )
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors._grid_runner import (
     GridVariant,
     run_grid,
 )
@@ -139,7 +139,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -180,7 +180,7 @@ def test_baseline_single_round_when_double_run_disabled(tmp_path, monkeypatch):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -203,7 +203,7 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     fake_run, state = _cold_then_hot_fake_run(captured)
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = _run(
@@ -244,7 +244,7 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
     fake_run, state = _cold_then_hot_fake_run(captured)
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = _run(
@@ -287,7 +287,7 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -319,7 +319,7 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -353,7 +353,7 @@ def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -405,7 +405,7 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -422,7 +422,7 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     """#524: when the liveness watchdog reaps a hung server
     (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead``
     even when no server.log marker is independently visible."""
-    from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+    from hyperloom.orchestrator.action_executors._subprocess_kill import (
         SERVER_DEAD_RETURNCODE,
     )
 
@@ -444,7 +444,7 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -492,7 +492,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -537,7 +537,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -550,7 +550,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
 def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
     """#523: a checkout already on a local filesystem is returned unchanged
     (no needless copy)."""
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     src = tmp_path / "InferenceX"
     (src / "benchmarks").mkdir(parents=True)
@@ -563,7 +563,7 @@ def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
 def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
     """#523: a checkout on a (simulated) network mount is mirrored to local
     disk and the returned path points at the local copy, not the original."""
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
     (src / "benchmarks").mkdir(parents=True)
@@ -594,7 +594,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     """#523: callers can include a task/output-dir key in the mirror hash so
     two overlapping baselines sharing one wekafs checkout never rmtree/replace
     a directory that another server is currently ``cd``-ed into."""
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
     (src / "benchmarks").mkdir(parents=True)
@@ -617,7 +617,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
 def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
     """#523: the relocation can be opted out of via env even on a network
     mount (escape hatch for multi-node / shared-mount setups)."""
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
     (src / "benchmarks").mkdir(parents=True)
@@ -635,7 +635,7 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     """#523: when the mirror copy itself fails (e.g. local disk full), the
     helper degrades to the original network-mount path instead of raising, so
     the run still proceeds (pre-fix behaviour) rather than aborting."""
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
     (src / "benchmarks").mkdir(parents=True)
@@ -663,7 +663,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     ``benchmarks/benchmark_lib.sh`` (partial / corrupt tree), the helper
     rejects it and returns the original path rather than handing Magpie a
     broken ``cd`` target."""
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     # Source has NO benchmark_lib.sh, so the post-copy completeness check fails.
     src = tmp_path / "wekafs_InferenceX"
@@ -692,7 +692,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     rewrote the env fallback and the pickle still dumped onto wekafs because
     Magpie reads the YAML field, not the env, when it is populated.
     """
-    from inference_optimizer.orchestrator.action_executors import baseline as bl
+    from hyperloom.orchestrator.action_executors import baseline as bl
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
@@ -731,7 +731,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -779,7 +779,7 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -808,7 +808,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -850,7 +850,7 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
     )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -898,11 +898,11 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
             return_value=True,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            "hyperloom.orchestrator.action_executors.baseline._kill_stale_servers",
             side_effect=fake_kill,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
             side_effect=fake_run,
         ),
     ):
@@ -952,11 +952,11 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path):
             return_value=False,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            "hyperloom.orchestrator.action_executors.baseline._kill_stale_servers",
             side_effect=fake_kill,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
             side_effect=fake_run,
         ),
     ):
@@ -1007,11 +1007,11 @@ def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path):
             return_value=True,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            "hyperloom.orchestrator.action_executors.baseline._kill_stale_servers",
             side_effect=fake_kill,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
             side_effect=fake_run,
         ),
     ):
@@ -1046,7 +1046,7 @@ def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
             return_value=True,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            "hyperloom.orchestrator.action_executors.baseline._kill_stale_servers",
             side_effect=fake_kill,
         ),
     ):
@@ -1089,11 +1089,11 @@ def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path):
             return_value=True,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            "hyperloom.orchestrator.action_executors.baseline._kill_stale_servers",
             side_effect=boom,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
             side_effect=fake_run,
         ),
     ):
@@ -1129,11 +1129,11 @@ def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
 
     with (
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            "hyperloom.orchestrator.action_executors.baseline._kill_stale_servers",
             side_effect=fake_kill,
         ),
         patch(
-            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
             side_effect=fake_run,
         ),
     ):
@@ -1166,7 +1166,7 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
 
 # -- #522: _classify_subprocess_error unit tests ----------------------------
 
-from inference_optimizer.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.action_executors.baseline import (
     _classify_subprocess_error,
 )
 

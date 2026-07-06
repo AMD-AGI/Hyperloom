@@ -17,9 +17,9 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import TargetAnalysisExecutor
-from inference_optimizer.orchestrator.action_executors import target_analysis as ta
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.action_executors import TargetAnalysisExecutor
+from hyperloom.orchestrator.action_executors import target_analysis as ta
+from hyperloom.orchestrator.task_registry import Task
 
 
 # Fixtures
@@ -115,7 +115,7 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
 @pytest.mark.asyncio
 async def test_happy_path_writes_files(session_dir):
     """Full pipeline reading an LLM-authored competitor target."""
-    from inference_optimizer.orchestrator import research_hints
+    from hyperloom.orchestrator import research_hints
 
     research_hints.write_competitor_target(
         session_dir,
@@ -171,8 +171,8 @@ async def test_happy_path_writes_files(session_dir):
 @pytest.mark.asyncio
 async def test_report_executor_renders_external_baseline_section(tmp_path: Path, monkeypatch):
     """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
-    from inference_optimizer.orchestrator.action_executors import ReportExecutor
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.action_executors import ReportExecutor
+    from hyperloom.orchestrator.shared_state import SharedState
     from inference_optimizer.storage.connection import SqliteConnection
 
     sd = tmp_path / "sess-report"
@@ -334,7 +334,7 @@ class TestExecutor:
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="")
         monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.target_analysis.analyze",
+            "hyperloom.orchestrator.action_executors.target_analysis.analyze",
             lambda **kwargs: _DummySummary(),
         )
         result = await ex(_unit_ctx())
@@ -351,7 +351,7 @@ class TestExecutor:
             raise RuntimeError("InferenceX 500")
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.target_analysis.analyze",
+            "hyperloom.orchestrator.action_executors.target_analysis.analyze",
             boom,
         )
         result = await ex(_unit_ctx())
@@ -372,7 +372,7 @@ class TestExecutor:
             raise RuntimeError("nope")
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.target_analysis.analyze",
+            "hyperloom.orchestrator.action_executors.target_analysis.analyze",
             boom,
         )
         result = await ex(_unit_ctx())
@@ -394,7 +394,7 @@ class TestExecutor:
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
         monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.target_analysis.analyze",
+            "hyperloom.orchestrator.action_executors.target_analysis.analyze",
             lambda **kwargs: _NoBestSummary(),
         )
         result = await ex(_unit_ctx(params={"model_path": "/m"}))

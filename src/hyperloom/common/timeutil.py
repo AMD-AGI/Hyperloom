@@ -2,7 +2,7 @@
 
 """Canonical UTC ISO-8601 timestamp helper (tree-reform.MD §7 — ``_time``).
 
-Relocated from ``inference_optimizer.orchestrator._time`` (which now re-exports
+Relocated from ``hyperloom.orchestrator._time`` (which now re-exports
 from here). Replaces the ~14 ``_now_iso`` copies. Stdlib-only.
 """
 

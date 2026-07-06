@@ -19,13 +19,13 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors.recover import (
+from hyperloom.orchestrator.action_executors.recover import (
     RecoverExecutor,
     _env_gate_allows_gpureset,
     _session_gpu_ids,
     recover_executor,
 )
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.task_registry import Task
 
 
 # RunnerContext stand-in (mirrors test_target_analysis_executor.py)
@@ -161,7 +161,7 @@ async def test_kills_stale_owners_and_recovers(tmp_path, monkeypatch):
 
     monkeypatch.setattr(exe, "_send_signal", _send)
     monkeypatch.setattr(exe, "_pid_alive", lambda pid: False)
-    import inference_optimizer.orchestrator.action_executors.recover as recmod
+    import hyperloom.orchestrator.action_executors.recover as recmod
 
     monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
 
@@ -210,7 +210,7 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
 
     monkeypatch.setattr(exe, "_send_signal", _send)
     monkeypatch.setattr(exe, "_pid_alive", lambda pid: True)
-    import inference_optimizer.orchestrator.action_executors.recover as recmod
+    import hyperloom.orchestrator.action_executors.recover as recmod
 
     monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
 
@@ -436,7 +436,7 @@ async def test_result_json_has_expected_keys(tmp_path, monkeypatch):
 
 # Module-level callable
 def test_module_callable_exists():
-    from inference_optimizer.orchestrator.action_executors.recover import (
+    from hyperloom.orchestrator.action_executors.recover import (
         RecoverExecutor as _Cls,
         recover_executor as _instance,
     )
@@ -448,7 +448,7 @@ def test_module_callable_exists():
 # gpureset subprocess error paths (real ``_try_rocm_smi_gpureset``)
 def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
     exe = RecoverExecutor()
-    import inference_optimizer.orchestrator.action_executors.recover as recmod
+    import hyperloom.orchestrator.action_executors.recover as recmod
 
     monkeypatch.setattr(recmod.shutil, "which", lambda b: None)
     out = exe._try_rocm_smi_gpureset([0, 1])
@@ -457,7 +457,7 @@ def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
 
 def test_try_rocm_smi_gpureset_handles_timeout(monkeypatch):
     exe = RecoverExecutor()
-    import inference_optimizer.orchestrator.action_executors.recover as recmod
+    import hyperloom.orchestrator.action_executors.recover as recmod
 
     monkeypatch.setattr(
         recmod.shutil,
@@ -476,7 +476,7 @@ def test_try_rocm_smi_gpureset_handles_timeout(monkeypatch):
 
 def test_try_rocm_smi_gpureset_returns_stdout_stderr(monkeypatch):
     exe = RecoverExecutor()
-    import inference_optimizer.orchestrator.action_executors.recover as recmod
+    import hyperloom.orchestrator.action_executors.recover as recmod
 
     monkeypatch.setattr(
         recmod.shutil,
@@ -630,25 +630,25 @@ class TestAllRecovered:
 class TestProbeGpuFreeMb:
     def test_returns_empty_when_rocm_smi_missing(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: None,
         )
         assert RecoverExecutor()._probe_gpu_free_mb() == []
 
     def test_returns_empty_on_nonzero_rc(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/rocm-smi",
         )
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             lambda *a, **k: _ProcResult(returncode=1, stderr="boom"),
         )
         assert RecoverExecutor()._probe_gpu_free_mb() == []
 
     def test_returns_empty_on_timeout(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/rocm-smi",
         )
 
@@ -656,18 +656,18 @@ class TestProbeGpuFreeMb:
             raise subprocess.TimeoutExpired(cmd=a, timeout=1)
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             boom,
         )
         assert RecoverExecutor()._probe_gpu_free_mb() == []
 
     def test_returns_parsed_rows_on_success(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/rocm-smi",
         )
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             lambda *a, **k: _ProcResult(returncode=0, stdout=_csv((0, 0), (1, 100))),
         )
         rows = RecoverExecutor()._probe_gpu_free_mb()
@@ -682,7 +682,7 @@ class TestSendAndAlive:
             raise ProcessLookupError()
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.os.kill",
+            "hyperloom.orchestrator.action_executors.recover.os.kill",
             raise_lookup,
         )
         assert ex._send_signal(12345, signal.SIGTERM) is False
@@ -694,7 +694,7 @@ class TestSendAndAlive:
             raise PermissionError("not allowed")
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.os.kill",
+            "hyperloom.orchestrator.action_executors.recover.os.kill",
             raise_perm,
         )
         assert ex._send_signal(12345, signal.SIGTERM) is False
@@ -703,7 +703,7 @@ class TestSendAndAlive:
         ex = RecoverExecutor()
         sent = []
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.os.kill",
+            "hyperloom.orchestrator.action_executors.recover.os.kill",
             lambda pid, sig: sent.append((pid, sig)),
         )
         assert ex._send_signal(1, signal.SIGTERM) is True
@@ -714,7 +714,7 @@ class TestSendAndAlive:
             raise ProcessLookupError()
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.os.kill",
+            "hyperloom.orchestrator.action_executors.recover.os.kill",
             raise_lookup,
         )
         assert RecoverExecutor._pid_alive(99999) is False
@@ -724,7 +724,7 @@ class TestSendAndAlive:
             raise PermissionError()
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.os.kill",
+            "hyperloom.orchestrator.action_executors.recover.os.kill",
             raise_perm,
         )
         assert RecoverExecutor._pid_alive(1) is False
@@ -738,14 +738,14 @@ class TestSendAndAlive:
 class TestDiscoverStalePids:
     def test_no_pgrep_returns_empty(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: None,
         )
         assert RecoverExecutor()._discover_stale_pids() == []
 
     def test_parses_pgrep_output(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/pgrep",
         )
         scripted = {
@@ -761,7 +761,7 @@ class TestDiscoverStalePids:
             return _ProcResult(returncode=rc, stdout=output)
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             fake_run,
         )
         ex = RecoverExecutor()
@@ -772,13 +772,13 @@ class TestDiscoverStalePids:
 
     def test_skips_own_pid(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/pgrep",
         )
         own_pid = os.getpid()
         output = f"{own_pid} sglang.launch_server self\n12000 sglang.launch_server other"
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             lambda *a, **k: _ProcResult(returncode=0, stdout=output),
         )
         ex = RecoverExecutor()
@@ -795,7 +795,7 @@ class TestDiscoverStalePids:
 class TestTryRocmSmiGpureset:
     def test_no_rocm_smi(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: None,
         )
         out = RecoverExecutor()._try_rocm_smi_gpureset([0])
@@ -803,12 +803,12 @@ class TestTryRocmSmiGpureset:
 
     def test_success_truncates_outputs(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/rocm-smi",
         )
         big_stdout = "ok\n" * 1500
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             lambda *a, **k: _ProcResult(returncode=0, stdout=big_stdout, stderr=""),
         )
         out = RecoverExecutor()._try_rocm_smi_gpureset([0])
@@ -817,7 +817,7 @@ class TestTryRocmSmiGpureset:
 
     def test_timeout_reports_error(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/rocm-smi",
         )
 
@@ -829,7 +829,7 @@ class TestTryRocmSmiGpureset:
             )
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             boom,
         )
         out = RecoverExecutor()._try_rocm_smi_gpureset([0])
@@ -839,7 +839,7 @@ class TestTryRocmSmiGpureset:
 
     def test_launch_failure_returns_error_dict(self, monkeypatch):
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
+            "hyperloom.orchestrator.action_executors.recover.shutil.which",
             lambda name: "/usr/bin/rocm-smi",
         )
 
@@ -847,7 +847,7 @@ class TestTryRocmSmiGpureset:
             raise FileNotFoundError("missing rocm-smi binary")
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
+            "hyperloom.orchestrator.action_executors.recover.subprocess.run",
             boom,
         )
         out = RecoverExecutor()._try_rocm_smi_gpureset([0])
@@ -880,7 +880,7 @@ class TestWorkspaceHelpers:
                 raise OSError("readonly")
 
         monkeypatch.setattr(
-            "inference_optimizer.orchestrator.action_executors.recover.Path",
+            "hyperloom.orchestrator.action_executors.recover.Path",
             _BadPath,
         )
         RecoverExecutor()._write_result_json(target, {"state": "x"})
@@ -891,7 +891,7 @@ class TestWorkspaceHelpers:
 # ===========================================================================
 
 
-import inference_optimizer.orchestrator.action_executors.recover as recmod  # noqa: E402
+import hyperloom.orchestrator.action_executors.recover as recmod  # noqa: E402
 
 
 class TestWriteResultJsonOSError:
@@ -926,20 +926,20 @@ class TestSessionGpuIdsEmptyTokens:
 
 class TestIsMultiNodeSandbox:
     def test_true_when_is_multi_node_true(self, monkeypatch):
-        import inference_optimizer.orchestrator.action_executors._multi_node_env as mne
+        import hyperloom.orchestrator.action_executors._multi_node_env as mne
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         assert recmod._is_multi_node_sandbox() is True
 
     def test_false_when_is_multi_node_false(self, monkeypatch):
-        import inference_optimizer.orchestrator.action_executors._multi_node_env as mne
+        import hyperloom.orchestrator.action_executors._multi_node_env as mne
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: False)
         assert recmod._is_multi_node_sandbox() is False
 
     def test_exception_defaults_to_single_node(self, monkeypatch):
         """A failure in is_multi_node() is swallowed -> single-node (lines 156-158)."""
-        import inference_optimizer.orchestrator.action_executors._multi_node_env as mne
+        import hyperloom.orchestrator.action_executors._multi_node_env as mne
 
         def _boom():
             raise RuntimeError("cannot determine node topology")

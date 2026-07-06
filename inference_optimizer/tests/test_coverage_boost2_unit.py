@@ -13,7 +13,7 @@ from types import SimpleNamespace
 # orchestrator.orchestration_memory.deterministic_memory_fallback             #
 # --------------------------------------------------------------------------- #
 def test_deterministic_memory_fallback_bad_gain() -> None:
-    from inference_optimizer.orchestrator.orchestration_memory import deterministic_memory_fallback
+    from hyperloom.orchestrator.orchestration_memory import deterministic_memory_fallback
 
     state = SimpleNamespace(
         current_best={"tput": 123.0},
@@ -31,7 +31,7 @@ def test_deterministic_memory_fallback_bad_gain() -> None:
 # orchestrator.specialist_profile                                             #
 # --------------------------------------------------------------------------- #
 def test_coerce_bool_and_infer_scope() -> None:
-    from inference_optimizer.orchestrator import specialist_profile as sp
+    from hyperloom.orchestrator import specialist_profile as sp
 
     assert sp._coerce_bool("off", default=True) is False  # line 119
     assert sp._coerce_bool("yes", default=False) is True
@@ -47,7 +47,7 @@ def test_coerce_bool_and_infer_scope() -> None:
 # orchestrator.action_executors._accuracy_gate.parse_quality_gate            #
 # --------------------------------------------------------------------------- #
 def test_parse_quality_gate_paths(tmp_path) -> None:
-    from inference_optimizer.orchestrator.action_executors import _accuracy_gate as ag
+    from hyperloom.orchestrator.action_executors import _accuracy_gate as ag
 
     # No report present.
     assert ag.parse_quality_gate(tmp_path)["quality_gate"] is None
@@ -75,7 +75,7 @@ def test_parse_quality_gate_paths(tmp_path) -> None:
 # orchestrator.trace.trace_env.env_flag                                        #
 # --------------------------------------------------------------------------- #
 def test_env_flag_tokens(monkeypatch) -> None:
-    from inference_optimizer.orchestrator.trace import trace_env
+    from hyperloom.orchestrator.trace import trace_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
     assert trace_env.env_flag("HL_TEST_FLAG") is True
@@ -91,7 +91,7 @@ def test_env_flag_tokens(monkeypatch) -> None:
 # orchestrator.gpu_pool._parse_gpu_list                                       #
 # --------------------------------------------------------------------------- #
 def test_parse_gpu_list() -> None:
-    from inference_optimizer.orchestrator.gpu_pool import _parse_gpu_list
+    from hyperloom.orchestrator.gpu_pool import _parse_gpu_list
 
     # Mixed valid / invalid / duplicate / negative entries (lines 52-53 except).
     assert _parse_gpu_list("0, 1 ; 2, x, 1, -3") == [0, 1, 2]

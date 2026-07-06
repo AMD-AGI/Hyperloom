@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 # Hyperloom roofline formula (single source of truth for ceiling).
-from inference_optimizer.orchestrator.roofline_ceiling import (
+from hyperloom.orchestrator.roofline_ceiling import (
     HW_SPECS,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,

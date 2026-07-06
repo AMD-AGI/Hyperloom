@@ -22,8 +22,8 @@ import pytest
 import yaml
 
 from inference_optimizer import cli_model_gate
-from inference_optimizer.orchestrator.action_executors import _workload_envs
-from inference_optimizer.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.action_executors import _workload_envs
+from hyperloom.orchestrator.action_executors._workload_envs import (
     materialize_config_with_envs,
 )
 

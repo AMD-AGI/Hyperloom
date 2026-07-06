@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from inference_optimizer.orchestrator.trajectory_reviewer import (
+from hyperloom.orchestrator.trajectory_reviewer import (
     _exhausted_clusters,
     _stalled_cycle_count,
     build_trajectory_digest,
@@ -136,7 +136,7 @@ def test_build_trajectory_digest_stall_without_validated(tmp_path):
 
 def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     """Cover exhausted_directions formatting (L150-156)."""
-    from inference_optimizer.orchestrator.optimization_journal import (
+    from hyperloom.orchestrator.optimization_journal import (
         Journal, JournalEntry,
     )
     journal = Journal.load_or_create(tmp_path, session_id="s1", model="m", hardware="h")
@@ -159,7 +159,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
 
 def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
     """A Journal.load_or_create failure yields an empty entry list (L52-53)."""
-    import inference_optimizer.orchestrator.trajectory_reviewer as tr
+    import hyperloom.orchestrator.trajectory_reviewer as tr
 
     def boom(*_a, **_k):
         raise RuntimeError("journal unreadable")
@@ -183,7 +183,7 @@ def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path)
 
 def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
     """An unexpected error inside the digest builder is swallowed (L171-173)."""
-    import inference_optimizer.orchestrator.trajectory_reviewer as tr
+    import hyperloom.orchestrator.trajectory_reviewer as tr
 
     def boom(*_a, **_k):
         raise RuntimeError("kaboom")

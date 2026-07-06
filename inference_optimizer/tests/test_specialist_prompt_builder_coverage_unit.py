@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
     build_specialist_prompts_for_domain,
     _render_measured_impact,
     _format_version_note,
 )
-from inference_optimizer.orchestrator.specialist_domains import get_domain
+from hyperloom.orchestrator.specialist_domains import get_domain
 
 
 _DOMAIN_KEYS = (

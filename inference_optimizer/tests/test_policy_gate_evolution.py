@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from inference_optimizer.orchestrator.policy import (
+from hyperloom.orchestrator.policy import (
     ALL_KNOWN_EXTERNAL_TOOL_NAMES,
     CORTEX_KB_READ_TOOL_NAMES,
     KB_WRITE_TOOL_NAMES,
@@ -79,7 +79,7 @@ def test_primary_roles_have_empty_external_tool_set():
 
 def test_no_tools_are_phase_restricted():
     """No tool carries a phase restriction — role isolation is the only R5 gate."""
-    from inference_optimizer.orchestrator import policy as policy_mod
+    from hyperloom.orchestrator import policy as policy_mod
 
     assert not hasattr(policy_mod, "PHASE_RESTRICTED_TOOLS")
 
@@ -245,7 +245,7 @@ def test_delegate_with_websearch_action_name_denied():
 # 7. Specialist runner imports stay closed against policy.py
 def test_specialist_runner_constants_derive_from_policy():
     """Specialist runner re-exports the canonical tool sets via :mod:`policy`."""
-    from inference_optimizer.orchestrator import specialist_runner as sr
+    from hyperloom.orchestrator import specialist_runner as sr
 
     assert set(sr.PR_MONITOR_MCP_TOOLS) == PR_MONITOR_TOOL_NAMES
     assert set(sr.CORTEX_KB_READONLY_MCP_TOOLS) == CORTEX_KB_READ_TOOL_NAMES

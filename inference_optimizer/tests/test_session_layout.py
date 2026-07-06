@@ -17,15 +17,15 @@ from inference_optimizer.manifest import (
     load_manifest,
     write_manifest,
 )
-from inference_optimizer.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
-from inference_optimizer.orchestrator.resource_lock import (
+from hyperloom.orchestrator.policy import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from inference_optimizer.orchestrator.sub_agent_runner import SubAgentRunner
-from inference_optimizer.orchestrator.task_registry import TaskRegistry
+from hyperloom.orchestrator.sub_agent_runner import SubAgentRunner
+from hyperloom.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.session_paths import (
     agent_prompt_snapshot,
     kernel_workspace,

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from inference_optimizer.orchestrator.trace import langfuse_mapping as lm
-from inference_optimizer.orchestrator.trace import parse_usage as pu
+from hyperloom.orchestrator.trace import langfuse_mapping as lm
+from hyperloom.orchestrator.trace import parse_usage as pu
 
 
 # ---- parse_usage: stream-json usage parser edge paths ----

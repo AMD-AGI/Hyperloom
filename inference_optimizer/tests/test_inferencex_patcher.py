@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import _inferencex_patcher
-from inference_optimizer.orchestrator.action_executors._inferencex_patcher import (
+from hyperloom.orchestrator.action_executors import _inferencex_patcher
+from hyperloom.orchestrator.action_executors._inferencex_patcher import (
     ensure_benchmark_lib_patched,
 )
 
@@ -204,7 +204,7 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
 
 
 # PR-D §2: benchmark_serving.py PROFILE_EXTRA_BODY consumer patch
-from inference_optimizer.orchestrator.action_executors._inferencex_patcher import (  # noqa: E402
+from hyperloom.orchestrator.action_executors._inferencex_patcher import (  # noqa: E402
     ensure_benchmark_serving_patched,
 )
 

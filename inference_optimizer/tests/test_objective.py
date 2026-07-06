@@ -9,17 +9,17 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.action_executors import report_executor
-from inference_optimizer.orchestrator.coordinator import (
+from hyperloom.orchestrator.action_executors import report_executor
+from hyperloom.orchestrator.coordinator import (
     Coordinator,
     effective_closing_grace_sec,
 )
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.orchestrator.objective import (
+from hyperloom.orchestrator.objective import (
     ObjectiveError,
     TargetBaselineObjective,
     TargetGainObjective,
@@ -27,7 +27,7 @@ from inference_optimizer.orchestrator.objective import (
     TimeOnlyObjective,
     build_objective,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 

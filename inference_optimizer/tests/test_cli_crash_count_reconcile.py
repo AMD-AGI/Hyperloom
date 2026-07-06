@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 from inference_optimizer.cli import _reconcile_crash_count
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 from inference_optimizer.session_paths import reports_dir
 
 

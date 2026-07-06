@@ -5,7 +5,7 @@ nearby (backward-compatible) patch instead of silently losing roofline.
 """
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.action_executors import _server_patcher as sp
+from hyperloom.orchestrator.action_executors import _server_patcher as sp
 
 
 def _mk_patches(tmp_path, versions):

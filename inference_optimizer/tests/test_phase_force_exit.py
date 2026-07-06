@@ -21,8 +21,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from inference_optimizer.orchestrator import phase_state
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator import phase_state
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 @pytest.fixture(autouse=True)

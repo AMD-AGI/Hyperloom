@@ -15,14 +15,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors._grid_runner import (
     DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     resolve_sglang_context_cap,
 )
-from inference_optimizer.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.action_executors._workload_envs import (
     materialize_config_with_envs,
 )
 

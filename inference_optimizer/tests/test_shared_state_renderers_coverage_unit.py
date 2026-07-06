@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def test_format_discovered_flags():

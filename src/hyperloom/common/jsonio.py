@@ -2,8 +2,8 @@
 
 """Shared safe-JSON helpers (tree-reform.MD §7 — canonical ``_json_io``).
 
-Relocated from ``inference_optimizer.orchestrator._json_io`` (which now
-re-exports from here). One precise swallowed-exception set; stdlib-only.
+Relocated from ``hyperloom.orchestrator._json_io`` (which now re-exports
+from here). One precise swallowed-exception set; stdlib-only.
 """
 
 from __future__ import annotations

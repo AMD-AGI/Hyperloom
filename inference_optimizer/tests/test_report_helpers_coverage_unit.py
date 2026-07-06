@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from inference_optimizer.orchestrator.action_executors import report as rp
+from hyperloom.orchestrator.action_executors import report as rp
 from inference_optimizer.session_paths import (
     reports_dir,
     target_baseline_json,

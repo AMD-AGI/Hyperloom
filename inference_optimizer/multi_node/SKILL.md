@@ -431,7 +431,7 @@ default `--robustness-agent` was selected via
   head pod (the sandbox does not have the inference framework
   installed) and cross-reference its flag set against the grid for
   that framework in
-  `inference_optimizer/orchestrator/action_executors/backends.py`:
+  `src/hyperloom/orchestrator/action_executors/backends.py`:
   * **sglang** — probe via `python3 -m sglang.launch_server --help`;
     grid = `DEFAULT_BACKENDS_GRID` plus the multi-node tier
     additions.

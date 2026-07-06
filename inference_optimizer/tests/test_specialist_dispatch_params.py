@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.policy import (
+from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.policy import (
     KNOWLEDGE_DOMAIN_TAG_SET,
     PolicyDenied,
     PolicyGate,
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
     SPECIALIST_FREEFORM_WAVE_MAX,
 )
-from inference_optimizer.orchestrator.specialist_profile import (
+from hyperloom.orchestrator.specialist_profile import (
     DEFAULT_BENCH,
     DEFAULT_LANE,
     DEFAULT_MODE,
@@ -287,7 +287,7 @@ def test_domains_scope_requires_multiple_tags(gate, orchestration_role):
 # Gap auto-fill from the gaps[] ledger (friction symmetry, point 4)
 # --------------------------------------------------------------------------- #
 def _gate_with_gaps(gaps: list[dict]) -> PolicyGate:
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     state = SharedState()
     for g in gaps:
@@ -365,7 +365,7 @@ def test_single_domain_scope_rejects_multiple_tags(gate, orchestration_role):
 # not a hole around the GPU-pool accounting.
 # --------------------------------------------------------------------------- #
 def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     state = SharedState()
     state.gpu_specialist_capacity = capacity
@@ -545,7 +545,7 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
 # leaves inherit the parent's VISIBLE_DEVICES so they cannot oversubscribe).
 # --------------------------------------------------------------------------- #
 def test_task_tool_granted_and_todowrite_granted():
-    from inference_optimizer.orchestrator.specialist_runner import (
+    from hyperloom.orchestrator.specialist_runner import (
         DEFAULT_SPECIALIST_TOOLS,
         SPECIALIST_TOOL_DENYLIST,
         SpecialistRunner,
@@ -571,7 +571,7 @@ def test_task_tool_granted_and_todowrite_granted():
 # on legitimate keys leaking through params.tags untranslated).
 # --------------------------------------------------------------------------- #
 def test_normalize_dispatch_tags_translates_key_to_anchor():
-    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+    from hyperloom.orchestrator.specialist_domains import normalize_dispatch_tags
 
     # A domain KEY in params.tags is translated to its kb_anchor.
     assert normalize_dispatch_tags({"tags": ["serving_specialist"]}) == ["framework"]
@@ -579,7 +579,7 @@ def test_normalize_dispatch_tags_translates_key_to_anchor():
 
 
 def test_normalize_dispatch_tags_keeps_valid_anchor_and_dedups():
-    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+    from hyperloom.orchestrator.specialist_domains import normalize_dispatch_tags
 
     # An already-valid anchor is preserved unchanged.
     assert normalize_dispatch_tags({"tags": ["framework"]}) == ["framework"]
@@ -588,7 +588,7 @@ def test_normalize_dispatch_tags_keeps_valid_anchor_and_dedups():
 
 
 def test_normalize_dispatch_tags_passes_garbage_through_for_rejection():
-    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+    from hyperloom.orchestrator.specialist_domains import normalize_dispatch_tags
 
     # Genuinely unknown tags are NOT invented into an anchor — they pass
     # through verbatim so PolicyGate's specialist_unknown_domain still fires.
@@ -596,7 +596,7 @@ def test_normalize_dispatch_tags_passes_garbage_through_for_rejection():
 
 
 def test_normalize_dispatch_tags_domain_alias_translated():
-    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+    from hyperloom.orchestrator.specialist_domains import normalize_dispatch_tags
 
     # The legacy single-tag params.domain alias is translated the same way.
     assert normalize_dispatch_tags({"domain": "system_specialist"}) == ["systems"]
@@ -637,7 +637,7 @@ def test_specialist_emit_hint_lists_all_eight_llm_domains():
     domains (the two read-only scouts were previously omitted)."""
     from types import SimpleNamespace
 
-    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+    from hyperloom.orchestrator.system_prompts.prompt_builder import (
         _format_emit_hint,
     )
 

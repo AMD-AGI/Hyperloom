@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def _ok_result(
@@ -429,7 +429,7 @@ def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeyp
 
 
 def test_resolve_kernel_opt_max_failures_defaults_and_env(monkeypatch):
-    from inference_optimizer.orchestrator.shared_state import (
+    from hyperloom.orchestrator.shared_state import (
         _DEFAULT_KERNEL_OPT_MAX_FAILURES,
         resolve_kernel_opt_max_failures,
     )

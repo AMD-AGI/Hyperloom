@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from inference_optimizer.orchestrator import research_hints
+from hyperloom.orchestrator import research_hints
 
 
 def _write(session_dir: Path, payload: dict) -> None:
@@ -130,7 +130,7 @@ def test_full_gap_summary_empty_on_none():
 
 
 def test_derive_tpot_from_e2el_ttft():
-    from inference_optimizer.orchestrator.action_executors import benchmark_result
+    from hyperloom.orchestrator.action_executors import benchmark_result
 
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0}
     report = {"config": {"osl": 100}}
@@ -139,7 +139,7 @@ def test_derive_tpot_from_e2el_ttft():
 
 
 def test_derive_tpot_skipped_when_present():
-    from inference_optimizer.orchestrator.action_executors import benchmark_result
+    from hyperloom.orchestrator.action_executors import benchmark_result
 
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0, "tpot_mean_ms": 7.0}
     benchmark_result._derive_tpot_if_missing(measurement, {"osl": 100})
@@ -147,7 +147,7 @@ def test_derive_tpot_skipped_when_present():
 
 
 def test_derive_tpot_skipped_without_osl():
-    from inference_optimizer.orchestrator.action_executors import benchmark_result
+    from hyperloom.orchestrator.action_executors import benchmark_result
 
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0}
     benchmark_result._derive_tpot_if_missing(measurement, {})

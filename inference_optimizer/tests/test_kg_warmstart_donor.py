@@ -113,7 +113,7 @@ def test_no_architectures_yields_none() -> None:
 
 def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
     # _kg_native_config_donor must NOT borrow from a non-native (sim) client.
-    from inference_optimizer.orchestrator import cortex_t0
+    from hyperloom.orchestrator import cortex_t0
 
     class _SimKG:
         _native = False
@@ -134,7 +134,7 @@ def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
 
 
 def test_cortex_helper_returns_native_donor(monkeypatch) -> None:
-    from inference_optimizer.orchestrator import cortex_t0
+    from hyperloom.orchestrator import cortex_t0
 
     class _NativeKG:
         _native = True

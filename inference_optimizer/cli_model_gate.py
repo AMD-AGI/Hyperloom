@@ -1533,7 +1533,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     """
     try:
         from .breakdown import patch_breakdown_langfuse
-        from .orchestrator.trace.langfuse_emitter import (
+        from hyperloom.orchestrator.trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )
@@ -1587,8 +1587,8 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     )
     # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
     try:
-        from .orchestrator.shared_state import SharedState
-        from .orchestrator.action_executors.report import (
+        from hyperloom.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.action_executors.report import (
             _build_summary_dict,
             _format_md,
         )
@@ -1668,8 +1668,8 @@ def _preflight_model_config_compat(
         f"to a version that supports this model, or skip it on this hardware."
     )
     try:
-        from .orchestrator.shared_state import SharedState
-        from .orchestrator.action_executors.report import (
+        from hyperloom.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.action_executors.report import (
             _build_summary_dict,
             _format_md,
         )
@@ -1757,7 +1757,7 @@ def _preflight_unsupported_model_arch(
         print(f"WARNING: {warning}", file=sys.stderr)
         log.warning(warning)
         try:
-            from .orchestrator.shared_state import SharedState
+            from hyperloom.orchestrator.shared_state import SharedState
 
             state = SharedState.load_or_init(session_dir)
             state.degraded_mode = True
@@ -1787,8 +1787,8 @@ def _preflight_unsupported_model_arch(
     )
     # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
     try:
-        from .orchestrator.shared_state import SharedState
-        from .orchestrator.action_executors.report import (
+        from hyperloom.orchestrator.shared_state import SharedState
+        from hyperloom.orchestrator.action_executors.report import (
             _build_summary_dict,
             _format_md,
         )

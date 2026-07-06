@@ -6,7 +6,7 @@ git grounding, missing-target detection, and quantitative-claim guards)."""
 from __future__ import annotations
 
 
-from inference_optimizer.orchestrator import specialist_patch_safety as ps
+from hyperloom.orchestrator import specialist_patch_safety as ps
 
 
 _DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n-old\n+new\n"

@@ -78,7 +78,7 @@
 #
 # Edit the defaults above before copying if your run uses different
 # values. Terminal detection is aligned with
-# ``inference_optimizer.orchestrator.phase_state.STOP_REASON_VOCAB`` (not a
+# ``hyperloom.orchestrator.phase_state.STOP_REASON_VOCAB`` (not a
 # hard-coded subset — ``baseline_failed`` and other failure sentinels must not
 # trigger auto-resume).
 
@@ -161,7 +161,7 @@ if phase == "CLOSE":
     raise SystemExit(0)
 
 try:
-    from inference_optimizer.orchestrator.phase_state import STOP_REASON_VOCAB
+    from hyperloom.orchestrator.phase_state import STOP_REASON_VOCAB
 except ImportError:
     STOP_REASON_VOCAB = frozenset({
         "target_reached", "global_converged", "time_exhausted", "max_ticks",

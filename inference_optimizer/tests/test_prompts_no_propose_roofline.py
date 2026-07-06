@@ -16,12 +16,12 @@ from pathlib import Path
 # Files whose content is rendered into LLM context.
 _PROMPT_ROOTS = (
     Path("inference_optimizer/actions"),
-    Path("inference_optimizer/orchestrator/system_prompts"),
+    Path("src/hyperloom/orchestrator/system_prompts"),
 )
 
 # Code files whose string literals reach the orchestration prompt via
 # ``SharedState.format_for_prompt()``.
-_PROMPT_AUX_FILES = (Path("inference_optimizer/orchestrator/shared_state.py"),)
+_PROMPT_AUX_FILES = (Path("src/hyperloom/orchestrator/shared_state.py"),)
 
 # Allow-list: these files document the denial rule and necessarily quote the
 # forbidden pattern.
@@ -97,7 +97,7 @@ def test_no_prompt_instructs_llm_to_propose_analysis_action():
 
 def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
     """The empty-snapshot ``_format_analysis_md_full`` fallback must NOT tell the LLM to propose ``roofline`` / ``profile``."""
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     state = SharedState()
     state.last_trace_analyze = {}

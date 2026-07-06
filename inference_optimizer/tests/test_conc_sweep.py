@@ -13,11 +13,11 @@ from unittest.mock import patch
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors._grid_runner import (
     GridVariant,
     VariantResult,
 )
-from inference_optimizer.orchestrator.conc_sweep import (
+from hyperloom.orchestrator.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
     _build_comparison,
@@ -25,7 +25,7 @@ from inference_optimizer.orchestrator.conc_sweep import (
     _has_optimization,
     run_conc_sweep,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 # Fixtures
@@ -279,7 +279,7 @@ def test_run_conc_sweep_skip_short_circuits(
         setattr(state, k, v)
 
     with patch(
-        "inference_optimizer.orchestrator.conc_sweep.run_grid",
+        "hyperloom.orchestrator.conc_sweep.run_grid",
     ) as mock_run_grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir))
 
@@ -295,7 +295,7 @@ def test_run_conc_sweep_skip_empty_conc_list(
 ):
     state = _make_state(baseline_config_path=str(baseline_yaml))
     with patch(
-        "inference_optimizer.orchestrator.conc_sweep.run_grid",
+        "hyperloom.orchestrator.conc_sweep.run_grid",
     ) as mock_run_grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[]))
     assert payload["status"] == "skipped"
@@ -313,7 +313,7 @@ def test_run_conc_sweep_skip_missing_config(
         baseline_config_path=str(tmp_path / "does_not_exist.yaml"),
     )
     with patch(
-        "inference_optimizer.orchestrator.conc_sweep.run_grid",
+        "hyperloom.orchestrator.conc_sweep.run_grid",
     ) as mock_run_grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir))
     assert payload["status"] == "skipped"
@@ -386,11 +386,11 @@ def test_run_conc_sweep_happy_path_writes_reports(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -467,11 +467,11 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -528,11 +528,11 @@ def test_run_conc_sweep_optimized_oom_yields_failed_pair(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -576,11 +576,11 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -621,11 +621,11 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -660,11 +660,11 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -714,11 +714,11 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -760,11 +760,11 @@ def test_run_conc_sweep_zero_budget_disables_gate(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -801,11 +801,11 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
 
     with (
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            "hyperloom.orchestrator.conc_sweep.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
-            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            "hyperloom.orchestrator.conc_sweep.materialize_config_with_envs",
             side_effect=_fake_materialize,
         ),
     ):
@@ -829,7 +829,7 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     baseline_yaml: Path,
 ):
     """ConcSweepExecutor reloads SharedState and threads registry fields through."""
-    from inference_optimizer.orchestrator.action_executors.conc_sweep import (
+    from hyperloom.orchestrator.action_executors.conc_sweep import (
         ConcSweepExecutor,
     )
 
@@ -859,7 +859,7 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
         }
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.conc_sweep.run_conc_sweep",
+        "hyperloom.orchestrator.action_executors.conc_sweep.run_conc_sweep",
         side_effect=_fake_run,
     ):
         result = asyncio.run(ConcSweepExecutor()(_Ctx()))
@@ -871,7 +871,7 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
 
 def test_conc_sweep_executor_missing_session_dir_yields_failure():
-    from inference_optimizer.orchestrator.action_executors.conc_sweep import (
+    from hyperloom.orchestrator.action_executors.conc_sweep import (
         ConcSweepExecutor,
     )
 
@@ -892,7 +892,7 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
     baseline_yaml: Path,
 ):
     """A run_conc_sweep skip surfaces ``was_skipped=True`` + ``status='succeeded'``."""
-    from inference_optimizer.orchestrator.action_executors.conc_sweep import (
+    from hyperloom.orchestrator.action_executors.conc_sweep import (
         ConcSweepExecutor,
     )
 
@@ -910,7 +910,7 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
         return {"status": "skipped", "skip_reason": "no_baseline_tput"}
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.conc_sweep.run_conc_sweep",
+        "hyperloom.orchestrator.action_executors.conc_sweep.run_conc_sweep",
         side_effect=_fake_run,
     ):
         result = asyncio.run(ConcSweepExecutor()(_Ctx()))
@@ -951,7 +951,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 def test_exit_normal_sweep_returns_conc_sweep_done():
     """Bug #12: SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
-    from inference_optimizer.orchestrator.phase_state import exit_normal_sweep
+    from hyperloom.orchestrator.phase_state import exit_normal_sweep
 
     class _State:
         last_sweep = {}  # no sweep recorded
@@ -982,7 +982,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
-    from inference_optimizer.orchestrator import kernel_request_handlers
+    from hyperloom.orchestrator import kernel_request_handlers
 
     fake_integrate = AsyncMock(
         return_value={
@@ -997,7 +997,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
         "integrate_handler",
         fake_integrate,
     )
-    from inference_optimizer.orchestrator import coordinator as coord_mod
+    from hyperloom.orchestrator import coordinator as coord_mod
 
     if hasattr(coord_mod, "integrate_handler"):
         monkeypatch.setattr(coord_mod, "integrate_handler", fake_integrate)
@@ -1011,7 +1011,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     coord.shared_state.next_pending_keep_kernel_id = lambda: pending_queue.pop(0) if pending_queue else ""
     coord.session_dir = Path("/tmp/sess")
 
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     asyncio.run(Coordinator._drain_pending_keep_integrates(coord))
 
@@ -1021,7 +1021,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
 
 def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
     """Bug #11: ``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
-    from inference_optimizer.orchestrator.policy import PolicyGate, PolicyDenied
+    from hyperloom.orchestrator.policy import PolicyGate, PolicyDenied
 
     class _State:
         phase = "SWEEP"

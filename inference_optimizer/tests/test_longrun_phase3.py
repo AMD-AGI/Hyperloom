@@ -19,8 +19,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from inference_optimizer.orchestrator import phase_state as ps
-from inference_optimizer.orchestrator.task_registry import TaskRegistry
+from hyperloom.orchestrator import phase_state as ps
+from hyperloom.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.storage import SqliteConnection
 from inference_optimizer.storage.schema import ensure_schema
 
@@ -113,8 +113,8 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     # during unit tests; the kill path is covered separately via monkeypatch.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "1")
     from inference_optimizer.paths import make_session_dir as _msd
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-    from inference_optimizer.orchestrator.backends import (
+    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.backends import (
         MockBackend,
         MockCriticBackend,
         MockKernelBackend,

@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from inference_optimizer.orchestrator import specialist_runner as sr
-from inference_optimizer.orchestrator.specialist_runner import (
+from hyperloom.orchestrator import specialist_runner as sr
+from hyperloom.orchestrator.specialist_runner import (
     SpecialistFailureType,
     SpecialistRunner,
     build_empty_specialist_done,

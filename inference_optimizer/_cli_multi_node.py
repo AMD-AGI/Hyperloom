@@ -346,7 +346,7 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         return
 
     from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
-    from .orchestrator.action_executors._multi_node_env import export_ray_address_to_os
+    from hyperloom.orchestrator.action_executors._multi_node_env import export_ray_address_to_os
 
     state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
     image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(

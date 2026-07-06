@@ -10,28 +10,28 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import (
+from hyperloom.orchestrator.action_executors import (
     _multi_node_server_lifecycle,
     report_executor,
 )
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     Backend,
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import (
+from hyperloom.orchestrator.coordinator import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
     Coordinator,
 )
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.sub_agent_runner import (
+from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.sub_agent_runner import (
     SubAgentRunner,
 )
-from inference_optimizer.orchestrator.task_registry import Task, TaskRegistry
-from inference_optimizer.orchestrator.resource_lock import (
+from hyperloom.orchestrator.task_registry import Task, TaskRegistry
+from hyperloom.orchestrator.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
@@ -179,7 +179,7 @@ class _AlwaysFailingBackend(Backend):
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
-        from inference_optimizer.orchestrator.backends.base import BackendError
+        from hyperloom.orchestrator.backends.base import BackendError
 
         self.calls += 1
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
@@ -979,10 +979,10 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
     Otherwise a later coordinator save re-persisted stale True and made the
     nominal one-shot eager fallback sticky for all later baseline retries.
     """
-    from inference_optimizer.orchestrator.action_executors.baseline import (
+    from hyperloom.orchestrator.action_executors.baseline import (
         BaselineExecutor,
     )
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1057,7 +1057,7 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         }
         import logging
 
-        with caplog.at_level(logging.WARNING, logger="inference_optimizer.orchestrator.coordinator"):
+        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.coordinator"):
             await c._handle_unpromotable_result(
                 _mk_task("roofline", task_id),
                 result,
@@ -1297,7 +1297,9 @@ async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
 
 
 def test_critic_md_carves_out_archival_actions():
-    path = Path(__file__).resolve().parent.parent / "orchestrator" / "system_prompts" / "critic.md"
+    from inference_optimizer.paths import asset_system_prompts_dir
+
+    path = asset_system_prompts_dir() / "critic.md"
     text = path.read_text(encoding="utf-8")
     assert "archival actions" in text.lower()
     assert "`report`" in text

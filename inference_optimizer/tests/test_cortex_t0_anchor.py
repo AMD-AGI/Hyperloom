@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.cortex_t0 import (
+from hyperloom.orchestrator.cortex_t0 import (
     T0Result,
     _warm_recipe_source,
     run_t0_anchor,

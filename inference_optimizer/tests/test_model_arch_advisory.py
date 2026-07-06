@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 
 from inference_optimizer.cli import _load_model_arch
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.shared_state import (
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.shared_state import (
     SharedState,
     render_model_arch_compact,
 )

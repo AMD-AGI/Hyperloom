@@ -36,7 +36,7 @@ import asyncio, signal, sys
 from pathlib import Path
 
 sd = Path(sys.argv[1])
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 st = SharedState.load_or_init(sd)
 st.session_id = "sess-kill"
 st.baseline_tput = 35.83

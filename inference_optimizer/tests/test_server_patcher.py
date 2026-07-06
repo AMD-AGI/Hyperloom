@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import _server_patcher
-from inference_optimizer.orchestrator.action_executors._server_patcher import (
+from hyperloom.orchestrator.action_executors import _server_patcher
+from hyperloom.orchestrator.action_executors._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,

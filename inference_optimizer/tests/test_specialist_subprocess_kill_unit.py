@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 
-from inference_optimizer.orchestrator import specialist_subprocess as ss
-from inference_optimizer.orchestrator.specialist_subprocess import (
+from hyperloom.orchestrator import specialist_subprocess as ss
+from hyperloom.orchestrator.specialist_subprocess import (
     SpecialistSubprocessDispatcher,
 )
 

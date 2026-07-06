@@ -22,7 +22,7 @@ from inference_optimizer.breakdown import (
     write_breakdown_json,
 )
 from inference_optimizer.breakdown import collectors
-from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
 
 def _seed_session(tmp_path: Path, **manifest_extra) -> Path:

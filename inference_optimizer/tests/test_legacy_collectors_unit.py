@@ -26,7 +26,7 @@ def test_action_phase_values_are_canonical():
     # Every reconstructed phase label must match a canonical PHASE_NAMES entry,
     # otherwise legacy-session segments render with names the dashboard/state
     # machine do not recognise. Guards against future step-name renames.
-    from inference_optimizer.orchestrator.phase_state import PHASE_NAMES
+    from hyperloom.orchestrator.phase_state import PHASE_NAMES
 
     for action, phase in lc._ACTION_PHASE.items():
         assert phase in PHASE_NAMES, f"{action!r} -> non-canonical phase {phase!r}"

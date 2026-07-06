@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.action_executors._accuracy_gate import (
+from hyperloom.orchestrator.action_executors._accuracy_gate import (
     accuracy_keep_block,
     require_framework_accuracy_default,
 )

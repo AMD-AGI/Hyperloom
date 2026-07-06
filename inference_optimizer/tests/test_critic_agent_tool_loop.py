@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import CriticAgentBackend, RuntimeCall
+from hyperloom.orchestrator.backends import CriticAgentBackend, RuntimeCall
 
 from inference_optimizer.tests.test_critic_agent_backend import (
     _make_fake_runtime,

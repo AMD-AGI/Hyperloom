@@ -752,7 +752,7 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     Returns:
         ``True`` when the langfuse section was refreshed, ``False`` otherwise.
     """
-    from ..orchestrator.trace.langfuse_emitter import read_receipt
+    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
 
     sd = Path(session_dir).resolve()
     target = sd / BREAKDOWN_FILENAME
@@ -829,7 +829,7 @@ def write_minimal_final_report(
     Returns:
         The path of the (existing or newly written) ``final.md`` file.
     """
-    from ..orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
@@ -972,7 +972,7 @@ def write_minimal_final_json(
     """
     from datetime import datetime, timezone
 
-    from ..orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir
 
     sd = Path(session_dir).resolve()

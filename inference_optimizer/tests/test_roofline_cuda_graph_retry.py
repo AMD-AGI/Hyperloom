@@ -13,12 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors.roofline import (
+from hyperloom.orchestrator.action_executors.roofline import (
     make_roofline_executor,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.task_registry import Task
 
 
 def _ctx(tmp_path: Path, params: dict | None = None) -> RunnerContext:
@@ -64,10 +64,10 @@ async def _run(tmp_path, first_result, *, state=None, params=None):
         return _ta_success()
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.action_executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
         await make_roofline_executor(shared_state=state or _state())(
@@ -175,7 +175,7 @@ async def test_capture_only_every_attempt_fails_clearly(tmp_path):
         return dict(_CAPTURE_ONLY)
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.action_executors.profile.profile_executor",
         new=always_capture_only,
     ):
         result = await make_roofline_executor(shared_state=_state())(_ctx(tmp_path))

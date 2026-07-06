@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from inference_optimizer.orchestrator.proposal_scorer import (
+from hyperloom.orchestrator.proposal_scorer import (
     ProposalScorer,
     _clip,
     _coerce_score,

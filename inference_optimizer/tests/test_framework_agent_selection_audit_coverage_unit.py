@@ -16,15 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator import coordinator as coord_mod
-from inference_optimizer.orchestrator import framework_agent_client as fa_client_mod
-from inference_optimizer.orchestrator import framework_paths as fp_mod
-from inference_optimizer.orchestrator import framework_agent_artifacts as fpa_mod
-from inference_optimizer.orchestrator import kb_writeback as kb_mod
-from inference_optimizer.orchestrator import phase_state as ps_mod
-from inference_optimizer.orchestrator.action_executors import framework_agent as fpr_mod
-from inference_optimizer.orchestrator.backends import Backend, MockBackend, ScriptedPlan
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator import coordinator as coord_mod
+from hyperloom.orchestrator import framework_agent_client as fa_client_mod
+from hyperloom.orchestrator import framework_paths as fp_mod
+from hyperloom.orchestrator import framework_agent_artifacts as fpa_mod
+from hyperloom.orchestrator import kb_writeback as kb_mod
+from hyperloom.orchestrator import phase_state as ps_mod
+from hyperloom.orchestrator.action_executors import framework_agent as fpr_mod
+from hyperloom.orchestrator.backends import Backend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 

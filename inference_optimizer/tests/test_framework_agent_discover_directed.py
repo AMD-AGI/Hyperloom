@@ -10,12 +10,12 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator import framework_agent_client as _fa_client
-from inference_optimizer.orchestrator.coordinator import (
+from hyperloom.orchestrator import framework_agent_client as _fa_client
+from hyperloom.orchestrator.coordinator import (
     DEFAULT_FRAMEWORK_MAX_CANDIDATES,
     Coordinator,
 )
-from inference_optimizer.orchestrator.specialist_domains import get_domain
+from hyperloom.orchestrator.specialist_domains import get_domain
 
 
 class _StateStub:

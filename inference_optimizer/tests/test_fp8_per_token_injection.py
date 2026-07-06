@@ -23,7 +23,7 @@ import yaml
 
 from inference_optimizer import cli_model_gate
 from inference_optimizer.model_config_utils import _fp8_is_per_channel_per_token
-from inference_optimizer.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.action_executors._workload_envs import (
     materialize_config_with_envs,
 )
 

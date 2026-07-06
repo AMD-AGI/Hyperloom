@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ...orchestrator.optimization_journal import (
+from hyperloom.orchestrator.optimization_journal import (
     classify_change_kind,
     operation_kind_for,
     proposer_for,

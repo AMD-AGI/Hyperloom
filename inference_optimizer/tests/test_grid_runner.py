@@ -15,9 +15,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from inference_optimizer.orchestrator.action_executors import _grid_runner
-from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors import _grid_runner
+from hyperloom.orchestrator.action_executors import _grid_runner as gr
+from hyperloom.orchestrator.action_executors._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
@@ -207,7 +207,7 @@ class TestReorderGridForMultiNode:
 
     def test_single_node_preserves_order_bit_for_bit(self, monkeypatch):
         # Hard requirement: single-node grid order is never altered.
-        from inference_optimizer.orchestrator.action_executors import (
+        from hyperloom.orchestrator.action_executors import (
             _multi_node_env as mne,
         )
 
@@ -220,7 +220,7 @@ class TestReorderGridForMultiNode:
         assert [v.name for v in out] == [v.name for v in grid]
 
     def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
-        from inference_optimizer.orchestrator.action_executors import (
+        from hyperloom.orchestrator.action_executors import (
             _multi_node_env as mne,
         )
 
@@ -509,7 +509,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -545,7 +545,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -678,7 +678,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -700,7 +700,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -728,7 +728,7 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
 
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -764,7 +764,7 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
 
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         await run_grid(
@@ -798,7 +798,7 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
 
     grid = [GridVariant("vA"), GridVariant("vB")]
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         await run_grid(

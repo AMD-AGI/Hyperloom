@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from inference_optimizer.orchestrator import static_recon_checklist as src
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.specialist_domains import (
+from hyperloom.orchestrator import static_recon_checklist as src
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.specialist_domains import (
     SPECIALIST_DOMAIN_KEYS,
     get_domain,
 )

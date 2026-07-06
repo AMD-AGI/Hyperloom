@@ -19,8 +19,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from inference_optimizer.orchestrator import phase_state as ps
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator import phase_state as ps
+from hyperloom.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
@@ -203,8 +203,8 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv(CYCLIC_ENV, "1")
     from inference_optimizer.paths import make_session_dir as _msd
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-    from inference_optimizer.orchestrator.backends import (
+    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.backends import (
         MockBackend,
         MockCriticBackend,
         MockKernelBackend,
@@ -285,8 +285,8 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
 # ==========================================================================
 def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from inference_optimizer.orchestrator.policy import PolicyGate
-    from inference_optimizer.orchestrator.agent_role import default_role_registry
+    from hyperloom.orchestrator.policy import PolicyGate
+    from hyperloom.orchestrator.agent_role import default_role_registry
     from inference_optimizer.protocol.intent import Intent, IntentType
 
     sd = make_session_dir()

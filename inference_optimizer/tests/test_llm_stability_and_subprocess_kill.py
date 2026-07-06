@@ -16,11 +16,11 @@ import time
 
 import pytest
 
-from inference_optimizer.orchestrator._llm_stability_env import (
+from hyperloom.orchestrator._llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
 )
-from inference_optimizer.orchestrator.kernel_request_handlers import _run_subprocess
+from hyperloom.orchestrator.kernel_request_handlers import _run_subprocess
 
 
 # 1. LLM-transport stability env helper

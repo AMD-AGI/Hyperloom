@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import _xdit_patcher
-from inference_optimizer.orchestrator.action_executors._xdit_patcher import (
+from hyperloom.orchestrator.action_executors import _xdit_patcher
+from hyperloom.orchestrator.action_executors._xdit_patcher import (
     _apply_patch_atomic,
     _discover_xfuser_base_models,
     ensure_xdit_profiler_patched,

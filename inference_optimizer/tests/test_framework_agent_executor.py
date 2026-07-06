@@ -15,17 +15,17 @@ import pytest
 
 from .conftest import init_git_repo
 
-from inference_optimizer.orchestrator.action_executors.framework_agent import (
+from hyperloom.orchestrator.action_executors.framework_agent import (
     FrameworkAgentExecutor,
     _candidate_slug,
     _fetch_diff_to_path,
     _materialize_pr_diff_via_worktree,
 )
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors._grid_runner import (
     VariantResult,
 )
-from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.task_registry import Task
 
 
 # Helpers
@@ -265,7 +265,7 @@ async def test_executor_no_framework_agent_root_returns_apply_failed(tmp_path: P
     cand = _make_candidate()
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.framework_agent._resolve_framework_root",
+        "hyperloom.orchestrator.action_executors.framework_agent._resolve_framework_root",
         return_value=None,
     ):
         ctx = _make_ctx(
@@ -362,7 +362,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
     """D2: a KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
-    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+    import hyperloom.orchestrator.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
     monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
@@ -410,7 +410,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
     """D2: a REVERT appends a 'reverted_smoke_fail' record for dedup."""
-    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+    import hyperloom.orchestrator.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
     monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
@@ -765,7 +765,7 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
 async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, monkeypatch):
     """apply_mode=checkout_head extracts the PR's net diff, applies, benches (+10%), KEEPs."""
     # Redirect the KB writeback root so the KEEP record doesn't leak into the real KB.
-    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+    import hyperloom.orchestrator.kb_writeback as kb_writeback
 
     monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
 
@@ -953,7 +953,7 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import inference_optimizer.orchestrator.action_executors.framework_agent as fp_mod
+    import hyperloom.orchestrator.action_executors.framework_agent as fp_mod
 
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
@@ -988,7 +988,7 @@ async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: 
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import inference_optimizer.orchestrator.action_executors.framework_agent as fp_mod
+    import hyperloom.orchestrator.action_executors.framework_agent as fp_mod
 
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
@@ -1088,7 +1088,7 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
 
 # 4. Registration / import surface
 def test_framework_agent_executor_imports_clean():
-    from inference_optimizer.orchestrator.action_executors import (
+    from hyperloom.orchestrator.action_executors import (
         framework_agent as fp_mod,
     )
 
@@ -1098,7 +1098,7 @@ def test_framework_agent_executor_imports_clean():
 
 def test_framework_meta_loads():
     """The action_registry can load actions/_meta/framework_agent.yaml."""
-    from inference_optimizer.orchestrator.action_registry import ActionRegistry
+    from hyperloom.orchestrator.action_registry import ActionRegistry
 
     reg = ActionRegistry().load()
     fp = reg.get("framework_agent")

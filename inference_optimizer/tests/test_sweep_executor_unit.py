@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import sweep as sw
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors import sweep as sw
+from hyperloom.orchestrator.action_executors._grid_runner import (
     VariantResult,
 )
 

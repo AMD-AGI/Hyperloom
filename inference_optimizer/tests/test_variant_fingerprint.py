@@ -8,7 +8,7 @@ string-coerced; GridVariant/VariantResult fingerprints match the function.
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.action_executors._grid_runner import (
     GridVariant,
     VariantResult,
     variant_fingerprint,
@@ -99,7 +99,7 @@ def test_variant_result_to_dict_carries_fingerprint() -> None:
 def test_shared_state_normalizes_explore_search_tested() -> None:
     """SharedState.from_dict shapes the ``explore_search`` ledger with
     defensive defaults and preserves fingerprint-keyed ``tested``."""
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     fp_a = variant_fingerprint("--A", {})
     raw = {

@@ -10,14 +10,14 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.backends.mock_backend import (
+from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.backends.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.policy import CORE_STATE_FIELDS
 
 
 # Fixtures
@@ -89,7 +89,7 @@ class _StubTaskRegistry:
         return row, False
 
     async def get(self, task_id):
-        from inference_optimizer.orchestrator.task_registry import TaskNotFound
+        from hyperloom.orchestrator.task_registry import TaskNotFound
 
         row = self._by_id.get(task_id)
         if row is None:
@@ -429,14 +429,14 @@ def test_close_sequence_done_in_core_state_fields():
 
 
 def test_policy_blocks_llm_close_sequence_done_write():
-    from inference_optimizer.orchestrator.agent_role import (
+    from hyperloom.orchestrator.agent_role import (
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
         Intent,
         IntentType,
     )
-    from inference_optimizer.orchestrator.policy import (
+    from hyperloom.orchestrator.policy import (
         PolicyDenied,
         PolicyGate,
     )

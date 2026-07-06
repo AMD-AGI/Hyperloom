@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
+from hyperloom.orchestrator.action_executors import _multi_node_env as mne
 
 
 def _install_min_ray_stub() -> None:
@@ -949,7 +949,7 @@ def _write_mn_state(tmp_path, monkeypatch, payload):
 def test_dynamo_ssh_env_empty_for_rayjob(tmp_path, monkeypatch):
     # RayJob backend (or single-node) must yield {} so the Ray RAY_ADDRESS
     # placement path is left completely untouched.
-    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+    from hyperloom.orchestrator.action_executors import _multi_node_env
 
     _write_mn_state(
         tmp_path,
@@ -965,7 +965,7 @@ def test_dynamo_ssh_env_empty_for_rayjob(tmp_path, monkeypatch):
 
 
 def test_dynamo_ssh_env_aggregated_picks_worker_pod(tmp_path, monkeypatch):
-    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+    from hyperloom.orchestrator.action_executors import _multi_node_env
 
     _write_mn_state(
         tmp_path,
@@ -987,7 +987,7 @@ def test_dynamo_ssh_env_aggregated_picks_worker_pod(tmp_path, monkeypatch):
 
 
 def test_dynamo_ssh_env_pd_picks_prefill_then_decode(tmp_path, monkeypatch):
-    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+    from hyperloom.orchestrator.action_executors import _multi_node_env
 
     _write_mn_state(
         tmp_path,
@@ -1007,7 +1007,7 @@ def test_dynamo_ssh_env_pd_picks_prefill_then_decode(tmp_path, monkeypatch):
 
 
 def test_dynamo_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
-    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+    from hyperloom.orchestrator.action_executors import _multi_node_env
 
     _write_mn_state(
         tmp_path,

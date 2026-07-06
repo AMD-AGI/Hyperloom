@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator import policy as pol
-from inference_optimizer.orchestrator.policy import (
+from hyperloom.orchestrator import policy as pol
+from hyperloom.orchestrator.policy import (
     PolicyDenied,
     PolicyGate,
     _delegate_field_present,
@@ -21,7 +21,7 @@ from inference_optimizer.orchestrator.policy import (
     gpu_specialist_ceiling,
     research_lane_ceiling,
 )
-from inference_optimizer.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.agent_role import default_role_registry
 
 
 # -- _value_is_present -----------------------------------------------------

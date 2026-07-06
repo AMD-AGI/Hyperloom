@@ -10,20 +10,20 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors.integrate_patch import (
+from hyperloom.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
 )
-from inference_optimizer.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.orchestrator.policy import (
+from hyperloom.orchestrator.policy import (
     INTEGRATE_PATCH_ACTION_NAME,
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     PolicyGate,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.task_registry import Task
 
 
 # 1. SharedState ledger

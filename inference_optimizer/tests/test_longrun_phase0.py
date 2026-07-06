@@ -21,13 +21,13 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator import db_maintenance as dbm
-from inference_optimizer.orchestrator import shared_state as ss_mod
-from inference_optimizer.orchestrator.shared_state import SharedState, _cap_tested_ledger
-from inference_optimizer.orchestrator.cursor_store import CursorStore
-from inference_optimizer.orchestrator.gpu_pool import SpecialistGpuPool
-from inference_optimizer.orchestrator.message_bus import Message, MessageBus
-from inference_optimizer.orchestrator.task_registry import TaskRegistry
+from hyperloom.orchestrator import db_maintenance as dbm
+from hyperloom.orchestrator import shared_state as ss_mod
+from hyperloom.orchestrator.shared_state import SharedState, _cap_tested_ledger
+from hyperloom.orchestrator.cursor_store import CursorStore
+from hyperloom.orchestrator.gpu_pool import SpecialistGpuPool
+from hyperloom.orchestrator.message_bus import Message, MessageBus
+from hyperloom.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.storage import SqliteConnection
 from inference_optimizer.storage.schema import ensure_schema
 
@@ -289,7 +289,7 @@ async def test_gpu_pool_reap_expired(conn):
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_retry_with_backoff_recovers_then_succeeds():
-    from inference_optimizer.orchestrator.backends.base import (
+    from hyperloom.orchestrator.backends.base import (
         RetryPolicy,
         retry_with_backoff,
     )
@@ -319,7 +319,7 @@ async def test_retry_with_backoff_recovers_then_succeeds():
 
 @pytest.mark.asyncio
 async def test_retry_with_backoff_exhausts_and_raises():
-    from inference_optimizer.orchestrator.backends.base import (
+    from hyperloom.orchestrator.backends.base import (
         RetryPolicy,
         retry_with_backoff,
     )
@@ -340,7 +340,7 @@ async def test_retry_with_backoff_exhausts_and_raises():
 
 
 def test_retry_policy_from_env(monkeypatch):
-    from inference_optimizer.orchestrator.backends.base import RetryPolicy
+    from hyperloom.orchestrator.backends.base import RetryPolicy
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS", "1")
     pol = RetryPolicy.from_env()
@@ -355,8 +355,8 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS", "10")
     from inference_optimizer.paths import make_session_dir
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-    from inference_optimizer.orchestrator.backends import (
+    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.backends import (
         MockBackend,
         MockCriticBackend,
         MockKernelBackend,
@@ -426,9 +426,9 @@ class _Options:
 
 @pytest.mark.asyncio
 async def test_claude_backend_retries_transient_then_succeeds():
-    from inference_optimizer.orchestrator.backends.claude import ClaudeBackend
-    from inference_optimizer.orchestrator.backends.base import RetryPolicy
-    from inference_optimizer.orchestrator.backends.mcp_emit_intent import (
+    from hyperloom.orchestrator.backends.claude import ClaudeBackend
+    from hyperloom.orchestrator.backends.base import RetryPolicy
+    from hyperloom.orchestrator.backends.mcp_emit_intent import (
         EMIT_INTENT_TOOL_QUALIFIED,
     )
 

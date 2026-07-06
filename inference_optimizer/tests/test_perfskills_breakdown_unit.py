@@ -21,7 +21,7 @@ import pytest
 
 from inference_optimizer.breakdown import collectors
 from inference_optimizer.breakdown.collectors import collect_perfskills
-from inference_optimizer.orchestrator.action_executors._perfskills_sweep import (
+from hyperloom.orchestrator.action_executors._perfskills_sweep import (
     _pareto_front,
     _parse_isl_osl,
     _read_json,

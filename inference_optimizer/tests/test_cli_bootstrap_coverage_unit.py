@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from types import SimpleNamespace
 
 from inference_optimizer import cli_bootstrap as cb
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def _args(**overrides):
@@ -86,7 +86,7 @@ def test_seed_shared_state_populates_perfskills_and_cli_overrides(
         "/recipes/kimi.sh",
     ))
 
-    from inference_optimizer.orchestrator import policy
+    from hyperloom.orchestrator import policy
 
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
@@ -138,7 +138,7 @@ def test_seed_shared_state_preserves_quantized_model_identity(
         cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
     )
 
-    from inference_optimizer.orchestrator import policy
+    from hyperloom.orchestrator import policy
 
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
@@ -166,7 +166,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
         cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
     )
 
-    from inference_optimizer.orchestrator import policy
+    from hyperloom.orchestrator import policy
 
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
@@ -317,7 +317,7 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
 
 
 def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, capsys) -> None:
-    from inference_optimizer.orchestrator import kernel_attempt_summary
+    from hyperloom.orchestrator import kernel_attempt_summary
 
     monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
     reports = tmp_path / "reports"
@@ -437,7 +437,7 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
 
 
 def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, capsys) -> None:
-    from inference_optimizer.orchestrator import kernel_attempt_summary
+    from hyperloom.orchestrator import kernel_attempt_summary
 
     monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path))
     reports = tmp_path / "reports"

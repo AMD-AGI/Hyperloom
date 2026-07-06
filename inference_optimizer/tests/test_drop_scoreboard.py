@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 # 1. SharedState dataclass surface
@@ -90,7 +90,7 @@ def test_from_dict_drops_action_scores_silently(monkeypatch):
 def test_from_dict_drop_mode_logs_at_info_level(monkeypatch, caplog):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", raising=False)
     raw = _legacy_state_payload()
-    with caplog.at_level(logging.INFO, logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.INFO, logger="hyperloom.orchestrator.shared_state"):
         SharedState.from_dict(raw)
     matched = [r for r in caplog.records if "v0.8 §3.9" in r.getMessage()]
     assert matched, "drop mode should log at INFO level"
@@ -100,7 +100,7 @@ def test_from_dict_drop_mode_logs_at_info_level(monkeypatch, caplog):
 def test_from_dict_warn_mode_emits_warning(monkeypatch, caplog):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "warn")
     raw = _legacy_state_payload()
-    with caplog.at_level(logging.WARNING, logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.shared_state"):
         SharedState.from_dict(raw)
     matched = [r for r in caplog.records if "v0.8 §3.9" in r.getMessage()]
     assert matched, "warn mode should log a WARNING"
@@ -111,7 +111,7 @@ def test_from_dict_no_legacy_fields_means_no_log(monkeypatch, caplog):
     """A clean v0.8 state.json doesn't produce any §3.9 log line."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "warn")
     raw = {"session_id": "fresh", "baseline_tput": 999.0}
-    with caplog.at_level(logging.WARNING, logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.shared_state"):
         SharedState.from_dict(raw)
     matched = [r for r in caplog.records if "§3.9" in r.getMessage()]
     assert matched == []
@@ -133,13 +133,13 @@ def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
 # 3. orchestrator.scoring module is gone
 def test_scoring_module_was_retired():
     with pytest.raises(ImportError):
-        importlib.import_module("inference_optimizer.orchestrator.scoring")
+        importlib.import_module("hyperloom.orchestrator.scoring")
 
 
 # 4. Coordinator scoring surface fully removed (KB_gaps/Dead-B)
 def test_coordinator_has_no_scoring_methods():
     """KB_gaps/Dead-B — every v0.6 scoreboard hook on Coordinator is removed."""
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     for name in (
         "_score_action_keep",
@@ -155,7 +155,7 @@ def test_coordinator_has_no_scoring_methods():
 
 def test_coordinator_source_has_no_scoreboard_callers():
     """Defense in depth: no call sites remain in the coordinator body."""
-    from inference_optimizer.orchestrator import coordinator as _c
+    from hyperloom.orchestrator import coordinator as _c
 
     src = Path(_c.__file__).read_text(encoding="utf-8")
     for needle in (
@@ -169,7 +169,7 @@ def test_coordinator_source_has_no_scoreboard_callers():
 
 def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
     """KB_gaps/Dead-B §B.4 — the pruned-family advisory string must not mention "Action scores"."""
-    from inference_optimizer.orchestrator import intent_router as _c
+    from hyperloom.orchestrator import intent_router as _c
 
     src = Path(_c.__file__).read_text(encoding="utf-8")
     advisory_idx = src.find('"delegate_pruned_advisory"')
@@ -182,11 +182,11 @@ def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
 # 5. Orchestration prompt has no Action scores top-12 block
 def test_orchestration_prompt_has_no_scoreboard_block():
     """KB_design §3.9 §8 — DECISION FRAMEWORK must not steer toward live scoring vocab."""
-    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+    from hyperloom.orchestrator.system_prompts.prompt_builder import (
         FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,
     )
-    from inference_optimizer.orchestrator.action_registry import ActionRegistry
+    from hyperloom.orchestrator.action_registry import ActionRegistry
 
     reg = ActionRegistry().load()
     prompt = build_orchestration_prompt(
@@ -217,7 +217,7 @@ def test_orchestration_prompt_has_no_scoreboard_block():
 
 def test_kernel_opt_body_has_no_scoreboard_vocab():
     """KB_gaps/Dead-D — the kernel-pipeline body must NOT carry v0.6 scoreboard vocab."""
-    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+    from hyperloom.orchestrator.system_prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )
 
@@ -241,7 +241,7 @@ def test_kernel_opt_body_has_no_scoreboard_vocab():
 
 def test_kernel_opt_body_references_v08_decision_signals():
     """KB_gaps/Dead-D §5.1 — the body must surface the v0.8 decision facts."""
-    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+    from hyperloom.orchestrator.system_prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )
 

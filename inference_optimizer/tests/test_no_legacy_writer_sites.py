@@ -30,12 +30,12 @@ ALLOWED_FILES: dict[str, str] = {
     # alias on GridVariant, walk-and-rewrite on SharedState loader).
     "inference_optimizer/actions/_meta/replay_warm_recipe.yaml": "warm-replay internal action schema mirrors RecipeKB best_config "
     "field names",
-    "inference_optimizer/orchestrator/action_executors/_grid_base.py": "GridVariant(extra_sglang_args=...) back-compat kwarg (tree-reform.MD P2.2: GridVariant extracted from _grid_runner.py to the _grid_base sibling)",
-    "inference_optimizer/orchestrator/shared_state.py": "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
-    "inference_optimizer/orchestrator/research_hints.py": "priors-match scorer builds a token blob from variant fields and "
+    "src/hyperloom/orchestrator/action_executors/_grid_base.py": "GridVariant(extra_sglang_args=...) back-compat kwarg (tree-reform.MD P2.2: GridVariant extracted from _grid_runner.py to the _grid_base sibling)",
+    "src/hyperloom/orchestrator/shared_state.py": "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
+    "src/hyperloom/orchestrator/research_hints.py": "priors-match scorer builds a token blob from variant fields and "
     "reads the legacy extra_sglang_args key alongside the canonical "
     "extra_server_args so pre-rename variant dicts still match",
-    "inference_optimizer/orchestrator/optimization_journal.py": "journal classification reads existing stack/variant args fields",
+    "src/hyperloom/orchestrator/optimization_journal.py": "journal classification reads existing stack/variant args fields",
     # legacy v0.6 breakdown reader walks raw optimization_stack which can
     # carry the pre-rename candidate_extra_sglang_args field; the emitted
     # key is the canonical extra_server_args.
@@ -68,46 +68,46 @@ ALLOWED_FILES: dict[str, str] = {
     # ``read_extra_server_args`` mention the legacy key inline in the
     # surrounding code comment to document why the call goes through
     # the helper.
-    "inference_optimizer/orchestrator/coordinator.py":
+    "src/hyperloom/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
         "intent / sub-agent envelope read boundaries",
     # tree-reform.MD P2.2 3b-1: Coordinator method clusters extracted into
     # collaborator objects; the read_extra_server_args envelope-read comments /
     # KB best_config arg handling moved with them.
-    "inference_optimizer/orchestrator/_resume.py": "resume/replay collaborator carries the coordinator envelope-read surface",
-    "inference_optimizer/orchestrator/_writeback.py": "writeback collaborator carries the KB best_config / recipe-attrs arg surface",
-    "inference_optimizer/orchestrator/_gating.py": "gating collaborator carries the sequence-denial envelope-read surface",
-    "inference_optimizer/orchestrator/_dispatcher.py": "dispatcher collaborator carries the delegate/dispatch envelope-read surface",
-    "inference_optimizer/orchestrator/_proposals.py": "proposals collaborator carries the KB recipe best_config arg surface",
-    "inference_optimizer/orchestrator/_advisory.py": "advisory collaborator carries the proposed-variant arg surface",
-    "inference_optimizer/orchestrator/_inline_actions.py": "inline-actions collaborator carries the inline delegate envelope-read surface",
-    "inference_optimizer/orchestrator/_conversation.py": "conversation collaborator carries the inbox/context envelope-read surface",
-    "inference_optimizer/orchestrator/_maintenance.py": "maintenance collaborator carries the checkpoint/observation arg surface",
+    "src/hyperloom/orchestrator/_resume.py": "resume/replay collaborator carries the coordinator envelope-read surface",
+    "src/hyperloom/orchestrator/_writeback.py": "writeback collaborator carries the KB best_config / recipe-attrs arg surface",
+    "src/hyperloom/orchestrator/_gating.py": "gating collaborator carries the sequence-denial envelope-read surface",
+    "src/hyperloom/orchestrator/_dispatcher.py": "dispatcher collaborator carries the delegate/dispatch envelope-read surface",
+    "src/hyperloom/orchestrator/_proposals.py": "proposals collaborator carries the KB recipe best_config arg surface",
+    "src/hyperloom/orchestrator/_advisory.py": "advisory collaborator carries the proposed-variant arg surface",
+    "src/hyperloom/orchestrator/_inline_actions.py": "inline-actions collaborator carries the inline delegate envelope-read surface",
+    "src/hyperloom/orchestrator/_conversation.py": "conversation collaborator carries the inbox/context envelope-read surface",
+    "src/hyperloom/orchestrator/_maintenance.py": "maintenance collaborator carries the checkpoint/observation arg surface",
     # tree-reform.MD P2.2 3b-2: Coordinator phase-handler clusters extracted
     # into collaborator objects; the read_extra_server_args envelope-read
     # comments / warm-recipe KB best_config arg handling moved with them.
-    "inference_optimizer/orchestrator/_phase_machine.py": "phase-machine handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_prelude.py": "prelude handler carries the warm-recipe KB best_config/extra_sglang_args read+merge surface",
-    "inference_optimizer/orchestrator/_phase_sweep.py": "sweep handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_close.py": "close handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_internal.py": "internal-tasks handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_kernel_stack.py": "kernel-stack handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_kernel.py": "kernel handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_explore.py": "explore handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/_phase_framework.py": "framework handler carries the cumulative-merge helper import",
-    "inference_optimizer/orchestrator/result_recorder.py":
+    "src/hyperloom/orchestrator/_phase_machine.py": "phase-machine handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_prelude.py": "prelude handler carries the warm-recipe KB best_config/extra_sglang_args read+merge surface",
+    "src/hyperloom/orchestrator/_phase_sweep.py": "sweep handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_close.py": "close handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_internal.py": "internal-tasks handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_kernel_stack.py": "kernel-stack handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_kernel.py": "kernel handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_explore.py": "explore handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/_phase_framework.py": "framework handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/result_recorder.py":
         "result-recording / fact-synthesis methods extracted verbatim from "
         "coordinator.py (phase 1B); same read_extra_server_args envelope-read "
         "boundaries as the coordinator they came from",
-    "inference_optimizer/orchestrator/coordinator_helpers.py":
+    "src/hyperloom/orchestrator/coordinator_helpers.py":
         "holds the extracted _merge_cumulative_extra_sglang_args helper "
         "that merges the legacy KB best_config arg stacks",
-    "inference_optimizer/orchestrator/_kernel_decisions.py":
+    "src/hyperloom/orchestrator/_kernel_decisions.py":
         "tree-reform.MD P2.2: kernel-decision write-owner functions extracted "
         "from kernel_request_handlers.py to this sibling module (re-exported "
         "back); carries _resolve_kernel_patch_identity's read_extra_server_args "
         "call + docstring naming the legacy extra_sglang_args alias",
-    "inference_optimizer/orchestrator/kernel_request_handlers.py":
+    "src/hyperloom/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary; also holds the "
         "kernel-decision write-owner functions folded back from the former "
@@ -127,7 +127,7 @@ ALLOWED_FILES: dict[str, str] = {
     # Watermark-refresh profile executor inherits current_best's launch
     # args through the canonical channel; the comment + params key name
     # the legacy alias for the downstream reader's back-compat path.
-    "inference_optimizer/orchestrator/action_executors/profile.py": "watermark-refresh inheritance comments name the legacy "
+    "src/hyperloom/orchestrator/action_executors/profile.py": "watermark-refresh inheritance comments name the legacy "
     "extra_sglang_args channel for the downstream reader",
     "inference_optimizer/tests/test_profile_and_kernel_handlers.py": "profile/kernel handler tests exercise the legacy "
     "extra_sglang_args inheritance channel",
@@ -136,7 +136,7 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/tests/test_extra_sglang_args_merge.py": "cumulative extra_sglang_args merge/dedupe back-compat tests",
     # T0 fallback reads best_config via read_extra_server_args (which falls
     # back to the legacy key); dispatcher comment names the alias.
-    "inference_optimizer/orchestrator/cortex_t0.py": "warm-start config extraction reads legacy extra_sglang_args "
+    "src/hyperloom/orchestrator/cortex_t0.py": "warm-start config extraction reads legacy extra_sglang_args "
     "via read_extra_server_args fallback for older recipe rows",
     "inference_optimizer/recipe_kb/dispatcher.py": "v2-to-arbor projection reads body.extra_sglang_args for "
     "legacy kb-extract recipes that lack body.best_config",

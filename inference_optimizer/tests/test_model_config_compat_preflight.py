@@ -40,7 +40,7 @@ def _seed_state(session_dir: Path, monkeypatch):
         "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR",
         str(session_dir),
     )
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.shared_state import SharedState
 
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -1001,7 +1001,7 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
 
 
 def test_stop_reason_is_canonical_vocab():
-    from inference_optimizer.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phase_state import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )
@@ -1236,7 +1236,7 @@ def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
 def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
     calls: dict[str, list] = {"flush": [], "patch": [], "record": []}
     from inference_optimizer import breakdown as bd
-    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
     monkeypatch.setattr(
         lfe, "flush_session", lambda sd: calls["flush"].append(Path(sd))
@@ -1303,7 +1303,7 @@ def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
     sd = tmp_path / "session_raise"
     _seed_state(sd, monkeypatch)
 
-    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
     def _boom(*a, **k):
         raise RuntimeError("langfuse down")

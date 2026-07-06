@@ -11,7 +11,7 @@ deviation from the baseline output.
 
 from __future__ import annotations
 
-from inference_optimizer.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.action_executors.baseline import (
     _should_establish_quality_ref,
 )
 

@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.specialist_domains import get_domain
-from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.specialist_domains import get_domain
+from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
 )

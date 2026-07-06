@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.cli import _load_model_config_tags
-from inference_optimizer.orchestrator.cortex_t0 import run_t0_anchor
+from hyperloom.orchestrator.cortex_t0 import run_t0_anchor
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,

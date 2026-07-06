@@ -21,7 +21,7 @@ from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
 
 
 # Helpers — minimal stand-ins
@@ -84,7 +84,7 @@ class _StubTaskRegistry:
 
     async def get(self, task_id: str) -> _StubTask:
         if task_id not in self._tasks:
-            from inference_optimizer.orchestrator.task_registry import TaskNotFound
+            from hyperloom.orchestrator.task_registry import TaskNotFound
 
             raise TaskNotFound(f"task {task_id} not found")
         return self._tasks[task_id]
@@ -94,7 +94,7 @@ class _StubTaskRegistry:
 @pytest.fixture
 def coord(tmp_path: Path):
     """Build a Coordinator via ``__new__`` with just enough attributes for the Gap-03 methods."""
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -319,7 +319,7 @@ async def test_handle_specialist_done_bad_source_prefix(coord):
 
 # 3. _task_id_from_specialist_source helper
 def test_task_id_from_specialist_source_extracts_prefix():
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     assert (
         Coordinator._task_id_from_specialist_source(
@@ -330,7 +330,7 @@ def test_task_id_from_specialist_source_extracts_prefix():
 
 
 def test_task_id_from_specialist_source_returns_empty_for_bad():
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     assert Coordinator._task_id_from_specialist_source("orchestration") == ""
     assert Coordinator._task_id_from_specialist_source("") == ""
@@ -346,7 +346,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):
     """The entry carries the full field set the breakdown ``specialist_runs[]`` consumer expects (KB_design §3.12 §4.3)."""
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(
@@ -393,7 +393,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
 
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord):
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
 
     coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(task_id="task-no-round", params={})
@@ -412,17 +412,17 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 ):
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
     from inference_optimizer.cli import _build_specialist_executor
-    from inference_optimizer.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.backends.mock_backend import (
         MockBackend,
         MockTurn,
         ScriptedPlan,
     )
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.coordinator import Coordinator
     from inference_optimizer.protocol.intent import IntentType
-    from inference_optimizer.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.backends.mock_backend import (
         MockBackend as MockOrchBackend,
     )
-    from inference_optimizer.orchestrator.agent_role import default_role_registry
+    from hyperloom.orchestrator.agent_role import default_role_registry
 
     done_payload = _done_payload(
         domain="serving_specialist",
@@ -486,7 +486,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         coord.sub.register_executor("specialist", executor)
 
         # Enqueue directly through TaskRegistry to test the dispatcher hook, not the upstream intent flow.
-        from inference_optimizer.orchestrator.task_registry import Task
+        from hyperloom.orchestrator.task_registry import Task
 
         task = Task(
             task_id="t-e2e-1",
@@ -528,8 +528,8 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 @pytest.fixture
 def force_coord(tmp_path: Path):
     """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-    from inference_optimizer.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.shared_state import SharedState
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -623,7 +623,7 @@ def test_handle_intent_dispatch_table_has_specialist_done_branch():
     """Gap-03 regression: the dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
     import inspect
 
-    from inference_optimizer.orchestrator.intent_router import IntentRouter
+    from hyperloom.orchestrator.intent_router import IntentRouter
 
     src = inspect.getsource(IntentRouter._handle_intent)
     assert "IntentType.SPECIALIST_DONE" in src, (

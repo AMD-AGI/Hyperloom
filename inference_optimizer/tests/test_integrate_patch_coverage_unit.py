@@ -12,18 +12,18 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors import integrate_patch as ip
-from inference_optimizer.orchestrator.action_executors.integrate_patch import (
+from hyperloom.orchestrator.action_executors import integrate_patch as ip
+from hyperloom.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
     _git_checkout_clean,
     _detect_p_level,
     _read_done_payload,
 )
-from inference_optimizer.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.action_executors._workload_envs import (
     FrameworkScriptMismatchError,
 )
-from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
-from inference_optimizer.orchestrator.task_registry import Task
+from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.task_registry import Task
 
 
 _VALID_PATCH = """\
@@ -473,7 +473,7 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.kb_writeback.write_framework_record",
+        "hyperloom.orchestrator.kb_writeback.write_framework_record",
         _fake_write,
     )
     ex = IntegratePatchExecutor(session_dir=session)

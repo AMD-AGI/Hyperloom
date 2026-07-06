@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 import time
 
-from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+from hyperloom.orchestrator.action_executors._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     run_with_session_kill,
 )

@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from inference_optimizer.orchestrator import phase_state
+from hyperloom.orchestrator import phase_state
 
 
 class _State:

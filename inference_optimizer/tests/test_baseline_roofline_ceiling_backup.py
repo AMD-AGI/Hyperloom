@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from inference_optimizer.breakdown import collectors
-from inference_optimizer.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.shared_state import SharedState
 
 
 def _write_synthetic_model(model_dir: Path, *, total_size: int) -> None:

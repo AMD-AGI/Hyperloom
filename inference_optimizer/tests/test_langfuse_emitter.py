@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.trace import langfuse_mapping as lfmap
-from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
+from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
 
 # ---------------------------------------------------------------------------

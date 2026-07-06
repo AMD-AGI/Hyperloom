@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from inference_optimizer.orchestrator.backends import (
+from hyperloom.orchestrator.backends import (
     Backend,
     MockBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -66,7 +66,7 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     # TTL = wall_budget × (1 + grace); the lease must outlive the kill so cards
     # are never reclaimed mid-run (iron law kill ≤ gpu_lease TTL ≤ lane TTL).
-    from inference_optimizer.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
+    from hyperloom.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
 
     coord.shared_state.macro_cycle = 0
     budget = coord._specialist_wall_budget_sec(needs_gpu=True)  # 3600
@@ -163,7 +163,7 @@ def test_gap_layer_for_action(coord: Coordinator) -> None:
 
 
 def test_task_id_from_specialist_source(coord: Coordinator) -> None:
-    from inference_optimizer.orchestrator.coordinator import SPECIALIST_FROM_AGENT_PREFIX
+    from hyperloom.orchestrator.coordinator import SPECIALIST_FROM_AGENT_PREFIX
 
     assert coord._task_id_from_specialist_source("") == ""
     assert coord._task_id_from_specialist_source("kernel_agent") == ""
@@ -474,7 +474,7 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
 
 
 def test_resolve_issue_canonical_priority(coord: Coordinator) -> None:
-    from inference_optimizer.orchestrator.coordinator import PendingProposal
+    from hyperloom.orchestrator.coordinator import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m1",
@@ -612,7 +612,7 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
 
 # -- module-level helpers --------------------------------------------------
 def test_first_present() -> None:
-    from inference_optimizer.orchestrator.coordinator import _first_present
+    from hyperloom.orchestrator.coordinator import _first_present
 
     assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
     assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
@@ -621,7 +621,7 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from inference_optimizer.orchestrator.coordinator import _lifecycle_paths
+    from hyperloom.orchestrator.coordinator import _lifecycle_paths
 
     assert _lifecycle_paths("not-a-dict") == {}
     out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
@@ -629,8 +629,8 @@ def test_lifecycle_paths() -> None:
 
 
 def test_format_inbox_event_variants() -> None:
-    from inference_optimizer.orchestrator.coordinator import _format_inbox_event
-    from inference_optimizer.orchestrator.message_bus import Message
+    from hyperloom.orchestrator.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.message_bus import Message
 
     delegated = Message.new(
         "kernel_agent",
