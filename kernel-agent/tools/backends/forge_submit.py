@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Forge (Kernel-Forge) submission backend.
+"""Forge submission backend running Kernel-Forge in an isolated worktree.
 
-Runs the Kernel-Forge autonomous IterationLoop on a single kernel, entirely
-inside a git WORKTREE of the kernel repo so the live repo is never mutated
-(Hyperloom forbids backends from writing the repo; integrate applies the
-artifact later). Emits the same artifacts every other backend does:
-
-  <output_dir>/optimized_versions/v1_forge.<ext>   complete replaceable source
-  <output_dir>/optimization_report.md              [micro_speedup] Nx + [correctness] pass
-
-Scope: Triton/Python kernels use the triton fellow. Compiled kernels
-(HIP/CK/aiter/hipBLASLt/FlyDSL) are also attempted when Kernel-Forge has a
-matching fellow; compile-only drivers are skipped unless explicitly allowed.
-
-Design ref: claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md
+Emits optimized source plus an optimization_report.md artifact for integration.
 """
 
 from __future__ import annotations
@@ -66,8 +54,8 @@ _PLATFORM_TO_GFX = {
     "mi355x": "gfx950",
 }
 
-# Stage 1: only triton maps to a fellow by default; compiled backends are
-# deferred (the autogen driver + in-place bench path are triton-validated).
+# Triton/python source maps to the triton fellow; compiled source types are
+# handled by _COMPILED_SOURCE_TYPE_TO_FELLOW below.
 _SOURCE_TYPE_TO_FELLOW = {
     "triton": "triton-fellow",
     "python": "triton-fellow",
