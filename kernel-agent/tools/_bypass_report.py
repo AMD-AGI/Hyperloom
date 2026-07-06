@@ -306,6 +306,11 @@ def build_candidates(
             "compute_utilization_pct": None,
             "bandwidth_utilization_pct": None,
             "rocprof_roofline": None,
+            # Placeholder roofline: bound_type/AI/util above are structural
+            # defaults, NOT measured. Flipped True only by the opt-in
+            # rocprof-compute enrichment. Lets downstream/LLM distinguish the
+            # "—" unknown-bound sentinel from a real measured roofline.
+            "roofline_measured": False,
             "library": "",
             "backend": framework,
             "framework": framework,
@@ -685,6 +690,9 @@ def build_kernel_roofline(
                 "reusable_native_kernel": c["reusable_native_kernel"],
                 "source_file": c["source_file"],
                 "rocprof_roofline": c["rocprof_roofline"],
+                # False = structural placeholder (see build_candidates); the
+                # opt-in rocprof enrichment flips this True when it fills real bound.
+                "roofline_measured": c.get("roofline_measured", False),
             }
         )
     return {
