@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for the kernel-agent tracelens_analysis filter fixes.
-
-Locks the ``is_kernel_event`` fix to require strict ``cat == 'kernel'`` (fuzzy
-name/category matching had promoted a CPU sync to the #1 hot kernel). Production
-TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
-"""
+"""Regression tests for tracelens_analysis candidate extraction and routing."""
 
 from __future__ import annotations
 
