@@ -15,7 +15,7 @@ understanding stage: it consumes traces collected by [Magpie](magpie.md),
 captures bottlenecks, and derives the roofline targets that seed the
 optimization search tree.
 
-- **Documentation**:
+- **Documentation**: <https://advanced-micro-devices-tracelens--772.com.readthedocs.build/en/772/>
 - **Source**: <https://github.com/AMD-AGI/TraceLens>
 - **License**: MIT
 

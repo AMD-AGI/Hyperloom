@@ -4,7 +4,7 @@ myst:
         "description": "Case study: Hyperloom optimized DeepSeek-R1-0528 on AMD Instinct MI355X GPUs, achieving +97% over NVIDIA B200 in a single session using MTP speculative decoding."
         "keywords": "Hyperloom, DeepSeek-R1, case study, AMD Instinct MI355X, MTP, speculative decoding, SGLang, LLM inference, throughput, ROCm, optimization, FP8, MoE"
 ---
-# Case Study: DeepSeek-R1 — Fast Scale-Up on a New Workload
+# Case study: DeepSeek-R1 — Fast scale-up on a new workload
 
 When a new model lands on new hardware, the first question is: how quickly can you get it running well? DeepSeek-R1-0528 (671B, mixture of experts (MoE)+multi-head latent attention (MLA), 8-bit floating point (FP8)) on 8x AMD Instinct™ MI355X GPUs went from baseline to **+97% over NVIDIA B200** in a single optimization session. The agent explored 7 configurations, identified multi-token prediction (MTP) speculative decoding as the key lever, diagnosed and fixed a scheduling bottleneck that was masking MTP's gains, and verified accuracy — arriving at production-ready performance without patches or kernel modifications.
 

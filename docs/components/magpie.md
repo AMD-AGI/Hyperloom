@@ -17,7 +17,7 @@ collect traces, and emit a structured `benchmark_report.json`; those traces are
 the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on
 [IntelliKit](intellikit.md) for some low-level GPU profiling tools.
 
-- **Documentation**:
+- **Documentation**: <https://advanced-micro-devices-demo--50.com.readthedocs.build/projects/magpie/en/50/>
 - **Source**: <https://github.com/AMD-AGI/Magpie>
 - **License**: MIT
 
@@ -25,12 +25,12 @@ the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on
 
 Magpie provides a hardware-aware kernel and workload evaluation framework:
 
-- **Three evaluation modes** — Analyze (single kernel + testcase), Compare
-  (multi-kernel ranking), and Benchmark (framework-level vLLM/SGLang/Atom runs).
+- **Three evaluation modes** — analyze (single kernel + testcase), compare
+  (multi-kernel ranking), and benchmark (framework-level vLLM/SGLang/Atom runs).
 - **Heterogeneous hardware** — AMD (HIP) and NVIDIA (CUDA) GPUs.
-- **Execution environments** — Local, sandboxed container, and remote Ray
+- **Execution environments** — local, sandboxed container, and remote Ray
   cluster scheduling.
-- **Hardware control** — Kernel evaluation under controlled power/frequency
+- **Hardware control** — kernel evaluation under controlled power/frequency
   settings, with automatic idle-GPU selection in Benchmark mode.
 - **Trace analysis** — TraceLens integration plus gap analysis on torch
   profiler traces.

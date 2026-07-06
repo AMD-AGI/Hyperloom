@@ -50,4 +50,4 @@ These resources are available for Hyperloom users and contributors:
 - [Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX) — full
   sweeps, patches, configs, and reproduction scripts for the key benchmark
   results.
-- [LLM Gateway](https://llm.amd.com/) — Obtain your API key.
+- [LLM Gateway](https://llm.amd.com/) — obtain your API key.

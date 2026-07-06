@@ -19,7 +19,7 @@ kernel-optimization path that uses Claude Code or OpenAI Codex). The kernel agen
 dispatches GEAK runs through Ray so multiple candidates can be explored in
 parallel on the cluster's GPUs.
 
-- **Documentation**:
+- **Documentation**: <https://advanced-micro-devices-demo--311.com.readthedocs.build/projects/geak/en/311/>
 - **Source**: <https://github.com/AMD-AGI/GEAK>
 - **License**: MIT
 
@@ -28,22 +28,22 @@ parallel on the cluster's GPUs.
 GEAK turns a natural-language task plus a target repository into a verified,
 patch-based kernel optimization:
 
-- **End-to-end optimization** — Discovers or generates tests and a harness,
+- **End-to-end optimization** — discovers or generates tests and a harness,
   then runs a closed loop of profiling → optimization → validation, emitting
   reproducible patches and benchmarks.
-- **Patch-driven iteration** — Every step produces a reproducible diff, guided
+- **Patch-driven iteration** — every step produces a reproducible diff, guided
   by a task-defined or custom metric, with strategy tracking across the run.
-- **Parallel exploration** — Runs multiple optimization agents, each in an
+- **Parallel exploration** — runs multiple optimization agents, each in an
   isolated git worktree, with optional GPU pinning (`--gpu-ids`).
-- **Best-patch selection** — Verifies candidates against the run's benchmark
+- **Best-patch selection** — verifies candidates against the run's benchmark
   contract, writes `round_N_evaluation.json` per round, and records the winning
   result in `final_report.json`.
-- **Skills & subagents** — Domain skills (`triton`, `hip`, `flydsl`,
+- **Skills & subagents** — domain skills (`triton`, `hip`, `flydsl`,
   `pytorch2flydsl-translation`, `fp8-gemm-tuning-sglang-aiter`) and specialist
   subagents (e.g., `general-kernel-optimization`, `harness-generator`,
   `codebase-explore`, `gemm-tuning`, `speedup-verify`) handle different kernel
   types and tasks.
-- **Tooling layer** — Kernel profiling for bottleneck analysis, optional retrieval-augmented generation (RAG)
+- **Tooling layer** — kernel profiling for bottleneck analysis, optional retrieval-augmented generation (RAG)
   for GPU knowledge retrieval, and within-/cross-session memory of past
   optimization insights.
 
@@ -63,7 +63,7 @@ pip install -e .      # editable
 pip install .         # non-editable (recommended for embedding consumers)
 ```
 
-Configure a model and provider key before running, e.g.,:
+Configure a model and provider key before running, e.g.,
 
 ```bash
 export MSWEA_MODEL_NAME="openai/gpt-5"

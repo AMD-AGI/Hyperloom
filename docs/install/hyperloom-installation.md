@@ -35,7 +35,7 @@ The fastest path, with no local GPU setup:
 Local Mode runs Hyperloom in a remote AMD GPU environment, then connects Cursor
 to it. Complete these steps:
 
-1. Prepare the GPU environment — Use a MI300X/MI308X/MI325X/MI355X machine running an
+1. Prepare the GPU environment — Use an MI300X, MI308X, MI325X, or MI355X machine running an
    SGLang or vLLM ROCm image (see [Hyperloom compatibility matrix](../compatibility.md)).
 2. Connect Cursor to that environment using Remote SSH or Dev Containers.
 3. Clone and bootstrap the local dependency checkout paths:

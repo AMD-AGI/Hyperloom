@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "Explore Hyperloom's specialized components: IntelliKit for GPU profiling, Magpie for benchmarking, TraceLens for trace analysis, and GEAK for kernel optimization."
-        "keywords": "Hyperloom, components, IntelliKit, Magpie, TraceLens, GEAK, GPU profiling, benchmarking, kernel optimization, AMD GPU, ROCm"
+        "description": "Explore Hyperloom's specialized components: IntelliKit for GPU profiling, Magpie for benchmarking, TraceLens for trace analysis, GEAK for kernel optimization, and AgentKernelArena for agent evaluation."
+        "keywords": "Hyperloom, components, IntelliKit, Magpie, TraceLens, GEAK, AgentKernelArena, GPU profiling, benchmarking, kernel optimization, AMD GPU, ROCm, evaluation"
 ---
 # Hyperloom components
 
@@ -16,6 +16,7 @@ is described in [Hyperloom optimization loop](../conceptual/optimization-loop.md
 | [Magpie](magpie.md) | Benchmark engine with trace-collection support | [AMD-AGI/Magpie](https://github.com/AMD-AGI/Magpie) |
 | [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) |
 | [GEAK](geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) |
+| [AgentKernelArena](agentkernelarena.md) | Standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) |
 
 ```{toctree}
 :maxdepth: 1
@@ -25,4 +26,5 @@ intellikit
 magpie
 tracelens
 geak
+agentkernelarena
 ```

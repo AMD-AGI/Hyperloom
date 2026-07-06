@@ -14,7 +14,7 @@ tuning, kernel rewrites, parallelism configs — one change at a time, always
 measuring against the real workload and using prior results plus knowledge base (KB) priors to
 choose the next move.
 
-Provide your workload, and the agent delivers a fully optimized codebase:
+Provide your workload, and the agent works toward an optimized configuration:
 profiling against peak hardware potential, identifying bottlenecks, and
 iteratively rewriting code to maximize throughput on AMD GPUs.
 
@@ -42,7 +42,7 @@ Hyperloom is composed of multiple tools, each documented on its own page:
 | [Magpie](components/magpie.md) | Benchmark engine with trace-collection support |
 | [TraceLens](components/tracelens.md) | Agentic trace analysis and roofline targets |
 | [GEAK](components/geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) |
-| [AgentKernelArena]() | |
+| [AgentKernelArena](components/agentkernelarena.md) | Standardized evaluation arena for agent benchmarking |
 
 ## Next steps
 

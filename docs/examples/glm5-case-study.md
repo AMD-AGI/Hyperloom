@@ -4,7 +4,7 @@ myst:
         "description": "Case study: Hyperloom optimized GLM-5-FP8 on AMD Instinct MI355X GPUs, achieving 2.93x throughput and exceeding NVIDIA B200 by 14% through agentic GEMM tuning."
         "keywords": "Hyperloom, GLM-5, case study, AMD Instinct MI355X, GEMM tuning, MoE, SGLang, LLM inference, throughput, ROCm, optimization, FP8, aiter, Triton, kernel"
 ---
-# Case Study: GLM-5 — Discovering Optimizations That Are Hard to Spot Manually
+# Case study: GLM-5 — Discovering optimizations that are hard to spot manually
 
 Autonomous optimization of GLM-5-FP8 on AMD Instinct™ MI355X GPUs — from 174 tok/s/GPU to 509 tok/s/GPU (2.93x), exceeding NVIDIA B200 by 14% on per-GPU throughput. The optimization explored 40+ configurations, produced code patches, and tuned 55 GEMM shapes. The most impactful findings required the agent to move fluidly across repository boundaries — from SGLang's serving layer, into aiter's Composable Kernel library, down to Triton GEMM config files and individual kernel source — building a cross-stack understanding that is time-consuming to develop manually.
 

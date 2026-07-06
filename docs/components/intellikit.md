@@ -18,7 +18,7 @@ Within Hyperloom, IntelliKit is not called directly. It sits underneath
 profiling primitives. Hyperloom therefore depends on IntelliKit transitively,
 through Magpie.
 
-- **Documentation**: 
+- **Documentation**: <https://advanced-micro-devices-demo--131.com.readthedocs.build/projects/intellikit/en/131/index.html>
 - **Source**: <https://github.com/AMDResearch/intellikit>
 - **License**: MIT
 
@@ -28,18 +28,18 @@ IntelliKit groups its tools around a kernel optimization workflow —
 **isolate → profile → inspect → validate** — with MCP servers and agent skills
 to wire the tools into large language model (LLM) clients:
 
-- **Kerncap** — Isolate a kernel: capture GPU dispatches and build standalone,
+- **Kerncap** — isolate a kernel: capture GPU dispatches and build standalone,
   replayable reproducers (HIP, Triton).
-- **Metrix** — Profile: human-readable metrics from hardware counters
+- **Metrix** — profile: human-readable metrics from hardware counters
   (bandwidth, cache, etc.).
-- **Linex** — Profile: source-line timing and stalls (compile with `-g` for
+- **Linex** — profile: source-line timing and stalls (compile with `-g` for
   `file:line` mapping).
-- **Nexus** — Inspect: from HSA packets, see what actually ran, including source
+- **Nexus** — inspect: from HSA packets, see what actually ran, including source
   and assembly.
-- **Accordo** — Validate: prove an optimized kernel still matches a reference.
+- **Accordo** — validate: prove an optimized kernel still matches a reference.
 - **rocm_mcp** — MCP servers for HIP compile, HIP docs, `rocminfo`, and
   `amd-smi`.
-- **uprof_mcp** — Host-side CPU hotspot analysis through an MCP bridge to AMD uProf.
+- **uprof_mcp** — host-side CPU hotspot analysis through an MCP bridge to AMD uProf.
 
 The stack requires Python 3.10+ and ROCm 6.0+ for the GPU packages (ROCm 7.0+
 for Linex). Accordo and Nexus additionally compile C++ during install (through

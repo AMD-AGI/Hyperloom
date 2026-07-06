@@ -27,7 +27,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Magpie </components/magpie>`
     * :doc:`TraceLens </components/tracelens>`
     * :doc:`GEAK </components/geak>`
-    * :doc:`AgentKernelArena <>`
+    * :doc:`AgentKernelArena </components/agentkernelarena>`
 
   .. grid-item-card:: How to
 

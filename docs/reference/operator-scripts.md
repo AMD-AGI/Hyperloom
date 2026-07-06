@@ -114,7 +114,7 @@ The script applies the following safeguards when LLM polishing is enabled.
   only rewrites prose.
 * If the LLM call fails (timeout, 5xx, malformed response), the
   script falls back to the deterministic report and exits 0.
-* If you do not want any LLM call, simply leave
+* If you do not want any LLM call, leave
   `HYPERLOOM_REPORT_LLM_BACKEND` unset.
 
 ---
