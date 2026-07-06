@@ -45,4 +45,22 @@ def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
     return lines[-limit:]
 
 
-__all__ = ["append_log", "atomic_write_json", "read_last_lines", "utc_now"]
+def kernel_row_matches(row: dict[str, Any], target_kernel: str) -> bool:
+    """Return whether a result row matches ``target_kernel`` (empty matches any)."""
+    if not target_kernel:
+        return True
+    target = target_kernel.strip()
+    names = (
+        str(row.get("matched_kernel_name") or "").strip(),
+        str(row.get("name") or "").strip(),
+    )
+    return any(name == target for name in names)
+
+
+__all__ = [
+    "append_log",
+    "atomic_write_json",
+    "kernel_row_matches",
+    "read_last_lines",
+    "utc_now",
+]

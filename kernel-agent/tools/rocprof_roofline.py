@@ -10,9 +10,16 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# Sibling import works whether run as a script or loaded via importlib.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import kernel_row_matches  # noqa: E402
+
+sys.path.pop(0)
 
 
 FP_METRICS = (
@@ -487,24 +494,8 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def _kernel_name_matches(row: dict[str, Any], target_kernel: str) -> bool:
-    """Return whether a result row matches the target kernel name.
-
-    Args:
-        row: A result row with ``matched_kernel_name`` / ``name`` fields.
-        target_kernel: Kernel name to match; an empty value matches any row.
-
-    Returns:
-        ``True`` if the row corresponds to ``target_kernel``.
-    """
-    if not target_kernel:
-        return True
-    target = target_kernel.strip()
-    names = (
-        str(row.get("matched_kernel_name") or "").strip(),
-        str(row.get("name") or "").strip(),
-    )
-    return any(name == target for name in names)
+# Shared row-vs-target-kernel matcher (see _io_utils.kernel_row_matches).
+_kernel_name_matches = kernel_row_matches
 
 
 def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") -> dict[str, Any]:
@@ -583,8 +574,6 @@ def _generate_harness_for_candidate(
 
     try:
         tools_dir = str(Path(__file__).resolve().parent)
-        import sys
-
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         from harness_generator import maybe_generate_harness  # noqa: WPS433

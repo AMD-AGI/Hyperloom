@@ -21,7 +21,13 @@ from typing import Any
 # Sibling import: kernel name → multi-GPU collective detection (torchrun vs python).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
-from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now  # noqa: E402
+from _io_utils import (  # noqa: E402
+    append_log,
+    atomic_write_json,
+    kernel_row_matches,
+    read_last_lines,
+    utc_now,
+)
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
@@ -2501,24 +2507,8 @@ def _run_rocprof_roofline(
     }
 
 
-def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
-    """Return whether a roofline result row matches the target kernel.
-
-    Args:
-        row: Result row with ``matched_kernel_name`` / ``name`` fields.
-        target_kernel: Kernel name to match; empty matches any row.
-
-    Returns:
-        ``True`` if the row corresponds to ``target_kernel``.
-    """
-    if not target_kernel:
-        return True
-    target = target_kernel.strip()
-    names = (
-        str(row.get("matched_kernel_name") or "").strip(),
-        str(row.get("name") or "").strip(),
-    )
-    return any(name == target for name in names)
+# Shared row-vs-target-kernel matcher (see _io_utils.kernel_row_matches).
+_rocprof_kernel_matches = kernel_row_matches
 
 
 def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_path: str) -> dict[str, Any]:
