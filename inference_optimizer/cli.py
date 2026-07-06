@@ -123,6 +123,45 @@ from .orchestrator.action_executors._aiter_jit import (
     clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
 )
 
+# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
+# re-exported here so the module namespace + monkeypatch surface is intact.
+from ._cli_credentials import (
+    _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
+    _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
+    _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
+    _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
+    _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
+    _resolve_critic_agent_root as _resolve_critic_agent_root,
+    _validate_critic_agent_runtime as _validate_critic_agent_runtime,
+    _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
+    _resolve_robustness_agent_root as _resolve_robustness_agent_root,
+    _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
+    _STALE_PROXY_HOSTPORT as _STALE_PROXY_HOSTPORT,
+    _is_stale_proxy_url as _is_stale_proxy_url,
+    _GEAK_BASE_URL_RE as _GEAK_BASE_URL_RE,
+    _sync_geak_config_base_url as _sync_geak_config_base_url,
+    _derive_anthropic_base_url as _derive_anthropic_base_url,
+    _resolve_llm_endpoints as _resolve_llm_endpoints,
+    _reset_claude_config_to_upstream as _reset_claude_config_to_upstream,
+    _validate_credentials as _validate_credentials,
+)
+from ._cli_multi_node import (
+    _gc_old_profile_traces as _gc_old_profile_traces,
+    _resolve_mn_backend as _resolve_mn_backend,
+    _provision_multi_node_dynamo_stack as _provision_multi_node_dynamo_stack,
+    _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
+    _replay_kernel_patches_for_multi_node as _replay_kernel_patches_for_multi_node,
+)
+from ._cli_quantization import (
+    _quantization_enabled_via_env as _quantization_enabled_via_env,
+    _run_quantization_prelude as _run_quantization_prelude,
+)
+from ._cli_recover import (
+    _session_recovery_status as _session_recovery_status,
+    _run_recover_session as _run_recover_session,
+)
+
+
 # Backward-compat re-exports: these helpers were extracted into cli_executors /
 # cli_kb / cli_backends / cli_model_gate / model_config_utils / cli_bootstrap
 # during the CLI decomposition, but callers and tests still import them from
@@ -188,7 +227,6 @@ from .paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
-    mn_profile_trace_root,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
 )
@@ -358,15 +396,7 @@ _DEFAULT_KERNEL_PROMPT = (
 )
 
 
-# Hard model allowlist (_CLAUDE_ALLOWED_MODELS): orchestration MUST resolve to Opus 4-7 (preferred)
-# or 4-6 (fallback) before Coordinator boots; other models drifted behaviour measurably (operator 2026-05-09).
-_CLAUDE_PREFERRED_MODEL = "claude-opus-4-7"
-_CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
-_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 
-# Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
-# len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
-_CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 # Per-attempt read timeout for the gateway /models catalog probe. The AMD
 # gateway is documented-flaky; on slow/borderline days a healthy /models call
 # can take ~5.5s, straddling this cutoff and causing spurious "gateway catalog
@@ -384,134 +414,16 @@ except (TypeError, ValueError):
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 
 
-# Critic-agent skill root resolution. Env wins; else sibling ``critic-agent/`` next to repo root.
-_CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
-def _resolve_critic_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``.
-
-    Returns:
-        Path | None: The validated critic-agent root, or ``None`` when no
-            candidate contains ``runtime/cli.py``.
-    """
-    override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
-    if override:
-        p = Path(override).expanduser()
-        return p if (p / "runtime" / "cli.py").is_file() else None
-    from .paths import PACKAGE_ROOT
-
-    candidate = PACKAGE_ROOT.parent / "critic-agent"
-    return candidate if (candidate / "runtime" / "cli.py").is_file() else None
 
 
-def _validate_critic_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work.
-
-    Args:
-        root (Path): The critic-agent skill root to validate.
-
-    Raises:
-        SystemExit: With code 2 when the runtime cannot start or exits
-            non-zero.
-    """
-    cmd = [sys.executable, "-m", "runtime.cli", "--help"]
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"ERROR: critic-agent runtime sanity check failed: {exc!r}\n"
-            f"  cwd={root}\n"
-            f"  cmd={' '.join(cmd)}\n"
-            f"Either fix CRITIC_AGENT_ROOT, install critic-agent at "
-            f"$REPO_ROOT/critic-agent, or pass --critic-mock to bypass "
-            f"critic-agent.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if proc.returncode != 0:
-        print(
-            f"ERROR: critic-agent runtime.cli --help exited rc={proc.returncode}\n"
-            f"  cwd={root}\n"
-            f"  stderr={proc.stderr.strip()[:500]}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
 
-# Robustness-agent runtime location resolution; mirrors critic-agent helpers above.
-_ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 
-def _resolve_robustness_agent_root() -> Path | None:
-    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``.
-
-    Returns:
-        Path | None: The validated robustness-agent root, or ``None`` when no
-            candidate contains the expected ``runtime/cli.py`` module.
-    """
-    override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
-    if override:
-        p = Path(override).expanduser()
-        return p if (p / "src" / "robustness_agent" / "runtime" / "cli.py").is_file() else None
-    from .paths import PACKAGE_ROOT
-
-    candidate = PACKAGE_ROOT.parent / "robustness-agent"
-    cli_module = candidate / "src" / "robustness_agent" / "runtime" / "cli.py"
-    return candidate if cli_module.is_file() else None
 
 
-def _validate_robustness_agent_runtime(root: Path) -> None:
-    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work.
-
-    Runs the runtime's ``--help`` with ``cwd=root`` and ``PYTHONPATH`` extended
-    by ``<root>/src`` so the subprocess resolves the module the same way the
-    real backend will. Any launch failure or non-zero exit prints an
-    operator-facing message and aborts.
-
-    Args:
-        root (Path): The robustness-agent skill root to validate.
-
-    Raises:
-        SystemExit: With code 2 when the runtime cannot start or exits non-zero.
-    """
-    src = str(root / "src")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
-    cmd = [sys.executable, "-m", "robustness_agent.runtime.cli", "--help"]
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"ERROR: robustness-agent runtime sanity check failed: {exc!r}\n"
-            f"  cwd={root}\n"
-            f"  cmd={' '.join(cmd)}\n"
-            f"Either fix ROBUSTNESS_AGENT_ROOT, install robustness-agent at "
-            f"$REPO_ROOT/robustness-agent, or pass --robustness-mock to bypass.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if proc.returncode != 0:
-        print(
-            f"ERROR: robustness-agent runtime.cli --help exited rc={proc.returncode}\n"
-            f"  cwd={root}\n"
-            f"  stderr={proc.stderr.strip()[:500]}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
@@ -737,213 +649,20 @@ def _resume_safe_numeric(
     return default
 
 
-# Legacy local auth-proxy endpoint. The component was removed; any leftover
-# URL pinned at this host:port is stale and must be force-rewritten to the
-# upstream gateway even when an operator value is otherwise preserved (#521).
-_STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
 
 
-def _is_stale_proxy_url(url: str | None) -> bool:
-    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``).
-
-    Args:
-        url (str | None): The URL to test.
-
-    Returns:
-        bool: ``True`` when the URL pins the stale legacy proxy host:port.
-    """
-    return _STALE_PROXY_HOSTPORT in str(url or "")
 
 
-# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
-# written by kernel-agent/scripts/install.sh, but tolerant of any indent).
-_GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
 
 
-def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
-    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
-
-    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
-    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
-    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
-    host-local reverse tunnel) AFTER install, the env override alone is not
-    enough: the stale yaml still sends GEAK at the unreachable gateway and the
-    KERNEL_AGENT phase burns budget on connection-error retries. Syncing the yaml in
-    place closes that gap so the Kernel-agent actually dials the operator's
-    endpoint.
-
-    Best-effort: returns ``False`` (never raises) when the path is empty, the
-    file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
-    is already in sync. Returns ``True`` only when a rewrite was applied.
-
-    Args:
-        geak_config_path (str): Path to the GEAK litellm yaml config.
-        base_url (str): The endpoint to write into the ``base_url:`` line.
-
-    Returns:
-        bool: ``True`` when a rewrite was applied, ``False`` otherwise.
-    """
-    if not geak_config_path or not base_url:
-        return False
-    path = Path(geak_config_path)
-    try:
-        if not path.is_file():
-            return False
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    match = _GEAK_BASE_URL_RE.search(text)
-    if match is None:
-        return False
-    current = match.group(0)[len(match.group(1)) :].strip()
-    if current == base_url:
-        return False
-    # Use a function replacement so a URL containing regex backreference
-    # characters (e.g. ``\g``) cannot corrupt the rewrite.
-    new_text = _GEAK_BASE_URL_RE.sub(
-        lambda m: m.group(1) + base_url,
-        text,
-        count=1,
-    )
-    try:
-        path.write_text(new_text, encoding="utf-8")
-    except OSError:
-        return False
-    return True
 
 
-def _derive_anthropic_base_url(openai_base_url: str) -> str:
-    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it).
-
-    Args:
-        openai_base_url (str): The ``OPENAI_BASE_URL`` value.
-
-    Returns:
-        str: The derived Anthropic base URL with a trailing ``/v1`` removed.
-    """
-    from urllib.parse import urlparse, urlunparse
-
-    parsed = urlparse(openai_base_url)
-    path = parsed.path.rstrip("/")
-    if path.endswith("/v1"):
-        path = path[: -len("/v1")]
-    return urlunparse(parsed._replace(path=path))
 
 
-def _resolve_llm_endpoints() -> tuple[str, str]:
-    """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
-
-    Each side keeps an explicit operator value; a missing side falls back to
-    the other so the legacy single-gateway setup (only ``OPENAI_BASE_URL``)
-    keeps working and both Claude and Codex still reach an endpoint. Known
-    stale auth-proxy leftovers (127.0.0.1:4002) are treated as unset so they
-    are re-derived rather than preserved.
-    """
-    openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-    if _is_stale_proxy_url(openai_url):
-        openai_url = ""
-    if _is_stale_proxy_url(anthropic_url):
-        anthropic_url = ""
-
-    if anthropic_url and openai_url:
-        # Both explicitly configured: respect each as-is (true dual entry).
-        return anthropic_url, openai_url
-    if openai_url and not anthropic_url:
-        # Single OpenAI-style gateway: derive the Anthropic base from it.
-        return _derive_anthropic_base_url(openai_url), openai_url
-    if anthropic_url and not openai_url:
-        # Anthropic-only entry: let the OpenAI/Codex side reuse the same URL.
-        return anthropic_url, anthropic_url
-    return "", ""
 
 
-def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
-
-    Args:
-        primary_api_key (str): The Claude CLI primary API key to write; blank
-            leaves any existing key untouched. Callers should pass the
-            Anthropic-side key (explicit ANTHROPIC_API_KEY wins, SAFE_API_KEY
-            is the fallback) so a split-entrypoint deploy authenticates Claude
-            with its own key rather than the shared gateway key.
-        anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
-    """
-    import json as _json
-
-    if not anthropic_base_url:
-        return
-    claude_config_path = Path.home() / ".claude" / "config.json"
-    config_data: dict = {}
-    if claude_config_path.exists():
-        try:
-            config_data = _json.loads(claude_config_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            config_data = {}
-        current_url = config_data.get("customApiUrl", "")
-        if current_url == anthropic_base_url:
-            print("Preflight: ~/.claude/config.json already points at upstream")
-            return
-
-    config_data.setdefault("theme", "dark")
-    config_data.setdefault("hasCompletedOnboarding", True)
-    if primary_api_key:
-        config_data["primaryApiKey"] = primary_api_key
-    elif "primaryApiKey" not in config_data:
-        config_data["primaryApiKey"] = ""
-    config_data["customApiUrl"] = anthropic_base_url
-    claude_config_path.parent.mkdir(parents=True, exist_ok=True)
-    claude_config_path.write_text(
-        _json.dumps(config_data, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    claude_config_path.chmod(0o600)
-    print(f"Preflight: updated ~/.claude/config.json customApiUrl -> {anthropic_base_url}")
 
 
-def _validate_credentials() -> None:
-    """Fail fast when no usable LLM endpoint/key is configured.
-
-    Accepts either the legacy single-gateway pair (``SAFE_API_KEY`` +
-    ``OPENAI_BASE_URL``) or the split Anthropic/OpenAI entrypoints: at least
-    one base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``) and at least
-    one key (``SAFE_API_KEY`` / ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_AUTH_TOKEN``).
-    """
-    has_url = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL"))
-    has_key = bool(
-        os.environ.get("SAFE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    )
-    if has_url and has_key:
-        return
-
-    missing: list[str] = []
-    if not has_url:
-        missing.append("a base URL (OPENAI_BASE_URL or ANTHROPIC_BASE_URL)")
-    if not has_key:
-        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)")
-    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
-    env_file = Path(repo_root) / ".env"
-    env_status = "present" if env_file.exists() else "not found"
-    print(
-        "\nERROR: Missing required credential(s): "
-        f"{', '.join(missing)}\n\n"
-        "Tried loading from:\n"
-        "  - shell environment\n"
-        f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
-        "Configure ONE of:\n"
-        "  1. Single gateway (AMD / LiteLLM-style):\n"
-        "       export SAFE_API_KEY=sk-xxxxx\n"
-        "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
-        "  2. Split entrypoints (native Anthropic + OpenAI):\n"
-        "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"
-        "       export OPENAI_BASE_URL=https://api.openai.com/v1      OPENAI_API_KEY=sk-xxx",
-        file=sys.stderr,
-    )
-    sys.exit(2)
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
@@ -1534,7 +1253,6 @@ def _probe_llm_catalog(
         set[str] | None: The set of model ids from ``<base_url>/models``, or
             ``None`` when the probe is skipped or exhausts its retries.
     """
-    import time
 
     if not base_url:
         return None
@@ -2356,552 +2074,18 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
-def _gc_old_profile_traces(
-    root: str | None = None,
-    retention_days: int = 7,
-    keep: str | None = None,
-) -> None:
-    """Best-effort GC of stale per-RayJob profile-trace dirs older than ``retention_days`` (``keep`` name-guarded).
-
-    Never blocks startup (errors swallowed). Env knobs: HYPERLOOM_MN_TRACE_RETENTION_DAYS,
-    HYPERLOOM_MN_TRACE_GC_DISABLE.
-
-    Args:
-        root (str | None): The trace-root directory to scan; defaults to the
-            multi-node profile-trace root.
-        retention_days (int): Age threshold in days before a trace dir is
-            removed (env-overridable).
-        keep (str | None): A directory name to always preserve (name-matched).
-    """
-    if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        return
-    try:
-        retention_days = int(os.environ.get("HYPERLOOM_MN_TRACE_RETENTION_DAYS") or retention_days)
-    except ValueError:
-        retention_days = 7
-    base = Path(root) if root is not None else mn_profile_trace_root()
-    if not base.is_dir():
-        return
-    cutoff = time.time() - retention_days * 86400
-    keep_name = Path(keep).name if keep else ""
-    removed = 0
-    kept = 0
-    try:
-        for child in base.iterdir():
-            if not child.is_dir():
-                continue
-            if keep_name and child.name == keep_name:
-                kept += 1
-                continue
-            try:
-                mtime = child.stat().st_mtime
-            except OSError:
-                continue
-            if mtime >= cutoff:
-                kept += 1
-                continue
-            try:
-                shutil.rmtree(child)
-                removed += 1
-            except OSError as exc:
-                print(
-                    f"WARN multi-node GC: failed to rm {child}: {exc}",
-                    file=sys.stderr,
-                )
-    except OSError as exc:
-        print(f"WARN multi-node GC: scan failed under {base}: {exc}", file=sys.stderr)
-        return
-    if removed or kept:
-        print(f"multi-node: GC profile-traces removed={removed} kept={kept} retention={retention_days}d root={base}")
 
 
-def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``mn_backend``).
-
-    Returns:
-        str: The resolved multi-node backend (``rayjob`` or ``dynamo``).
-
-    Raises:
-        SystemExit: With code 2 when the resolved backend is invalid.
-    """
-    backend = (
-        (getattr(args, "mn_backend", None) or "").strip()
-        or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
-        or os.environ.get("MN_BACKEND", "").strip()
-        or "rayjob"
-    ).lower()
-    if backend not in ("rayjob", "dynamo"):
-        print(
-            f"ERROR: --mn-backend must be 'rayjob' or 'dynamo', got {backend!r}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return backend
 
 
-def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2`` and ``--mn-backend dynamo``, create an idle
-    DynamoDeployment and export the frontend service_url for benchmarks.
-
-    No Ray head / bootstrap / RAY_ADDRESS: the worker pods are idle (sshd),
-    and ``restart-server`` (routed by ``state.backend == 'dynamo'``) SSHes in
-    to launch ``dynamo.sglang``/``dynamo.vllm``. Benchmarks target the Dynamo
-    frontend (:8000) via ``state.service_url`` — picked up automatically by
-    ``_multi_node_env.benchmark_env_for_subprocess``.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``,
-            ``rayjob_image``, ``rayjob_gpus_per_node``, and PD flags).
-
-    Raises:
-        SystemExit: With code 2 when a required Dynamo image is not resolvable.
-    """
-    nodes = max(1, int(args.nodes))
-    from .multi_node.cli import cmd_create_dynamo, _load_state
-
-    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
-    image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
-    ).strip()
-    if not image and state_path.is_file():
-        try:
-            prior = json.loads(state_path.read_text(encoding="utf-8"))
-            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
-        except (OSError, json.JSONDecodeError, TypeError):
-            image = ""
-    if not image:
-        print(
-            "ERROR: --nodes >= 2 --mn-backend dynamo requires a Dynamo image "
-            "WITH the sshd layer (mn-idle.sh). Pass --rayjob-image <harbor/...> "
-            "or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    gpn = getattr(args, "rayjob_gpus_per_node", None)
-    if gpn is None:
-        try:
-            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
-        except ValueError:
-            gpn = 8
-
-    poll_timeout = int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110)
-    # Hyperloom patch (operator-local): forward --pd-* flags so the auto-created
-    # DGD honours the operator's PD topology AND so cmd_create_dynamo's reuse
-    # path classifies pods under the correct prefill/decode roles when writing
-    # /tmp/multi_node_state.json. Without these forwards the helper defaults
-    # pd_mode to 'aggregated' regardless of the optimize CLI, and downstream
-    # restart_server_for_round finds zero prefill/decode pods → no SSH launch →
-    # baseline gets 0 completed requests → baseline_failed after 3 attempts.
-    _pd_kv_backend = (getattr(args, "pd_transfer_backend", "") or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_DYNAMO_KV_BACKEND", "nixl"
-    )
-    ns_create = argparse.Namespace(
-        workspace=None,
-        image=image,
-        nodes=nodes,
-        gpus_per_node=int(gpn),
-        cpus_per_node=96,
-        mem_per_node=1024,
-        ephemeral_per_node=400,
-        shared_mem_per_node=200,
-        backend_framework=(getattr(args, "framework", None) or "sglang"),
-        kv_transfer_backend=_pd_kv_backend,
-        ssh_port=int(os.environ.get("MN_SSH_PORT", "2222") or 2222),
-        display_name=None,
-        description=None,
-        owner_id=None,
-        extra_env=list(getattr(args, "rayjob_extra_env", None) or []),
-        extra_label=[],
-        no_wait=False,
-        recreate=False,
-        poll_interval=6,
-        poll_timeout=poll_timeout,
-        # PD topology forward (missing in upstream; see comment above).
-        pd_mode=(getattr(args, "pd_mode", "") or "aggregated"),
-        pd_prefill_nodes=int(getattr(args, "pd_prefill_nodes", 0) or 0),
-        pd_decode_nodes=int(getattr(args, "pd_decode_nodes", 0) or 0),
-        pd_prefill_tp=int(getattr(args, "pd_prefill_tp", 0) or 0),
-        pd_decode_tp=int(getattr(args, "pd_decode_tp", 0) or 0),
-    )
-    rc = cmd_create_dynamo(ns_create)
-    if rc != 0:
-        sys.exit(rc)
-
-    state = _load_state()
-    su = str(state.get("service_url") or "").strip()
-    if su:
-        # Belt-and-suspenders: benchmark_env_for_subprocess also reads
-        # state.service_url, but exporting here makes the frontend URL
-        # visible to any early shell-level Magpie call too.
-        os.environ["BENCHMARK_BASE_URL"] = su
-        os.environ["MAGPIE_RUN_PHASE"] = "client"
-        print(f"multi-node(dynamo): BENCHMARK_BASE_URL={su} (frontend :8000)")
-
-    # Install GEAK on the GPU pods over SSH (one-time, idempotent) so the
-    # kernel-agent SSH placement finds `geak` on PATH. Skipped when the run
-    # opted out of the kernel phase. Best-effort: a failure here surfaces
-    # later as a clear pod-side "geak CLI not found" rather than aborting
-    # provisioning. Dynamo-only (the helper no-ops for other backends).
-    if not getattr(args, "no_kernel", False):
-        from .multi_node.cli import install_kernel_tools_on_pods_best_effort
-
-        install_kernel_tools_on_pods_best_effort()
 
 
-def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
-
-    For ``--mn-backend dynamo`` this delegates to
-    :func:`_provision_multi_node_dynamo_stack` (idle DynamoDeployment + SSH).
-
-    No-op when ``--nodes < 2``. The RayJob path resolves the container image
-    (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
-    one-time bootstrap if it hasn't run yet, exports ``RAY_ADDRESS`` for
-    kernel-agent Ray tasks, sets ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` to a
-    cluster-shared trace directory namespaced by ``rayjob_id`` (GC'ing older
-    sibling dirs), and replays previously-applied kernel patches onto the
-    (possibly fresh) pods.
-
-    Raises:
-        SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
-            configured, or with the create/bootstrap return code on failure.
-    """
-    nodes = max(1, int(args.nodes))
-    if nodes < 2:
-        return
-
-    if _resolve_mn_backend(args) == "dynamo":
-        _provision_multi_node_dynamo_stack(args)
-        return
-
-    from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
-    from .orchestrator.action_executors._multi_node_env import export_ray_address_to_os
-
-    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
-    image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
-    ).strip()
-    if not image and state_path.is_file():
-        try:
-            prior = json.loads(state_path.read_text(encoding="utf-8"))
-            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
-        except (OSError, json.JSONDecodeError, TypeError):
-            image = ""
-    if not image:
-        print(
-            "ERROR: --nodes >= 2 requires a RayJob container image. Pass "
-            "--rayjob-image <harbor/...> or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    gpn = getattr(args, "rayjob_gpus_per_node", None)
-    if gpn is None:
-        try:
-            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
-        except ValueError:
-            gpn = 8
-
-    # Forward agent-supplied prompt env verbatim; no-op on RayJob reuse (see multi_node/SKILL.md).
-    rayjob_extra_env = list(getattr(args, "rayjob_extra_env", None) or [])
-
-    ns_create = argparse.Namespace(
-        workspace=None,
-        image=image,
-        nodes=nodes,
-        gpus_per_node=int(gpn),
-        cpus_per_node=96,
-        mem_per_node=1024,
-        ephemeral_per_node=400,
-        display_name=None,
-        description=None,
-        owner_id=None,
-        extra_env=rayjob_extra_env,
-        extra_label=[],
-        no_wait=False,
-        recreate=False,
-        poll_interval=6,
-        poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110),
-    )
-    rc = cmd_create_rayjob(ns_create)
-    if rc != 0:
-        sys.exit(rc)
-
-    state = _load_state()
-    if not state.get("last_bootstrap_submission_id"):
-        ns_boot = argparse.Namespace(
-            script=None,
-            force=False,
-            print_logs=False,
-            poll_interval=6,
-            poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110),
-        )
-        rc_boot = cmd_bootstrap(ns_boot)
-        if rc_boot != 0:
-            sys.exit(rc_boot)
-
-    export_ray_address_to_os()
-    ra = os.environ.get("RAY_ADDRESS", "")
-    if ra:
-        print(f"multi-node: exported RAY_ADDRESS={ra} for kernel-agent Ray tasks")
-
-    # Multi-node: server pods must write torch traces to a sandbox-readable wekafs path, namespaced by rayjob_id.
-    state_after = _load_state()
-    rid = (state_after.get("rayjob_id") or "").strip()
-    if rid:
-        # Anchor torch-profile shared root on $USER_DATA_PATH so sandbox and RayJob pods see the same path.
-        trace_root_path = mn_profile_trace_root() / rid / "torch_trace"
-        trace_root = str(trace_root_path)
-        try:
-            trace_root_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            print(
-                f"WARN multi-node: cannot mkdir {trace_root}: {exc}; server traces will fall back to per-pod /tmp",
-                file=sys.stderr,
-            )
-        else:
-            os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = trace_root
-            print(f"multi-node: exported HYPERLOOM_MN_PROFILE_TRACE_DIR={trace_root}")
-            # Best-effort GC of older sibling RayJob trace dirs (active rayjob_id name-guarded).
-            _gc_old_profile_traces(keep=rid)
-
-    # RayJob recreate path: replay promoted patches from optimization_stack since fresh pods lost them.
-    # Best-effort; failures degrade to warnings (orchestrator re-runs kernel-agent on missing speedups).
-    _replay_kernel_patches_for_multi_node(args)
 
 
-def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
-    """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods.
-
-    Idempotent ``apply-patch`` fan-out, run only when ``--nodes>=2``. Best-effort: per-patch failures warn.
-
-    Args:
-        args: Parsed CLI arguments; reads ``nodes`` and resolves the session
-            workspace to locate applied-patch manifests.
-    """
-    nodes = max(1, int(getattr(args, "nodes", 1) or 1))
-    if nodes < 2:
-        return
-    session_dir = _session_dir_resolve()
-    workspace_root = session_dir / "kernel-agent-workspace"
-    if not workspace_root.is_dir():
-        return
-
-    manifests: list[Path] = sorted(workspace_root.rglob("manifest.json"))
-    if not manifests:
-        return
-
-    replayed = 0
-    skipped = 0
-    failed = 0
-    for mpath in manifests:
-        try:
-            data = json.loads(mpath.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(
-                f"WARN multi-node patch replay: skipping unreadable manifest {mpath}: {exc}",
-                file=sys.stderr,
-            )
-            skipped += 1
-            continue
-        if str(data.get("status", "")).lower() != "applied":
-            continue
-        mn = data.get("multinode") or {}
-        if not mn:
-            continue
-        target_file = data.get("target_file") or ""
-        patch_path = data.get("patch_path") or ""
-        kernel_id = data.get("kernel_id") or ""
-        backup_dir_on_pod = mn.get("backup_dir_on_pod") or "/var/kernel_patch_backups"
-        if not target_file or not patch_path:
-            skipped += 1
-            continue
-        if not Path(patch_path).is_file():
-            print(
-                f"WARN multi-node patch replay: source patch missing for "
-                f"{target_file} (manifest={mpath} patch_path={patch_path}); "
-                f"skipping",
-                file=sys.stderr,
-            )
-            skipped += 1
-            continue
-        cmd = [
-            sys.executable,
-            "-m",
-            "inference_optimizer.multi_node",
-            "apply-patch",
-            "--patch-file",
-            str(patch_path),
-            "--target-path",
-            str(target_file),
-            "--backup-dir",
-            str(backup_dir_on_pod),
-            "--kernel-id",
-            str(kernel_id),
-        ]
-        print(
-            f"multi-node patch replay: target={target_file} kernel_id={kernel_id!r} (from {mpath})",
-        )
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if proc.returncode != 0:
-            failed += 1
-            print(
-                f"WARN multi-node patch replay failed for {target_file} "
-                f"rc={proc.returncode} stderr={(proc.stderr or '')[-1000:]!r}",
-                file=sys.stderr,
-            )
-            continue
-        replayed += 1
-    if replayed or failed or skipped:
-        print(
-            f"multi-node patch replay: applied={replayed} "
-            f"skipped={skipped} failed={failed} "
-            f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
-        )
 
 
-def _quantization_enabled_via_env() -> bool:
-    """Return ``True`` iff the deterministic quantization master switch is on.
-
-    Quantization is gated on ``$HYPERLOOM_QUANTIZE_ENABLED`` (truthy = ``1`` /
-    ``true`` / ``yes`` / ``on``, case-insensitive). This makes the on/off
-    decision a deterministic, frontend-settable env flag rather than something
-    an LLM agent infers from natural language. Anything else — including unset —
-    disables quantization.
-
-    Returns:
-        ``True`` when the env var is set to a recognized truthy value.
-    """
-    return os.environ.get("HYPERLOOM_QUANTIZE_ENABLED", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
-async def _run_quantization_prelude(args: argparse.Namespace) -> None:
-    """Run the quantization-agent once before the optimization loop.
-
-    No-op unless ``--quantize "<prompt>"`` was passed. When set, this drives
-    AMD Quark PTQ from the prompt via the ``quantization_request_handlers``
-    adapter, then rewrites ``args.model`` (+ ``$MODEL_PATH``) to the exported
-    quantized model so every downstream phase (baseline / profile / sweep /
-    kernel) optimizes the quantized model instead of the source.
-
-    Contract:
-      * Skipped on ``--resume`` (a resumed session already has its model
-        pinned in the manifest; re-quantizing would diverge from it).
-      * On a failed/blocked quantization the process exits with code 3 —
-        we must not silently fall through and optimize the un-quantized
-        source model when the user explicitly asked for quantization.
-      * On a scheme/GPU mismatch (e.g. an MI355X-only scheme on an mi300x
-        target), the structured ``--quantize-scheme`` path reports the error
-        and *skips* quantization, then continues optimizing the un-quantized
-        model. The mismatch is a config error caught before any Quark work
-        runs, not a mid-run failure, so the run proceeds rather than aborting.
-        The skip is made **detectable** so a launcher / UI never mistakes the
-        run for quantized: a ``QUANTIZATION_SKIPPED:`` marker line on stdout
-        plus the ``$HYPERLOOM_QUANTIZATION_SKIPPED`` env var (set to the reason).
-
-    Args:
-        args: Parsed CLI arguments; reads ``quantize`` / ``quantize_scheme`` /
-            ``gpu_type`` / ``resume`` and rewrites ``args.model`` in place to
-            the exported quantized model path on success.
-    """
-    # Free-text --quantize wins; otherwise resolve the structured
-    # --quantize-scheme enum (the UI/backend path) to a prompt.
-    prompt = getattr(args, "quantize", None)
-    if not prompt:
-        from .orchestrator.quantization_schemes import (
-            SchemeNotSupportedError,
-            resolve_scheme_prompt,
-            validate_scheme,
-        )
-
-        scheme = getattr(args, "quantize_scheme", None)
-        # Constrain the scheme by the target GPU. The real GPU is probed later;
-        # use the --gpu-type / $GPU_TYPE hint here (empty => no enforcement).
-        gpu_hint = (getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")).strip().lower()
-        try:
-            validate_scheme(scheme, gpu_hint)
-        except SchemeNotSupportedError as exc:
-            # Pre-flight config error (caught before any Quark work): per the
-            # documented contract we SKIP quantization and continue on the
-            # un-quantized model rather than hard-stopping. Make the skip
-            # explicit + machine-detectable (stdout marker + env var) so a
-            # launcher / UI surfaces "requested quantization was skipped"
-            # instead of silently believing the run is quantized.
-            reason = str(exc)
-            os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
-            print(
-                f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
-                "un-quantized model. Pick a scheme supported by this GPU TYPE "
-                "(or change GPU_TYPE) to actually quantize."
-            )
-            print(f"ERROR: quantization skipped — {reason}", file=sys.stderr)
-            return
-        prompt = resolve_scheme_prompt(scheme)
-    if not prompt:
-        return
-    if getattr(args, "resume", False):
-        print("Quantization prelude: skipped (--resume); using model from manifest.")
-        return
-
-    # Deterministic master switch: quantization runs ONLY when
-    # $HYPERLOOM_QUANTIZE_ENABLED is explicitly truthy. This decouples the
-    # on/off decision from any agent's natural-language judgement — even if a
-    # --quantize / --quantize-scheme flag reached us (e.g. an in-sandbox agent
-    # added it from the prompt), we refuse to quantize unless the env switch is
-    # on. Absent / false => skip and continue on the un-quantized model, made
-    # detectable via the QUANTIZATION_SKIPPED marker + $HYPERLOOM_QUANTIZATION_SKIPPED.
-    if not _quantization_enabled_via_env():
-        reason = "HYPERLOOM_QUANTIZE_ENABLED is not set to a truthy value"
-        os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
-        print(
-            f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
-            "un-quantized model. Set HYPERLOOM_QUANTIZE_ENABLED=1 to quantize."
-        )
-        return
-
-    from .paths import workspace_root
-
-    source_model = str(args.model)
-    workspace = workspace_root() / "quantization" / Path(source_model).name
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    # Adapter lives in the orchestrator package; lazy-import so the CLI keeps
-    # importing cleanly even in environments without the quantization deps.
-    # _run_optimize already runs under asyncio.run, so await the async form
-    # directly (the sync wrapper would call asyncio.run inside a live loop).
-    from .orchestrator.quantization_request_handlers import (
-        run_quantization_prelude_async,
-    )
-
-    quantized_model_dir = await run_quantization_prelude_async(
-        prompt=prompt,
-        source_model=source_model,
-        workspace=workspace,
-    )
-
-    args.model = Path(quantized_model_dir)
-    os.environ["MODEL_PATH"] = str(quantized_model_dir)
-    # Preserve the SOURCE model identity for session naming / display. The export
-    # dir basename is always "quantized" (see quantization_request_handlers), so
-    # deriving the model name from args.model would collapse every quantized run
-    # to "quantized". Pin "<source>-quantized" so the session dir, SharedState,
-    # and manifest carry the real model name and quantized runs stay distinct.
-    args.model_display_name = f"{Path(source_model).name}-quantized"
-    print(f"Quantization prelude: model -> {quantized_model_dir}")
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
@@ -5507,133 +4691,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
-    """Inspect on-disk artifacts to judge whether a session finished cleanly.
-
-    Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
-    Returns flags used by :func:`_run_recover_session` to decide whether the
-    session still needs a (re)build + Langfuse push.
-
-    Args:
-        session_dir (Path): The session directory to inspect.
-
-    Returns:
-        dict[str, Any]: A status mapping with ``close_done``,
-            ``breakdown_exists``, ``breakdown_recorded``, ``counts_final``,
-            and ``looks_complete`` flags.
-    """
-    import json
-
-    from .breakdown import BREAKDOWN_FILENAME
-
-    state_path = session_dir / "state.json"
-    close_done = False
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            close_done = bool((state or {}).get("close_sequence_done"))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
-
-    from .orchestrator.trace.langfuse_emitter import read_receipt
-
-    receipt = read_receipt(session_dir) or {}
-    counts = receipt.get("counts") or {}
-    breakdown_recorded = bool(counts.get("breakdown_recorded"))
-    counts_final = bool(receipt.get("counts_final"))
-
-    return {
-        "close_done": close_done,
-        "breakdown_exists": breakdown_exists,
-        "breakdown_recorded": breakdown_recorded,
-        "counts_final": counts_final,
-        "looks_complete": close_done and breakdown_recorded,
-    }
 
 
-def _run_recover_session(args: argparse.Namespace) -> int:
-    """Offline recovery for a session that exited abnormally.
-
-    Rebuilds ``session_breakdown.json`` from the crash-time recorder fragments
-    (the merge step), reconciles + flushes Langfuse, splices the post-flush
-    receipt into the breakdown, and attaches the full breakdown JSON to the
-    session's trace. Idempotent across processes (guarded by the persisted
-    Langfuse receipt), so re-running is safe.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``session_dir``, ``force``, and ``backfill_trace``).
-
-    Returns:
-        int: The process exit code (``0`` on success, ``2`` when the session
-            dir is missing, ``1`` on breakdown rebuild failure).
-    """
-    session_dir = args.session_dir.resolve()
-    if not session_dir.is_dir():
-        print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)
-        return 2
-
-    status = _session_recovery_status(session_dir)
-    print(
-        f"recover-session   : {session_dir}\n"
-        f"  close_sequence_done={status['close_done']} "
-        f"breakdown_exists={status['breakdown_exists']} "
-        f"breakdown_recorded={status['breakdown_recorded']} "
-        f"counts_final={status['counts_final']}"
-    )
-    if status["looks_complete"] and not args.force:
-        print("  -> already complete (breakdown built and recorded to Langfuse); pass --force to rebuild anyway.")
-        return 0
-
-    # 1) Rebuild/merge the breakdown from whatever fragments survived the crash.
-    try:
-        from .breakdown import write_breakdown_json
-
-        breakdown_path = write_breakdown_json(session_dir)
-        print(f"  rebuilt breakdown : {breakdown_path}")
-    except Exception:  # noqa: BLE001
-        log.exception("recover-session: breakdown rebuild failed")
-        return 1
-
-    # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
-    try:
-        from .breakdown import patch_breakdown_langfuse
-        from .orchestrator.trace.langfuse_emitter import (
-            flush_session,
-            record_session_breakdown,
-        )
-
-        flush_session(session_dir)
-        patch_breakdown_langfuse(session_dir)
-        record_session_breakdown(session_dir)
-        print("  langfuse          : flushed + breakdown attached")
-    except Exception:  # noqa: BLE001
-        log.exception("recover-session: langfuse push failed (non-fatal)")
-
-    # 3) Optional full generation replay (off by default; duplicates if the
-    #    live emitter already ran for this session).
-    if args.backfill_trace:
-        try:
-            from .scripts.backfill_langfuse import build_plan, ingest
-
-            rc = ingest(build_plan(session_dir))
-            print(f"  trace backfill    : rc={rc}")
-        except Exception:  # noqa: BLE001
-            log.exception("recover-session: trace backfill failed (non-fatal)")
-
-    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
-    try:
-        from .breakdown import package_session_artifacts
-
-        pkg_path = package_session_artifacts(session_dir)
-        if pkg_path is not None:
-            print(f"  artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
-        log.exception("recover-session: artifact package failed (non-fatal)")
-
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
