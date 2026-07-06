@@ -16,10 +16,17 @@ import json
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+# Sibling import works whether run as a script or loaded via importlib.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import safe_float  # noqa: E402
+
+sys.path.pop(0)
 
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
@@ -700,23 +707,8 @@ async def run_tracelens_skill(
     )
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Coerce a value to float, falling back to a default on failure.
-
-    Args:
-        value (Any): The value to coerce.
-        default (float): The value returned when ``value`` is ``None`` or not
-            convertible.
-
-    Returns:
-        float: The parsed float, or ``default`` on ``None`` / parse failure.
-    """
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+# Shared numeric coercion (see _io_utils.safe_float).
+_safe_float = safe_float
 
 
 # analysis.md parser (TraceLens final-report contract; PR #155): reads p_item markers + compute-tier reasoning blocks with a 9-column **Data:** table. Sole reader of candidate data.
