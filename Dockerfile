@@ -61,12 +61,28 @@ RUN apt-get update \
 # --- §1: Clone Hyperloom (feat/vl-model-support) for build-time dep install ---
 # The working tree is NOT kept in the image; it is mounted at runtime via
 # -v $PWD:/workspace/Hyperloom. The clone here is used only to drive
-# install.sh so deps (Magpie, InferenceX, TraceLens, Ray, bench libs) are
-# baked into the image.
+# install.sh so ALL deps (Magpie, InferenceX, inference_optimizer, plus the
+# kernel-agent stack: Ray, TraceLens, GEAK code) are baked into the image.
+# The GEAK RAG index is the one thing NOT baked (needs the GPU; see below) —
+# it builds on first container start. framework-agent (the `fa` CLI) is still
+# skipped — it is only needed for the FRAMEWORK_PR phase and pulls extra deps.
 #
 # install.sh requires SAFE_API_KEY + OPENAI_BASE_URL to pass its credential
 # preflight. The heavy work (git clone + pip install) never calls the gateway,
 # so dummy values are safe here. Real keys must be supplied at runtime via -e.
+#
+# Build-time gotchas handled here:
+#   * KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 — GEAK is AMD/ROCm-native and its
+#     semantic RAG index builds in ~1 min on an AMD GPU (torch "cuda" == HIP on
+#     ROCm). But `docker build` never attaches the GPU (/dev/kfd + /dev/dri; no
+#     --gpus flag, runc runtime), so at build time the only options are a crash
+#     (cuda with no device node) or a ~1.5h CPU embedding run. We therefore bake
+#     GEAK's CODE (clone + pip) here and DEFER the index build to first container
+#     start, where the GPU IS attached and the index builds fast. install.sh /
+#     the CLI preflight builds it on first run.
+#   * ray start is fail-soft during build (no live head persists across layers);
+#     the ray head is (re)started at container runtime by install.sh / the CLI
+#     preflight.
 RUN --mount=type=ssh \
     mkdir -p -m 0700 ~/.ssh \
     && ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts \
@@ -78,8 +94,8 @@ RUN --mount=type=ssh \
        SAFE_API_KEY=build \
        OPENAI_BASE_URL=https://invalid.local/v1 \
        USER_DATA_PATH=/workspace/hyperloom \
+       KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 \
        bash /opt/hyperloom-build/inference_optimizer/scripts/install.sh \
-           --skip-kernel-agent \
            --skip-framework-agent \
     && python3 -m pip install --quiet --break-system-packages \
            /opt/hyperloom-build[test] \

@@ -71,21 +71,26 @@ without rebuilding the image.
 
 ## Bootstrap (first start)
 
-The image bakes Magpie, InferenceX, and bench deps, but kernel-agent (Ray,
-TraceLens, GEAK) was skipped at build time because it requires GPU access.
-Run the full installer once inside the container:
+The image bakes the full stack — Magpie, InferenceX, bench deps, and the
+kernel-agent stack (Ray, TraceLens, GEAK code + rag-mcp). The only pieces that
+cannot bake at build time are the GEAK **RAG index** and a live Ray head, both
+of which need the GPU (`docker build` has no GPU access; GEAK is ROCm-native and
+uses the AMD GPU via HIP at runtime). Re-run the installer once inside the
+container to build the index (~1 min on GPU) and start Ray:
 
 ```bash
 docker exec -it hyperloom-vl-vllm-local-$USER bash
 
-# Inside the container:
+# Inside the container — near-instant except the GPU RAG index build (~1 min):
 bash inference_optimizer/scripts/install.sh
 source /workspace/hyperloom/runtime/kernel-agent.env.sh
 ```
 
 This is only needed once per container lifetime. The runtime env file
-(`kernel-agent.env.sh`) is written to `USER_DATA_PATH/runtime/` and
-persists across restarts as long as the volume is not removed.
+(`kernel-agent.env.sh`) is baked into the image and also written to
+`USER_DATA_PATH/runtime/`. The CLI preflight auto-builds the index and starts
+Ray on first `inference_optimizer optimize`, so this step is optional if you go
+straight to a benchmark.
 
 ---
 
@@ -153,21 +158,25 @@ docker run --rm --entrypoint bash hyperloom-vl-vllm-local-$USER -c \
 
 ## What is baked vs. runtime
 
-| Component | Baked at build | Installed at runtime |
-|-----------|:--------------:|:--------------------:|
+| Component | Baked at build | First-start (needs GPU) |
+|-----------|:--------------:|:-----------------------:|
 | Magpie (from `MAGPIE_REF`) | ✓ | |
 | InferenceX | ✓ | |
 | `inference_optimizer` package | ✓ | |
 | `rocprof-compute` | ✓ | |
 | bench serving deps (aiohttp, transformers …) | ✓ | |
 | Claude Code CLI | ✓ | |
-| Ray (head node) | | ✓ |
-| TraceLens | | ✓ |
-| GEAK + RAG semantic index | | ✓ |
-| `kernel-agent.env.sh` | | ✓ |
+| Ray (package) | ✓ | |
+| TraceLens | ✓ | |
+| GEAK code + rag-mcp | ✓ | |
+| `kernel-agent.env.sh` | ✓ | |
+| GEAK RAG index | | ✓ |
+| Ray head (started) | | ✓ |
+| framework-agent (`fa` CLI) | | optional |
 
-Runtime installation is handled by `inference_optimizer/scripts/install.sh`
-(see [Bootstrap](#bootstrap-first-start) above).
+The GPU-dependent first-start steps (RAG index build, Ray head) are handled by
+`inference_optimizer/scripts/install.sh` or the CLI preflight (see
+[Bootstrap](#bootstrap-first-start) above).
 
 ---
 

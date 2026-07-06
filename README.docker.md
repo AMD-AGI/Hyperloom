@@ -1,9 +1,14 @@
 # Hyperloom vLLM Docker — Quick Start
 
 Hyperloom local-mode image on the vLLM ROCm base for **multimodal (VL)
-benchmarking** on MI355X.  Magpie, InferenceX, `inference_optimizer`, and
-`rocprof-compute` are baked in.  Your working checkout is mounted at runtime —
+benchmarking** on MI355X.  The full stack — Magpie, InferenceX,
+`inference_optimizer`, `rocprof-compute`, plus the kernel-agent stack (Ray,
+TraceLens, GEAK) — is baked in.  Your working checkout is mounted at runtime —
 no rebuild needed when you edit the branch.
+
+> The one thing NOT baked is GEAK's semantic RAG index: it needs the GPU, and
+> `docker build` has no GPU access. It builds automatically on first container
+> start (~1 min on an AMD GPU).
 
 ---
 
@@ -60,15 +65,22 @@ container (session dirs, result JSONs, runtime env files) are owned by you, not 
 
 ## 3 — Bootstrap (once per container)
 
-Ray, TraceLens, and GEAK need GPU access, so they are installed at runtime:
+The whole dependency stack (Ray, TraceLens, GEAK) is already baked in. The only
+first-run step is building GEAK's RAG index (needs the GPU) and starting the Ray
+head — both handled by re-running `install.sh`, which is now near-instant since
+everything else is already installed:
 
 ```bash
 docker exec -it hyperloom-vl-vllm-local-$USER bash
 
-# Inside the container — takes ~3 min on first run
+# Inside the container — builds the GEAK RAG index (~1 min on GPU) + starts Ray
 bash inference_optimizer/scripts/install.sh
 source /workspace/hyperloom/runtime/kernel-agent.env.sh
 ```
+
+> The CLI preflight also auto-builds the index and starts Ray on first
+> `inference_optimizer optimize`, so this step is optional if you go straight
+> to a benchmark.
 
 ---
 
@@ -144,17 +156,20 @@ docker run --rm --entrypoint bash hyperloom-vl-vllm-local-$USER -c \
 
 ## What is baked vs. runtime
 
-| Component | Baked | Runtime (`install.sh`) |
-|-----------|:-----:|:----------------------:|
+| Component | Baked | Runtime (first start) |
+|-----------|:-----:|:---------------------:|
 | Magpie | ✓ | |
 | InferenceX | ✓ | |
 | `inference_optimizer` | ✓ | |
 | `rocprof-compute` | ✓ | |
 | Claude Code CLI | ✓ | |
-| Ray + ray head | | ✓ |
-| TraceLens | | ✓ |
-| GEAK + RAG index | | ✓ |
-| `kernel-agent.env.sh` | | ✓ |
+| Ray (package) | ✓ | |
+| TraceLens | ✓ | |
+| GEAK code + rag-mcp | ✓ | |
+| `kernel-agent.env.sh` | ✓ | |
+| GEAK RAG index | | ✓ (needs GPU) |
+| Ray head (started) | | ✓ |
+| framework-agent (`fa`) | | optional |
 
 For the full env reference see [`docs/ENV_AND_AUTH.md`](docs/ENV_AND_AUTH.md).
 For the full VL benchmark details see [`docs/VLLM_DOCKER.md`](docs/VLLM_DOCKER.md).
