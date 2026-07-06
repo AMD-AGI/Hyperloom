@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
-"""Workload-level (end-to-end) roofline for diffusion / scriptable traces.
+"""Workload-level roofline for diffusion/scriptable traces.
 
-TraceLens' ``generate_perf_report_pytorch`` produces a *per-kernel* roofline
-(each op vs its dtype ceiling). For LLM decode, hyperloom also models a
-*workload-level* memory-bandwidth roofline (``roofline_ceiling.py``). Diffusion
-is the compute-bound dual of that: the DiT forward runs once per denoise step,
-dominated by large batched GEMMs + attention.
-
-This tool aggregates the per-kernel report into a single workload roofline:
-
-    - kernel roofline efficiency = Sigma(ideal kernel time) / Sigma(actual kernel time)
-    - gpu busy ratio             = busy_time / wall_time            (from gpu_timeline)
-    - end-to-end efficiency      ~ kernel_eff * gpu_busy_ratio
-    - per denoise-step timings   = totals / num_denoise_steps       (when provided)
-
-The two efficiency gaps it surfaces are complementary:
-  1. scheduling gap  (gpu_busy_ratio < 1): GPU idle / exposed comm / launch gaps.
-  2. kernel gap      (kernel_eff  < 1):    kernels below their roofline ceiling.
-
-Input is the ``--output_csvs_dir`` produced by generate_perf_report_pytorch
-(``unified_perf_summary.csv`` + optional ``gpu_timeline.csv``), so the workload
-roofline stays numerically consistent with the per-kernel roofline.
+Aggregates per-kernel roofline CSVs into kernel-efficiency and GPU-busy gaps.
 """
 
 from __future__ import annotations
