@@ -22,7 +22,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Published registry image. Override with IMAGE=... env or --image flag.
 IMAGE="${IMAGE:-amdsiloai/vllm-private:mlperf6.1-q3vl-r72-w4a4-fusemoe-20260620-hyperloom}"
-CONTAINER="hyperloom-vl-vllm-local-${USER}"
+# Sanitize $USER for the container name: docker only allows [a-zA-Z0-9_.-], so
+# accounts like "vassavas@amd.com" must have @/. and other chars mapped to '-'.
+_USER_SAFE="$(printf '%s' "${USER}" | tr -c 'a-zA-Z0-9_.-' '-')"
+CONTAINER="hyperloom-vl-vllm-local-${_USER_SAFE}"
 EXTRA_MOUNTS=()   # populated by --mount flags
 FORCE_BUILD=0     # set by --build to force a local rebuild
 # Auto-detect AMD API port from ANTHROPIC_BASE_URL on the host (e.g. http://127.0.0.1:41829/Anthropic).
