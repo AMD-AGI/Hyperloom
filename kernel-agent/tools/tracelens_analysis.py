@@ -4141,7 +4141,8 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
             if (row.get("type") or "").strip().lower() == "idle_time":
                 return float(row.get("percent", 0))
     except ValueError:
-        pass
+        # malformed CSV numeric field; treat as absent
+        return None
     return None
 
 
@@ -4161,7 +4162,8 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
             if (row.get("type") or "").strip().lower() == "total_time":
                 return float(row.get("time ms", 0)) * 1000.0
     except ValueError:
-        pass
+        # malformed CSV numeric field; treat as absent
+        return None
     return None
 
 
