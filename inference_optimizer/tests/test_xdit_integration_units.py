@@ -446,6 +446,63 @@ class TestRooflineSnapshotUnits:
         assert snap["within_roofline_pct"] == 75.0
 
 
+class TestScriptableLatencyRooflineSidecar:
+    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when
+    ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only
+    ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
+
+    def _make_state(self, tmp_path):
+        from inference_optimizer.orchestrator.shared_state import SharedState
+
+        return SharedState.load_or_init(tmp_path)
+
+    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0, analytic_us=None):
+        run_dir = session_dir / "kernel-agent" / "runs" / "20260705T193725Z" / "20260705T200313Z_tl-abc"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        payload = {"totals": {"sigma_ideal_roofline_us": sigma_ideal_us}}
+        if analytic_us is not None:
+            payload["analytic_dit_ceiling"] = {"ideal_compute_us": analytic_us}
+        sidecar = run_dir / "diffusion_roofline.json"
+        sidecar.write_text(json.dumps(payload), encoding="utf-8")
+        return sidecar
+
+    def test_empty_kernel_roofline_path_falls_back_to_session_dir(self, tmp_path):
+        state = self._make_state(tmp_path)
+        self._write_sidecar(tmp_path)
+        # kernel_roofline_path empty (the diffusion case) must still resolve.
+        e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
+        assert e2e_ms == pytest.approx(1350.0, abs=1.0)
+        assert ideal_ms == pytest.approx(611.192, abs=0.01)
+
+    def test_analytic_ceiling_preferred_over_totals(self, tmp_path):
+        state = self._make_state(tmp_path)
+        self._write_sidecar(tmp_path, sigma_ideal_us=611192.0, analytic_us=644000.0)
+        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
+        assert ideal_ms == pytest.approx(644.0, abs=0.01)
+
+    def test_missing_sidecar_yields_zero_ideal(self, tmp_path):
+        state = self._make_state(tmp_path)
+        e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
+        assert e2e_ms > 0
+        assert ideal_ms == 0.0
+
+    def test_serving_framework_is_noop(self, tmp_path):
+        state = self._make_state(tmp_path)
+        self._write_sidecar(tmp_path)
+        assert state._scriptable_latency_roofline("vllm", 100.0, "") == (0.0, 0.0)
+
+    def test_explicit_kernel_roofline_path_still_resolves(self, tmp_path):
+        state = self._make_state(tmp_path)
+        run_dir = tmp_path / "kernel-agent" / "runs" / "ts" / "ts_tl-xyz"
+        (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (run_dir / "diffusion_roofline.json").write_text(
+            json.dumps({"totals": {"sigma_ideal_roofline_us": 500000.0}}), encoding="utf-8"
+        )
+        krp = str(run_dir / "reports" / "kernel_roofline.json")
+        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, krp)
+        assert ideal_ms == pytest.approx(500.0, abs=0.01)
+
+
 class TestHyperloomArchSpec:
     """A3: TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
 

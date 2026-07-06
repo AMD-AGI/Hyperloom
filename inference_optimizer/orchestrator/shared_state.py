@@ -1854,6 +1854,44 @@ class SharedState:
         """
         return _first_positive_tput(self.current_best)
 
+    def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
+        """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.
+
+        The sidecar sits at the TraceLens run-dir root
+        (``<session>/kernel-agent/runs/<ts>/<ts>_tl-*/diffusion_roofline.json``).
+        Diffusion/xDiT trace_analyze emits ONLY this sidecar (no
+        ``kernel_roofline.json``), so ``kernel_roofline_path`` is empty and the
+        run-dir cannot be derived from it. Resolve, in order:
+
+          1. ``kernel_roofline_path`` run-dir root (serving/kernel path, when set).
+          2. Newest sidecar under ``<session>/kernel-agent/runs`` (diffusion path).
+
+        Args:
+            kernel_roofline_path: Path to ``reports/kernel_roofline.json`` when
+                present; empty for diffusion sessions.
+
+        Returns:
+            The resolved sidecar path, or ``None`` when none is found.
+        """
+        krp = str(kernel_roofline_path or "").strip()
+        if krp:
+            cand = Path(krp).parent.parent / "diffusion_roofline.json"
+            if cand.is_file():
+                return cand
+        session_dir = getattr(self, "_session_dir", None)
+        if session_dir:
+            try:
+                sidecars = [
+                    p
+                    for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json")
+                    if p.is_file()
+                ]
+                if sidecars:
+                    return max(sidecars, key=lambda p: p.stat().st_mtime)
+            except OSError:
+                return None
+        return None
+
     def _scriptable_latency_roofline(
         self, framework: str, achieved_tput: float, kernel_roofline_path: Any
     ) -> tuple[float, float]:
@@ -1884,12 +1922,11 @@ class SharedState:
             e2e_mean_ms = float(
                 framework_registry.primary_metric_value(framework, achieved_tput) or 0.0
             )
-            # Ideal per-image latency floor from the diffusion roofline sidecar
-            # (run_dir/diffusion_roofline.json; kernel_roofline is run_dir/reports/).
+            # Ideal per-image latency floor from the diffusion roofline sidecar.
             roofline_ideal_ms = 0.0
-            try:
-                sidecar = Path(str(kernel_roofline_path)).parent.parent / "diffusion_roofline.json"
-                if sidecar.is_file():
+            sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
+            if sidecar is not None:
+                try:
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
                     analytic = data.get("analytic_dit_ceiling") if isinstance(data, dict) else None
                     totals = data.get("totals") if isinstance(data, dict) else None
@@ -1897,8 +1934,8 @@ class SharedState:
                         roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
                     elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
                         roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                roofline_ideal_ms = 0.0
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    roofline_ideal_ms = 0.0
             return e2e_mean_ms, roofline_ideal_ms
         except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
             return 0.0, 0.0
