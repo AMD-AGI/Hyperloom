@@ -36,14 +36,7 @@ SATURATION_PCT = 60.0
 
 
 def _safe_float(value: str) -> float | None:
-    """Parse a string to float, returning ``None`` on failure.
-
-    Args:
-        value: String to convert.
-
-    Returns:
-        The parsed float, or ``None`` when ``value`` is not numeric.
-    """
+    """Parse a string to float, returning ``None`` on failure."""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -51,14 +44,7 @@ def _safe_float(value: str) -> float | None:
 
 
 def _bound_type(bound: str) -> str:
-    """Classify a roofline bound description into a short category.
-
-    Args:
-        bound: Free-form bound text (e.g. ``"memory-bound ..."``).
-
-    Returns:
-        One of ``"memory"``, ``"compute"``, ``"latency"``, or ``"unknown"``.
-    """
+    """Classify a roofline bound description into a short category."""
     lower = (bound or "").lower()
     if lower.startswith("memory-bound"):
         return "memory"
@@ -70,14 +56,7 @@ def _bound_type(bound: str) -> str:
 
 
 def _resolve_rocprof_compute() -> str | None:
-    """Locate the ``rocprof-compute`` executable.
-
-    Checks the ``HYPERLOOM_ROCPROF_COMPUTE_PATH`` / ``ROCPROF_COMPUTE_PATH``
-    environment variables, then ``PATH``, then the default ROCm install path.
-
-    Returns:
-        The resolved executable path, or ``None`` when not found.
-    """
+    """Locate the ``rocprof-compute`` executable."""
     configured = (
         os.environ.get("HYPERLOOM_ROCPROF_COMPUTE_PATH", "").strip()
         or os.environ.get("ROCPROF_COMPUTE_PATH", "").strip()
