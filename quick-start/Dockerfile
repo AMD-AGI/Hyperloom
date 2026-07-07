@@ -16,15 +16,14 @@ RUN --mount=type=ssh mkdir -p -m 700 /root/.ssh \
 RUN --mount=type=ssh export KERNEL_FORGE_REPO="git@github.com:AMD-AGI/KernelForge.git" && \
     bash /opt/Hyperloom/inference_optimizer/scripts/local_setup.sh --deps-root /opt --session-dir /workspace/hyperloom
 
-RUN cp /opt/Hyperloom/.env.template /opt/Hyperloom/.env
-
 COPY *.sh /workspace/hyperloom/
 RUN chmod +x /workspace/hyperloom/*.sh
 
+RUN cp /opt/Hyperloom/.env.template /opt/Hyperloom/.env
 
-ARG HYPERLOOM_REFRESH=0
-#tmp patch
-RUN --mount=type=ssh cd /opt/Hyperloom && git pull && git checkout feature/percy/quick-start && git log -2
+RUN mkdir -p /workspace/hyperloom/logs && \
+SKIP_RAY_START=1 KERNEL_AGENT_SKIP_MODEL_LOAD=1 bash -o pipefail -c  "/opt/Hyperloom/inference_optimizer/scripts/install.sh 2>&1 | tee /workspace/hyperloom/logs/pre-install.log"
 
+WORKDIR /opt/Hyperloom
 ENTRYPOINT ["/workspace/hyperloom/setup_env.sh"]
 
