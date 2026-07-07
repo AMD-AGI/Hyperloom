@@ -20,12 +20,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from inference_optimizer.protocol.intent import (
+from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from inference_optimizer.session_paths import allocate_turn_workdir
+from hyperloom.inference_optimizer.session_paths import allocate_turn_workdir
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 from .base import BackendError, BackendTurnResult
 
@@ -243,7 +243,7 @@ class RobustnessAgentBackend:
         # Record the robustness signal before stale workdirs are pruned
         # (folded into the critic_robustness breakdown).
         try:
-            from inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             instrument.record_robustness_signal(
                 self.session_dir,

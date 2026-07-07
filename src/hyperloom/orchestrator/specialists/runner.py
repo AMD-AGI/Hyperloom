@@ -24,10 +24,10 @@ from typing import Any
 
 from hyperloom.common import io as _common_io
 
-from inference_optimizer.session_paths import runs_dir, specialist_intel_path
+from hyperloom.inference_optimizer.session_paths import runs_dir, specialist_intel_path
 from .._time import now_iso
 from ..roles.base import BackendError
-from inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .domains import (

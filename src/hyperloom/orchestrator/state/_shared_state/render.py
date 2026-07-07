@@ -121,7 +121,7 @@ class _RenderMixin:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
-        from inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
         lines = [
             f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
@@ -148,7 +148,7 @@ class _RenderMixin:
         """
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
-        from inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
         cb_tput = self.current_best.get("tput")
         perf = (
@@ -807,7 +807,7 @@ class _RenderMixin:
 
     @staticmethod
     def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only; on-disk file intact). Delegates to ``inference_optimizer.tracelens_md``.
+        """Drop base64 image payloads before prompt injection (in-memory only; on-disk file intact). Delegates to ``hyperloom.inference_optimizer.tracelens_md``.
 
         Args:
             text (str): The markdown text to scrub of base64 data URLs.
@@ -818,7 +818,7 @@ class _RenderMixin:
         """
         if not text:
             return text or ""
-        from inference_optimizer.tracelens_md import strip_base64_data_urls
+        from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 
         return strip_base64_data_urls(text)
 

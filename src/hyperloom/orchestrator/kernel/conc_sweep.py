@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from inference_optimizer.session_paths import reports_dir, runs_root
+from hyperloom.inference_optimizer.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
@@ -487,7 +487,7 @@ async def run_conc_sweep(
     # canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then
     # canonicalize through _gpu_runner_type so the selected Magpie script is a
     # shipped runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    from inference_optimizer.cli_model_gate import _gpu_runner_type
+    from hyperloom.inference_optimizer.cli_model_gate import _gpu_runner_type
 
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower()
@@ -627,7 +627,7 @@ async def run_conc_sweep(
         _write_csv(csv_path, baseline_points + optimized_points)
         # Author-time breakdown capture: mirror the summary into the recorder.
         try:
-            from inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             instrument.record_singleton_section(
                 session_dir,

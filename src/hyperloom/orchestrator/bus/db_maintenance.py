@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .cursor_store import CursorStore
-from inference_optimizer.storage.connection import SqliteConnection
+from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 
 
 # Keep at least this many most-recent events regardless of cursor watermark, so

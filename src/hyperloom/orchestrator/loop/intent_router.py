@@ -26,7 +26,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import format_exc_brief, serialize_verdict_advisory
 from ..bus.message_bus import Message
 from ..policy.gate import PolicyDenied

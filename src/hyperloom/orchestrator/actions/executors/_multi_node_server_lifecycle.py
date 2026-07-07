@@ -390,7 +390,7 @@ async def restart_server_for_round(
         _tracelens_patch_enabled_fn = _tracelens_patch_enabled
     if _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
         try:
-            from inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
+            from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
             patch_ns = argparse.Namespace(
                 tracelens_root=os.environ.get("TRACELENS_ROOT", "").strip(),
@@ -426,7 +426,7 @@ async def restart_server_for_round(
 
     try:
         # Local import to keep httpx out of the single-node import path.
-        from inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
+        from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
 
         poll_timeout_s = int(
             os.environ.get(

@@ -13,7 +13,7 @@ import math
 import os
 from typing import Any
 
-from inference_optimizer.protocol.action_surfaces import (
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     KERNEL_AGENT_OWNED_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,

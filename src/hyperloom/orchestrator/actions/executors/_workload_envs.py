@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 
-from inference_optimizer.paths import asset_root
+from hyperloom.inference_optimizer.paths import asset_root
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -42,7 +42,7 @@ from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
-from inference_optimizer.model_config_utils import (
+from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
     _model_is_gemma2,
@@ -350,7 +350,7 @@ def materialize_config_with_envs(
     # custom/non-prefixed scripts are not falsely rejected.
     _script = str(bench.get("benchmark_script") or "").lower()
     _fw = str(bench.get("framework") or "").lower()
-    from inference_optimizer import framework_registry
+    from hyperloom.inference_optimizer import framework_registry
 
     _known_fw = framework_registry.names()
     if _script and _fw in _known_fw:
@@ -450,7 +450,7 @@ def materialize_config_with_envs(
     # OSL/steady-floor math below are all serving concepts xDiT never consumes.
     # Its profiler window is defined by the xDiT bench yaml + the _xdit_patcher
     # (repeat=1); injecting the LLM window here is inert-to-harmful, so skip it.
-    from inference_optimizer import framework_registry as _fw_reg
+    from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
     profile_num_prompts: int | None = None
@@ -1032,7 +1032,7 @@ def materialize_config_with_envs(
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
     # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
     # an operator-set value (YAML / extra_envs) always wins.
-    from inference_optimizer.cli import _resolve_amd_gpu_type
+    from hyperloom.inference_optimizer.cli import _resolve_amd_gpu_type
 
     _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
     if (

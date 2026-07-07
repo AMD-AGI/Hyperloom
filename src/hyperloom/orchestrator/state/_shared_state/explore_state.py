@@ -84,7 +84,7 @@ class _ExploreStateMixin:
         self._trim_specialist_rounds()
         # Author-time breakdown capture: one specialist_runs item per round.
         try:
-            from inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             instrument.record_specialist_round(
                 getattr(self, "_session_dir", None),

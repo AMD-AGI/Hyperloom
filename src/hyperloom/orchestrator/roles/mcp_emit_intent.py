@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from inference_optimizer.protocol.intent import (
+from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]

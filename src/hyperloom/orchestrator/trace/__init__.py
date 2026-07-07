@@ -18,7 +18,7 @@ Modules:
   fold them into the same ledger.
 
 The collector that joins this ledger with the decision streams lives in
-``inference_optimizer/breakdown/collectors.py`` (``collect_decision_trace``).
+``src/hyperloom/inference_optimizer/breakdown/collectors.py`` (``collect_decision_trace``).
 """
 
 from .conversation_trace import (

@@ -58,7 +58,7 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
-# Standalone-tool workspace-root resolver (cannot import inference_optimizer.paths; see _paths.py).
+# Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.paths; see _paths.py).
 from _paths import workspace_root
 
 
@@ -4068,7 +4068,7 @@ def _is_scriptable_framework(framework: str | None) -> bool:
         bool: ``True`` for scriptable image frameworks.
     """
     try:
-        from inference_optimizer.framework_registry import is_scriptable
+        from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
         return is_scriptable(framework)
     except Exception:
@@ -4814,7 +4814,7 @@ _TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
 
 def _default_tracelens_root() -> Path:
     """Installer-managed default checkout path (mirrors install.sh /
-    inference_optimizer.paths.open_source_root)."""
+    hyperloom.inference_optimizer.paths.open_source_root)."""
     base = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT") or "/opt/hyperloom/open-source-repos"
     return Path(base) / "TraceLens"
 
@@ -4866,7 +4866,7 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
 
     Keep this temp-clone+pin+atomic-rename in lockstep with the twin
     implementations: kernel-agent/scripts/install.sh (ensure_tracelens) and
-    inference_optimizer/scripts/local_setup.sh (clone_or_update "atomic").
+    src/hyperloom/inference_optimizer/scripts/local_setup.sh (clone_or_update "atomic").
     """
     tl_root = Path(tl_root)
     if _tracelens_checkout_complete(tl_root):

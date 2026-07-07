@@ -332,7 +332,7 @@ def _default_kernel_batch_parallel() -> int:
     at process start; ``torch.cuda.device_count()`` is a driver query
     we don't want to re-issue on every batch dispatch. Tests that
     monkeypatch torch / env must call ``cache_clear()``; the
-    ``inference_optimizer/tests/conftest.py`` autouse fixture handles
+    ``src/hyperloom/inference_optimizer/tests/conftest.py`` autouse fixture handles
     this for every test.
 
     Returns:
@@ -422,7 +422,7 @@ def _kernel_agent_root_error() -> str | None:
     if root is None:
         return (
             f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
-            "inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
+            "src/hyperloom/inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
             "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
     if not root.is_dir():
@@ -439,7 +439,7 @@ def _resolve_tracelens_root() -> Path:
     Returns:
         Path: The resolved TraceLens root (may not exist yet; callers validate).
     """
-    from inference_optimizer import paths
+    from hyperloom.inference_optimizer import paths
 
     return paths.tracelens_root()
 
@@ -481,7 +481,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     kernel-agent.env.sh, so "env is set" is NOT a reliable override signal —
     compare the resolved path against the installer default instead.
     """
-    from inference_optimizer import paths
+    from hyperloom.inference_optimizer import paths
 
     default_root = paths.open_source_root() / "TraceLens"
     try:
@@ -1055,7 +1055,7 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
-    from inference_optimizer.session_paths import patches_dir
+    from hyperloom.inference_optimizer.session_paths import patches_dir
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
     backup_root = payload.get("backup_root") or (patches_dir(session_dir, kid or "anon") / "backup")
@@ -1884,7 +1884,7 @@ def _resolve_forge_untuned_csv(
         else:
             return ""
 
-    from inference_optimizer.session_paths import runs_root
+    from hyperloom.inference_optimizer.session_paths import runs_root
 
     specialist_dir = runs_root(session_dir) / "specialist"
     if not specialist_dir.is_dir():
@@ -2345,7 +2345,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         return
     from datetime import datetime, timezone
 
-    from inference_optimizer.session_paths import gemm_tuning_steps_path
+    from hyperloom.inference_optimizer.session_paths import gemm_tuning_steps_path
 
     engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
     tuners: list[dict[str, Any]] = []
@@ -2443,7 +2443,7 @@ async def trace_analyze_handler(
     # LLM decode steady-state window, so the TraceLens steady-state splitter
     # cannot produce chunks and hard-fails (trace_split_no_steady_state). Feed
     # the raw trace to TraceLens directly and drop the (LLM-only) --split-* hints.
-    from inference_optimizer.framework_registry import is_scriptable
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
     scriptable = is_scriptable(framework)
 
@@ -2605,7 +2605,7 @@ async def trace_analyze_handler(
         # run + its hot-kernel list + tool provenance, so the journey can thread
         # discovery -> dispatch -> backends -> e2e.
         try:
-            from inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
             # Discovery source = the route that actually ran. The tool reports
@@ -2986,7 +2986,7 @@ def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
     Returns:
         The set of kernel ids currently in flight.
     """
-    from inference_optimizer.session_paths import kernel_agent_runs_dir
+    from hyperloom.inference_optimizer.session_paths import kernel_agent_runs_dir
 
     in_flight: set[str] = set()
     sid = session_dir.name
@@ -4156,7 +4156,7 @@ async def _run_optimization_single(
     from ..actions.executors._multi_node_env import is_multi_node
 
     if is_multi_node():
-        from inference_optimizer.multi_node.cli import (
+        from hyperloom.inference_optimizer.multi_node.cli import (
             kill_inference_for_kernel_agent_best_effort,
         )
 
@@ -4294,7 +4294,7 @@ def _trace_kernel_attempt_steps(
     if not isinstance(attempts, list):
         return
     from datetime import datetime, timezone
-    from inference_optimizer.session_paths import forge_steps_path
+    from hyperloom.inference_optimizer.session_paths import forge_steps_path
     kernel_id = str(result.get("kernel_id") or "") or None
     rows: list[dict[str, Any]] = []
     for attempt in attempts:
@@ -4418,7 +4418,7 @@ def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
         payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict) or not payload:
             return
-        from inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         instrument.record_singleton_section(
             session_dir,
@@ -4807,7 +4807,7 @@ async def integrate_handler(
         }
 
     # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
-    from inference_optimizer.compat.payload_aliases import read_extra_server_args
+    from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
 
     env_only_validation = (
         str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"}
@@ -4867,7 +4867,7 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext; extra_server_args goes via task params (forward compat).
-    from inference_optimizer.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session_paths import runs_dir
 
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
     workspace = runs_dir(session_dir, "integrate", fake_task_id)

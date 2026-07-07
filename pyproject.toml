@@ -55,13 +55,23 @@ trace = [
 ]
 
 [project.scripts]
-inference_optimizer = "inference_optimizer.cli:main"
+inference_optimizer = "hyperloom.inference_optimizer.cli:main"
 
 # Packages are provided by setup.py so editable installs use the same package
 # discovery as local source runs.
 
 [tool.setuptools.package-data]
-inference_optimizer = [
+# tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
+# orchestrator -> src/hyperloom/orchestrator promotion (stage A) and further
+# into orchestrator/prompts/ during the internal subpackage split (stage B).
+# tree-reform.MD P2.4: inference_optimizer.* entries moved here (from the
+# top-level ``inference_optimizer`` key) after inference_optimizer was
+# promoted from a repo-root flat-layout package to
+# src/hyperloom/inference_optimizer.
+hyperloom = [
+    "orchestrator/prompts/*.md",
+]
+"hyperloom.inference_optimizer" = [
     "SKILL.md",
     "README.md",
     "actions/*.md",
@@ -73,17 +83,11 @@ inference_optimizer = [
     "kb/framework/*.md",
     "kb/recipes/*.json",
 ]
-# tree-reform.MD P2.3: system_prompts/*.md moved with the
-# orchestrator -> src/hyperloom/orchestrator promotion (stage A) and further
-# into orchestrator/prompts/ during the internal subpackage split (stage B).
-hyperloom = [
-    "orchestrator/prompts/*.md",
-]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = [
-    "inference_optimizer/tests",
+    "src/hyperloom/inference_optimizer/tests",
     "robustness-agent/tests",
     "critic-agent/runtime/tests",
     "quantization_agent/tests",
@@ -106,7 +110,10 @@ testpaths = [
 # ``testpaths``) and measured for coverage (see ``[tool.coverage.run].source``).
 # Tree-reform transition (tree-reform.MD P2.0): ``src`` (new ``hyperloom.*``
 # namespace) is added alongside the legacy import roots so both resolve during
-# the migration window (dual-importable). Legacy roots are removed only in P2.7.
+# the migration window (dual-importable). Legacy roots are removed only in
+# P2.7. ``.`` is still required for the still-flat ``quantization_agent`` and
+# ``ci`` packages (tree-reform.MD P2.4 only promoted ``inference_optimizer``;
+# quantization_agent/ci src-layout promotion is P2.5/P2.6).
 pythonpath = ["src", ".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
@@ -114,7 +121,7 @@ markers = [
     "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
 ]
 filterwarnings = [
-    "ignore::DeprecationWarning:inference_optimizer.compat.payload_aliases",
+    "ignore::DeprecationWarning:hyperloom.inference_optimizer.compat.payload_aliases",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
@@ -137,9 +144,9 @@ filterwarnings = [
 [tool.coverage.run]
 branch = false
 source = [
-    "inference_optimizer",
-    # tree-reform.MD P2.3: orchestrator now lives under src/hyperloom (its
-    # coverage was previously counted under the inference_optimizer entry).
+    # tree-reform.MD P2.3: orchestrator moved under src/hyperloom. tree-reform.MD
+    # P2.4: inference_optimizer moved under src/hyperloom too (both were
+    # previously counted under a standalone "inference_optimizer" entry).
     "src/hyperloom",
     "robustness_agent",
     "critic-agent/runtime",
@@ -155,16 +162,16 @@ omit = [
     "*/__main__.py",
     "setup.py",
     # CLI driver scripts (subprocess plumbing dominated).
-    "inference_optimizer/cli.py",
-    "inference_optimizer/multi_node/cli.py",
-    "inference_optimizer/multi_node/scripts/*",
-    "inference_optimizer/multi_node/_internal/*",
+    "src/hyperloom/inference_optimizer/cli.py",
+    "src/hyperloom/inference_optimizer/multi_node/cli.py",
+    "src/hyperloom/inference_optimizer/multi_node/scripts/*",
+    "src/hyperloom/inference_optimizer/multi_node/_internal/*",
     # Subprocess wrappers + multi-node server lifecycle.
     "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
-    "inference_optimizer/breakdown/reporters/llm_client.py",
+    "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Robustness-agent standalone reactor CLI wrapper.
     "robustness-agent/src/robustness_agent/main.py",
     # Stand-alone kernel-agent CLI tools.
@@ -195,7 +202,8 @@ omit = [
     # network / long-running services exercised end-to-end, not by unit
     # tests. The unit-testable OOB logic (config, database, convergence_check,
     # tools/agent_tools, tools/benchmark_tools, task_manager) stays measured
-    # and is covered by ``inference_optimizer/tests/test_oob_units.py``.
+    # and is covered by
+    # ``src/hyperloom/inference_optimizer/tests/test_oob_units.py``.
     "OOB/cli.py",
     "OOB/server.py",
     "OOB/scheduler.py",
@@ -218,12 +226,13 @@ omit = [
     # exercised end-to-end by the breakdown reporter tests. Direct
     # unit-testing every leaf path doubles the test surface for
     # marginal value.
-    "inference_optimizer/breakdown/collectors.py",
+    "src/hyperloom/inference_optimizer/breakdown/collectors.py",
     # Verification scripts — operator scripts, not library code.
-    "inference_optimizer/scripts/*",
+    "src/hyperloom/inference_optimizer/scripts/*",
     # Subprocess transport for the robustness-agent runtime CLI; the
     # in-process role contract is covered by the role/runtime/cli tests
-    # plus the e2e harness in inference_optimizer/tests/test_p2_robustness_agent_e2e.
+    # plus the e2e harness in
+    # src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.
     "src/hyperloom/orchestrator/roles/robustness_agent.py",
     # Legacy conductor SQLite bridge superseded by the M1 reactor / CLI
     # transport. Kept for backwards compat; not unit-tested.
@@ -367,9 +376,9 @@ ignore = ["E501", "E741"]
 # tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,dynamo}.py
 # after the base helpers/constants they import back are already defined
 # (cycle-safe ordering), so the import sits below the top import block.
-"inference_optimizer/multi_node/cli.py" = ["E402"]
-"inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
-"inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
 # tree-reform.MD P2.3 stage B: paths updated for the specialists/, kernel/,
 # and prompts/ subpackage moves.
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]

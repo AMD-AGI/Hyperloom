@@ -1,4 +1,4 @@
-"""Adapter: drive the quantization-agent from inference_optimizer.
+"""Adapter: drive the quantization-agent from hyperloom.inference_optimizer.
 
 Thin shim between ``cli._run_quantization_prelude`` and the standalone
 ``quantization_agent`` package. It builds an effective prompt (source model

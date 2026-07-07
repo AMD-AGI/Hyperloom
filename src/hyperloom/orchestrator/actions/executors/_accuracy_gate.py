@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Accuracy gate — GSM8K eval integration for inference_optimizer.
+"""Accuracy gate — GSM8K eval integration for hyperloom.inference_optimizer.
 
 Protocol: baseline always runs GSM8K; high-risk variants too. Threshold is
 ``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT otherwise.
@@ -259,7 +259,7 @@ def parse_eval_results(
     """
     workspace = Path(workspace)
 
-    from inference_optimizer import framework_registry
+    from hyperloom.inference_optimizer import framework_registry
 
     scriptable = framework_registry.is_scriptable(framework)
 

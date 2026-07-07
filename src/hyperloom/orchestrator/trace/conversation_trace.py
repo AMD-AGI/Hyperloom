@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .._time import now_iso
-from inference_optimizer.session_paths import conversations_path
+from hyperloom.inference_optimizer.session_paths import conversations_path
 from ._row_utils import (
     coerce_optional_int as _coerce_optional_int,
     coerce_optional_str as _coerce_optional_str,

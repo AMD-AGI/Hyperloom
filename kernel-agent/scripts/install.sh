@@ -72,7 +72,7 @@ HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 # Resolve MAGPIE_PYTHON dynamically. The previous default
 # ${MAGPIE_PATH}/venv/bin/python assumed a Magpie-private venv, but
-# inference_optimizer/scripts/install.sh's ensure_magpie() does
+# src/hyperloom/inference_optimizer/scripts/install.sh's ensure_magpie() does
 # `pip install -e $MAGPIE_PATH` into the driver Python's site-packages
 # (or the container image pre-installs it that way) — no venv is ever
 # created at $MAGPIE_PATH/venv. Mirrors _resolve_magpie_python() in
@@ -123,7 +123,7 @@ TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"
 # unresolvable paths fall back to the trimmed literal so a not-yet-cloned
 # default still compares correctly (#722 / PR#789).
 # Keep in lockstep with the twin helper in
-# inference_optimizer/scripts/local_setup.sh.
+# src/hyperloom/inference_optimizer/scripts/local_setup.sh.
 _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
@@ -547,7 +547,7 @@ PY
 # the same install path the existing `ensure_node` helper takes for
 # Node.js, so it carries no new failure modes.
 ensure_patch_tools() {
-  log "ensuring git + patch (required by inference_optimizer/_server_patcher fuzzy-fallback path)"
+  log "ensuring git + patch (required by src/hyperloom/inference_optimizer/_server_patcher fuzzy-fallback path)"
   local need_git=0 need_patch=0
   command -v git >/dev/null 2>&1   || need_git=1
   command -v patch >/dev/null 2>&1 || need_patch=1
@@ -842,7 +842,7 @@ ensure_tracelens() {
       # on a mid-clone crash) would leave an unpinned/half-cloned $TRACELENS_ROOT
       # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
       # Keep this temp-clone+pin+atomic-rename in lockstep with the twin
-      # implementations: inference_optimizer/scripts/local_setup.sh
+      # implementations: src/hyperloom/inference_optimizer/scripts/local_setup.sh
       # (clone_or_update "atomic") and kernel-agent/tools/tracelens_analysis.py
       # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"

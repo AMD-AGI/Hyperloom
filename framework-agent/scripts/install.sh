@@ -4,7 +4,7 @@
 # framework-agent installer (P2 PR-D).
 #
 # Idempotent. Used both standalone (developer pod setup) and chained
-# from inference_optimizer/scripts/install.sh on Hyperloom sandboxes.
+# from src/hyperloom/inference_optimizer/scripts/install.sh on Hyperloom sandboxes.
 # Targets a single Python venv (PEP 660 editable install) so the `fa`
 # console script is on PATH alongside `inference_optimizer`.
 #
@@ -32,7 +32,7 @@ EXTRAS="${FRAMEWORK_AGENT_EXTRAS:-ast,test}"
 # system /usr/bin/pip is too old (22.0.2 on Ubuntu 22.04) to honour the
 # PEP 660 build_editable hook our pyproject declares, so editable install
 # fails with "build backend is missing the 'build_editable' hook". Mirror
-# inference_optimizer/scripts/install.sh::resolve_python.
+# src/hyperloom/inference_optimizer/scripts/install.sh::resolve_python.
 if [ -x "/opt/venv/bin/python" ] && [ "${FRAMEWORK_AGENT_FORCE_PYTHON:-0}" != "1" ]; then
     if [ -n "${VENV_PYTHON:-}" ] && [ "${VENV_PYTHON}" != "/opt/venv/bin/python" ]; then
         echo "[framework-agent/install.sh] preferring /opt/venv/bin/python over VENV_PYTHON=${VENV_PYTHON} (canonical ROCm stack)"

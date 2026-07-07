@@ -86,7 +86,7 @@ _MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
 
 
 def _mn_state_path() -> Path:
-    """Resolve where ``inference_optimizer.multi_node`` dropped its state.
+    """Resolve where ``hyperloom.inference_optimizer.multi_node`` dropped its state.
 
     Honours the ``$MULTI_NODE_STATE_FILE`` override and falls back to
     ``/tmp/multi_node_state.json``.
@@ -145,7 +145,7 @@ def _dispatch_multinode_apply(
     cmd = [
         sys.executable,
         "-m",
-        "inference_optimizer.multi_node",
+        "hyperloom.inference_optimizer.multi_node",
         "apply-patch",
         "--patch-file",
         str(patch_path),
@@ -204,7 +204,7 @@ def _dispatch_multinode_revert(
     cmd = [
         sys.executable,
         "-m",
-        "inference_optimizer.multi_node",
+        "hyperloom.inference_optimizer.multi_node",
         "revert-patch",
         "--target-path",
         str(target_path),

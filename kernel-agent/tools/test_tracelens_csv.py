@@ -3438,7 +3438,7 @@ def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
 
 
 def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
-    """No envs set → hard-coded default matches inference_optimizer/paths.DEFAULT_SESSION_DIR."""
+    """No envs set → hard-coded default matches src/hyperloom/inference_optimizer/paths.DEFAULT_SESSION_DIR."""
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.delenv("WORKSPACE_PATH", raising=False)
     assert tla._default_workspace_path() == "/workspace/hyperloom"

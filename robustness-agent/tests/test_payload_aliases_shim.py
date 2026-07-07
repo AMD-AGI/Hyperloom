@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Smoke tests for the payload-aliases compat shim: pin its behaviour against drift from ``inference_optimizer.compat.payload_aliases`` (the shim is a duplicated copy by design)."""
+"""Smoke tests for the payload-aliases compat shim: pin its behaviour against drift from ``hyperloom.inference_optimizer.compat.payload_aliases`` (the shim is a duplicated copy by design)."""
 
 from __future__ import annotations
 

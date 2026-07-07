@@ -29,7 +29,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
 cp .env.template .env          # then edit credentials (SAFE_API_KEY, OPENAI_BASE_URL)
 export USER_DATA_PATH=/path/to/hyperloom-run
-bash inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/scripts/local_setup.sh
 ```
 
 When `local_setup.sh` finishes it prints the workspace path to open in Cursor,
@@ -42,7 +42,7 @@ start `inference_optimizer optimize`:
 
 ```bash
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-bash inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/scripts/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
@@ -56,7 +56,7 @@ Open the printed workspace in Cursor, then paste the generated prompt into
 Cursor Chat, filling in your workload:
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model
@@ -71,7 +71,7 @@ Optimize inference for this workload:
 
 Before launch, run exactly:
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
-bash inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/scripts/install.sh
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
 
@@ -94,7 +94,7 @@ happens in each phase.
 ### 5. Resume an interrupted session
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 

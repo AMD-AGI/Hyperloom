@@ -44,7 +44,7 @@ class GatingCollaborator:
             unavailable, treated as done); ``False`` otherwise.
         """
         try:
-            from inference_optimizer.session_paths import target_baseline_json
+            from hyperloom.inference_optimizer.session_paths import target_baseline_json
 
             return target_baseline_json(self.session_dir).exists()
         except ImportError:

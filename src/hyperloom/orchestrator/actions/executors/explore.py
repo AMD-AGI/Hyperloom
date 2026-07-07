@@ -44,7 +44,7 @@ from typing import Any
 import yaml
 
 from ..._time import now_iso
-from inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.session_paths import runs_dir
 from ...gain_math import gain_pct
 from ._accuracy_gate import (
     accuracy_passed,
@@ -1209,7 +1209,7 @@ class ExploreExecutor:
                         # scriptable frameworks (xDiT diffusion) the image-quality
                         # gate is the sole correctness signal, so EVERY variant is
                         # gated and a missing gate fails closed.
-                        from inference_optimizer import framework_registry
+                        from hyperloom.inference_optimizer import framework_registry
 
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True

@@ -151,7 +151,7 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-`inference_optimizer.cli` does NOT auto-start ray, so this step is required
+`hyperloom.inference_optimizer.cli` does NOT auto-start ray, so this step is required
 both standalone and under the inference-optimizer entry point.
 
 ### Recovery
@@ -605,18 +605,18 @@ kernel-agent flow adapts transparently:
 * Applying patches — `apply_kernel_patch.py` detects multi-node via
   `_is_multi_node()` and, after writing the sandbox-local copy,
   fans the SAME patch bytes to every pod via
-  `python3 -m inference_optimizer.multi_node apply-patch`. Per-host
+  `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`. Per-host
   backup paths are persisted into the manifest so revert can hit the
   same pods. Pod fan-out failure → sandbox copy is auto-restored from
   the source backup (strict 3-way transaction: sandbox + head + workers
   all on v1, or all on v0; no partial state).
 * Reverting — `revert_kernel_patch` reads `manifest.multinode.host_backup_map`
-  and dispatches `python3 -m inference_optimizer.multi_node revert-patch`
+  and dispatches `python3 -m hyperloom.inference_optimizer.multi_node revert-patch`
   before returning.
 * Compiling + benchmarking — the sandbox has no GPU. Backend prompts
   (Claude/Codex/GEAK) get a `MULTI-NODE SANDBOX` block in their safety
   instructions directing them to
-  `python3 -m inference_optimizer.multi_node kernel-bench` instead of
+  `python3 -m hyperloom.inference_optimizer.multi_node kernel-bench` instead of
   local `hipcc` / `torch.cuda.*` / `torch.utils.cpp_extension.load`.
   The CLI base64-encodes any helper files, stages them on a
   GPU-bearing pod, runs `bash --bench-command`, and returns
@@ -628,7 +628,7 @@ kernel-agent flow adapts transparently:
   measure pre-patch behaviour and integrate decisions become noise.
 * RayJob recreate — when a fresh RayJob is provisioned (after OOM /
   manual recreate), `_replay_kernel_patches_for_multi_node` in
-  `inference_optimizer/cli.py` scans the session's kernel-agent
+  `src/hyperloom/inference_optimizer/cli.py` scans the session's kernel-agent
   workspace for applied manifests and replays each via `apply-patch`
   so the new pods start in the post-stack state.
 

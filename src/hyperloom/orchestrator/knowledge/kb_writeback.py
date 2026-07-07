@@ -24,7 +24,7 @@ def _default_kb_root() -> Path:
 
     Honours the ``INFERENCE_OPTIMIZER_FA_KB_PATH`` override when set;
     otherwise derives a repo-relative path so ``framework-agent`` sits
-    next to ``inference_optimizer/``.
+    next to ``src/hyperloom/inference_optimizer/``.
 
     Returns:
         Path: The ``framework_optimization`` directory under the resolved

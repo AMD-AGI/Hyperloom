@@ -1191,7 +1191,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # recorder spool right after persisting. Best-effort; never blocks save.
         self._session_dir = Path(session_dir)
         try:
-            from inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             instrument.snapshot_state_sections(session_dir, self)
         except Exception:  # noqa: BLE001 — author-time capture must never block save
@@ -1202,7 +1202,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         try:
             cb = self.current_best or {}
             if cb:
-                from inference_optimizer.reference_script import render_reference_script
+                from hyperloom.inference_optimizer.reference_script import render_reference_script
                 text = render_reference_script(
                     framework=os.environ.get("FRAMEWORK", "sglang"),
                     server_args=str(cb.get("extra_server_args") or ""),
@@ -1845,7 +1845,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         setattr(self, last_attr, dict(entry))
         # Author-time breakdown capture: one phase_timeline event per attempt.
         try:
-            from inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             instrument.record_phase_event(
                 getattr(self, "_session_dir", None),
@@ -1951,7 +1951,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             when unavailable.
         """
         try:
-            from inference_optimizer import framework_registry
+            from hyperloom.inference_optimizer import framework_registry
 
             if not framework_registry.is_scriptable(framework):
                 return 0.0, 0.0

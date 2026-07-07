@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from inference_optimizer.storage.connection import SqliteConnection
+from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 from .._time import now_iso
 
 

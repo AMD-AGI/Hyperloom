@@ -3,7 +3,7 @@
 A consolidated symptom → cause → fix index for the failures Hyperloom
 users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
-[`inference_optimizer/SKILL.md`](../inference_optimizer/SKILL.md),
+[`src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
 [`critic-agent/SKILL.md`](../critic-agent/SKILL.md),
 [`robustness-agent/SKILL.md`](../robustness-agent/SKILL.md).
@@ -87,7 +87,7 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-> **Note.** `inference_optimizer.cli` does **not** auto-start Ray.
+> **Note.** `hyperloom.inference_optimizer.cli` does **not** auto-start Ray.
 > Always start it before launching `inference_optimizer optimize`.
 
 ---
@@ -274,7 +274,7 @@ and requires a separate `crsr_...` key.
 * If you do have a Cursor account:
   ```bash
   export CURSOR_API_KEY=crsr_...
-  bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"   # picks up the new key
+  bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"   # picks up the new key
   ```
 
 See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §3 for the Cursor key
@@ -386,7 +386,7 @@ Three commands give you a fast situation report:
 
 ```bash
 # 1. Are events landing?
-python -m inference_optimizer.scripts.event_counts
+python -m hyperloom.inference_optimizer.scripts.event_counts
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SESSION_DIR/state.json"

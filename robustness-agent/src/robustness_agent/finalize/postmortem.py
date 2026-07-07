@@ -32,7 +32,7 @@ _POSTMORTEM_FILENAME: str = "robustness_postmortem.md"
 _DECISION_TRACE_FILENAME: str = "decision_trace.json"
 
 # Action families scanned under ``runs/`` for L2. Mirrors
-# ``inference_optimizer.session_paths.RUN_ACTION_FAMILIES`` (source of truth).
+# ``hyperloom.inference_optimizer.session_paths.RUN_ACTION_FAMILIES`` (source of truth).
 _DECISION_TRACE_ACTION_DIRS: tuple[str, ...] = (
     "baseline",
     "profile",

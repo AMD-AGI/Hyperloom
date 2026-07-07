@@ -2,7 +2,7 @@
 
 """ActionRunner for the ``session_breakdown`` action.
 
-Thin wrapper around :func:`inference_optimizer.breakdown.write_breakdown_json`
+Thin wrapper around :func:`hyperloom.inference_optimizer.breakdown.write_breakdown_json`
 for on-demand refreshes of ``$SESSION_DIR/session_breakdown.json`` during a
 session (the end-of-session safety net lives in cli.py's finally block).
 
@@ -59,7 +59,7 @@ class SessionBreakdownExecutor:
         params = ctx.task.params or {}
         output_path = params.get("output_path")
 
-        from inference_optimizer.breakdown import build, write_breakdown_json
+        from hyperloom.inference_optimizer.breakdown import build, write_breakdown_json
 
         try:
             target = write_breakdown_json(session_dir, output_path=output_path)
@@ -106,7 +106,7 @@ class SessionBreakdownExecutor:
         params = ctx.task.params or {}
         if params.get("session_dir"):
             return Path(params["session_dir"])
-        from inference_optimizer.paths import session_dir as _sd
+        from hyperloom.inference_optimizer.paths import session_dir as _sd
 
         candidate = _sd()
         # manifest.json (not state.json) so a fresh session yields a partial

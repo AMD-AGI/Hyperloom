@@ -53,12 +53,12 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 - Run the full test suite from the repo root:  
   `pytest`
 - To target a directory or file:  
-  `pytest inference_optimizer/tests`  
-  `pytest inference_optimizer/tests/test_prompt_builder.py -k subset`
+  `pytest src/hyperloom/inference_optimizer/tests`  
+  `pytest src/hyperloom/inference_optimizer/tests/test_prompt_builder.py -k subset`
 
 ### Coverage (source of truth)
 
-**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and report options), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). There is **no** minimum line-coverage percentage enforced in CI. Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`inference_optimizer/tests/test_oob_units.py`](inference_optimizer/tests/test_oob_units.py).
+**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and report options), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). There is **no** minimum line-coverage percentage enforced in CI. Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`src/hyperloom/inference_optimizer/tests/test_oob_units.py`](src/hyperloom/inference_optimizer/tests/test_oob_units.py).
 
 The default pytest **`testpaths`** include **`quantization_agent/tests`** so quantization driver code is exercised in CI, not only via inference_optimizer tests.
 

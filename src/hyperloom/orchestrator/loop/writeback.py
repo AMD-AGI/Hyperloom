@@ -7,13 +7,13 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any
-from inference_optimizer.compat.payload_aliases import read_extra_server_args
+from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
 from ..state.optimization_journal import (
     Journal,
     classify_change_kind,
     operation_kind_for,
 )
-from inference_optimizer.protocol.intent import Intent
+from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from ..policy.gate import (
     PolicyDenied,

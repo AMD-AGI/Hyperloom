@@ -107,7 +107,7 @@ class MaintenanceCollaborator:
         """
         import shutil
 
-        from inference_optimizer.session_paths import runs_root as _runs_root
+        from hyperloom.inference_optimizer.session_paths import runs_root as _runs_root
 
         try:
             usage = shutil.disk_usage(str(self.session_dir))

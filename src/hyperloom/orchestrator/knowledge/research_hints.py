@@ -16,7 +16,7 @@ from typing import Any
 
 from hyperloom.common import io as _common_io
 
-from inference_optimizer import session_paths
+from hyperloom.inference_optimizer import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 

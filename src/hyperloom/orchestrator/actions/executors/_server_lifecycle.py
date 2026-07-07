@@ -89,7 +89,7 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
     # persistent server, so the reuse protocol does not apply. Bail out before
     # the Magpie built-in-script check (whose script names are serving-only).
-    from inference_optimizer import framework_registry
+    from hyperloom.inference_optimizer import framework_registry
 
     if (
         str(bench.get("workload_kind") or "").strip().lower()

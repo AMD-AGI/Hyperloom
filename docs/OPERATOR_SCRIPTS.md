@@ -1,7 +1,7 @@
 # Operator Scripts Reference
 
 A short reference for the operator-facing scripts under
-`inference_optimizer/scripts/`. These are not part of the agent loop —
+`src/hyperloom/inference_optimizer/scripts/`. These are not part of the agent loop —
 they are utilities you run by hand against a finished or in-progress
 session directory.
 
@@ -29,20 +29,20 @@ builder as the live Coordinator `session_breakdown` action and the
 
 ```bash
 # Live session in the current sandbox (USER_DATA_PATH or /workspace/hyperloom)
-python -m inference_optimizer.scripts.dump_session_breakdown
+python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown
 
 # Historical session on WekaFS
-python -m inference_optimizer.scripts.dump_session_breakdown \
+python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
     --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
 
 # Override output path (don't touch session_dir)
-python -m inference_optimizer.scripts.dump_session_breakdown \
+python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
     --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
 # Bulk historical
 for d in /wekafs/users/*/inference_optimizer-sessions/*; do
     [ -d "$d" ] || continue
-    python -m inference_optimizer.scripts.dump_session_breakdown \
+    python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
         --session-dir "$d" > /dev/null
 done
 ```
@@ -76,7 +76,7 @@ OpenAI-compatible endpoint is configured.
 
 ```bash
 # Deterministic only (no LLM):
-python -m inference_optimizer.scripts.dump_session_report \
+python -m hyperloom.inference_optimizer.scripts.dump_session_report \
     --input  /wekafs/.../session_breakdown.json \
     --output /wekafs/.../session_report.md
 
@@ -84,7 +84,7 @@ python -m inference_optimizer.scripts.dump_session_report \
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
 OPENAI_BASE_URL=http://127.0.0.1:4002/v1 \
 OPENAI_API_KEY=... \
-python -m inference_optimizer.scripts.dump_session_report \
+python -m hyperloom.inference_optimizer.scripts.dump_session_report \
     --input  /wekafs/.../session_breakdown.json \
     --output /wekafs/.../session_report.md
 ```
@@ -122,8 +122,8 @@ Print recent action / proposal / kernel counts from a session's
 ### Usage
 
 ```bash
-python -m inference_optimizer.scripts.event_counts            # default session_dir
-python -m inference_optimizer.scripts.event_counts /path/to/session
+python -m hyperloom.inference_optimizer.scripts.event_counts            # default session_dir
+python -m hyperloom.inference_optimizer.scripts.event_counts /path/to/session
 ```
 
 Reads at most the last 500 events from

@@ -34,7 +34,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from inference_optimizer.session_paths import (
+from hyperloom.inference_optimizer.session_paths import (
     decision_trace_path,
     forge_steps_path,
     gemm_tuning_steps_path,
@@ -1324,7 +1324,7 @@ def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
     """
     import json
 
-    from inference_optimizer.breakdown import BREAKDOWN_FILENAME
+    from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
 
     path = Path(session_dir) / BREAKDOWN_FILENAME
     if not path.exists():

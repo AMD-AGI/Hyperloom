@@ -18,7 +18,7 @@ from ..actions.registry import (
     ActionRegistry,
     VALID_PIPELINE_PHASES,
 )
-from inference_optimizer.protocol.action_surfaces import (
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
     FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS,
     KERNEL_AGENT_OWNED_ACTIONS,

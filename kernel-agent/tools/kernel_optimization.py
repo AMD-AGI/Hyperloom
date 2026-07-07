@@ -1949,7 +1949,7 @@ def build_prompt(
     # Multi-node sandbox is GPU-less: any local `hipcc` / `torch.cuda.*` /
     # `torch.utils.cpp_extension.load` call WILL fail. Direct the LLM to
     # delegate compile + execution to a GPU-bearing pod via the
-    # `inference_optimizer.multi_node kernel-bench` subcommand (head pod,
+    # `hyperloom.inference_optimizer.multi_node kernel-bench` subcommand (head pod,
     # single-GPU actor); LLM still iterates locally on source, just
     # off-loads each measurement step. The CLI base64-encodes any
     # supporting files, stages them under --workspace on the pod, runs
@@ -1977,7 +1977,7 @@ def build_prompt(
             "  1. Write the bench script (and any deps) under your\n"
             "     workspace ($WORKSPACE/benchmarks/, $WORKSPACE/optimized_versions/).\n"
             "  2. Invoke:\n"
-            "       python3 -m inference_optimizer.multi_node kernel-bench \\\n"
+            "       python3 -m hyperloom.inference_optimizer.multi_node kernel-bench \\\n"
             "         --workspace /tmp/kbench_$KERNEL_ID \\\n"
             "         --bench-command 'cd /tmp/kbench_$KERNEL_ID && bash bench.sh' \\\n"
             '         --files-b64-json \'<{"bench.sh":"<b64>","v1.cu":"<b64>",...}>\' \\\n'
@@ -2016,7 +2016,7 @@ def build_prompt(
             except Exception:
                 full_report = ""
             if full_report:
-                from inference_optimizer.tracelens_md import strip_base64_data_urls
+                from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 
                 full_report = strip_base64_data_urls(full_report)
                 rank = candidate.get("tracelens_pitem_rank")

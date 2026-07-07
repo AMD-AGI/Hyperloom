@@ -2,7 +2,7 @@
 
 """Workspace-root resolver for the standalone kernel-agent tools.
 
-Stdlib-only mirror of ``inference_optimizer.paths.workspace_root``.
+Stdlib-only mirror of ``hyperloom.inference_optimizer.paths.workspace_root``.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 
-# Kept byte-for-byte identical to inference_optimizer/paths.py::DEFAULT_SESSION_DIR.
+# Kept byte-for-byte identical to src/hyperloom/inference_optimizer/paths.py::DEFAULT_SESSION_DIR.
 DEFAULT_WORKSPACE_ROOT = "/workspace/hyperloom"
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
 

@@ -30,7 +30,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.session_paths import runs_dir
 from ._grid_runner import (
     GridVariant,
     VariantResult,

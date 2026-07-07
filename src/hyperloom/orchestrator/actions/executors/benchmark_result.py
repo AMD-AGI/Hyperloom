@@ -626,7 +626,7 @@ def _is_scriptable_measurement(result: dict[str, Any]) -> bool:
     Returns:
         bool: ``True`` for scriptable measurements.
     """
-    from inference_optimizer import framework_registry
+    from hyperloom.inference_optimizer import framework_registry
 
     if str(result.get("workload_kind") or "").strip().lower() == framework_registry.SCRIPTABLE:
         return True

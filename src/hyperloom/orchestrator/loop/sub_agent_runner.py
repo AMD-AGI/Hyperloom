@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 
 import logging
 
-from inference_optimizer.session_paths import _runs_actions, runs_dir
+from hyperloom.inference_optimizer.session_paths import _runs_actions, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..state.task_registry import Task, TaskNotFound, TaskRegistry
 

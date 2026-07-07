@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 

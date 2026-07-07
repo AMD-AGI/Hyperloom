@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
-from inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
@@ -1423,7 +1423,7 @@ class ExplorePhase(PhaseHandler):
         if not sid:
             return
         # Resolve patches_written against worktree + workspace; submit only when >=1 real file exists.
-        from inference_optimizer.session_paths import runs_dir as _runs_dir
+        from hyperloom.inference_optimizer.session_paths import runs_dir as _runs_dir
 
         resolve_bases: list[Path] = []
         if self.session_dir is not None:

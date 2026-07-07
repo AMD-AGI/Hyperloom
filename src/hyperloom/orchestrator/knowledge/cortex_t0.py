@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from inference_optimizer.recipe_kb import RecipeKB, recipe_canonical_id
-from inference_optimizer.recipe_snapshot_constants import detect_framework_version
-from inference_optimizer.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
+from hyperloom.inference_optimizer.recipe_kb import RecipeKB, recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
 
 log = logging.getLogger(__name__)
@@ -303,7 +303,7 @@ def _donor_is_trustworthy(
     if _max_session_gain(donor) <= 0:
         return False
     # RC2: require a concrete architecture matching the target (no cross-arch / unknown).
-    from inference_optimizer.recipe_snapshot_constants import _architectures_slug
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     donor_arch = _architectures_slug(donor.get("architectures") or [])
     donor_mt = str(donor.get("model_type") or "").strip().lower()
@@ -367,7 +367,7 @@ def _kg_native_config_donor(
     if not archs:
         return None
     try:
-        from inference_optimizer.recipe_kb.kg_client import (
+        from hyperloom.inference_optimizer.recipe_kb.kg_client import (
             generate_warmstart_donor_graph_guided,
             get_kg_client,
         )
@@ -631,7 +631,7 @@ def _enhance_warm_start_with_kg(
     try:
         kg = kg_client
         if kg is None:
-            from inference_optimizer.recipe_kb.kg_client import get_kg_client
+            from hyperloom.inference_optimizer.recipe_kb.kg_client import get_kg_client
 
             kg = get_kg_client()
         if kg is None or not kg.is_available():
@@ -732,7 +732,7 @@ def _enhance_warm_start_with_kg(
         # so they ride a separate ctx key and never mix with the patch-keyed
         # ``recommended_knobs`` above.
         if _kg_guided_enabled():
-            from inference_optimizer.recipe_kb.kg_client import generate_knob_candidates_graph_guided
+            from hyperloom.inference_optimizer.recipe_kb.kg_client import generate_knob_candidates_graph_guided
 
             knobs = generate_knob_candidates_graph_guided(
                 kg,
@@ -1120,7 +1120,7 @@ def run_t0_anchor(
     warm_prefer = _build_warm_prefer(shared_state, _fw_version)
 
     # Pre-compute architectures slug once for L2/L3 reuse.
-    from inference_optimizer.recipe_snapshot_constants import _architectures_slug
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     _arch_slug = _architectures_slug(_architectures_val)
 

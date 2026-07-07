@@ -1,7 +1,7 @@
 # framework-agent
 
 vllm/sglang source-layer optimisation companion for
-[`inference_optimizer`](../inference_optimizer/). The live Hyperloom
+[`inference_optimizer`](../src/hyperloom/inference_optimizer/). The live Hyperloom
 integration uses the FRAMEWORK discovery path:
 
 - **FRAMEWORK discovery** (`fa phase-discover`) — returns upstream PR
@@ -95,7 +95,7 @@ inference_optimizer optimize \
     --max-hours 2
 ```
 
-See `inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
+See `src/hyperloom/inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
 and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
 
 ## Design references

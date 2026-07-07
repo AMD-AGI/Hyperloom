@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from ..framework.paths import resolve_source_file_allowlist
 from ..bus.gpu_pool import resolve_gpu_specialist_devices
-from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.protocol.action_surfaces import (
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -483,7 +483,7 @@ def _trace_path_allowlist() -> tuple[str, ...]:
             trace root with a trailing ``/`` so prefix ``startswith`` checks are
             path-boundary safe.
     """
-    from inference_optimizer.paths import mn_profile_trace_root
+    from hyperloom.inference_optimizer.paths import mn_profile_trace_root
 
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
@@ -888,7 +888,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"unknown action_name={action_name!r} (not in ActionRegistry)",
                 rule="unknown_action",
-                hint="register a yaml under inference_optimizer/actions/_meta/<name>.yaml",
+                hint="register a yaml under src/hyperloom/inference_optimizer/actions/_meta/<name>.yaml",
             )
         # Per-action source allowlist (e.g. ``recover`` is robustness-only).
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)

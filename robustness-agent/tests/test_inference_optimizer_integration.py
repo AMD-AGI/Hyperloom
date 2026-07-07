@@ -22,7 +22,7 @@ def _try_import_upstream():
             break
     try:
         from hyperloom.orchestrator.roles.agent_role import default_role_registry
-        from inference_optimizer.protocol.intent import (
+        from hyperloom.inference_optimizer.protocol.intent import (
             Intent as UpstreamIntent,
             IntentType as UpstreamIntentType,
         )

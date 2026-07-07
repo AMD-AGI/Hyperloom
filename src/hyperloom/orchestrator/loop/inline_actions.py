@@ -9,7 +9,7 @@ import json
 import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
-from inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
     PolicyDenied,

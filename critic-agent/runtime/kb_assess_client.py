@@ -13,7 +13,7 @@ KB URL. It honours recipe-snapshot's "no URL = no network" contract:
   ``{CORTEX_KB_URL}/v2/reasoning/assess`` and fold the verdict into the bundle;
 * unset → :func:`from_env` returns ``None`` and the Critic never calls out.
 
-Config mirrors :mod:`inference_optimizer.recipe_kb.remote_client`:
+Config mirrors :mod:`hyperloom.inference_optimizer.recipe_kb.remote_client`:
 ``CORTEX_KB_URL`` (URL), ``CORTEX_KB_HTTP_TIMEOUT_SEC`` (timeout),
 ``KB_SERVICE_TOKEN`` (bearer).
 

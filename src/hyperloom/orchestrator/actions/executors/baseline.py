@@ -28,8 +28,8 @@ from typing import Any
 
 import yaml
 
-from inference_optimizer.compat.payload_aliases import read_extra_server_args
-from inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
+from hyperloom.inference_optimizer.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
@@ -321,14 +321,14 @@ def _resolve_reference_base(
     """
     try:
         from ...state.shared_state import SharedState
-        from inference_optimizer.reference_script import models_compatible
+        from hyperloom.inference_optimizer.reference_script import models_compatible
         # The baseline executor is a module-level singleton instantiated at
         # import time — before $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is
         # pinned — so its cached session_dir can resolve to the workspace root
         # instead of the live session dir whose state.json carries the
         # reference_* fields. Prefer the live pin when present; otherwise honor
         # the caller-supplied path (direct-instantiation tests, explicit calls).
-        from inference_optimizer.paths import ENV_CURRENT_SESSION_DIR
+        from hyperloom.inference_optimizer.paths import ENV_CURRENT_SESSION_DIR
         _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
         if _pinned:
             session_dir = Path(_pinned)
@@ -2070,7 +2070,7 @@ class BaselineExecutor:
         else:
             log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
 
-        from inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
         log.info(
             "baseline_executor: %s %s (output) e2el=%.1fms",

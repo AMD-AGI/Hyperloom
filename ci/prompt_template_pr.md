@@ -15,14 +15,14 @@ export REPO_ROOT="$(pwd)"
 echo "[pr-ci] REPO_ROOT=$REPO_ROOT"
 echo "[pr-ci] HEAD=$(git rev-parse HEAD)"
 test "$(git rev-parse HEAD)" = "{git_ref}" || {{ echo "[pr-ci] ERROR: HEAD != {git_ref}"; exit 2; }}
-bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
 ```
 
 If step 0 fails (network, token, install.sh broken on PR head, …) **stop and exit non-zero** — do NOT silently fall back to `/wekafs/HyperloomV2`, the comparison would be meaningless.
 
 ## Step 1 — Run inference_optimizer skill from the cloned PR-head repo
 
-Use the skill at `$REPO_ROOT/inference_optimizer/SKILL.md` (NOT the wekafs copy). Read SKILL.md, then follow Step 2 ("Launch a New Optimization") with these CLI flags:
+Use the skill at `$REPO_ROOT/src/hyperloom/inference_optimizer/SKILL.md` (NOT the wekafs copy). Read SKILL.md, then follow Step 2 ("Launch a New Optimization") with these CLI flags:
 
   --model {model_path}
   --framework {framework}
@@ -37,7 +37,7 @@ Workload envs — export before launch (Coordinator reuses these for baseline �
 
 Session dir: /workspace/hyperloom (SKILL.md default — do NOT override).
 
-ci_metrics.json contract — written automatically by `inference_optimizer/manifest.py` to `/workspace/hyperloom/ci_metrics.json`:
+ci_metrics.json contract — written automatically by `src/hyperloom/inference_optimizer/manifest.py` to `/workspace/hyperloom/ci_metrics.json`:
   baseline_throughput    total output tok/s across all GPUs
   optimized_throughput   same, after sweep
   gain_pct               (optimized - baseline)/baseline * 100, 0.0 if no gain

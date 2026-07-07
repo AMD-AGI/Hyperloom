@@ -96,14 +96,14 @@ python -m robustness_agent.runtime.cli tick \
 
 `intent_envelope` follows the same schema as `critic-agent`'s
 `commit-review` output, validated host-side by
-`inference_optimizer.protocol.intent.validate_envelope`.
+`hyperloom.inference_optimizer.protocol.intent.validate_envelope`.
 Exit code `0` = logical success (zero or more intents); `2` = adapter /
 configuration bug.
 
 The host-side wrapper that drives this subprocess lives in
 `src/hyperloom/orchestrator/roles/robustness_agent.py:RobustnessAgentBackend`,
 mirroring the layout of `CriticAgentBackend`. End-to-end tests in
-`inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
+`src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
 `robustness-agent/tests/test_runtime_cli.py` together cover the full
 host -> subprocess -> envelope -> upstream PolicyGate path.
 

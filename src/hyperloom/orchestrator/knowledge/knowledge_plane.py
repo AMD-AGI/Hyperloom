@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from inference_optimizer.paths import asset_actions_dir
+from hyperloom.inference_optimizer.paths import asset_actions_dir
 from .pr_monitor import (
     DEFAULT_PR_FEED_PER_REPO_LIMIT,
     DEFAULT_PR_FEED_TOTAL_BUDGET_SEC,

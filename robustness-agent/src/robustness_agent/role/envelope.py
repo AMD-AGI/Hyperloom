@@ -2,7 +2,7 @@
 
 """Intent envelope contract.
 
-Mirrors the wire shape of ``inference_optimizer/protocol/intent.py`` so the
+Mirrors the wire shape of ``src/hyperloom/inference_optimizer/protocol/intent.py`` so the
 reactor can build intents the Coordinator's ``PolicyGate`` accepts unchanged.
 Transport-agnostic; avoids importing inference_optimizer to stay independent.
 A contract test cross-checks ``IntentType`` / ``_PAYLOAD_REQUIRED`` against the
@@ -20,7 +20,7 @@ class IntentType(str, Enum):
     """Intent vocabulary mirrored from upstream ``intent_parser.IntentType``.
 
     Values are the exact strings the Coordinator persists; do not rename
-    without coordinating with inference_optimizer.
+    without coordinating with hyperloom.inference_optimizer.
     """
 
     SEND_MESSAGE = "send_message"

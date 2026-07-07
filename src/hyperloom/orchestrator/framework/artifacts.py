@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.session_paths import runs_dir
 
 
 log = logging.getLogger(__name__)

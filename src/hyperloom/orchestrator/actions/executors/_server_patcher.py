@@ -630,7 +630,7 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
 
 
 # KernelForge root env aliases, in the precedence used by
-# ``inference_optimizer/scripts/install.sh`` ``_forge_gemm_tune_candidates``.
+# ``src/hyperloom/inference_optimizer/scripts/install.sh`` ``_forge_gemm_tune_candidates``.
 _KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = (
     "FORGE_PATH",
     "KERNEL_FORGE_ROOT",

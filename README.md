@@ -107,7 +107,7 @@ The repo ships a single skill — `inference_optimizer/` — with the full optim
 
 | Domain | Skill | Description |
 |--------|-------|-------------|
-| **Inference** | [SKILL.md](inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
+| **Inference** | [SKILL.md](src/hyperloom/inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
 
 The skill file is the agent's instructions. It encodes the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
 
@@ -117,17 +117,22 @@ The skill file is the agent's instructions. It encodes the full optimization met
 
 ```
 Hyperloom/
-├── inference_optimizer/                  # Inference optimization skill (sole entry point)
-│   ├── SKILL.md                          # Skill spec (Cursor/Claw entry point)
-│   ├── cli.py                            # CLI entry: inference_optimizer optimize
-│   ├── actions/_meta/                    # Action metadata and scheduling policy
-│   ├── baseline_comparison/              # InferenceX baseline comparison and target analysis
-│   ├── orchestrator/                     # Coordinator + agent roles + action executors
-│   │   ├── action_executors/             # Executors for baseline/profile/params/sweep, etc.
-│   │   ├── backends/                     # Claude/Codex/Critic backend adapters
-│   │   └── system_prompts/               # Orchestration prompt construction
-│   ├── scripts/                          # Install scripts, baseline/profile configs
-│   └── tests/                            # Inference optimizer unit and regression tests
+├── src/hyperloom/                        # Single src-layout namespace (tree-reform.MD)
+│   ├── common/                           # Zero-dependency shared library (io/env/jsonio/...)
+│   ├── inference_optimizer/              # Inference optimization skill (sole entry point)
+│   │   ├── SKILL.md                      # Skill spec (Cursor/Claw entry point)
+│   │   ├── cli.py                        # CLI entry: inference_optimizer optimize
+│   │   ├── actions/_meta/                # Action metadata and scheduling policy
+│   │   ├── baseline_comparison/          # InferenceX baseline comparison and target analysis
+│   │   ├── scripts/                      # Install scripts, baseline/profile configs
+│   │   └── tests/                        # Inference optimizer unit and regression tests
+│   └── orchestrator/                     # Coordinator + agent roles + action executors
+│       ├── loop/                         # Coordinator facade + collaborators
+│       ├── phases/                       # Phase state machine + per-phase handlers
+│       ├── policy/                       # PolicyGate + action surfaces
+│       ├── actions/                      # Action registry + executors/
+│       ├── roles/                        # Claude/Codex/Critic/Robustness backend adapters
+│       └── prompts/                      # Orchestration prompt construction
 ├── kernel-agent/                         # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
 │   ├── SKILL.md                          # Kernel-agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply

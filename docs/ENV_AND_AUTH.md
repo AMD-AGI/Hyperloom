@@ -2,7 +2,7 @@
 
 > **Scope.** This is the single authoritative reference for credentials and
 > environment configuration in Hyperloom. If any other document
-> (`README.md`, `inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
+> (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
 > `robustness-agent/SKILL.md`) appears to contradict this page, this page
 > wins. Please open an issue against the contradicting file.
 
@@ -15,7 +15,7 @@ Hyperloom needs at most three classes of configuration:
 2. The **Cursor SDK** key (`CURSOR_API_KEY`) — optional, only needed if
    you want the OOB `cursor` kernel-opt backend.
 3. **Path / workspace layout** — for local mode, run
-   `inference_optimizer/scripts/local_setup.sh` once (credentials + Hyperloom
+   `src/hyperloom/inference_optimizer/scripts/local_setup.sh` once (credentials + Hyperloom
    checkout are enough). It clones missing dependency repos under
    `HYPERLOOM_OPEN_SOURCE_ROOT` (default `/opt/hyperloom/open-source-repos`),
    writes `$USER_DATA_PATH/runtime/local-setup.env.sh`, and exports
@@ -27,7 +27,7 @@ Hyperloom needs at most three classes of configuration:
 In the **single-gateway** setup, GEAK keys, OOB Claude/Codex keys, and
 Anthropic / OpenAI aliases are **derived** from `SAFE_API_KEY` and
 `OPENAI_BASE_URL` by `kernel-agent/scripts/install.sh` and
-`inference_optimizer/cli.py` at preflight. You normally do not set those
+`src/hyperloom/inference_optimizer/cli.py` at preflight. You normally do not set those
 aliases by hand. Split-gateway and GEAK/OOB endpoint overrides are the
 exceptions (§2.3, §3.3).
 
@@ -43,7 +43,7 @@ Hyperloom reads credentials from two places, in this order:
 | `$REPO_ROOT/.env`                           | Only for keys **missing** from the process environment.   |
 
 > **Hard rule.** Shell environment variables **always** win over `.env`.
-> Both `inference_optimizer/cli.py` (`_load_dotenv_fallback`) and
+> Both `src/hyperloom/inference_optimizer/cli.py` (`_load_dotenv_fallback`) and
 > `kernel-agent/scripts/install.sh` honour this rule. Do **not**
 > manually `source .env` from chat — it inverts the precedence and can
 > overwrite an exported key with a stale value from disk.
@@ -201,7 +201,7 @@ set `USER_DATA_PATH` if you want a non-default workspace):
 
 ```bash
 export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-bash inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/scripts/local_setup.sh
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 ```
 
@@ -255,7 +255,7 @@ rewrite `x-api-key` into `Authorization: Bearer`. **That component has
 been removed.** Claude, Codex, and GEAK now talk to the upstream gateway
 directly. The AMD primus-safe gateway accepts both header styles natively.
 
-At preflight, `inference_optimizer/cli.py`:
+At preflight, `src/hyperloom/inference_optimizer/cli.py`:
 
 * Resolves Anthropic and OpenAI base URLs (§2).
 * Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.

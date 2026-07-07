@@ -502,7 +502,7 @@ def _fmt_tput(v: float | None, framework: str = "") -> str:
     """
     if not isinstance(v, (int, float)) or v <= 0:
         return "—"
-    from inference_optimizer import framework_registry
+    from hyperloom.inference_optimizer import framework_registry
 
     if framework_registry.is_scriptable(framework):
         return framework_registry.format_primary_metric(framework, float(v))

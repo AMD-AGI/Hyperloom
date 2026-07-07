@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from inference_optimizer.protocol.intent import Intent
+from hyperloom.inference_optimizer.protocol.intent import Intent
 from .base import BackendTurnResult
 
 
@@ -127,8 +127,8 @@ class MockBackend:
         if self.plan.default_intent is not None:
             return MockTurn(intents=[self.plan.default_intent])
         # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
-        from inference_optimizer.protocol.intent import Intent as _Intent
-        from inference_optimizer.protocol.intent import IntentType as _IT
+        from hyperloom.inference_optimizer.protocol.intent import Intent as _Intent
+        from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT
 
         return MockTurn(
             intents=[

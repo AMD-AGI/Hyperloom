@@ -6,20 +6,11 @@ from __future__ import annotations
 
 from setuptools import find_packages, setup
 
-# Tree-reform transition (see tree-reform.MD, P2.0): discover BOTH the legacy
-# flat-layout ``inference_optimizer`` package at the repo root AND the new
-# ``src/hyperloom`` src-layout namespace, so both import roots resolve during
-# the migration window. ``package_dir`` maps only the new namespace under
-# ``src/`` (longest-prefix match), leaving the legacy root layout untouched.
+# tree-reform.MD P2.4: ``inference_optimizer`` was promoted from a repo-root
+# flat-layout package to ``src/hyperloom/inference_optimizer`` (alongside the
+# already-promoted ``orchestrator`` and ``common``), so the whole ``hyperloom``
+# distribution is now a single src-layout namespace discovered from ``src/``.
 setup(
-    packages=(
-        find_packages(
-            include=[
-                "inference_optimizer",
-                "inference_optimizer.*",
-            ],
-        )
-        + find_packages(where="src")
-    ),
+    packages=find_packages(where="src"),
     package_dir={"hyperloom": "src/hyperloom"},
 )

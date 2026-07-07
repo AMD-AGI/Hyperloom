@@ -21,8 +21,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from inference_optimizer.storage.connection import SqliteConnection
-from inference_optimizer.storage.schema import DEFAULT_LANE_CAPACITIES
+from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+from hyperloom.inference_optimizer.storage.schema import DEFAULT_LANE_CAPACITIES
 from .._time import now_iso
 
 

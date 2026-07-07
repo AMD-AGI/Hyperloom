@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Smoke tests for the kernel-agent payload-aliases compat shim (duplicated copy of inference_optimizer.compat.payload_aliases; pins behaviour against drift)."""
+"""Smoke tests for the kernel-agent payload-aliases compat shim (duplicated copy of hyperloom.inference_optimizer.compat.payload_aliases; pins behaviour against drift)."""
 
 from __future__ import annotations
 

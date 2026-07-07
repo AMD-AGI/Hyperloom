@@ -6,9 +6,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
-from inference_optimizer.compat.payload_aliases import read_extra_server_args
-from inference_optimizer.recipe_kb import recipe_canonical_id
-from inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
+from hyperloom.inference_optimizer.recipe_kb import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import Task
@@ -562,7 +562,7 @@ class ProposalsCollaborator:
             return
         try:
             from ..trace.llm_trace import _now_iso
-            from inference_optimizer.session_paths import proposal_task_map_path
+            from hyperloom.inference_optimizer.session_paths import proposal_task_map_path
             path = proposal_task_map_path(self.session_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
             row = {

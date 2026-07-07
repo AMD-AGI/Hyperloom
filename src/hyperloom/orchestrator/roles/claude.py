@@ -18,7 +18,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from inference_optimizer.protocol.intent import (
+from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
     NoIntentEmitted,

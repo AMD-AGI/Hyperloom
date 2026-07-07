@@ -302,7 +302,7 @@ def _tracelens_symptoms(
             subject={},
             source="local",
             suggestion=(
-                "re-run $REPO_ROOT/inference_optimizer/scripts/install.sh; "
+                "re-run $REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh; "
                 "TraceLens editable install is idempotent and will "
                 "restore both perf-report CLI names"
             ),

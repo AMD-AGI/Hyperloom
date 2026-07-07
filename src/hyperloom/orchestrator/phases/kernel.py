@@ -816,7 +816,7 @@ class KernelPhase(PhaseHandler):
         # conflate the two provenances. See ``_relabel_perfskills_geak_journey``.
         _relabel_perfskills_geak_journey(journey)
 
-        from inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         sdir = self.session_dir
         commit = str(getattr(self.shared_state, "code_revision", "") or "")
@@ -931,7 +931,7 @@ class KernelPhase(PhaseHandler):
         if not self._ck_switch_precision_is_fp8(result):
             return False
 
-        from inference_optimizer.cli_model_gate import _resolve_amd_gpu_type
+        from hyperloom.inference_optimizer.cli_model_gate import _resolve_amd_gpu_type
         from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
 
         gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")
@@ -943,7 +943,7 @@ class KernelPhase(PhaseHandler):
         # ``gemm_a8w8_blockscale``), so the checkpoint must declare
         # ``weight_block_size``. This excludes per-tensor, static and
         # per-channel/per-token fp8, which take other GEMM paths.
-        from inference_optimizer.model_config_utils import _fp8_is_block_scale
+        from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
 
         model_path = str(
             getattr(self.shared_state, "model_path", "")

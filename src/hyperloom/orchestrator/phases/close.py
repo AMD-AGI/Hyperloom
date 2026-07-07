@@ -185,7 +185,7 @@ class ClosePhase(PhaseHandler):
                 # Surface the final report location in the lifecycle
                 # log. report_executor writes final.{json,md} under
                 # reports_dir(session_dir); advertise whichever exist.
-                from inference_optimizer.session_paths import reports_dir as _reports_dir
+                from hyperloom.inference_optimizer.session_paths import reports_dir as _reports_dir
 
                 _rd = _reports_dir(self.session_dir)
                 _artifacts = {
@@ -268,7 +268,7 @@ class ClosePhase(PhaseHandler):
             )
 
             flush_session(self.session_dir)
-            from inference_optimizer.breakdown import patch_breakdown_langfuse
+            from hyperloom.inference_optimizer.breakdown import patch_breakdown_langfuse
 
             patch_breakdown_langfuse(self.session_dir)
             # After the breakdown file is in its final (post-flush) form, attach
@@ -293,7 +293,7 @@ class ClosePhase(PhaseHandler):
         # sequence. The zip carries its own PACKAGE_MANIFEST log of what
         # went in / what was missing.
         try:
-            from inference_optimizer.breakdown import package_session_artifacts
+            from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
             pkg_path = package_session_artifacts(
                 self.session_dir,

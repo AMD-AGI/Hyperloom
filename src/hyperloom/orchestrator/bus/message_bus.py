@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from inference_optimizer.storage.connection import SqliteConnection
+from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 from .._time import now_iso
 
 

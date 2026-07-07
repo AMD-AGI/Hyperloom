@@ -204,7 +204,7 @@ def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
     Returns:
         The results directory path, or ``None`` when none is found.
     """
-    from inference_optimizer.session_paths import kernel_agent_runs_root
+    from hyperloom.inference_optimizer.session_paths import kernel_agent_runs_root
 
     runs_root = kernel_agent_runs_root(Path(session_dir))
     if not runs_root.is_dir():

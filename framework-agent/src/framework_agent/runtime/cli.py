@@ -311,7 +311,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        # Standalone repo_map; no reverse-import of inference_optimizer.
+        # Standalone repo_map; no reverse-import of hyperloom.inference_optimizer.
         from framework_agent.repo_map import repo_url_for_framework
 
         repo_url = repo_url_for_framework(framework)

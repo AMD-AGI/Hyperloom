@@ -11,7 +11,7 @@ The Coordinator accepts intent envelopes of the form
 The Critic normally produces two intent types: ``review_verdict``
 (per proposal) and ``send_message`` (heartbeat / ``advice``).
 Schema and verdict vocabulary are mirrored from
-``inference_optimizer/protocol/intent.py`` and ``.../policy.py`` rather than
+``src/hyperloom/inference_optimizer/protocol/intent.py`` and ``.../policy.py`` rather than
 imported, so the skill stays a standalone package. Bump
 ``ENVELOPE_SCHEMA_VERSION`` if the Coordinator extends the envelope schema.
 """

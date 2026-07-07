@@ -152,7 +152,7 @@ def _resolve_kernel_patch_identity(
         or ""
     )
     # External envelope; route through compat helper so legacy ``extra_sglang_args`` still resolves.
-    from inference_optimizer.compat.payload_aliases import read_extra_server_args
+    from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
     extra_args = read_extra_server_args(payload).strip()
     return kernel_id, patch_path, target_file, extra_args
 
@@ -301,7 +301,7 @@ def record_kernel_integrate_result(
     # Record the end-to-end integrate outcome into the breakdown recorder,
     # idempotent per kernel_id, best-effort.
     try:
-        from inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
         if sdir and kernel_id:
             _dec = str(result.get("decision") or "").upper()
@@ -410,7 +410,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # backend + pre-dispatch failures) before the metadata-less early
     # return so no failed attempt becomes invisible in the geak/oob view.
     try:
-        from inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
         instrument.record_kernel_invocations(sdir, result)
         # Record dispatch and per-backend attempts. Distinct from the

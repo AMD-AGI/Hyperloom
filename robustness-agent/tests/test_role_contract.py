@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Contract test: keep envelope tables aligned with inference_optimizer. Skipped when it is not importable (soft dependency); add its path to PYTHONPATH to run."""
+"""Contract test: keep envelope tables aligned with hyperloom.inference_optimizer. Skipped when it is not importable (soft dependency); add its path to PYTHONPATH to run."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _try_import_inference_optimizer():
             sys.path.insert(0, str(root / "src"))
             break
     try:
-        import inference_optimizer.protocol.intent as upstream_ip
+        import hyperloom.inference_optimizer.protocol.intent as upstream_ip
         import hyperloom.orchestrator.policy.gate as upstream_policy
         import hyperloom.orchestrator.roles.agent_role as upstream_role
     except ImportError:

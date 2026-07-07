@@ -16,7 +16,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
-from inference_optimizer.protocol.intent import Intent
+from hyperloom.inference_optimizer.protocol.intent import Intent
 
 log = logging.getLogger(__name__)
 

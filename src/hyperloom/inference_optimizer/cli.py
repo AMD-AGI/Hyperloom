@@ -1,0 +1,4746 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
+
+Env vars consumed: MODEL_PATH, OPENAI_BASE_URL + SAFE_API_KEY, ROCR_VISIBLE_DEVICES,
+CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+    _NOOP_KINDS_KERNEL_ONLY,
+    _REAL_EXECUTORS_FULL,
+    _build_specialist_executor,
+    _noop_prep,
+    _register_executors,
+)
+from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+    _bootstrap_cortex_kb,
+    _bootstrap_knowledge_plane,
+    _build_recipe_kb_dispatcher,
+    _resolve_local_kb_root,
+)
+from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
+    _build_backends,
+    _build_proposal_scorer,
+    _build_robustness_options,
+    _robustness_server_configured,
+)
+from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
+    _AMD_GPU_TYPES,
+    _AMD_UNSUPPORTED_ARCHITECTURES,
+    _AMD_UNSUPPORTED_MODEL_TYPES,
+    _AMD_UNSUPPORTED_QUANT_ALGOS,
+    _AMD_UNSUPPORTED_QUANT_METHODS,
+    _CONTEXT_HEADROOM_DEFAULT,
+    _CONTEXT_HEADROOM_ENV,
+    _GEMMA2_ARCHITECTURES,
+    _GFX_TO_RUNNER,
+    _MAX_MODEL_LEN_HEADROOM,
+    _MAXPOS_CONFIG_KEYS,
+    _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES,
+    _PHI3_ROPE_TYPES,
+    _ROPE_CONFIG_KEYS,
+    _SAFETENSORS_HEADER_LIMIT,
+    _SUPPORTED_ARCH_MARKERS,
+    _SUPPORTED_MODEL_TYPES,
+    _TEXT_COERCIBLE_MODEL_TYPES,
+    _TEXT_DECODER_CONFIG_KEYS,
+    _TOKENIZER_ARTIFACT_FILES,
+    _UNRECOGNIZED_ARCHITECTURES,
+    _UNRECOGNIZED_MODEL_TYPES,
+    _UNREGISTERED_CUSTOM_CONFIG_TYPES,
+    _UNSUPPORTED_ARCHITECTURES,
+    _UNSUPPORTED_CONFIG_KEYS,
+    _UNSUPPORTED_MODEL_TYPES,
+    _VERDICT_TEXT_COERCIBLE,
+    _VERDICT_VISION_ONLY,
+    _VOCAB_WEIGHT_NAMES,
+    _arch_is_supported_text_generation,
+    _autodetect_gpu_type,
+    _config_architectures,
+    _config_declares_text_decoder,
+    _context_headroom_tokens,
+    _detect_amd_unsupported_quant,
+    _detect_gemma2_missing_hidden_act,
+    _detect_incompatible_model_config,
+    _detect_missing_tokenizer_files,
+    _detect_phi3_rope_scaling_incompatible,
+    _detect_unrecognized_architecture,
+    _detect_unsupported_model,
+    _detect_vocab_weight_shape_mismatch,
+    _gpu_runner_type,
+    _load_model_arch,
+    _load_model_config_dict,
+    _load_model_config_tags,
+    _load_model_max_position_embeddings,
+    _model_has_dual_chunk_attention,
+    _model_is_moe,
+    _preflight_context_window,
+    _preflight_model_config_compat,
+    _preflight_unsupported_model_arch,
+    _read_safetensors_header,
+    _resolve_amd_gpu_type,
+    _resolve_gpu_type,
+    _resolve_max_model_len,
+)
+from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+    _model_is_gemma2,
+    summarize_model_config,
+)
+from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
+    _default_target_summary,
+    _parse_conc_sweep_concs,
+    _print_final_summary,
+    _print_kernel_opt_summary_line,
+    _print_session_skeleton,
+    _read_failure_summary,
+    _reconcile_crash_count,
+    _resolve_reference_recipe,
+    _resolve_session_dir_for_summary,
+    _seed_shared_state,
+    _snapshot_system_prompts,
+    resolve_model_display_name,
+)
+from hyperloom.orchestrator.actions.executors._aiter_jit import (
+    AITER_LOCK_STALE_MINUTES,
+    clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
+)
+
+# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
+# re-exported here so the module namespace + monkeypatch surface is intact.
+from ._cli_credentials import (
+    _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
+    _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
+    _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
+    _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
+    _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
+    _resolve_critic_agent_root as _resolve_critic_agent_root,
+    _validate_critic_agent_runtime as _validate_critic_agent_runtime,
+    _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
+    _resolve_robustness_agent_root as _resolve_robustness_agent_root,
+    _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
+    _STALE_PROXY_HOSTPORT as _STALE_PROXY_HOSTPORT,
+    _is_stale_proxy_url as _is_stale_proxy_url,
+    _GEAK_BASE_URL_RE as _GEAK_BASE_URL_RE,
+    _sync_geak_config_base_url as _sync_geak_config_base_url,
+    _derive_anthropic_base_url as _derive_anthropic_base_url,
+    _resolve_llm_endpoints as _resolve_llm_endpoints,
+    _reset_claude_config_to_upstream as _reset_claude_config_to_upstream,
+    _validate_credentials as _validate_credentials,
+)
+from ._cli_multi_node import (
+    _gc_old_profile_traces as _gc_old_profile_traces,
+    _resolve_mn_backend as _resolve_mn_backend,
+    _provision_multi_node_dynamo_stack as _provision_multi_node_dynamo_stack,
+    _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
+    _replay_kernel_patches_for_multi_node as _replay_kernel_patches_for_multi_node,
+)
+from ._cli_quantization import (
+    _quantization_enabled_via_env as _quantization_enabled_via_env,
+    _run_quantization_prelude as _run_quantization_prelude,
+)
+from ._cli_recover import (
+    _session_recovery_status as _session_recovery_status,
+    _run_recover_session as _run_recover_session,
+)
+
+
+# Backward-compat re-exports: these helpers were extracted into cli_executors /
+# cli_kb / cli_backends / cli_model_gate / model_config_utils / cli_bootstrap
+# during the CLI decomposition, but callers and tests still import them from
+# ``hyperloom.inference_optimizer.cli`` (e.g. _grid_runner, test_reference_script). Listing
+# them in ``__all__`` keeps the re-export intentional (and silences the unused-
+# import lint for a re-export-only binding).
+__all__ = [
+    # from .cli_executors
+    "_NOOP_KINDS_KERNEL_ONLY", "_REAL_EXECUTORS_FULL", "_build_specialist_executor",
+    "_noop_prep", "_register_executors",
+    # from .cli_kb
+    "_bootstrap_cortex_kb", "_bootstrap_knowledge_plane", "_build_recipe_kb_dispatcher",
+    "_resolve_local_kb_root",
+    # from .cli_backends
+    "_MULTI_NODE_WORKLOAD_UID_ENV_KEYS", "_build_backends", "_build_proposal_scorer",
+    "_build_robustness_options", "_robustness_server_configured",
+    # from .cli_model_gate
+    "_AMD_GPU_TYPES", "_AMD_UNSUPPORTED_ARCHITECTURES", "_AMD_UNSUPPORTED_MODEL_TYPES",
+    "_AMD_UNSUPPORTED_QUANT_ALGOS", "_AMD_UNSUPPORTED_QUANT_METHODS",
+    "_CONTEXT_HEADROOM_DEFAULT", "_CONTEXT_HEADROOM_ENV", "_GEMMA2_ARCHITECTURES",
+    "_GFX_TO_RUNNER", "_MAX_MODEL_LEN_HEADROOM", "_MAXPOS_CONFIG_KEYS",
+    "_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES", "_PHI3_ROPE_TYPES", "_ROPE_CONFIG_KEYS",
+    "_SAFETENSORS_HEADER_LIMIT", "_SUPPORTED_ARCH_MARKERS", "_SUPPORTED_MODEL_TYPES",
+    "_TEXT_COERCIBLE_MODEL_TYPES", "_TEXT_DECODER_CONFIG_KEYS", "_TOKENIZER_ARTIFACT_FILES",
+    "_UNRECOGNIZED_ARCHITECTURES", "_UNRECOGNIZED_MODEL_TYPES",
+    "_UNREGISTERED_CUSTOM_CONFIG_TYPES", "_UNSUPPORTED_ARCHITECTURES",
+    "_UNSUPPORTED_CONFIG_KEYS", "_UNSUPPORTED_MODEL_TYPES", "_VERDICT_TEXT_COERCIBLE",
+    "_VERDICT_VISION_ONLY", "_VOCAB_WEIGHT_NAMES", "_arch_is_supported_text_generation",
+    "_autodetect_gpu_type", "_config_architectures", "_config_declares_text_decoder",
+    "_context_headroom_tokens", "_detect_amd_unsupported_quant",
+    "_detect_gemma2_missing_hidden_act", "_detect_incompatible_model_config",
+    "_detect_missing_tokenizer_files", "_detect_phi3_rope_scaling_incompatible",
+    "_detect_unrecognized_architecture", "_detect_unsupported_model",
+    "_detect_vocab_weight_shape_mismatch", "_gpu_runner_type", "_load_model_arch",
+    "_load_model_config_dict", "_load_model_config_tags",
+    "_load_model_max_position_embeddings", "_model_has_dual_chunk_attention",
+    "_model_is_moe", "_preflight_context_window", "_preflight_model_config_compat",
+    "_preflight_unsupported_model_arch", "_read_safetensors_header",
+    "_resolve_amd_gpu_type", "_resolve_gpu_type", "_resolve_max_model_len",
+    # from .model_config_utils
+    "_model_is_gemma2",
+    # from .cli_bootstrap
+    "_default_target_summary", "_parse_conc_sweep_concs", "_print_final_summary",
+    "_print_kernel_opt_summary_line", "_print_session_skeleton", "_read_failure_summary",
+    "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
+    "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
+]
+from . import framework_registry
+from .manifest import load_manifest, write_manifest
+from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
+from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+from hyperloom.orchestrator.state.objective import Objective, build_objective
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.prompts.prompt_builder import (
+    build_orchestration_prompt,
+    default_enabled_actions,
+)
+from .session_lock import SessionAlreadyRunning, SessionLock
+from .paths import (
+    DEFAULT_SESSION_DIR,
+    ENV_USER_DATA_PATH,
+    asset_system_prompts_dir,
+    make_session_dir,
+    session_dir as _session_dir_resolve,
+    workspace_root as _workspace_root_resolve,
+)
+
+
+log = logging.getLogger("hyperloom.inference_optimizer.cli")
+
+
+class _RetiredFlag(argparse.Action):
+    """Argparse action that hard-fails on a retired CLI flag with a migration hint (exits 2)."""
+
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str,
+        *,
+        hint: str,
+        **kwargs: Any,
+    ) -> None:
+        """Register the retired flag as a zero-argument, hidden action.
+
+        Args:
+            option_strings (list[str]): The flag spellings this action handles.
+            dest (str): The argparse destination name (unused; suppressed).
+            hint (str): One-line migration hint shown in the error message when
+                the retired flag is used.
+            **kwargs (Any): Passed through to :class:`argparse.Action`; ``nargs``,
+                ``default``, and ``help`` are defaulted so the flag takes no
+                value and stays out of ``--help``.
+        """
+        kwargs.setdefault("nargs", 0)
+        kwargs.setdefault("default", argparse.SUPPRESS)
+        kwargs.setdefault("help", argparse.SUPPRESS)
+        self._hint = hint
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        """Abort parsing with a migration hint when the retired flag is seen.
+
+        Args:
+            parser (argparse.ArgumentParser): The parser invoking this action.
+            namespace (argparse.Namespace): The in-progress parse namespace.
+            values (Any): Parsed values for the flag (always empty; ``nargs=0``).
+            option_string (str | None): The exact flag spelling that triggered this.
+
+        Raises:
+            SystemExit: Always — ``parser.error`` prints the message and exits 2.
+        """
+        parser.error(f"{option_string} was removed. {self._hint}")
+
+
+def _orchestration_rules_fragment_path() -> Path:
+    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``.
+
+    Returns:
+        Path: The path to the bundled ``orchestration.md`` fragment.
+    """
+    return asset_system_prompts_dir() / "orchestration.md"
+
+
+def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
+    """Summarise an objective into the ``(kind, value)`` pair the prompt expects.
+
+    Inspects the objective for the first recognised target attribute
+    (``target_gain_pct`` → float, ``target_tput_per_gpu`` → float,
+    ``baseline_dir`` → str) and pairs it with the objective's ``kind()``.
+
+    Args:
+        objective (Objective): The run objective to summarise.
+
+    Returns:
+        tuple[str, float | str | None]: ``(kind, value)`` where ``value`` is the
+        objective's numeric / string target, or ``None`` when none is present.
+    """
+    kind = objective.kind()
+    value: float | str | None = None
+    if hasattr(objective, "target_gain_pct"):
+        value = float(getattr(objective, "target_gain_pct"))
+    elif hasattr(objective, "target_tput_per_gpu"):
+        value = float(getattr(objective, "target_tput_per_gpu"))
+    elif hasattr(objective, "baseline_dir"):
+        value = str(getattr(objective, "baseline_dir"))
+    return kind, value
+
+
+def _build_orchestration_prompt(
+    *,
+    no_kernel: bool,
+    framework: str,
+    objective: Objective,
+    max_minutes: int,
+    no_explore: bool = False,
+    no_framework_agent: bool = False,
+    action_registry: ActionRegistry | None = None,
+) -> str:
+    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
+
+    Args:
+        no_kernel (bool): When ``True`` the kernel actions are disabled.
+        framework (str): The serving framework name (e.g. ``sglang``).
+        objective (Objective): The run objective summarised into the prompt.
+        max_minutes (int): The wall-clock budget in minutes.
+        no_explore (bool): When ``True`` the EXPLORE phase is disabled.
+        no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
+        action_registry (ActionRegistry | None): The action registry to use;
+            a fresh loaded registry is built when ``None``.
+
+    Returns:
+        str: The composed Orchestration system prompt.
+    """
+    registry = action_registry or ActionRegistry().load()
+    enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
+    kind, value = _objective_summary_for_prompt(objective)
+    return build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=enabled,
+        framework=framework,
+        kernel_enabled=not no_kernel,
+        explore_enabled=not no_explore,
+        framework_agent_phase_enabled=not no_framework_agent,
+        objective_kind=kind,
+        objective_value=value,
+        max_minutes=int(max_minutes),
+        rules_fragment_path=_orchestration_rules_fragment_path(),
+        framework_source_roots=resolve_source_file_allowlist(),
+    )
+
+
+def _load_critic_prompt() -> str:
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``.
+
+    Returns:
+        str: The contents of ``critic.md``.
+    """
+    return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
+
+
+_DEFAULT_KERNEL_PROMPT = (
+    "You are the Kernel-agent — responder-only. You receive `request`\n"
+    "events from Orchestration in your inbox.\n\n"
+    "For every un-answered request, emit ONE `response` intent in reply.\n"
+    "Schema:\n"
+    "  intent_type: response\n"
+    "  payload: {\n"
+    "    in_reply_to: <request msg_id>,\n"
+    "    kind:        '<request.kind>_done',\n"
+    "    status:      'ok' | 'failed' | 'needs_review',\n"
+    "    result:      { /* whatever the request asked for */ }\n"
+    "  }\n\n"
+    "Native-only rule: run_optimization must refuse runtime-generated\n"
+    "torch.compile/Inductor/Triton cache kernels. Only reusable framework\n"
+    "sources under stable repos (aiter/sglang/vllm source trees) are valid\n"
+    "kernel-opt targets; otherwise return status='failed' with a clear reason.\n\n"
+    "SESSION_DIR contract: every path you emit in result.* must be either\n"
+    "verbatim from the request payload, prefixed by SESSION_DIR (injected\n"
+    "per tick), or under one of `/sgl-workspace/aiter/`, `/sgl-workspace/\n"
+    "sglang/`, `/sgl-workspace/vllm/` (the framework source allowlists).\n"
+    "PolicyGate rejects responses whose path fields escape this set.\n\n"
+    "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
+    "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
+)
+
+
+
+# Per-attempt read timeout for the gateway /models catalog probe. The AMD
+# gateway is documented-flaky; on slow/borderline days a healthy /models call
+# can take ~5.5s, straddling this cutoff and causing spurious "gateway catalog
+# unreachable" launch refusals even though the gateway is up. Allow an operator
+# override via env (default unchanged at 5.0s) for slow-gateway windows.
+try:
+    _CATALOG_REQUEST_TIMEOUT_SEC = float(
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0")
+        or "5.0"
+    )
+except (TypeError, ValueError):
+    _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+
+# /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
+_DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
+    """Validate atom-specific CLI knobs: sole job is the ``--nodes>=2`` fail-fast guard (IR-8).
+
+    No auto-tightening is applied; kernel/framework/profile all work on atom. Multi-node TP wiring
+    is unimplemented so ``--nodes>=2`` exits 2. Returns the list of auto-disabled flags (always empty).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``).
+
+    Returns:
+        list[str]: The auto-disabled flags (always empty).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` (unsupported on atom).
+    """
+    auto_disabled: list[str] = []
+    if int(getattr(args, "nodes", 1) or 1) >= 2:
+        print(
+            "ERROR: --framework atom does not support multi-node "
+            "(--nodes >= 2). atom multi-node TP wiring is deferred; "
+            "drop to --nodes 1 or pick --framework sglang/vllm.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(
+        "  framework=atom: no auto-disable applied (kernel-agent + "
+        "framework-agent + profile / roofline / TraceLens all wired "
+        "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
+    )
+    return auto_disabled
+
+
+# Forward-looking alias for _apply_atom_auto_tighten (old name kept for tests/SKILL refs; same callable).
+_assert_atom_single_node = _apply_atom_auto_tighten
+
+
+
+
+def _emit_launch_info(
+    *,
+    pid: int,
+    session_dir: Path,
+    session_id: str,
+    run_log: str,
+    gpu_type: str,
+    framework: str,
+    model: str,
+    launch_info_file: str | None,
+) -> dict[str, Any]:
+    """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``.
+
+    Returns the launch_info dict for callers/tests.
+
+    Args:
+        pid (int): The launched process id.
+        session_dir (Path): The session root directory.
+        session_id (str): The session identifier.
+        run_log (str): The run-log path string.
+        gpu_type (str): The resolved GPU type.
+        framework (str): The serving framework name.
+        model (str): The model name / path.
+        launch_info_file (str | None): Optional path to JSON-dump the launch
+            info; skipped when ``None``.
+
+    Returns:
+        dict[str, Any]: The launch-info dict that was printed (and optionally
+            written).
+    """
+    launch_info: dict[str, Any] = {
+        "event": "launch",
+        "pid": pid,
+        "session_dir": str(session_dir),
+        "session_id": session_id,
+        "run_log": run_log,
+        "manifest": str(session_dir / "manifest.json"),
+        "gpu_type": gpu_type,
+        "framework": framework,
+        "model": model,
+    }
+    kv_body = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in launch_info.items())
+    print(f"HYPERLOOM_LAUNCH {kv_body}")
+    if launch_info_file:
+        path = Path(launch_info_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(launch_info, indent=2))
+        print(f"Launch info file: {path}")
+    return launch_info
+
+
+# Exit code for "another optimizer already owns this session" (issue #592).
+# Distinct from the generic config/usage failures (``2``) so the robustness
+# monitor can tell a refused duplicate launch from a real misconfiguration.
+SESSION_BUSY_EXIT_CODE = 3
+
+
+def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
+    """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``.
+
+    Guards both fresh ``optimize`` and ``--resume`` against a second optimizer
+    attaching to the same ``session_dir`` (issue #592). When a live optimizer
+    already owns the session this refuses to run *before* any ``state.json`` /
+    lease mutation, so a misfiring robustness monitor can never corrupt the
+    shared session.
+
+    Args:
+        session_dir (Path): The resolved session root directory.
+
+    Returns:
+        SessionLock: The acquired lock; the caller must keep it referenced for
+            the optimizer's lifetime.
+    """
+    lock = SessionLock(session_dir)
+    try:
+        lock.acquire()
+    except SessionAlreadyRunning as exc:
+        print(
+            f"ERROR: {exc}. Refusing to start a second optimizer on the same "
+            f"session (would corrupt shared leases / state.json). If the owner "
+            f"is truly dead, wait for the OS to drop the lock or remove "
+            f"{lock.path} before retrying.",
+            file=sys.stderr,
+        )
+        sys.exit(SESSION_BUSY_EXIT_CODE)
+    return lock
+
+
+def _clean_stale_aiter_locks(
+    aiter_jit_dir: Path | None = None,
+    stale_minutes: int = AITER_LOCK_STALE_MINUTES,
+) -> dict[str, Any]:
+    """Startup sweep of stale aiter JIT locks; delegates to the shared helper.
+
+    Thin shim preserving the historical signature / stats-dict contract for the
+    startup call site and tests. The canonical implementation (plus the
+    liveness-gated per-cold-start variant) lives in
+    ``orchestrator/action_executors/_aiter_jit.py``.
+    """
+    return _clean_stale_aiter_locks_impl(
+        aiter_jit_dir, stale_minutes=stale_minutes,
+    )
+
+
+
+
+# AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
+# here, and some upstream archs (DSA) are not adapted to AMD yet.
+
+
+
+
+def _resume_safe_flag(
+    args: argparse.Namespace,
+    arg_name: str,
+    manifest: dict | None,
+    manifest_key: str,
+    *,
+    default: bool,
+    invert: bool = False,
+) -> bool:
+    """Resolve a boolean CLI flag with resume-safe manifest fallback: explicit arg → manifest → default.
+
+    ``invert=True`` handles the ``--no-*`` pattern (args.no_X True == disable; manifest stores positive form).
+    Lets robustness_monitor.sh resume preserve original intent without re-passing the flag.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace.
+        arg_name (str): The attribute name to read from ``args``.
+        manifest (dict | None): The resume manifest, or ``None``.
+        manifest_key (str): The manifest key holding the persisted value.
+        default (bool): The fallback value when neither arg nor manifest
+            supplies one.
+        invert (bool): When ``True`` apply the ``--no-*`` inversion to the
+            explicit arg.
+
+    Returns:
+        bool: The resolved boolean flag value.
+    """
+    raw_arg = getattr(args, arg_name, None)
+    if isinstance(raw_arg, bool) and raw_arg:
+        return (not raw_arg) if invert else raw_arg
+    if manifest is not None and manifest_key in manifest:
+        stored = manifest.get(manifest_key)
+        if isinstance(stored, bool):
+            return stored
+    return default
+
+
+def _resume_safe_numeric(
+    args: argparse.Namespace,
+    arg_name: str,
+    manifest: dict | None,
+    manifest_key: str,
+    *,
+    default: float,
+) -> float:
+    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace.
+        arg_name (str): The attribute name to read from ``args``.
+        manifest (dict | None): The resume manifest, or ``None``.
+        manifest_key (str): The manifest key holding the persisted value.
+        default (float): The fallback value when neither source supplies one.
+
+    Returns:
+        float: The resolved numeric value.
+    """
+    raw_arg = getattr(args, arg_name, None)
+    if raw_arg is not None:
+        try:
+            v = float(raw_arg)
+        except (TypeError, ValueError):
+            v = None
+        if v is not None and v != default:
+            return v
+    if manifest is not None and manifest_key in manifest:
+        try:
+            return float(manifest.get(manifest_key) or default)
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _is_placeholder_tracelens_path(value: str) -> bool:
+    """Treat unedited .env.template placeholders as unset.
+
+    Covers the bare ``\\`` / whitespace-only values plus common literal
+    placeholders (``/path/to/your/TraceLens``, ``<your-...>``) an operator
+    forgot to replace, so the pod-local fallback / installer value wins.
+
+    Args:
+        value (str): The candidate TraceLens path value.
+
+    Returns:
+        bool: ``True`` when the value is blank or an unedited placeholder.
+    """
+    stripped = value.strip()
+    if stripped in ("", "\\"):
+        return True
+    low = stripped.lower()
+    if "/path/to/" in low or "path/to/your" in low:
+        return True
+    if "<" in stripped and ">" in stripped:
+        return True
+    return False
+
+
+def _load_dotenv_fallback() -> None:
+    """Source missing vars from ``$REPO_ROOT/.env`` until a usable LLM endpoint+key is present; env always wins.
+
+    Skips loading only when both a base URL (OPENAI_BASE_URL / ANTHROPIC_BASE_URL)
+    and a key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
+    ANTHROPIC_AUTH_TOKEN) are already set, so split-entrypoint shells that
+    export only the Anthropic side still pull the missing OpenAI vars from .env.
+    """
+    has_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+    has_key = (
+        os.environ.get("SAFE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+    if has_url and has_key:
+        return
+    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
+    env_file = Path(repo_root) / ".env"
+    if not env_file.exists():
+        return
+    loaded = 0
+    for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
+            continue
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    if loaded:
+        print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
+
+
+# kernel-agent env vars that MUST resolve to an existing checkout. Unlike
+# ordinary vars (env-wins no-clobber), a stale/invalid inherited value for
+# these is CORRECTED from the installer-written env file so trace_analyze does
+# not fall back to an empty pod-local dir (issue #722). Scoped to TRACELENS_ROOT
+# only: MAGPIE_PATH is deliberately excluded because a merely-existing dir that
+# is not a Magpie checkout would flip the downstream preflight into the
+# explicit-override branch and hard-fail auto-clone.
+_KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
+
+
+def _parse_env_assignments(text: str) -> dict[str, str]:
+    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins)."""
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out.setdefault(key, value)
+    return out
+
+
+def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -> None:
+    """Overwrite invalid inherited path-class vars with the env file's value.
+
+    Only fires when the inherited value is unset/non-existent AND the file value
+    points at an existing dir; a valid inherited value keeps env-wins semantics.
+    """
+    for key in _KERNEL_AGENT_PATH_VARS:
+        file_val = file_vars.get(key)
+        if not file_val or not Path(file_val).is_dir():
+            continue
+        current = os.environ.get(key, "")
+        if current == file_val or (current and Path(current).is_dir()):
+            continue
+        print(
+            f"Preflight: WARNING — {key}={current or '(unset)'} does not point "
+            f"at an existing checkout; correcting to {file_val} from {env_path} "
+            f"(installer-written value wins for path vars).",
+            file=sys.stderr,
+        )
+        os.environ[key] = file_val
+
+
+def _load_kernel_agent_env_fallback() -> None:
+    """Auto-source the installer-written kernel-agent env file
+    (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``).
+
+    Must source before any orchestrator import (trace_analyze reads
+    HYPERLOOM_KERNEL_AGENT_ROOT at module load). When HYPERLOOM_KERNEL_AGENT_ROOT
+    is already set, bootstrapping is skipped but the env file is still consulted
+    to CORRECT a stale/invalid inherited TRACELENS_ROOT — the fix for issue
+    #722 where a bad inherited TRACELENS_ROOT survived. Hard-fail contract
+    (root unset only): sys.exit(2) if missing/0-vars/still-unset.
+    """
+    candidate = os.environ.get("KERNEL_AGENT_ENV")
+    if not candidate:
+        user_data = os.environ.get("USER_DATA_PATH")
+        if user_data:
+            candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
+        # Root is set: no bootstrap needed, but still correct invalid path vars
+        # from the env file when resolvable. Silent no-op otherwise.
+        if not candidate:
+            return
+        env_path = Path(candidate)
+        if not env_path.is_file():
+            return
+        try:
+            text = env_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        _correct_kernel_agent_path_vars(_parse_env_assignments(text), env_path)
+        return
+
+    if not candidate:
+        print(
+            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
+            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "resolve kernel-agent.env.sh. Run "
+            "src/hyperloom/inference_optimizer/scripts/install.sh and export "
+            "USER_DATA_PATH=/path/to/sessions first.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    env_path = Path(candidate)
+    if not env_path.is_file():
+        print(
+            f"Preflight: ERROR — kernel-agent env file not found at "
+            f"{env_path}. USER_DATA_PATH must be the workspace root "
+            f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
+            f"is workspace-shared, not per-session. Either "
+            f"(a) re-run src/hyperloom/inference_optimizer/scripts/install.sh under "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
+            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
+            f"fallback entirely. Aborting now (was: silently warning and "
+            f"letting trace_analyze fail 10h in).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(
+            f"Preflight: ERROR — failed to read {env_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    file_vars = _parse_env_assignments(text)
+    loaded = 0
+    for key, value in file_vars.items():
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    _correct_kernel_agent_path_vars(file_vars, env_path)
+    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+        print(
+            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
+            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
+            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/scripts/"
+            f"install.sh to regenerate it.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(
+        f"Preflight: loaded {loaded} kernel-agent var(s) from "
+        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
+        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
+    )
+
+
+def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install runtime-imported Python SDKs using the same interpreter that imports them.
+
+    Avoids first-tick BackendError after baseline burns wall time; same-interpreter install avoids
+    cross-interpreter install failures.
+
+    Args:
+        python_exe (str): The interpreter that will import the SDKs (and run
+            the probe / install).
+        pip_extra (list[str]): Extra arguments threaded into the ``pip
+            install`` invocation (e.g. index flags).
+    """
+    candidates = (
+        ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
+        ("openai", "openai>=1.50"),
+        ("httpx", "httpx>=0.27"),
+    )
+    for module_name, pip_spec in candidates:
+        check = subprocess.run(
+            [python_exe, "-c", f"import {module_name}"],
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            print(f"Preflight: {module_name} OK")
+            continue
+        print(f"Preflight: {module_name} not importable, installing {pip_spec} ...")
+        subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, pip_spec],
+            check=True,
+        )
+        print(f"Preflight: installed {pip_spec}")
+
+
+def _unset_hip_visible_devices() -> None:
+    """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
+
+    ROCm gotcha: both set can make torch.cuda.is_available() false in Magpie; ROCR_VISIBLE_DEVICES is canonical.
+    """
+    if "HIP_VISIBLE_DEVICES" not in os.environ:
+        return
+    if "ROCR_VISIBLE_DEVICES" not in os.environ:
+        return
+    value = os.environ.pop("HIP_VISIBLE_DEVICES")
+    print(
+        f"Preflight: WARNING — unset HIP_VISIBLE_DEVICES={value!r} "
+        f"(ROCR_VISIBLE_DEVICES wins on ROCm; HIP_VISIBLE_DEVICES can "
+        f"make torch.cuda.is_available() false inside Magpie subprocess)"
+    )
+
+
+def _check_gpu_visibility() -> None:
+    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent)."""
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        return
+    if proc.returncode != 0:
+        return
+    # rocm-smi --showid emits multiple GPU[ lines per GPU (~6x overcount); deduplicate by GPU index.
+    visible_indices: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GPU["):
+            idx, _, _ = stripped[4:].partition("]")
+            if idx:
+                visible_indices.add(idx)
+    visible = len(visible_indices)
+    try:
+        wanted = int(os.environ.get("TP", "1") or "1")
+    except ValueError:
+        wanted = 1
+    if visible == 0:
+        print("Preflight: WARNING — rocm-smi sees 0 GPUs; benchmark will fail")
+        return
+    if wanted > visible:
+        print(
+            f"Preflight: WARNING — TP={wanted} but rocm-smi sees {visible} "
+            f"GPU(s); sglang/vllm may fail to load weights. Lower TP or "
+            f"adjust ROCR_VISIBLE_DEVICES."
+        )
+
+
+def _check_shm_disk() -> None:
+    """Warn (not fail-fast) on tight ``/dev/shm`` (vLLM/NCCL IPC needs headroom)."""
+    try:
+        usage = shutil.disk_usage("/dev/shm")
+    except (FileNotFoundError, OSError):
+        return
+    if usage.free < _DEV_SHM_MIN_FREE_BYTES:
+        free_gb = usage.free / (1024**3)
+        total_gb = usage.total / (1024**3)
+        print(
+            f"Preflight: WARNING — /dev/shm has {free_gb:.1f} GiB free of "
+            f"{total_gb:.1f} GiB total (< 16 GiB threshold). vLLM IPC + "
+            f"NCCL shm segments may collide with stale entries; if the "
+            f"first server launch hangs >5min, clear /dev/shm/{{vllm,nccl,cuda}}*"
+        )
+
+
+_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
+
+
+def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
+    """Return whether the TraceLens CLI must be present at preflight (hard-fail).
+
+    TraceLens is reached both by the Kernel-agent AND by the PRELUDE/auto
+    roofline (roofline -> trace_analyze -> TraceLens). ``enable_roofline``
+    defaults True and is NOT disabled by ``--no-kernel``, so under ``--no-kernel``
+    alone the PRELUDE roofline still invokes TraceLens. It is only truly unused
+    when the kernel_agent role is off (``--no-kernel``) AND roofline is disabled; only
+    then may preflight degrade to WARN. Otherwise keep the hard-fail so a missing
+    CLI fails fast at preflight instead of mid-run at the first roofline.
+
+    Args:
+        no_kernel: Whether the run is started with ``--no-kernel``.
+        enable_roofline: Whether the auto/PRELUDE roofline is enabled.
+
+    Returns:
+        bool: ``True`` when TraceLens must hard-gate at preflight.
+    """
+    return not (no_kernel and not enable_roofline)
+
+
+def _check_tracelens_cli() -> None:
+    """Hard-gate TraceLens CLI presence — abort before Coordinator starts (SKILL IR-2).
+
+    Pod-local /opt/venv/bin/TraceLens_* console_scripts don't persist across pod restarts, so install.sh
+    must run before every launch (carve-out: --resume in the same shell). Fail-fast beats a delayed
+    tracelens_cli_missing strike at tick ~6 after baseline burned setup time.
+    """
+    missing = [name for name in _TRACELENS_REQUIRED_CLIS if shutil.which(name) is None]
+    if not missing:
+        return
+    session_dir = str(_workspace_root_resolve())
+    print(
+        f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
+        f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
+        f"kernel-agent/scripts/install.sh (chained from "
+        f"src/hyperloom/inference_optimizer/scripts/install.sh) and do NOT persist "
+        f"across pod restarts. SKILL IR-2 requires running install.sh "
+        f"before every launch (carve-out applies only to --resume in "
+        f"the same shell that earlier ran install.sh). Re-run:\n"
+        f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh\n"
+        f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
+        f"then retry `inference_optimizer optimize`. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _check_tracelens_root_exists() -> None:
+    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight (issue #722).
+
+    An operator-supplied TRACELENS_ROOT that points at a missing checkout (stale
+    path or unedited template placeholder) otherwise only surfaces ~10h later in
+    trace_analyze. Unset is fine (pod-local fallback handled downstream).
+    """
+    override = os.environ.get("TRACELENS_ROOT")
+    if not override or Path(override).is_dir():
+        return
+    print(
+        f"ERROR: TRACELENS_ROOT={override} does not point at an existing "
+        f"TraceLens checkout. It was likely inherited from a stale shell or an "
+        f"unedited .env template. Re-run src/hyperloom/inference_optimizer/scripts/install.sh "
+        f"and source $KERNEL_AGENT_ENV, point TRACELENS_ROOT at a real checkout, "
+        f"or unset it to use the pod-local default. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _check_node_claude_cli() -> None:
+    """WARN-only presence check for bundled agent CLIs (node/claude/codex) and ``@cursor/sdk``.
+
+    SDKs fall back to direct HTTP when CLIs are absent, so this is informational. @cursor/sdk is a Node
+    library probed via ``require.resolve`` against ``$(npm root -g)`` since ``shutil.which`` would miss it.
+    """
+    missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
+    if missing:
+        print(
+            f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
+            f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
+            f"Run kernel-agent/scripts/install.sh to bring them in."
+        )
+    # @cursor/sdk presence — probe via Node since it's a library, not a CLI.
+    if shutil.which("node") is not None and shutil.which("npm") is not None:
+        try:
+            npm_root = subprocess.run(
+                ["npm", "root", "-g"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            global_modules = (npm_root.stdout or "").strip()
+            probe = subprocess.run(
+                ["node", "-e", "require.resolve('@cursor/sdk')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "NODE_PATH": global_modules} if global_modules else None,
+            )
+            if probe.returncode != 0:
+                print(
+                    "Preflight: WARNING — @cursor/sdk not resolvable; cursor "
+                    "backend will fail to start. Run kernel-agent/scripts/"
+                    "install.sh to install it globally via npm."
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            print("Preflight: WARNING — could not probe @cursor/sdk presence; cursor backend may be unavailable.")
+
+
+def _emit_preflight_diagnostics(
+    *,
+    magpie_python: str,
+    anthropic_base_url: str | None,
+    args: argparse.Namespace | None = None,
+) -> None:
+    """One canonical, grep-friendly diagnostics block at the end of preflight.
+
+    Args:
+        magpie_python (str): The Magpie interpreter path to report.
+        anthropic_base_url (str | None): The resolved Anthropic base URL, or
+            ``None`` when unset.
+        args (argparse.Namespace | None): Parsed CLI args; when present, KB /
+            PR-monitor status lines are added.
+    """
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        BASELINE_COLD_START_TIMEOUT_SEC,
+        BASELINE_DEFAULT_TIMEOUT_SEC,
+        _probe_aiter_jit_cache,
+    )
+    from .paths import asset_root
+
+    probe = _probe_aiter_jit_cache()
+    cold_cap = os.environ.get(
+        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+        str(BASELINE_COLD_START_TIMEOUT_SEC),
+    )
+    if probe["probe_status"] == "found":
+        kind = "COLD" if probe["is_cold"] else "WARM"
+        cache_line = f"{probe['kernel_count']} .so / {probe['size_mb']} MB ({kind}) at {probe['path']}"
+    else:
+        cache_line = f"<probe_status={probe['probe_status']}>"
+
+    print("Preflight diagnostics:")
+    print(f"  asset_root          = {asset_root()}")
+    print(
+        f"  session_dir         = {_session_dir_resolve()}  "
+        f"({ENV_USER_DATA_PATH}="
+        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
+        f"default={DEFAULT_SESSION_DIR})"
+    )
+    print(f"  magpie_python       = {magpie_python}")
+    print(f"  INFERENCEX_PATH     = {os.environ.get('INFERENCEX_PATH', '<unset>')}")
+    print(f"  aiter jit cache     = {cache_line}")
+    print(f"  cold_start_timeout  = {cold_cap}s")
+    print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    # Surface the hard GPU-reset arming state up front: `recover` (robustness-
+    # delegated) may shell out to `rocm-smi --gpureset` on gpu_memory_leaked.
+    # It is opt-in and scoped to ROCR_VISIBLE_DEVICES (never implicit --gpu=all).
+    _gpureset_on = os.environ.get(
+        "HYPERLOOM_RECOVER_ALLOW_GPU_RESET",
+        "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    _rocr_scope = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if _gpureset_on and _rocr_scope:
+        print(
+            f"  recover_gpureset    = ARMED — robustness may auto "
+            f"`rocm-smi --gpureset --gpu={_rocr_scope}` on gpu_memory_leaked; "
+            f"WARNING: confirm this session exclusively owns those cards"
+        )
+    elif _gpureset_on:
+        print(
+            "  recover_gpureset    = ARMED but UNSCOPED (ROCR_VISIBLE_DEVICES "
+            "unset) — hard reset will be SKIPPED (refuses implicit --gpu=all)"
+        )
+    else:
+        print(
+            "  recover_gpureset    = disabled (opt-in; set "
+            "HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1 to enable, scoped to "
+            "ROCR_VISIBLE_DEVICES)"
+        )
+    if anthropic_base_url:
+        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
+    else:
+        print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
+    if args is not None:
+        kb_enabled = bool(getattr(args, "cortex_enabled", True))
+        pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
+        kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
+        pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
+        kb_status = "OK" if kb_enabled else f"DEGRADED ({kb_reason})"
+        pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
+        print(f"  kb_status           = {kb_status}")
+        print(f"  pr_monitor_status   = {pr_status}")
+        print(f"  kb_degraded_reason  = {kb_reason}")
+        print(f"  pr_degraded_reason  = {pr_reason}")
+
+    # Issue-H: surface Cortex KB offline-queue state; dead-letter pile-up signals a cold-start session.
+    try:
+        _print_cortex_kb_queue_status()
+    except Exception as exc:  # noqa: BLE001 — defensive
+        print(f"  cortex_kb_queue     = <probe_failed: {exc!r}>")
+
+
+def _print_cortex_kb_queue_status() -> None:
+    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal).
+
+    Note:
+        Side-effecting: writes the queue status summary to stdout and returns
+        nothing.
+    """
+    from .session_paths import (
+        cortex_dead_letter_ndjson,
+        cortex_flushed_ndjson,
+        cortex_pending_ndjson,
+    )
+
+    sd = _session_dir_resolve()
+    pending = cortex_pending_ndjson(sd)
+    dead = cortex_dead_letter_ndjson(sd)
+    flushed = cortex_flushed_ndjson(sd)
+
+    def _count(p: Path) -> int:
+        """Count non-blank lines (NDJSON rows) in a queue file.
+
+        Args:
+            p (Path): Path to the NDJSON file to count.
+
+        Returns:
+            int: The number of non-empty lines, or 0 when the file is missing
+            or unreadable.
+        """
+        if not p.exists():
+            return 0
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except OSError:
+            return 0
+
+    p_n, d_n, f_n = _count(pending), _count(dead), _count(flushed)
+    print(f"  cortex_kb_queue     = pending={p_n} dead_letter={d_n} flushed={f_n} (root={pending.parent})")
+    if d_n > 0:
+        print(
+            f"                        ⚠ {d_n} dead-letter row(s) — "
+            f"prior KB writes permanently rejected (4xx schema). "
+            f"Specialists for affected anchors will start cold "
+            f"(no priors). See {dead}."
+        )
+
+
+def _probe_llm_catalog(
+    *,
+    base_url: str,
+    api_key: str,
+) -> set[str] | None:
+    """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
+
+    TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
+
+    Args:
+        base_url (str): The gateway base URL; ``""`` returns ``None``.
+        api_key (str): Optional bearer key sent in the ``Authorization``
+            header.
+
+    Returns:
+        set[str] | None: The set of model ids from ``<base_url>/models``, or
+            ``None`` when the probe is skipped or exhausts its retries.
+    """
+
+    if not base_url:
+        return None
+
+    try:
+        import httpx  # type: ignore[import-not-found]
+    except ImportError:
+        # _ensure_python_sdks should have installed httpx; return None so the caller decides.
+        print(
+            "Preflight: WARNING — httpx not importable, skipping catalog "
+            "probe. _ensure_python_sdks should have installed it."
+        )
+        return None
+
+    insecure = os.environ.get(
+        "INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE",
+        "",
+    ).strip().lower() in ("1", "true", "yes")
+    if insecure:
+        print(
+            "Preflight: WARNING — INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1 "
+            "is set; catalog probe will skip TLS verification while sending "
+            "an Authorization: Bearer header. Use only against trusted internal "
+            "gateways with self-signed certs."
+        )
+        try:
+            import urllib3  # type: ignore[import-not-found]
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:  # noqa: BLE001
+            pass
+
+    probe_url = base_url.rstrip("/") + "/models"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    delays = (0.0, *_CATALOG_RETRY_DELAYS_SEC)
+    last_err: str = ""
+    for i, delay in enumerate(delays):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            resp = httpx.get(
+                probe_url,
+                headers=headers,
+                timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
+                verify=not insecure,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+            print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} failed: {last_err}")
+            continue
+        if resp.status_code != 200:
+            last_err = f"HTTP {resp.status_code}: {(resp.text or '')[:200]}"
+            print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} got {last_err}")
+            continue
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            last_err = f"JSON decode: {exc}"
+            print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} returned non-JSON: {last_err}")
+            continue
+        ids = {m["id"] for m in data.get("data") or [] if isinstance(m, dict) and isinstance(m.get("id"), str)}
+        if not ids:
+            last_err = "empty data[]"
+            continue
+        return ids
+
+    print(f"Preflight: catalog probe exhausted {len(delays)} attempts ({last_err}); cannot validate model availability")
+    return None
+
+
+def _validate_and_resolve_claude_model(
+    args: argparse.Namespace,
+    resolved_urls: tuple[str, str] | None,
+) -> set[str] | None:
+    """Hard-gate Claude model selection (must be in _CLAUDE_ALLOWED_MODELS); mutates ``args.claude_model``.
+
+    Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
+    catalog id set on success (reused by the codex smoke-test).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace; ``claude_model``
+            may be mutated to the fallback model.
+        resolved_urls (tuple[str, str] | None): Optional
+            ``(anthropic_base_url, openai_base_url)`` used to resolve the probe
+            base URL when env is unset.
+
+    Returns:
+        set[str] | None: The gateway catalog id set on success.
+
+    Raises:
+        SystemExit: With code 2 when the model is disallowed, the catalog is
+            unreachable, or no acceptable model is present.
+    """
+    chosen = (args.claude_model or "").strip()
+    # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
+    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
+    # an AMD-network safety default; an operator can opt out via
+    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
+    # catalog probe below is the sole gate (a typo still fails because the id
+    # won't be in the catalog). Default behavior is unchanged.
+    allow_custom = os.environ.get(
+        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL",
+        "",
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
+        print(
+            f"ERROR: --claude-model={chosen!r} is not allowed. "
+            f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
+            f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
+            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start. "
+            f"For a non-AMD gateway, set "
+            f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
+            f"orchestration model validated against your gateway catalog.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if allow_custom and not chosen:
+        print(
+            "ERROR: --claude-model is empty but "
+            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
+            "orchestration model id. Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Catalog probe GETs <base>/models. The orchestration model is a Claude
+    # model, so probe the Anthropic side first; if that side has no reachable
+    # catalog (e.g. native api.anthropic.com without a LiteLLM /models route)
+    # fall back to the OpenAI side. INFERENCE_OPTIMIZER_CATALOG_PROBE_URL
+    # overrides the host outright (single probe, no fallback).
+    catalog_ids = None
+    override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if override_url:
+        api_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("SAFE_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
+    else:
+        anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if not anthropic_url and resolved_urls is not None:
+            anthropic_url = resolved_urls[0]
+        if not openai_url and resolved_urls is not None:
+            openai_url = resolved_urls[1]
+        anthropic_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("SAFE_API_KEY", "")
+        )
+        openai_key = (
+            os.environ.get("OPENAI_API_KEY", "")
+            or os.environ.get("SAFE_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        )
+        # (url, key) candidates in priority order; skip blanks and dedupe so a
+        # single-gateway deploy (same URL both sides) probes only once.
+        seen_urls: set[str] = set()
+        for cand_url, cand_key in ((anthropic_url, anthropic_key), (openai_url, openai_key)):
+            if not cand_url or cand_url in seen_urls:
+                continue
+            seen_urls.add(cand_url)
+            catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
+            if catalog_ids is not None:
+                break
+
+    if catalog_ids is None:
+        # #340: a custom-model deploy may sit behind a gateway without a
+        # /models route; don't hard-block — warn and trust the operator id.
+        if allow_custom:
+            print(
+                f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
+                f"--claude-model={chosen!r}. Proceeding under "
+                f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 (trusting the operator id)."
+            )
+            return None
+        print(
+            "ERROR: gateway catalog unreachable after retries; cannot "
+            "verify Claude model availability. Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if chosen in catalog_ids:
+        print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
+        return catalog_ids
+
+    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
+    # catalog miss so the operator fixes the id rather than silently running a
+    # model their gateway doesn't serve.
+    if allow_custom:
+        print(
+            f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
+            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"{sorted(catalog_ids)[:20]}). Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if _CLAUDE_FALLBACK_MODEL in catalog_ids:
+        print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {_CLAUDE_FALLBACK_MODEL!r}")
+        args.claude_model = _CLAUDE_FALLBACK_MODEL
+        return catalog_ids
+
+    print(
+        f"ERROR: neither {_CLAUDE_PREFERRED_MODEL!r} nor "
+        f"{_CLAUDE_FALLBACK_MODEL!r} present in gateway catalog "
+        f"(catalog has {sorted(m for m in catalog_ids if m.startswith('claude-'))}). "
+        f"Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _smoke_test_codex_model(
+    args: argparse.Namespace,
+    resolved_urls: tuple[str, str] | None,
+) -> None:
+    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+
+    Probes the OpenAI-side catalog independently of the Claude check: in a
+    split-entrypoint deploy the Claude catalog lives on the Anthropic gateway
+    and would not list ``gpt-*``, so reusing it would always false-warn.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
+            ``no_kernel``).
+        resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
+            from preflight; the OpenAI side is probed for the Codex catalog.
+    """
+    # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
+    critic_uses_codex = args.critic_backend == "agent"
+    needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
+    if not needs_codex:
+        return
+
+    openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if not openai_url:
+        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if not openai_url and resolved_urls is not None:
+        openai_url = resolved_urls[1]
+    openai_key = (
+        os.environ.get("OPENAI_API_KEY", "")
+        or os.environ.get("SAFE_API_KEY", "")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    )
+    catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
+    if catalog_ids is None:
+        # WARN-only path: don't block startup just because the OpenAI catalog
+        # is unreachable (the Claude gate already validated reachability).
+        print(
+            "Preflight: WARNING — OpenAI-side catalog unreachable; skipping "
+            "--codex-model verification (CodexBackend may fail at first turn)."
+        )
+        return
+
+    chosen = (args.codex_model or "").strip()
+    if chosen in catalog_ids:
+        print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
+        return
+    print(
+        f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
+        f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
+        f"CodexBackend will fail at first turn. Pass --codex-model with a "
+        f"value in the catalog or use --critic-mock / --kernel-claude to "
+        f"avoid the Codex path entirely."
+    )
+
+
+# InferenceX clone defaults — kept in sync with
+# src/hyperloom/inference_optimizer/scripts/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
+_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+_INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
+
+
+def _inferencex_checkout_ok(path: Path | str) -> bool:
+    """True when ``path`` is a usable InferenceX checkout, not a stub.
+
+    A bare ``is_dir()`` check accepts a half-cloned dir left behind by a
+    ``git init`` that then failed to fetch/checkout. Magpie sources
+    ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
+    exist — a complete checkout always has it, a stub never does.
+
+    Args:
+        path (Path | str): The candidate InferenceX checkout directory.
+
+    Returns:
+        bool: ``True`` when the checkout contains
+            ``benchmarks/benchmark_lib.sh``.
+    """
+    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
+def _clone_inferencex(dest: Path) -> str | None:
+    """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
+
+    Mirrors install.sh ``git_fetch_pinned``: a 7-40 hex ref triggers a
+    shallow fetch-checkout (GitHub serves SHA fetches), otherwise a
+    ``--branch`` clone. Returns the path on success, ``None`` on failure
+    (caller decides how to surface it). Never raises out.
+
+    On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
+    fetched tree) is removed so a later preflight's detection does not
+    mistake the stub for a valid checkout and skip re-cloning.
+
+    Args:
+        dest (Path): The writable destination directory for the checkout.
+
+    Returns:
+        str | None: The checkout path string on success, or ``None`` on
+            failure.
+    """
+    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    dest_str = str(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
+            subprocess.run(
+                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
+                check=True,
+                timeout=600,
+            )
+            subprocess.run(
+                ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
+                check=True,
+                timeout=120,
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
+                check=True,
+                timeout=600,
+            )
+        if not _inferencex_checkout_ok(dest):
+            raise OSError(f"clone reported success but {dest_str} is missing benchmarks/benchmark_lib.sh")
+        return dest_str
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
+        shutil.rmtree(dest, ignore_errors=True)
+        return None
+
+
+def _preflight(
+    args: argparse.Namespace | None = None,
+) -> tuple[str, str] | None:
+    """Auto-install missing runtime deps and export auth aliases.
+
+    Credentials fallback → auth aliases → SDK install → Anthropic/OpenAI base URL resolve + ~/.claude reset →
+    ROCm hygiene → ray/Magpie/InferenceX install → CLI presence checks → diagnostics. Returns
+    ``(anthropic_base_url, openai_base_url)`` or ``None`` when no LLM base URL is configured.
+
+    Args:
+        args (argparse.Namespace | None): Parsed CLI args, used for the
+            diagnostics block; optional.
+
+    Returns:
+        tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
+            ``None`` when neither base URL is configured.
+    """
+    _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
+
+    # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.
+    _validate_credentials()
+
+    # --- Auth alias export ---
+    # SAFE_API_KEY only FILLS gaps now: an operator who set a provider-specific
+    # key (OPENAI_API_KEY / ANTHROPIC_API_KEY) for split entrypoints keeps it.
+    safe_key = os.environ.get("SAFE_API_KEY", "")
+    if safe_key:
+        for alias in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OOB_API_KEY",
+            "GEAK_API_KEY",
+            "LLM_API_KEY",
+            "AMD_LLM_API_KEY",
+        ):
+            if not os.environ.get(alias):
+                os.environ[alias] = safe_key
+                print(f"Preflight: filled {alias} from SAFE_API_KEY")
+    # --- Resolve install interpreters ---
+    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_magpie_python
+
+    magpie_python = _resolve_magpie_python()
+
+    # Outside a venv, add --break-system-packages so pip installs on bare-metal Debian/Ubuntu.
+    pip_extra: list[str] = []
+    if not (hasattr(sys, "real_prefix") or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)):
+        pip_extra = ["--break-system-packages"]
+
+    # --- Python SDK auto-install (claude-agent-sdk / openai / httpx) ---
+    # Must precede Coordinator import (ClaudeBackend lazy-imports the SDK); sys.executable matches imports.
+    _ensure_python_sdks(sys.executable, pip_extra)
+
+    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
+    # Explicit operator values on each side are preserved; a missing side falls
+    # back to the other (legacy single-gateway stays one URL). We still rewrite
+    # known-stale 127.0.0.1:4002 leftovers so they can't reach the CLIs.
+    resolved_urls: tuple[str, str] | None = None
+    anthropic_url, openai_url = _resolve_llm_endpoints()
+    if anthropic_url or openai_url:
+        for var, want in (
+            ("ANTHROPIC_BASE_URL", anthropic_url),
+            ("OPENAI_BASE_URL", openai_url),
+        ):
+            if not want:
+                continue
+            prev = os.environ.get(var, "")
+            if prev != want:
+                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "resolved endpoint"
+                os.environ[var] = want
+                print(f"Preflight: {var} {prev or '<unset>'} -> {want} ({why})")
+        # Claude CLI primary key: prefer the explicit Anthropic-side key so a
+        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY
+        # (single-gateway) is the fallback.
+        claude_primary_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or safe_key
+        )
+        _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
+        resolved_urls = (anthropic_url, openai_url)
+
+        # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
+        # gateway URL, but an INTENTIONAL operator override is preserved (#521:
+        # GEAK runs in a separate network namespace reached via a host-local
+        # reverse tunnel). We still force-rewrite the known-stale legacy
+        # auth-proxy URL (127.0.0.1:4002) so leftovers can't reach the CLIs.
+        gateway_url = openai_url or anthropic_url
+        if gateway_url:
+            for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+                current = os.environ.get(alias, "").strip()
+                if current and current != gateway_url and not _is_stale_proxy_url(current):
+                    print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
+                    continue
+                if os.environ.get(alias) != gateway_url:
+                    prev = os.environ.get(alias, "")
+                    os.environ[alias] = gateway_url
+                    why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
+                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} ({why})")
+
+        # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+        # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
+        # resolved GEAK_BASE_URL above actually reaches the kernel agent.
+        geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+        geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+        if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+            print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
+    else:
+        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
+
+    # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
+    _unset_hip_visible_devices()
+    _check_gpu_visibility()
+    _check_shm_disk()
+
+    # --- Runtime dep install ---
+    # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
+    if shutil.which("ray") is None:
+        print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
+        subprocess.run(
+            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+            check=True,
+        )
+        print("Preflight: ray installed OK")
+
+    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_PATH override; auto-clones if missing).
+    check = subprocess.run(
+        [magpie_python, "-c", "import Magpie"],
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        magpie_env = os.environ.get("MAGPIE_PATH")
+        magpie_env_explicit = bool(magpie_env)
+        if magpie_env:
+            magpie_dir = Path(magpie_env)
+        else:
+            from .paths import magpie_dir as _magpie_default
+
+            magpie_dir = _magpie_default(_session_dir_resolve())
+        magpie_dir.parent.mkdir(parents=True, exist_ok=True)
+        if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+            # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_PATH (would destroy local work).
+            if magpie_env_explicit:
+                print(
+                    f"Preflight: ERROR — $MAGPIE_PATH={magpie_dir} has no "
+                    f"setup.py/pyproject.toml; refusing to clone Magpie "
+                    f"main on top of an operator-supplied path. Fix the "
+                    f"env or unset $MAGPIE_PATH to fall back to the "
+                    f"session-default location.",
+                    file=sys.stderr,
+                )
+                raise FileNotFoundError(f"$MAGPIE_PATH={magpie_dir} is not a valid Magpie checkout")
+            print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
+                check=True,
+            )
+        print(f"Preflight: installing Magpie from {magpie_dir} ...")
+        subprocess.run(
+            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, "-e", str(magpie_dir)],
+            check=True,
+        )
+        print("Preflight: Magpie installed OK")
+
+    # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if not inferencex_path:
+        from .paths import (
+            magpie_dir as _magpie_default,
+            open_source_root as _open_source_default,
+        )
+
+        open_source_root = _open_source_default()
+        _magpie_env = os.environ.get("MAGPIE_PATH")
+        magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default(_session_dir_resolve())
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        for candidate in (
+            magpie_root / "InferenceX",
+            open_source_root / "InferenceX",
+        ):
+            if _inferencex_checkout_ok(candidate):
+                if os.access(candidate, os.W_OK):
+                    inferencex_path = str(candidate)
+                    break
+                print(
+                    "Preflight: skipping non-writable auto-detected "
+                    f"InferenceX checkout at {candidate}; cloning a "
+                    "writable checkout instead."
+                )
+    # When no writable checkout was found (e.g. a brain-launched run that
+    # skipped install.sh's ensure_inferencex), clone one ourselves rather
+    # than falling back to a read-only host mount. baseline cannot run
+    # without InferenceX, so a clone failure is a hard error.
+    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        from .paths import open_source_root as _open_source_default
+
+        dest = _open_source_default() / "InferenceX"
+        print(f"Preflight: InferenceX not found; cloning into {dest} ...")
+        inferencex_path = _clone_inferencex(dest)
+        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+            print(
+                "Preflight: ERROR — InferenceX checkout missing and clone "
+                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
+                "to a writable checkout or re-run "
+                "src/hyperloom/inference_optimizer/scripts/install.sh.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    # Guard against a read-only selection (shared mount handed to us via
+    # INFERENCEX_PATH): Magpie stages benchmark scripts there, so a
+    # non-writable tree fails the run before server boot.
+    if not os.access(inferencex_path, os.W_OK):
+        print(
+            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
+            f"writable. Magpie stages benchmark scripts into it and will "
+            f"fail with [Errno 30] Read-only file system. Point "
+            f"INFERENCEX_PATH at a writable checkout (unset it to let "
+            f"Hyperloom clone a fresh one).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH that
+    # triggered the clone above must not survive into the child env, or Magpie
+    # still reads the bad path. The validated value wins.
+    os.environ["INFERENCEX_PATH"] = inferencex_path
+
+    # --- node / claude / codex CLI presence (WARN-only) ---
+    _check_node_claude_cli()
+
+    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off; SKILL Step 2 step 8.5) ---
+    # Catches launchers that skip install.sh, else missing-CLI only surfaces at the tick ~6 robustness probe.
+    no_kernel = getattr(args, "no_kernel", False) if args else False
+    enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if _tracelens_required_at_preflight(no_kernel, enable_roofline):
+        _check_tracelens_cli()
+        # Fail fast on a stale/placeholder TRACELENS_ROOT before the Coordinator
+        # starts, rather than ~10h later in trace_analyze (issue #722).
+        _check_tracelens_root_exists()
+    else:
+        _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
+        if _missing_tl:
+            print(
+                f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {_missing_tl} "
+                f"(skipped; --no-kernel + roofline disabled)"
+            )
+
+    # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
+    if args is not None:
+        _run_ir3_preflight(args)
+
+    # --- Single canonical diagnostics block ---
+    _emit_preflight_diagnostics(
+        magpie_python=magpie_python,
+        anthropic_base_url=(resolved_urls[0] if resolved_urls is not None else None),
+        args=args,
+    )
+
+    return resolved_urls
+
+
+def _run_ir3_preflight(args: argparse.Namespace) -> None:
+    """IR-3 — Cortex KB + PR Monitor reachability probe (soft degrade); never raises/exits.
+
+    Mutates args: ``cortex_enabled``/``pr_monitor_enabled`` plus
+    ``kb_degraded_reason``/``pr_degraded_reason`` (None|"explicit_flag"|"ir3_auto").
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace; mutated in place
+            with the resolved KB / PR-monitor enable flags and reasons.
+    """
+    explicit_kb = bool(getattr(args, "degraded_kb", False))
+    explicit_pr = bool(getattr(args, "degraded_pr", False))
+
+    args.cortex_enabled = True
+    args.pr_monitor_enabled = True
+    args.kb_degraded_reason = None
+    args.pr_degraded_reason = None
+
+    if explicit_kb and explicit_pr:
+        args.cortex_enabled = False
+        args.kb_degraded_reason = "explicit_flag"
+        args.pr_monitor_enabled = False
+        args.pr_degraded_reason = "explicit_flag"
+        return
+
+    user_data = _workspace_root_resolve()
+    marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
+    script = Path(__file__).resolve().parent / "scripts" / "preflight_kb.sh"
+    env = os.environ.copy()
+    # Inject --cortex-kb-url into env so the probe script sees it; empty URL means skip the KB branch.
+    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
+    if cortex_url:
+        env["CORTEX_KB_URL"] = cortex_url
+    if explicit_kb:
+        env["SKIP_KB_PROBE"] = "1"
+    if explicit_pr:
+        env["SKIP_PR_PROBE"] = "1"
+
+    try:
+        subprocess.run(
+            ["bash", str(script)],
+            env=env,
+            check=False,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # Script died — treat both branches as unreachable so soft-degrade kicks in.
+        log.warning("IR-3 preflight script error: %s", exc)
+        marker: dict[str, Any] = {
+            "kb_reachable": False,
+            "pr_reachable": False,
+            "kb_skipped": explicit_kb,
+            "pr_skipped": explicit_pr,
+        }
+    else:
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("IR-3 marker unreadable: %s", exc)
+            marker = {
+                "kb_reachable": False,
+                "pr_reachable": False,
+                "kb_skipped": explicit_kb,
+                "pr_skipped": explicit_pr,
+            }
+
+    if explicit_kb:
+        args.cortex_enabled = False
+        args.kb_degraded_reason = "explicit_flag"
+    elif not marker.get("kb_reachable", False) and not marker.get("kb_skipped", False):
+        args.cortex_enabled = False
+        args.kb_degraded_reason = "ir3_auto"
+
+    if explicit_pr:
+        args.pr_monitor_enabled = False
+        args.pr_degraded_reason = "explicit_flag"
+    elif not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
+        args.pr_monitor_enabled = False
+        args.pr_degraded_reason = "ir3_auto"
+
+
+# Default critic backend ("agent" since Step D); override via env or --critic-mock/--critic-agent.
+DEFAULT_CRITIC_BACKEND = os.environ.get(
+    "INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
+    "agent",
+)
+_VALID_CRITIC_BACKENDS = ("mock", "agent")
+
+
+def _resolve_critic_choice(args: argparse.Namespace) -> str:
+    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``critic_backend``).
+
+    Returns:
+        str: The resolved critic backend (one of ``_VALID_CRITIC_BACKENDS``).
+
+    Raises:
+        SystemExit: With code 2 when the chosen backend is invalid.
+    """
+    chosen = args.critic_backend
+    if chosen is None:
+        chosen = DEFAULT_CRITIC_BACKEND
+    if chosen not in _VALID_CRITIC_BACKENDS:
+        print(
+            f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
+            f"(set by --critic-mock / --critic-agent or "
+            f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chosen
+
+
+# Default robustness backend ("agent"); force heartbeat-only mock via --robustness-mock or env.
+DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
+    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
+    "agent",
+)
+_VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
+
+
+def _resolve_robustness_choice(args: argparse.Namespace) -> str:
+    """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid.
+
+    Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
+    separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
+    auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``robustness_backend`` / ``nodes`` and server config).
+
+    Returns:
+        str: The resolved robustness backend (one of
+            ``_VALID_ROBUSTNESS_BACKENDS``).
+
+    Raises:
+        SystemExit: With code 2 when the chosen backend is invalid.
+    """
+    chosen = getattr(args, "robustness_backend", None)
+    explicit = chosen is not None
+    if chosen is None:
+        chosen = DEFAULT_ROBUSTNESS_BACKEND
+    if chosen not in _VALID_ROBUSTNESS_BACKENDS:
+        print(
+            f"ERROR: robustness backend {chosen!r} not in "
+            f"{_VALID_ROBUSTNESS_BACKENDS!r} (set by --robustness-mock / "
+            f"--robustness-agent or "
+            f"INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
+        if explicit:
+            print(
+                f"WARN: --robustness-agent selected but nodes={nodes} and "
+                f"no robustness-server configured — the agent's LocalProbe "
+                f"family targets sandbox-local resources (ray, inference "
+                f"server, GPU, ...) that all live in separate pods on "
+                f"multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; configure "
+                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
+                f"the agent backend, or pass --robustness-mock explicitly "
+                f"to suppress this warning. See "
+                f"src/hyperloom/inference_optimizer/multi_node/SKILL.md "
+                f"(Robustness limitation in multi-node mode).",
+                file=sys.stderr,
+            )
+        chosen = "mock"
+    return chosen
+
+
+def _reset_state_file(session_dir: Path) -> None:
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched).
+
+    Args:
+        session_dir (Path): The session root directory holding ``state.json``.
+    """
+    state_path = session_dir / "state.json"
+    if not state_path.exists():
+        return
+    import time as _time
+
+    ts = int(_time.time())
+    backup_path = session_dir / f"state.json.preReset.{ts}"
+    try:
+        state_path.replace(backup_path)
+    except OSError as exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "v0.8 §3.10 --reset-state: could not move %s → %s: %s",
+            state_path,
+            backup_path,
+            exc,
+        )
+        return
+    import logging as _logging
+
+    _logging.getLogger(__name__).info(
+        "v0.8 §3.10 --reset-state: backed up state.json to %s; session starts blank.",
+        backup_path.name,
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _argv_has_option(argv: list[str], option: str) -> bool:
+    """Report whether ``argv`` explicitly carries a given option.
+
+    Matches both the bare flag (``--tp``) and the ``=``-joined form
+    (``--tp=8``).
+
+    Args:
+        argv (list[str]): The argument vector to scan.
+        option (str): The long-option flag to look for (e.g. ``"--tp"``).
+
+    Returns:
+        bool: ``True`` when the option appears in ``argv``, else ``False``.
+    """
+    prefix = f"{option}="
+    return any(arg == option or arg.startswith(prefix) for arg in argv)
+
+
+def _positive_int_arg(value: str) -> int:
+    """argparse type for positive integer knobs."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _parse_conc_values(raw: str, *, source: str = "CONC") -> list[int]:
+    """Parse a positive integer or comma ladder without mutating env."""
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    tokens = [tok.strip() for tok in text.split(",") if tok.strip()]
+    try:
+        values = [int(tok) for tok in tokens]
+    except ValueError:
+        print(
+            f"ERROR: {source}={text!r} is not an integer or comma-separated integer ladder. "
+            "Use --conc N for one baseline concurrency, or "
+            "--conc-sweep-concs 4,16,128 for a ladder.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if not values or any(v <= 0 for v in values):
+        print(
+            f"ERROR: {source}={text!r} must contain positive integer value(s).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return values
+
+
+def _parse_conc_env_default() -> int:
+    """Resolve ``$CONC`` for argparse; comma ladders use first value as baseline."""
+    values = _parse_conc_values(os.environ.get("CONC", ""), source="CONC")
+    return values[0] if values else 8
+
+
+def _parse_conc_sweep_default() -> str:
+    """Resolve the sweep ladder, defaulting a comma ``$CONC`` into the sweep."""
+    explicit = os.environ.get("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "").strip()
+    if explicit:
+        return explicit
+    raw = os.environ.get("CONC", "").strip()
+    if not raw:
+        return "1,2,4,8,16,32,64,128"
+    values = _parse_conc_values(raw, source="CONC")
+    if len(values) > 1:
+        return ",".join(str(v) for v in values)
+    return "1,2,4,8,16,32,64,128"
+
+
+def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
+    """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
+    if getattr(args, "max_model_len", None):
+        return int(args.max_model_len), "--max-model-len"
+    max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
+    if max_model_len_env:
+        try:
+            return _positive_int_arg(max_model_len_env), "$MAX_MODEL_LEN"
+        except argparse.ArgumentTypeError as exc:
+            print(
+                f"ERROR: MAX_MODEL_LEN={max_model_len_env!r} is invalid: {exc}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    return (
+        _resolve_max_model_len(
+            args.isl,
+            args.osl,
+            str(args.model or ""),
+        ),
+        "auto",
+    )
+
+
+# Phases that still sit upstream of EXPLORE, so a resume may retroactively
+# honour --no-explore. Includes the legacy "FRAMEWORK" name for sessions
+# persisted before the FRAMEWORK -> FRAMEWORK_AGENT rename (commit 33ac6ccc).
+_PRE_EXPLORE_PHASES: frozenset[str] = frozenset({"", "PRELUDE", "FRAMEWORK", "FRAMEWORK_AGENT"})
+
+
+def _resume_can_disable_explore(cur_phase: str) -> bool:
+    """Whether ``--no-explore`` may still disable EXPLORE for a resumed session.
+
+    Args:
+        cur_phase (str): The persisted ``state.phase``; case/whitespace-insensitive.
+
+    Returns:
+        bool: ``True`` when the phase is upstream of EXPLORE (EXPLORE not yet
+        entered), so the flag can be honoured retroactively.
+    """
+    return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
+
+
+def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
+    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
+
+    Keys MUST be the canonical phase names from
+    :mod:`hyperloom.orchestrator.phases.machine_state`; otherwise
+    :func:`normalize_budget_pct` silently drops the entry and the phase falls
+    back to its library default.
+    """
+    from hyperloom.orchestrator.phases.machine_state import (
+        PHASE_CLOSE,
+        PHASE_EXPLORE,
+        PHASE_FRAMEWORK_AGENT,
+        PHASE_KERNEL_AGENT,
+        PHASE_PRELUDE,
+        PHASE_SWEEP,
+    )
+
+    phase_budget_pct: dict[str, float] = {}
+    for cli_field, phase_name in (
+        ("phase_budget_prelude_pct", PHASE_PRELUDE),
+        ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
+        ("phase_budget_explore_pct", PHASE_EXPLORE),
+        ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
+        ("phase_budget_sweep_pct", PHASE_SWEEP),
+        ("phase_budget_close_pct", PHASE_CLOSE),
+    ):
+        val = getattr(args, cli_field, None)
+        if val is not None:
+            phase_budget_pct[phase_name] = float(val)
+    return phase_budget_pct
+
+
+def _export_workload_envs_for_optimize(
+    args: argparse.Namespace,
+    *,
+    nodes_resolved: int,
+    tp_resolved: int,
+    ep_resolved: int,
+    argv: list[str] | None = None,
+) -> None:
+    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``conc``).
+        nodes_resolved (int): The resolved node count; ``>= 2`` forces export
+            of all three knobs regardless of whether they were passed.
+        tp_resolved (int): The resolved tensor-parallel size to export as ``TP``.
+        ep_resolved (int): The resolved expert-parallel size to export as ``EP``.
+        argv (list[str] | None): The argument vector to inspect for explicit
+            flags; defaults to ``sys.argv[1:]`` when ``None``.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
+        os.environ["TP"] = str(tp_resolved)
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--conc"):
+        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--ep"):
+        os.environ["EP"] = str(ep_resolved)
+
+
+async def _run_optimize(args: argparse.Namespace) -> int:
+    """Run the ``optimize`` subcommand end to end.
+
+    Resolves topology arguments (nodes, TP/EP, GPUs per node), runs
+    preflight, and drives the optimization session to completion.
+
+    Args:
+        args: Parsed CLI arguments for the ``optimize`` subcommand.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
+    # Surface --nodes (CLI flag wins) before _preflight runs.
+    nodes_resolved = max(1, int(args.nodes))
+    tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
+    ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
+    # Resolve gpus_per_node with the same CLI > env > 8 chain _provision_multi_node_rayjob_stack uses.
+    gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
+    if gpn_attr is not None:
+        gpus_per_node_resolved = int(gpn_attr)
+    else:
+        try:
+            gpus_per_node_resolved = int(
+                os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8,
+            )
+        except ValueError:
+            gpus_per_node_resolved = 8
+    total_gpus = nodes_resolved * gpus_per_node_resolved
+
+    # Topology sanity gates — multi-node only (nodes>=2); fail fast vs a cryptic launcher crash mid-cold-start.
+    if nodes_resolved >= 2:
+        # Gate 1: total cluster GPUs (nodes*gpus_per_node) must hold the model's TP shards.
+        if total_gpus < tp_resolved:
+            print(
+                f"ERROR: TP={tp_resolved} exceeds total GPU count "
+                f"({nodes_resolved} nodes * {gpus_per_node_resolved} "
+                f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
+                "--nodes, or use a larger --rayjob-gpus-per-node pod "
+                "template.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Gate 2: EP cannot exceed TP (can't place more expert shards than ranks); fail before bootstrap.
+        if ep_resolved > tp_resolved:
+            print(
+                f"ERROR: EP={ep_resolved} > TP={tp_resolved}. Expert-parallel "
+                "size must be <= tensor-parallel size. Either lower --ep or "
+                "raise --tp.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    operator_server_args = str(getattr(args, "server_args", "") or "").strip()
+    if operator_server_args:
+        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
+    # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
+    _export_workload_envs_for_optimize(
+        args,
+        nodes_resolved=nodes_resolved,
+        tp_resolved=tp_resolved,
+        ep_resolved=ep_resolved,
+    )
+    # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
+    skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
+    os.environ["SKIP_VARIANTS"] = skip_variants_resolved
+    # Surface PD_* knobs for executors; empty means "resolve from state.json", pd_mode always exported.
+    pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+    if pd_mode == "disaggregated" and nodes_resolved < 2:
+        # PD disaggregation needs >=2 nodes (separate prefill + decode pods); fail at parse time.
+        print(
+            f"ERROR: --pd-mode disaggregated requires --nodes >= 2 "
+            f"(got --nodes {nodes_resolved}). PD splits the cluster "
+            "into prefill + decode groups; a single pod cannot host "
+            "both. Either drop --pd-mode (defaults to colocated) or "
+            "raise --nodes.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    os.environ["PD_MODE"] = pd_mode
+    if pd_mode == "disaggregated":
+        for cli_attr, env_key in (
+            ("pd_prefill_nodes", "PD_PREFILL_NODES"),
+            ("pd_decode_nodes", "PD_DECODE_NODES"),
+            ("pd_prefill_tp", "PD_PREFILL_TP"),
+            ("pd_decode_tp", "PD_DECODE_TP"),
+        ):
+            v = int(getattr(args, cli_attr, 0) or 0)
+            if v > 0:
+                os.environ[env_key] = str(v)
+        for cli_attr, env_key in (
+            ("pd_transfer_backend", "PD_TRANSFER_BACKEND"),
+            ("pd_ib_device", "PD_IB_DEVICE"),
+        ):
+            v = (getattr(args, cli_attr, "") or "").strip()
+            if v:
+                os.environ[env_key] = v
+
+    await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
+
+    # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
+    aiter_sweep = _clean_stale_aiter_locks()
+    if aiter_sweep["dir"] and aiter_sweep["deleted"]:
+        print(
+            f"Stale aiter locks cleared: "
+            f"dir={aiter_sweep['dir']} "
+            f"deleted={aiter_sweep['deleted']} "
+            f"skipped_fresh={aiter_sweep['skipped_fresh']} "
+            f"errors={aiter_sweep['errors']}"
+        )
+
+    resolved_urls = _preflight(args)
+
+    # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
+    _validate_and_resolve_claude_model(args, resolved_urls)
+    # Codex smoke probes the OpenAI side independently (split entrypoints).
+    _smoke_test_codex_model(args, resolved_urls)
+
+    # `--resume-from <path>` implies `--resume` (operator convenience).
+    if args.resume_from and not args.resume:
+        args.resume = True
+
+    if args.resume:
+        # Resume mode: USER_DATA_PATH stays at workspace level; pick the per-session subdir via --resume-from
+        # or auto-pick the latest under <model>/<ts>/ (legacy flat layout fallback). Pin
+        # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR so paths/subprocesses resolve consistently.
+        from .paths import (
+            ENV_CURRENT_SESSION_DIR,
+            find_latest_per_session_dir,
+            workspace_root,
+        )
+
+        ws = workspace_root()
+        if args.resume_from:
+            session_dir = Path(args.resume_from).expanduser().resolve()
+            try:
+                session_dir.relative_to(ws.resolve())
+            except ValueError:
+                print(
+                    f"ERROR: --resume-from {session_dir!r} is not under "
+                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                    f"workspace root (the parent of the per-session subdirs) "
+                    f"and pass the per-session subdir via --resume-from.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not session_dir.is_dir():
+                print(
+                    f"ERROR: --resume-from {session_dir!r} does not exist.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        else:
+            picked = find_latest_per_session_dir()
+            if picked is not None:
+                session_dir = picked
+                print("  --resume: auto-picked latest per-session subdir")
+            else:
+                # Legacy flat layout — workspace_root itself is the session_dir.
+                session_dir = ws
+                print(
+                    f"  --resume: no per-session subdir found under "
+                    f"{ws}/<model>/<ts>/; falling back to flat layout "
+                    f"({ws})"
+                )
+        # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
+        os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
+        # Ensure per-session skeleton exists (idempotent mkdir -p).
+        for sub in __import__("hyperloom.inference_optimizer.paths", fromlist=["_SESSION_SKELETON"])._SESSION_SKELETON:
+            (session_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        # Single-optimizer guard (issue #592): take the session lock before any
+        # state.json / lease access so a misfiring monitor cannot attach a
+        # second optimizer to this session. Held for the whole run.
+        session_lock = _acquire_session_lock_or_exit(session_dir)
+
+        try:
+            manifest = load_manifest(session_dir)
+        except FileNotFoundError as exc:
+            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not (session_dir / "state.json").exists():
+            print(
+                f"ERROR: --resume failed: {session_dir}/state.json missing "
+                f"(manifest exists but Coordinator never wrote SharedState)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        state = SharedState.load_or_init(session_dir)
+        prior_stop = state.stop_reason
+        print(f"Resuming session: {session_dir}")
+        print(f"  manifest.session_id    : {manifest.get('session_id')}")
+        print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
+        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(
+            f"  prior current_best    : "
+            f"{(state.current_best or {}).get('action')}/"
+            f"{(state.current_best or {}).get('tput')}"
+        )
+        print(f"  prior stop_reason     : {prior_stop or '(none)'}")
+
+        # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
+        if state.model_path:
+            os.environ["MODEL_PATH"] = state.model_path
+            print(f"  re-exported MODEL_PATH: {state.model_path}")
+            # Backfill model_info for sessions created before the field existed
+            # (or whose config was unreadable at launch); fail-soft to {}.
+            if not state.model_info:
+                state.model_info = summarize_model_config(state.model_path)
+                if state.model_info:
+                    state.save(session_dir)
+                    print("  backfilled model_info (from config.json)")
+        if state.framework:
+            os.environ["FRAMEWORK"] = state.framework
+            print(f"  re-exported FRAMEWORK : {state.framework}")
+        if state.gpu_type:
+            runner_gpu_type = _gpu_runner_type(state.gpu_type)
+            os.environ["TARGET_GPU_TYPE"] = state.gpu_type
+            os.environ["GPU_TYPE"] = runner_gpu_type
+            print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+            if runner_gpu_type != state.gpu_type:
+                print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
+        for state_attr, env_name in (
+            ("tp", "TP"),
+            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects
+            # --enable-expert-parallel (#569); lost EP would silently drop it.
+            ("ep", "EP"),
+            ("conc", "CONC"),
+            ("isl", "ISL"),
+            ("osl", "OSL"),
+            ("max_model_len", "MAX_MODEL_LEN"),
+        ):
+            val = getattr(state, state_attr, 0) or 0
+            if val:
+                os.environ[env_name] = str(val)
+                print(f"  re-exported {env_name:<14s}: {val}")
+        # Profile-scoped OSL: an explicit --profile-osl on this resume wins;
+        # otherwise re-export the value persisted from the original run so the
+        # profile phase doesn't silently revert to its default (and re-trigger
+        # the oversized-trace / EngineCore-timeout failure this guards against).
+        _resume_profile_osl = getattr(args, "profile_osl", None) or getattr(state, "profile_osl", 0)
+        if _resume_profile_osl:
+            os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
+            state.profile_osl = int(_resume_profile_osl)
+            print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
+        if state.precision:
+            os.environ["PRECISION"] = state.precision
+            print(f"  re-exported PRECISION     : {state.precision}")
+        if getattr(state, "framework_version", ""):
+            os.environ["FRAMEWORK_VERSION"] = state.framework_version
+            print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
+        # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
+        if not state.kernel_enabled:
+            args.no_kernel = True
+            print("  Kernel-agent          : DISABLED (persisted from original run)")
+        # Same persistence contract for the FRAMEWORK_AGENT phase toggle.
+        if not bool(getattr(state, "framework_agent_phase_enabled", True)):
+            args.no_framework_agent = True
+            print("  framework phase       : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_framework_agent", False)):
+            # Inverse (P2.d): honour --no-framework-agent on resume only before FRAMEWORK is entered.
+            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
+            if cur_phase in ("", "PRELUDE"):
+                state.framework_agent_phase_enabled = False
+                # Persist immediately; the later conditional save only runs on prior stop_reason/crash.
+                state.save(session_dir)
+                print("  framework phase       : DISABLING for resume (--no-framework-agent + phase=PRELUDE)")
+            else:
+                print(
+                    f"  framework phase       : WARN --no-framework-agent ignored; "
+                    f"session is already in phase={cur_phase!r} "
+                    f"(cannot retroactively skip)"
+                )
+        # Same persistence contract for the EXPLORE phase toggle.
+        if not bool(getattr(state, "explore_enabled", True)):
+            args.no_explore = True
+            print("  explore phase         : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_explore", False)):
+            # Honour --no-explore on resume only before EXPLORE is entered.
+            # Phases preceding EXPLORE are PRELUDE and FRAMEWORK_AGENT (the
+            # latter renamed from the legacy "FRAMEWORK" in commit 33ac6ccc,
+            # which persisted sessions may still carry).
+            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
+            if _resume_can_disable_explore(cur_phase):
+                state.explore_enabled = False
+                print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
+            else:
+                print(
+                    f"  explore phase         : WARN --no-explore ignored; "
+                    f"session is already in phase={cur_phase!r} "
+                    f"(cannot retroactively skip)"
+                )
+
+        # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
+        prior_crash = state.crash_count
+
+        # Issue-G: target_reached is an intentional terminal state (SKILL Run-time signals);
+        # require --force-resume to push past it. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
+        force_resume = bool(getattr(args, "force_resume", False))
+        gated_terminal = {"target_reached"}
+        if prior_stop in gated_terminal and not force_resume:
+            print(
+                f"\nERROR: --resume blocked by terminal stop_reason="
+                f"{prior_stop!r}.\n"
+                f"\n"
+                f"  SKILL.md (Run-time signals): {prior_stop!r} is a "
+                f"deliberate terminal state.\n"
+                f"  The optimizer will not auto-resume past it because "
+                f"the prior run\n"
+                f"  declared exhaustion — picking up where it left off "
+                f"only repeats\n"
+                f"  the same exhaustion verdict.\n"
+                f"\n"
+                f"  Override paths:\n"
+                f"  1. Pass ``--force-resume`` if you have changed the "
+                f"workload /\n"
+                f"     search space / model / strategy and want to "
+                f"continue regardless.\n"
+                f"  2. Start a fresh session (different "
+                f"$USER_DATA_PATH) for a clean run.\n"
+                f"\n"
+                f"  Reports for the prior run live under "
+                f"{session_dir}/reports/.\n",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        if prior_stop or prior_crash >= 3:
+            state.stop_reason = ""
+            state.closing_phase = False
+            state.closing_started_unix = 0.0
+            state.closing_report_task_id = ""
+            # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
+            state.crash_count = 0
+            # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
+            from datetime import datetime, timezone
+
+            state.start_ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            state.save(session_dir)
+            override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
+            print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
+            print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        # Re-bootstrap the Cortex KB client (recreates client + reruns T0 warm-start); resume=True is banner-only.
+        cortex_client = _bootstrap_cortex_kb(
+            args,
+            session_dir=session_dir,
+            manifest=manifest,
+            resume=True,
+        )
+        # KnowledgePlane facade (fail-soft degrades when PR Monitor/Cortex unreachable); None only when --degraded-kb.
+        knowledge_plane = (
+            None
+            if not getattr(args, "cortex_enabled", True)
+            else _bootstrap_knowledge_plane(
+                args,
+                cortex_client=cortex_client,
+                session_dir=session_dir,
+            )
+        )
+        # No resume backfill needed for roofline (PR #321: roofline_snapshots restored by SharedState.from_dict).
+    else:
+        # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
+        if not args.model:
+            args.model = os.environ.get("MODEL_PATH") or ""
+        if not args.model:
+            print(
+                "ERROR: model is required. Pass --model <path> or set "
+                "MODEL_PATH env (or use --resume to continue an existing "
+                "session at the canonical session_dir).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
+        os.environ["MODEL_PATH"] = str(args.model)
+
+        # Quantization prelude (one-shot, before any session/baseline work):
+        # if --quantize was passed, quantize the source model now and rewrite
+        # args.model to the exported quantized model. No-op otherwise.
+        await _run_quantization_prelude(args)
+
+        # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
+        framework = (
+            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+            or framework_registry.DEFAULT_FRAMEWORK
+        )
+        if not framework_registry.is_supported(framework):
+            print(
+                f"ERROR: --framework must be one of "
+                f"{', '.join(framework_registry.names())} "
+                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
+                "--framework",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        os.environ["FRAMEWORK"] = framework
+        print(f"Framework       : {framework}")
+
+        # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
+        if framework == "atom":
+            _apply_atom_auto_tighten(args)
+
+        # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
+        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        probed = _autodetect_gpu_type() or ""
+        gpu_type, gpu_warnings = _resolve_gpu_type(
+            user_specified=user_specified,
+            probed=probed,
+        )
+        for line in gpu_warnings:
+            print(line, file=sys.stderr)
+        if probed and not user_specified:
+            print(f"GPU type        : {gpu_type} (auto-detected)")
+        runner_gpu_type = _gpu_runner_type(gpu_type)
+        if gpu_type and runner_gpu_type != gpu_type:
+            print(
+                f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
+                f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
+                f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
+                file=sys.stderr,
+            )
+        args.gpu_type = gpu_type or None
+        if runner_gpu_type:
+            os.environ["TARGET_GPU_TYPE"] = gpu_type
+            os.environ["GPU_TYPE"] = runner_gpu_type
+            print(f"GPU type        : {gpu_type}")
+            print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
+        else:
+            os.environ.pop("TARGET_GPU_TYPE", None)
+            os.environ.pop("GPU_TYPE", None)
+            args.gpu_type = None
+            print("GPU type        : <unset> (Magpie will auto-detect)")
+
+        # MAX_MODEL_LEN is operator-overridable. Auto resolution only runs when
+        # neither --max-model-len nor $MAX_MODEL_LEN was supplied.
+        max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
+        args.max_model_len = max_model_len
+        os.environ["MAX_MODEL_LEN"] = str(max_model_len)
+        os.environ["ISL"] = str(args.isl)
+        os.environ["OSL"] = str(args.osl)
+        # Profile-scoped OSL (issue #571): exported only when explicitly set, so
+        # the profile/roofline materializer can decouple its OSL from the served
+        # workload. Unset leaves the profile phase on the global --osl.
+        if getattr(args, "profile_osl", None) is not None:
+            os.environ["PROFILE_OSL"] = str(args.profile_osl)
+        os.environ["PRECISION"] = args.precision
+        # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
+        _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
+            os.environ.get("FRAMEWORK_VERSION", "") or ""
+        ).strip()
+        if not _fw_version_for_env:
+            from .recipe_snapshot_constants import (
+                DEFAULT_FRAMEWORK_VERSION_SLUG,
+                detect_framework_version,
+            )
+
+            _detected = detect_framework_version(
+                (getattr(args, "framework", None) or "").strip() or os.environ.get("FRAMEWORK", "")
+            )
+            if _detected and _detected != DEFAULT_FRAMEWORK_VERSION_SLUG:
+                _fw_version_for_env = _detected
+        if _fw_version_for_env:
+            os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
+        print(
+            f"Workload        : ISL={args.isl} OSL={args.osl} "
+            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+            f"PRECISION={args.precision} "
+            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
+        )
+
+        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/ (INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for legacy).
+        # Use the resolved identity so a quantized run is named after the source
+        # model (e.g. "<model>-quantized") instead of the generic export-dir
+        # basename "quantized".
+        session_dir = make_session_dir(model_name=resolve_model_display_name(args))
+        # Single-optimizer guard (issue #592): a fresh per-session dir is
+        # normally uncontended, but take the lock here too so the contract
+        # ("one optimizer owns a session") holds uniformly and the owner pid is
+        # published for the robustness monitor.
+        session_lock = _acquire_session_lock_or_exit(session_dir)
+        manifest = write_manifest(session_dir, args=args)
+        # One-shot Langfuse startup marker: ties the WekaFS user dir + session
+        # dir to code_revision/dependency commits the moment the session is
+        # created, so a run that aborts in pre-flight or is killed before a
+        # breakdown still leaves a correlatable trace. Best-effort, never fatal.
+        try:
+            from hyperloom.orchestrator.trace.langfuse_emitter import record_session_start
+
+            record_session_start(session_dir)
+        except Exception:  # noqa: BLE001 — startup marker must never break launch
+            log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
+        print(f"Session dir     : {session_dir}")
+        print(f"Session id      : {manifest['session_id']}  (manifest label only)")
+        _print_session_skeleton(session_dir)
+
+        # Machine-readable launch info: stable point for launcher scripts to harvest pid/session_dir/run_log.
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest["session_id"]),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=gpu_type or "",
+            framework=args.framework or "",
+            model=str(args.model) if args.model else "",
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
+        _seed_shared_state(
+            session_dir,
+            args,
+            session_id=manifest["session_id"],
+        )
+        # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
+        if _preflight_unsupported_model_arch(args, session_dir):
+            sys.exit(2)
+        # Model-config compatibility preflight: reject statically-broken
+        # configs before the heavy server bring-up.
+        if _preflight_model_config_compat(args, session_dir):
+            sys.exit(2)
+        # Context-window preflight: reject when ISL+OSL+headroom exceeds max_position_embeddings (no stretch by policy).
+        if _preflight_context_window(args, session_dir):
+            sys.exit(2)
+        # Cortex KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); fails fast unless --degraded-kb.
+        cortex_client = _bootstrap_cortex_kb(
+            args,
+            session_dir=session_dir,
+            manifest=manifest,
+            resume=False,
+        )
+        # KnowledgePlane facade for specialists (fail-soft both sides; always non-None for dispatch).
+        knowledge_plane = (
+            None
+            if not getattr(args, "cortex_enabled", True)
+            else _bootstrap_knowledge_plane(
+                args,
+                cortex_client=cortex_client,
+                session_dir=session_dir,
+            )
+        )
+
+    objective = build_objective(
+        {
+            "MAX_HOURS": str(args.max_hours),
+            "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
+            "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
+            "TARGET_DIR": args.target_baseline_dir or "",
+        }
+    )
+    print(f"Objective       : kind={objective.kind()} {objective.describe()}")
+    no_kernel = getattr(args, "no_kernel", False)
+    no_explore = getattr(args, "no_explore", False)
+    no_framework_agent = bool(getattr(args, "no_framework_agent", False))
+    # Unconditional phase-toggle banner lines (mirror the kernel banner so all
+    # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
+    if no_explore:
+        print(
+            "Explore phase   : DISABLED (--no-explore); "
+            f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}"
+        )
+    else:
+        print("Explore phase   : ENABLED")
+    if no_framework_agent:
+        print("Framework-agent phase : DISABLED (--no-framework-agent)")
+    else:
+        print("Framework-agent phase : ENABLED")
+    if no_explore and no_kernel:
+        print(
+            "WARNING: --no-explore and --no-kernel are both set; the run "
+            "collapses to baseline -> SWEEP over an empty optimization_stack "
+            "(no EXPLORE param search, no KERNEL rewrites). SWEEP only "
+            "re-validates the baseline recipe. Continuing as requested.",
+            file=sys.stderr,
+        )
+    if bool(getattr(args, "research_scout", True)):
+        print(
+            "Research scout  : ENABLED at PRELUDE (re-dispatch every "
+            f"{max(1, int(getattr(args, 'research_scout_interval', 3) or 3))} "
+            "explore rounds)"
+        )
+    else:
+        print("Research scout  : DISABLED (--no-research-scout)")
+    if bool(getattr(args, "target_advisory", True)):
+        print("Target advisory : ENABLED (External target gap injected into prompts; advisory-only)")
+    else:
+        print("Target advisory : DISABLED (--no-target-advisory)")
+    if bool(getattr(args, "recipe_sediment", True)):
+        print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
+    else:
+        print("Recipe sediment : DISABLED (--no-recipe-sediment)")
+    if bool(getattr(args, "allow_empty_kernel_shape", False)):
+        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+        print("Kernel shape    : empty-shape dispatch ALLOWED (--allow-empty-kernel-shape)")
+    else:
+        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
+        print("Kernel shape    : non-empty trace shape REQUIRED for kernel-opt dispatch")
+
+    # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
+    critic_choice = _resolve_critic_choice(args)
+    critic_agent_root: Path | None = None
+    critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
+    if critic_kb_mode not in ("inmemory", "live"):
+        print(
+            f"ERROR: CRITIC_KB_CLIENT_MODE={critic_kb_mode!r} not in {{'inmemory','live'}}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if critic_choice == "agent":
+        critic_agent_root = _resolve_critic_agent_root()
+        if critic_agent_root is None:
+            print(
+                f"ERROR: --critic-agent selected but critic-agent runtime not "
+                f"found.\n"
+                f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
+                f"runtime/cli.py, or install critic-agent at "
+                f"$REPO_ROOT/critic-agent/.\n"
+                f"  Bypass with --critic-mock.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _validate_critic_agent_runtime(critic_agent_root)
+        if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
+            print(
+                "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
+                "set. Either export KB_BASE_URL or unset "
+                "CRITIC_KB_CLIENT_MODE to fall back to inmemory.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Default WORKSPACE_PATH for critic-agent runtime: SKILL static-asset root (repo root), not artefact dir.
+        os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[3]))
+
+    # Resolve robustness backend choice + runtime root, mirroring critic.
+    robustness_choice = _resolve_robustness_choice(args)
+    robustness_agent_root: Path | None = None
+    robustness_options = _build_robustness_options(args)
+    if robustness_choice == "agent":
+        robustness_agent_root = _resolve_robustness_agent_root()
+        if robustness_agent_root is None:
+            print(
+                f"ERROR: --robustness-agent selected but robustness-agent "
+                f"runtime not found.\n"
+                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
+                f"containing src/robustness_agent/runtime/cli.py, or install "
+                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
+                f"  Bypass with --robustness-mock.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _validate_robustness_agent_runtime(robustness_agent_root)
+
+    backends = _build_backends(
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
+        kernel_codex=args.kernel_codex,
+        critic_choice=critic_choice,
+        session_dir=session_dir,
+        critic_agent_root=critic_agent_root,
+        critic_kb_mode=critic_kb_mode,
+        cortex_kb_url=(getattr(args, "cortex_kb_url", None) or "").strip() or None,
+        robustness_choice=robustness_choice,
+        robustness_agent_root=robustness_agent_root,
+        robustness_options=robustness_options,
+        no_kernel=no_kernel,
+    )
+    # Expose active session_dir to in-process executors via the canonical
+    # pin env var (read by paths.session_dir() -> report.py, sweep.py, etc.).
+    # Note: make_session_dir() already sets this, but we reinforce it here
+    # for --resume paths where make_session_dir may not have been called.
+    # DO NOT overwrite USER_DATA_PATH — it must remain the workspace root
+    # so concurrent sessions, install.sh, and setup_env.sh resolution work
+    # correctly on shared filesystems (WekaFS).
+    os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
+    # Production: enable strict PolicyGate path-containment (escaping intents land as policy_denied).
+    os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
+    # PolicyGate R1 phase_incompatible enforcement for production runs (env affects cli boot path only).
+    if getattr(args, "strict_phase", True):
+        os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
+    # Propagate --legacy-action-scores so SharedState.from_dict handles drop/warn uniformly (default drop).
+    legacy_mode = (
+        str(
+            getattr(args, "legacy_action_scores", "drop") or "drop",
+        )
+        .strip()
+        .lower()
+    )
+    if legacy_mode == "warn":
+        os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
+    # Propagate --migration-mode: SharedState.from_dict treats fact-layer discrepancy as fatal (strict) or WARN (lenient).
+    migration_mode = (
+        str(
+            getattr(args, "migration_mode", "strict") or "strict",
+        )
+        .strip()
+        .lower()
+    )
+    if migration_mode == "lenient":
+        os.environ["INFERENCE_OPTIMIZER_MIGRATION_MODE"] = "lenient"
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_MIGRATION_MODE", None)
+    # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
+    if getattr(args, "reset_state", False):
+        _reset_state_file(session_dir)
+    # Propagate --breakdown-include-transcripts (inline / path-only choice) to end-of-session breakdown.
+    transcripts_flag = (
+        str(
+            getattr(args, "breakdown_include_transcripts", "false") or "false",
+        )
+        .strip()
+        .lower()
+    )
+    if transcripts_flag == "true":
+        os.environ["INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS"] = "1"
+    else:
+        os.environ.pop(
+            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
+            None,
+        )
+
+    # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
+    phase_budget_pct = _build_phase_budget_pct(args)
+
+    # When kernel is disabled, strip it from the role registry (no tick / no backend expectation).
+    role_registry = None
+    if no_kernel:
+        from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
+
+    coordinator = Coordinator(
+        session_dir,
+        backends=backends,
+        role_registry=role_registry,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
+        cortex_kb=cortex_client,
+        phase_budget_pct=phase_budget_pct or None,
+        # KnowledgePlane facade (None when --degraded-kb).
+        knowledge_plane=knowledge_plane,
+        # Advisory multi-model specialist-proposal scorer. ``None`` when
+        # --no-proposal-scoring or an empty model list; otherwise scores
+        # each proposal_set and surfaces the results to Orchestration as
+        # one reference among many (never gates anything). ``session_dir``
+        # is forwarded so the scorer can append its per-model token usage
+        # to the full-trace ledger (component=proposal_scorer).
+        proposal_scorer=_build_proposal_scorer(args, session_dir),
+        # Warm-recipe replay controls. Default ON, fires when
+        # warm_start_recipe.confidence >= min_confidence and the
+        # measured gain reproduces at least min_reproduce_pct of the
+        # recipe's historical claim. Manifest is the persistent
+        # authority across restarts (resume-safe).
+        warm_replay_enabled=_resume_safe_flag(
+            args,
+            "no_warm_replay",
+            manifest,
+            "warm_replay_enabled",
+            default=True,
+            invert=True,
+        ),
+        warm_replay_min_confidence=_resume_safe_numeric(
+            args,
+            "warm_replay_min_confidence",
+            manifest,
+            "warm_replay_min_confidence",
+            default=0.7,
+        ),
+        warm_replay_min_reproduce_pct=_resume_safe_numeric(
+            args,
+            "warm_replay_min_reproduce_pct",
+            manifest,
+            "warm_replay_min_reproduce_pct",
+            default=0.8,
+        ),
+    )
+    framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
+    max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
+    prompts: dict[str, str] = {
+        "orchestration": args.orch_prompt
+        or _build_orchestration_prompt(
+            no_kernel=no_kernel,
+            no_explore=no_explore,
+            no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+        ),
+        "critic": args.critic_prompt or _load_critic_prompt(),
+    }
+    if not no_kernel:
+        prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+    coordinator.system_prompt_overrides = prompts
+    # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
+    try:
+        coordinator.framework_agent_discover_timeout_sec = float(
+            getattr(args, "framework_agent_discover_timeout_sec", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        coordinator.framework_agent_discover_timeout_sec = 0.0
+    # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
+    specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
+    specialist_executor: "Any" = None
+    if specialist_capacity > 0:
+        specialist_executor = _build_specialist_executor(
+            args,
+            session_dir=session_dir,
+            knowledge_plane=knowledge_plane,
+        )
+    _register_executors(
+        coordinator,
+        no_kernel=no_kernel,
+        compare_against_gpu=getattr(args, "compare_against_gpu", None),
+        session_dir=session_dir,
+        specialist_executor=specialist_executor,
+    )
+    # Persist effective system prompts for resume / drift inspection.
+    _snapshot_system_prompts(session_dir, prompts=prompts)
+
+    kernel_str = "DISABLED" if no_kernel else (f"{'Codex' if args.kernel_codex else 'Claude'}")
+    if critic_choice == "mock":
+        critic_str = "mock"
+    else:  # "agent"
+        critic_str = f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, root={critic_agent_root})"
+    if robustness_choice == "mock":
+        robustness_str = "mock"
+    else:
+        robustness_str = f"robustness-agent(root={robustness_agent_root})"
+        if robustness_options:
+            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
+            robustness_str += f"[{kvs}]"
+    print(
+        f"Backends        : "
+        f"orchestration=Claude({args.claude_model}), "
+        f"kernel={kernel_str}, "
+        f"critic={critic_str}, "
+        f"robustness={robustness_str}"
+    )
+    print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
+    print(f"Tick interval   : {args.tick_interval_sec}s")
+    print()
+
+    if not (getattr(args, "compare_against_gpu", None) or "").strip():
+        print(
+            "[target_analysis] no --compare-against-gpu set; will write a "
+            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
+            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
+            "to fetch real InferenceX reference data.",
+            file=sys.stderr,
+        )
+
+    try:
+        stop_reason = await coordinator.run(
+            objective=objective,
+            max_minutes=args.max_hours * 60.0,
+            tick_interval_sec=args.tick_interval_sec,
+            max_ticks=args.max_ticks,
+            install_signal_handlers=True,
+            closing_grace_sec=args.closing_grace_sec,
+        )
+    finally:
+        await coordinator.stop()
+        # Drop the single-optimizer session lock (issue #592) once the
+        # coordinator has released its leases. The OS would drop it on process
+        # exit anyway; this just frees it promptly for an intentional resume.
+        session_lock.release()
+        # Issue #464: crash-safe reports/final.json. Runs unconditionally and
+        # FIRST so a consumable machine-readable summary always exists even
+        # when the CLOSE sequencer never ran (time_exhausted / external
+        # SIGTERM) or its report task failed. Idempotent: a no-op when the
+        # full ReportExecutor already wrote final.json. coordinator.run's own
+        # finally has persisted state.json (with stop_reason) before we get
+        # here, so the fields are current.
+        try:
+            from .breakdown import write_minimal_final_json
+
+            final_json = write_minimal_final_json(session_dir)
+            print(f"Final summary     : {final_json}")
+        except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
+            log.exception("crash-safe final.json write failed (non-fatal)")
+        # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
+        # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
+        sequencer_done = getattr(
+            coordinator.shared_state,
+            "close_sequence_done",
+            False,
+        )
+        if sequencer_done:
+            print(
+                "Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)"
+            )
+            # The sequencer already flushed Langfuse + packaged at step 2.5/2.6.
+            # Re-run flush idempotently as a safety net (only re-writes the
+            # receipt if it already ran), so a step-2.5 failure still gets a
+            # final receipt spliced in.
+            try:
+                from hyperloom.orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
+
+                flush_session(session_dir)
+                from .breakdown import patch_breakdown_langfuse
+
+                patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
+        else:
+            try:
+                from .breakdown import write_breakdown_json
+
+                breakdown_path = write_breakdown_json(session_dir)
+                print(f"Session breakdown : {breakdown_path}")
+            except Exception:  # noqa: BLE001
+                log.exception("session_breakdown finalize failed (non-fatal)")
+            # Issue-I: safety-net reports/final.md (no-op when the sequencer's final.md already exists).
+            try:
+                from .breakdown import write_minimal_final_report
+
+                final_md = write_minimal_final_report(session_dir)
+                print(f"Final report      : {final_md}")
+            except Exception:  # noqa: BLE001
+                log.exception("emergency final report write failed (non-fatal)")
+            # Live Langfuse push (opt-in, default off): reconcile + flush,
+            # then splice the post-flush receipt (final counts) into the
+            # session_breakdown.json langfuse section (written above with only
+            # the pre-flush in-process counts). MUST run BEFORE the artifact
+            # package below, so the bundled SBD carries counts_final=true and
+            # the bundle includes the final langfuse_receipt.json. No-op unless
+            # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are set; idempotent if the
+            # CLOSE sequencer already flushed (re-writes the receipt only).
+            try:
+                from hyperloom.orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
+
+                flush_session(session_dir)
+                from .breakdown import patch_breakdown_langfuse
+
+                patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
+
+        # Safety-net artifact package -> /workspace. The CLOSE phase
+        # sequencer normally packages at step 2.6, but the wall-clock
+        # deadline path (_enter_closing_phase) and crash paths leave
+        # close_sequence_done False and never run the sequencer, so the
+        # bundle would be missing without this. Best-effort: failures
+        # must not mask stop_reason. Runs after the SBD/final.md +
+        # Langfuse flush above so the freshest products are bundled.
+        try:
+            from .breakdown import package_session_artifacts
+
+            pkg_path = package_session_artifacts(
+                session_dir,
+                session_id=str(
+                    getattr(coordinator.shared_state, "session_id", "") or "",
+                ),
+            )
+            if pkg_path is not None:
+                print(f"Artifact package  : {pkg_path}")
+        except Exception:  # noqa: BLE001
+            log.exception("session artifact package failed (non-fatal)")
+
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
+    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
+
+    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
+    return (
+        0
+        if stop_reason
+        in (
+            "target_reached",
+            "global_converged",
+            "time_exhausted",
+            "max_ticks",
+        )
+        else 1
+    )
+
+
+def _default_research_lane_capacity() -> int:
+    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU).
+
+    Returns:
+        int: The resolved research-lane capacity (env value when set and
+            parseable, otherwise the policy GPU ceiling).
+    """
+    env = os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
+
+    return research_lane_ceiling()
+
+
+def _default_gpu_specialist_capacity() -> int:
+    """Default ``--gpu-specialist-capacity``: $INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY else the whole machine.
+
+    WS2 turns GPU specialists on by default at whole-machine capacity. When the
+    env var is set (including ``0`` as an explicit disable escape hatch) it
+    wins; otherwise the default is the visible GPU count probed on the launch
+    host (``detect_gpu_count()``), or ``0`` when nothing can be probed.
+
+    Returns:
+        int: The resolved GPU specialist capacity (env value when set and
+            parseable, otherwise the detected whole-machine GPU count).
+    """
+    env = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY")
+    if env is not None and env.strip() != "":
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    from hyperloom.orchestrator.policy.gate import detect_gpu_count
+
+    return detect_gpu_count()
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level CLI argument parser and subcommands.
+
+    Returns:
+        The configured :class:`argparse.ArgumentParser`.
+    """
+    from hyperloom.orchestrator.specialists.domains import (
+        DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
+    )
+
+    p = argparse.ArgumentParser(
+        prog="inference_optimizer",
+        description="Inference Optimizer v0.6 — multi-agent SGLang/vLLM optimization",
+    )
+    p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    opt = sub.add_parser("optimize", help="Drive a multi-agent optimization run on a model")
+    opt.add_argument(
+        "--model",
+        "-m",
+        type=Path,
+        default=None,
+        help="Model path (required for new runs; ignored when "
+        "--resume is set — model is read from manifest.json/"
+        "state.json)",
+    )
+    opt.add_argument(
+        "--quantize",
+        type=str,
+        default=None,
+        metavar="PROMPT",
+        help="Optional natural-language quantization request. When set, the "
+        "quantization-agent runs ONCE as a prelude before the "
+        "optimization loop: it drives AMD Quark PTQ from this prompt, "
+        "then rewrites --model to the exported quantized model so the "
+        "rest of the run optimizes the quantized model. Ignored on "
+        "--resume.",
+    )
+    from hyperloom.orchestrator.phases.quantization_schemes import QUANT_SCHEME_CHOICES
+
+    opt.add_argument(
+        "--quantize-scheme",
+        choices=QUANT_SCHEME_CHOICES,
+        default=None,
+        metavar="SCHEME",
+        help="Structured alternative to --quantize for UI/backends: pick a "
+        "curated quantization scheme (resolved to a prompt internally). "
+        f"Choices: {', '.join(QUANT_SCHEME_CHOICES)}. 'none' or omit = no "
+        "quantization. Ignored if --quantize (free text) is also given.",
+    )
+    opt.add_argument(
+        "--gpu-type",
+        choices=["mi300x", "mi308x", "mi325x", "mi355x"],
+        default=None,
+        help="Hint for the real target GPU. The rocm-smi probe always "
+        "wins when both are present and disagree; a WARN is "
+        "emitted to stderr so the operator sees the typo. Used "
+        "verbatim only when the probe fails (CPU sandbox / no "
+        "rocm-smi). Magpie runner_type is derived separately; "
+        "mi325x currently runs with mi300x runner scripts because "
+        "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh.",
+    )
+    opt.add_argument(
+        "--framework",
+        choices=list(framework_registry.names()),
+        default=None,
+        help="Inference framework to benchmark / optimize. Resolution order: "
+        "--framework > $FRAMEWORK env > sglang (default). Selection is "
+        "session-wide; mixing frameworks in a single session is not "
+        "supported. NOTE: --framework atom is single-node-only "
+        "(``--nodes>=2`` fails fast); profile / roofline, "
+        "kernel-agent, and framework-agent are all enabled on atom. "
+        "The auto-tighten guard only enforces ``--nodes 1``. "
+        "--framework xdit is a server-less (scriptable) diffusion "
+        "workload (xDiT): no serving server, throughput is img/s, and "
+        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE).",
+    )
+    opt.add_argument(
+        "--nodes",
+        type=int,
+        # Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1 ($NODES fallback for SaFE optimizer.env).
+        default=int(os.environ.get("INFERENCE_OPTIMIZER_NODES") or os.environ.get("NODES") or "1"),
+        help="Total number of GPU nodes for the inference RayJob. "
+        "1 (default) keeps the legacy single-pod path. "
+        ">=2: `optimize` provisions the SaFE RayJob before preflight "
+        "(unless already in /tmp/multi_node_state.json), runs bootstrap "
+        "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
+        "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
+        "stop-rayjob` when you want to release it. Requires "
+        "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
+        "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.",
+    )
+    opt.add_argument(
+        "--mn-backend",
+        choices=("rayjob", "dynamo"),
+        default=None,
+        help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
+        "head+workers) or 'dynamo' (idle DynamoDeployment + SSH control "
+        "plane). Resolution: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND "
+        "> rayjob. Single-node runs ignore this flag.",
+    )
+    opt.add_argument(
+        "--rayjob-image",
+        default=None,
+        help="Container image for the multi-node RayJob (head+workers). "
+        "Required when --nodes>=2 unless INFERENCE_OPTIMIZER_RAYJOB_IMAGE "
+        "is set or state file last_create_request.image is present.",
+    )
+    opt.add_argument(
+        "--rayjob-gpus-per-node",
+        type=int,
+        default=None,
+        help="GPUs per RayJob pod (default: INFERENCE_OPTIMIZER_GPUS_PER_NODE "
+        "or 8). Passed to multi_node create-rayjob.",
+    )
+    # --rayjob-extra-env is a prompt-driven pass-through forwarded verbatim to workload_spec.env; the CLI
+    # invents no keys. Reserved RAY_JOB_ENTRYPOINT stripped downstream; credential keys auto-injected elsewhere.
+    opt.add_argument(
+        "--rayjob-extra-env",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="Extra env entries to inject into the multi-node RayJob "
+        "(repeatable). Agent maps each line of the user prompt's "
+        "`env:` block into one --rayjob-extra-env K=V; the CLI "
+        "does not own any default. Skip *_API_KEY / *_BASE_URL "
+        "(auto-injected by _credential_fanout) and RAY_JOB_ENTRYPOINT "
+        "(reserved by workload_spec). Only takes effect when "
+        "--nodes>=2 and this run actually creates the RayJob; "
+        "idempotent reuse of an existing rayjob_id keeps the env "
+        "set at original create time.",
+    )
+    opt.add_argument(
+        "--tp",
+        type=int,
+        default=int(os.environ.get("TP", "1") or 1),
+        help="Tensor parallel size. Resolution: --tp > $TP env > 1. "
+        "Symmetric with --ep — historically TP only flowed in via "
+        "$TP env (read by _workload_envs); the CLI flag was added "
+        "so the agent can pass `--tp N` directly from the prompt's "
+        "Environment block instead of having to `export TP=N` "
+        "first. Either path still works.",
+    )
+    opt.add_argument(
+        "--conc",
+        type=_positive_int_arg,
+        default=_parse_conc_env_default(),
+        help="Magpie client concurrency cap (max in-flight requests). "
+        "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
+        "agent can pass `--conc N` directly from the prompt. If $CONC is "
+        "a comma ladder (e.g. 4,16,128), Hyperloom uses the first value as "
+        "the baseline cap and forwards the ladder to --conc-sweep-concs.",
+    )
+    opt.add_argument(
+        "--max-model-len",
+        dest="max_model_len",
+        type=_positive_int_arg,
+        default=None,
+        help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values are preserved and "
+        "exported into the materialized Magpie YAML.",
+    )
+    opt.add_argument(
+        "--server-args",
+        dest="server_args",
+        type=str,
+        default=os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", ""),
+        help="Framework server args to apply in every phase. Routed through "
+        "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
+        "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
+        "Example: --server-args \"--kv-cache-dtype fp8_e4m3 "
+        "--gpu-memory-utilization 0.85\".",
+    )
+    opt.add_argument(
+        "--ep",
+        type=int,
+        default=int(os.environ.get("EP", "1") or 1),
+        help="Expert-parallel size for MoE inference. 1 (default) keeps "
+        "experts sharded by TP (legacy behaviour). >=2 enables true "
+        "expert parallelism: sglang adds `--expert-parallel-size N`, "
+        "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
+        "DSr1/DSv3 on multi-node. Resolution: --ep > $EP env > 1. "
+        "EP > TP is rejected at server-restart time.",
+    )
+    opt.add_argument(
+        "--pd-mode",
+        choices=("colocated", "disaggregated"),
+        default="colocated",
+        help="Prefill-Decode disaggregation mode. ALWAYS defaults to "
+        "`colocated` regardless of any inherited $PD_MODE env, so "
+        "PD only turns on when the agent explicitly passes "
+        "`--pd-mode disaggregated` (driven by the prompt's "
+        "Environment block having a PD_MODE=disaggregated line). "
+        "Stale env from a previous restart cannot accidentally "
+        "re-enable PD.",
+    )
+    opt.add_argument(
+        "--pd-prefill-nodes",
+        type=int,
+        default=int(os.environ.get("PD_PREFILL_NODES", "0") or 0),
+        help="Number of prefill nodes (disaggregated only); pn+dn=nodes",
+    )
+    opt.add_argument(
+        "--pd-decode-nodes",
+        type=int,
+        default=int(os.environ.get("PD_DECODE_NODES", "0") or 0),
+        help="Number of decode nodes (disaggregated only)",
+    )
+    opt.add_argument(
+        "--pd-prefill-tp",
+        type=int,
+        default=int(os.environ.get("PD_PREFILL_TP", "0") or 0),
+        help="TP for prefill group (disaggregated only); default = --tp",
+    )
+    opt.add_argument(
+        "--pd-decode-tp",
+        type=int,
+        default=int(os.environ.get("PD_DECODE_TP", "0") or 0),
+        help="TP for decode group (disaggregated only); default = --tp",
+    )
+    opt.add_argument(
+        "--pd-transfer-backend",
+        type=str,
+        default=os.environ.get("PD_TRANSFER_BACKEND", ""),
+        help="sglang: mooncake|nixl ; vllm: NixlConnector|...; empty = default",
+    )
+    opt.add_argument(
+        "--pd-ib-device",
+        type=str,
+        default=os.environ.get("PD_IB_DEVICE", ""),
+        help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). "
+        "Empty = use $NCCL_IB_HCA from RayJob pod env at server-launch time.",
+    )
+    opt.add_argument(
+        "--skip-variants",
+        type=str,
+        default=os.environ.get("SKIP_VARIANTS", ""),
+        help="Comma/whitespace-separated list of variant names or fnmatch "
+        "globs to drop from the backends/params grids before launch. "
+        "Examples: `attn_aiter` (exact), `attn_aiter,sched_dfs` (two "
+        "exacts), `attn_*,vllm_aiter_*` (globs). Resolution: "
+        "--skip-variants > $SKIP_VARIANTS > empty. Exported back into "
+        "$SKIP_VARIANTS so all executors and the multi-node orchestrator "
+        "subprocess see the same value. Dropped variants surface in "
+        "state.json under each action's `dropped_variants` field tagged "
+        "`source=user_skip`.",
+    )
+    opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--closing-grace-sec",
+        type=float,
+        default=None,
+        help=(
+            "Extra seconds after the wall-clock deadline for Coordinator to "
+            "flush a deterministic report task (no LLM). Default: "
+            "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
+        ),
+    )
+    opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
+                      help="Input sequence length (default $ISL or 256)")
+    opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
+                      help="Output sequence length (default $OSL or 256)")
+    opt.add_argument(
+        "--profile-osl",
+        dest="profile_osl",
+        type=int,
+        default=(
+            int(os.environ["PROFILE_OSL"])
+            if os.environ.get("PROFILE_OSL", "").strip().isdigit()
+            else None
+        ),
+        help=(
+            "Profiling-phase output sequence length. When set, it overrides "
+            "--osl for the roofline/profile server ONLY, so its torch-profiler "
+            "trace stays serializable; baseline/optimize phases still run at "
+            "--osl. Default $PROFILE_OSL; when unset the profile phase uses "
+            "min(--osl, 1024) and is auto-lowered further if needed to keep the "
+            "capture window within the serialization cap."
+        ),
+    )
+    opt.add_argument(
+        "--reference-script",
+        dest="reference_script",
+        type=str,
+        default=None,
+        help=(
+            "Reference launch recipe (.sh path or http(s) URL). Its serve "
+            "flags + whitelisted exports seed the baseline server args at "
+            "lowest priority (EXPLORE can override). Model-gated: ignored if "
+            "the run's model differs from the recipe's. If the given path is "
+            "unreadable / yields no flags, a matching InferenceX single-node "
+            "recipe is auto-discovered (exact filename match only; fuzzy "
+            "matches are logged, not used). When this flag is omitted, no "
+            "discovery runs and the baseline is unchanged."
+        ),
+    )
+    opt.add_argument("--precision", type=str,
+                      default=os.environ.get("PRECISION", "bf16"),
+                      help="Model precision (default $PRECISION or bf16)")
+    opt.add_argument(
+        "--framework-version",
+        dest="framework_version",
+        type=str,
+        default=None,
+        help=(
+            "Framework version slug for the recipe-snapshot canonical id "
+            "(scopes recipes to a specific framework release — sglang 0.4.5 "
+            "and sglang 0.5.x have different scheduler defaults so they "
+            "deserve separate KB rows). When omitted, auto-detected via "
+            "importing the framework's top-level package and reading "
+            "``__version__`` (sglang/vllm/atom supported); auto-detect "
+            "failure degrades to 'unknown_version'. Override with "
+            "--framework-version=0.4.5 to pin a specific tag for the run."
+        ),
+    )
+    opt.add_argument(
+        "--continue-kernel-after-gemm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After FP8 GEMM tuning succeeds, continue into source-level "
+            "kernel_opt. Use --no-continue-kernel-after-gemm for a "
+            "GEMM-only validation run."
+        ),
+    )
+    grp = opt.add_mutually_exclusive_group()
+    grp.add_argument("--target-gain", type=float, default=None, help="Stop when cumulative_gain >= N%% over baseline")
+    grp.add_argument("--target-tput", type=float, default=None, help="Stop when current best tok/s/GPU >= N")
+    grp.add_argument(
+        "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
+    )
+    opt.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume an existing session. Without --resume-from, "
+        "auto-picks the latest per-session subdir under "
+        "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
+        "falls back to $USER_DATA_PATH (legacy flat layout). "
+        "USER_DATA_PATH MUST stay at workspace level "
+        "(/wekafs/.../sessions/, not the per-session subdir) "
+        "so runtime/ resolution works. Skips the SharedState "
+        "seed and lets the Coordinator replay the prior "
+        "event log + state.json.",
+    )
+    opt.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Explicit per-session subdir to resume from. Use "
+        "when multiple per-launch ts dirs exist under the "
+        "same model and the latest is not what you want. "
+        "Must be an absolute path under $USER_DATA_PATH "
+        "(workspace_root). Implies --resume.",
+    )
+    opt.add_argument(
+        "--force-resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow ``--resume`` to push past a terminal "
+            "``stop_reason='target_reached'``. "
+            "Without this flag the resume aborts (Issue-G guard, per "
+            "SKILL.md 'Run-time signals': that terminal requires an "
+            "operator-side workload / strategy change before resuming). "
+            "No-op outside ``--resume``."
+        ),
+    )
+    opt.add_argument(
+        "--model-class",
+        type=str,
+        default=os.environ.get("MODEL_CLASS", None),
+        help=(
+            "Categorical model-class key. It is the deterministic key for "
+            "several consumers: the atom explore seed grid "
+            "(action_executors/explore.py), the framework-agent gap search "
+            "token (action_executors/_framework_gap_composer.py), the recipe "
+            "key, and the orchestration prompt label. Recognised values "
+            "(case-insensitive, with -/+/space tolerated): dense / moe_mla / "
+            "moe_swa / moe_mla_nsa. When unset, Coordinator boot infers and "
+            "persists it from config.json (num_experts / architectures) or "
+            "model-path family keywords, replacing the deleted ``classify`` "
+            "action's lightweight state-write role. For richer *advisory* "
+            "model context (attention variant, KV/token, experts, MTP, ...) "
+            "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
+            "is injected into prompts but drives no gating."
+        ),
+    )
+    opt.add_argument("--target-summary", type=str, default=None, help="Free-text goal summary surfaced in prompts")
+    opt.add_argument(
+        "--compare-against-gpu",
+        type=str,
+        default=None,
+        help=(
+            "Reference GPU hardware key for external baseline comparison "
+            "(e.g. b300 / mi355x / h200). target_analysis ALWAYS runs as "
+            "TODO 0 and always writes "
+            "$SESSION_DIR/target_analysis/target_baseline.json + a short "
+            "MD report. When this flag is set, the JSON carries the "
+            "matching InferenceX (https://inferencex.semianalysis.com) "
+            "reference data point; when unset, the JSON carries a "
+            "structured reason='no_target_gpu_configured' marker so the "
+            "report still has a deterministic 'External baseline' "
+            "section. The data is REPORT-ONLY: it does not influence "
+            "Objective, scoring, or any agent prompt. Other dimensions "
+            "(model / framework / precision / ISL / OSL) are derived "
+            "from --model and the standard FRAMEWORK / PRECISION / ISL / "
+            "OSL env vars."
+        ),
+    )
+    opt.add_argument("--max-ticks", type=int, default=None, help="Hard tick cap (None = unlimited; mostly for tests)")
+    opt.add_argument("--tick-interval-sec", type=float, default=0.0, help="Sleep between ticks (0 = no sleep)")
+    opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
+    opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument(
+        "--allow-mm-text-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When a model carries a multimodal signal (e.g. vision_config) "
+        "but exposes a text-generation path, run it on the TEXT path with "
+        "a degraded-mode warning instead of fail-fasting. Image/audio "
+        "inputs are ignored, so numbers reflect the text decoder alone. "
+        "True VLMs with no text path (Llava / PaliGemma / Qwen-VL / "
+        "Phi3V) still fail-fast regardless of this flag. Pass "
+        "--no-allow-mm-text-fallback to fail-fast on text-coercible "
+        "models too. Default: enabled.",
+    )
+    opt.add_argument(
+        "--no-kernel",
+        action="store_true",
+        default=False,
+        help="Disable the Kernel-agent entirely. The run will "
+        "only do baseline + explore + sweep (pure "
+        "parameter search). Useful when GEAK/OOB/GPU "
+        "compile env is unavailable or you just want the "
+        "quick-win parameter path. Default: kernel enabled.",
+    )
+    opt.add_argument(
+        "--no-explore",
+        action="store_true",
+        default=False,
+        help="Skip the EXPLORE phase entirely. PRELUDE (and "
+        "FRAMEWORK, if enabled) route straight to KERNEL "
+        "— or to SWEEP when --no-kernel is also set. Useful "
+        "for a baseline -> kernel-only run, or to validate "
+        "the current recipe via SWEEP without a serving-"
+        "param search. Default: explore enabled.",
+    )
+    opt.add_argument(
+        "--launch-info-file",
+        type=str,
+        default=None,
+        help="Write a JSON file with the launched session's pid, "
+        "session_dir, session_id, run_log, manifest path, gpu_type, "
+        "framework and model. Launcher scripts can ``jq -r .pid`` / "
+        "``jq -r .session_dir`` instead of grepping stdout or "
+        "pgrep'ing. Always emitted alongside the ``HYPERLOOM_LAUNCH "
+        "<key=value> ...`` single-line sentinel that is printed to "
+        "stdout for stream-based parsers.",
+    )
+    opt.add_argument(
+        "--framework-discover-timeout-sec",
+        type=float,
+        default=0.0,
+        help="Override the per-call timeout for "
+        "``fa phase-discover``. 0 (the default) uses "
+        "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
+        "(180s). The Coordinator retries discover up to "
+        "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
+        "failures before marking FRAMEWORK done.",
+    )
+    opt.add_argument(
+        "--no-framework-agent",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_NO_FRAMEWORK",
+            "0",
+        ).strip()
+        in ("1", "true", "True", "TRUE", "yes"),
+        help="Skip the FRAMEWORK_AGENT phase (PRELUDE → EXPLORE "
+        "directly). The phase pre-scans upstream sglang/"
+        "vllm PRs via framework-agent and lands KEPT "
+        "patches before EXPLORE starts. Disable when "
+        "the framework-agent toolchain is unavailable "
+        "or you want a faster cold start. Also read from "
+        "$INFERENCE_OPTIMIZER_NO_FRAMEWORK=1. "
+        "Default: framework phase enabled.",
+    )
+    opt.add_argument(
+        "--kernel-codex",
+        action="store_true",
+        default=True,
+        help="Use Codex backend for Kernel-agent (default — faster). Pass --kernel-claude to switch.",
+    )
+    opt.add_argument(
+        "--kernel-claude", action="store_false", dest="kernel_codex", help="Use Claude backend for Kernel-agent"
+    )
+    # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.
+    opt.add_argument(
+        "--critic-mock",
+        dest="critic_backend",
+        action="store_const",
+        const="mock",
+        default=None,
+        help="Force the always-approve mock Critic (offline / smoke tests).",
+    )
+    opt.add_argument(
+        "--critic-agent",
+        dest="critic_backend",
+        action="store_const",
+        const="agent",
+        help="Force the critic-agent runtime backend (KB + session memory + "
+        "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
+        "$REPO_ROOT/critic-agent/ directory.",
+    )
+    # Robustness backend selection (mirrors critic)
+    opt.add_argument(
+        "--robustness-mock",
+        dest="robustness_backend",
+        action="store_const",
+        const="mock",
+        default=None,
+        help="Force the heartbeat-only mock Robustness backend.",
+    )
+    opt.add_argument(
+        "--robustness-agent",
+        dest="robustness_backend",
+        action="store_const",
+        const="agent",
+        help="Force the robustness-agent runtime backend (subprocess + JSON, "
+        "mirrors critic-agent transport). Requires ROBUSTNESS_AGENT_ROOT "
+        "or a sibling $REPO_ROOT/robustness-agent/ directory.",
+    )
+    opt.add_argument(
+        "--robustness-server-url",
+        dest="robustness_server_url",
+        type=str,
+        default=None,
+        help="Override the robustness-server base URL forwarded into "
+        "request.options. Honoured only when --robustness-agent is "
+        "selected.",
+    )
+    opt.add_argument(
+        "--robustness-llm-rca",
+        dest="robustness_llm_rca",
+        action="store_true",
+        default=None,
+        help="Forward llm_rca_enabled=true into request.options. The agent "
+        "still falls back to NoopRcaEngine when LLM credentials aren't "
+        "set in the runtime env.",
+    )
+    opt.add_argument(
+        "--no-robustness-llm-rca",
+        dest="robustness_llm_rca",
+        action="store_false",
+        help="Forward llm_rca_enabled=false into request.options.",
+    )
+    opt.add_argument(
+        "--robustness-workload-uid",
+        dest="robustness_workload_uid",
+        type=str,
+        default=None,
+        help="Forward workload_uid into request.options. The robustness-server "
+        "resolves it to every pod (head + workers) backing the RayJob via "
+        "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
+        "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
+    )
+    opt.add_argument(
+        "--robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_true",
+        default=None,
+        help="Force disable_local_probe=true. The robustness-agent silences "
+        "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
+        "local HTTP) cannot emit false-positive symptoms.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_false",
+        help="Force disable_local_probe=false (keep the LocalProbe fallback even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_true",
+        default=None,
+        help="Force auto_probe_inference_server=false: stop the robustness-agent "
+        "from auto-probing the local inference-server health endpoint "
+        "(http://127.0.0.1:8888/health). Unlike --robustness-disable-local-probe "
+        "this is surgical — the REST of LocalProbe (gpu-leak, gateway 401, "
+        "coordinator-zombie, aiter-JIT, disk/fd) stays active. Use on "
+        "single-node runs where the optimizer restarts the inference server "
+        "between benchmarks: those restart windows otherwise trip "
+        "false-positive local_server_unreachable symptoms (which can escalate "
+        "to a premature skip_to_close / robustness_escalated stop). "
+        "Auto-enabled in multi-node.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_false",
+        help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
+        "/health auto-probe even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_true",
+        default=None,
+        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
+        "fans out per-pod metrics through robustness-server and feeds "
+        "the local_health rules with cluster-decoded GPU snapshots.",
+    )
+    opt.add_argument(
+        "--no-robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_false",
+        help="Force enable_cluster_pod_metrics=false.",
+    )
+    opt.add_argument(
+        "--robustness-pod-metrics-categories",
+        dest="robustness_pod_metrics_categories",
+        type=str,
+        default=None,
+        help="Comma-separated metric categories forwarded into "
+        "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
+        "applied by the runtime when this flag is omitted.",
+    )
+    opt.add_argument(
+        "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
+    )
+    opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
+    opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
+    # Cortex KB flag (Critic agent only)
+    # --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL.
+    opt.add_argument(
+        "--cortex-kb-url",
+        dest="cortex_kb_url",
+        type=str,
+        default=None,
+        help="Cortex KB base URL for this run, used only by the Critic "
+        "agent's per-proposal assess enrichment (/v2/reasoning/assess); "
+        "also settable via $CORTEX_KB_URL. This is NOT the recipe KB — "
+        "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
+        "go to --local-kb-root. Leave it UNSET to skip Critic assess "
+        "enrichment entirely.",
+    )
+    opt.add_argument(
+        "--specialist-kb-mcp-url",
+        dest="specialist_kb_mcp_url",
+        type=str,
+        default=None,
+        help="Read-only KB-graph (cortex_kb) MCP endpoint advertised to "
+        "specialist subprocesses; also settable via "
+        "$HYPERLOOM_SPECIALIST_KB_MCP_URL (bearer token from "
+        "$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN). When unset, falls back to "
+        "the gbrain MCP derived from $GBRAIN_BASE_URL (+ /mcp) with a "
+        "$GBRAIN_TOKEN bearer. Specialist KB writes always stay local.",
+    )
+    opt.add_argument(
+        "--local-kb-root",
+        dest="local_kb_root",
+        type=str,
+        default=None,
+        help="Filesystem root for the local recipe-snapshot KB store. "
+        "All writes (put_recipe / append_attempt / delete_recipe) go "
+        "here regardless of --cortex-kb-url. Defaults to "
+        "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
+        "then /workspace/hyperloom/kb. Layout is a 5-level "
+        "directory tree keyed by canonical_id components "
+        "(model -> hardware -> framework -> framework_version -> "
+        "precision); each leaf holds recipe.json + history/ + "
+        "attempts.ndjson + .lock. See "
+        "src/hyperloom/inference_optimizer/recipe_kb/local_store.py for the "
+        "on-disk contract.",
+    )
+    opt.add_argument(
+        "--degraded-kb",
+        dest="degraded_kb",
+        action="store_true",
+        default=False,
+        help="Skip the Cortex KB integration entirely (T0/T2/T3/T4 become "
+        "no-ops). Also short-circuits the IR-3 KB probe. IR-3 sets "
+        "this automatically when kb-service is unreachable (soft "
+        "degrade); manifest records the reason as ``explicit_flag`` "
+        "vs ``ir3_auto``.",
+    )
+    opt.add_argument(
+        "--cortex-strict-fingerprint",
+        dest="cortex_strict_fingerprint",
+        action="store_true",
+        default=False,
+        help="When set, T0 refuses warm_start_recipe rows whose "
+        "stack_fingerprint does not match the current pod (recorded "
+        "in manifest.json). Default: lenient (M1 records the flag "
+        "in manifest only; consumed by M5 specialist assembly).",
+    )
+    # Warm-recipe replay (PRELUDE auto-applies KB best_config before EXPLORE): --no-warm-replay disables;
+    # --warm-replay-min-confidence (0.7) gates trigger tier; --warm-replay-min-reproduce-pct (0.8) gates reproduction.
+    opt.add_argument(
+        "--no-warm-replay",
+        dest="no_warm_replay",
+        action="store_true",
+        default=False,
+        help="Disable the PRELUDE auto-replay of KB warm-start "
+        "``best_config``. The warm_start_recipe is still rendered "
+        "into the specialist prompt as priors, but the Coordinator "
+        "will NOT auto-run the historical best_config. Use this "
+        "for cold debugging / ablation runs.",
+    )
+    opt.add_argument(
+        "--warm-replay-min-confidence",
+        dest="warm_replay_min_confidence",
+        type=float,
+        default=0.7,
+        help="Minimum ``warm_start_recipe.confidence`` required to "
+        "trigger the auto-replay. Default 0.7 means an ``exact`` "
+        "5-tuple hit (conf 1.0) and a server-returned ``relative`` "
+        "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
+        "does not. Raise it above 0.7 to require an exact hit "
+        "before spending a verify on the warm config.",
+    )
+    opt.add_argument(
+        "--warm-replay-min-reproduce-pct",
+        dest="warm_replay_min_reproduce_pct",
+        type=float,
+        default=0.8,
+        help="Minimum fraction of the recipe's recorded gain we need "
+        "to reproduce to count as ``status=reproduced`` and push "
+        "the warm config onto the optimization stack. Default "
+        "0.8 — a recipe claiming +25%% counts if we measure "
+        "+20%% or more. Below the threshold we record "
+        "``status=drift`` and continue with the regular EXPLORE "
+        "flow without inheriting the warm config.",
+    )
+    # PR Monitor REST + MCP
+    # --pr-monitor-url overrides the in-cluster default (port-forward when outside the primus-cortex namespace);
+    # --degraded-pr makes pr_feed_warm a no-op and strips mcp__pr_monitor__* from the specialist whitelist.
+    opt.add_argument(
+        "--pr-monitor-url",
+        dest="pr_monitor_url",
+        type=str,
+        default=None,
+        help="Override PR Monitor REST URL for this run. Default: "
+        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local"
+        "/v1 (env: PR_MONITOR_URL). Pair with --pr-monitor-mcp-url "
+        "when port-forwarding for local debug.",
+    )
+    opt.add_argument(
+        "--pr-monitor-mcp-url",
+        dest="pr_monitor_mcp_url",
+        type=str,
+        default=None,
+        help="Override PR Monitor MCP URL handed to specialist LLM "
+        "backends. Default mirrors --pr-monitor-url with /mcp/ "
+        "suffix; the trailing slash is mandatory.",
+    )
+    opt.add_argument(
+        "--degraded-pr",
+        dest="degraded_pr",
+        action="store_true",
+        default=False,
+        help="Disable the PR Monitor integration entirely. "
+        "pr_feed_warm returns empty; the specialist tool "
+        "whitelist drops mcp__pr_monitor__* tools. Short-circuits "
+        "the IR-3 PR Monitor probe; IR-3 sets this automatically "
+        "when PR Monitor is unreachable (soft degrade).",
+    )
+    opt.add_argument(
+        "--pr-feed-window-days",
+        dest="pr_feed_window_days",
+        type=int,
+        default=int(os.environ.get("PR_FEED_WINDOW_DAYS", "30") or "30"),
+        help="Look-back window for the PR feed warmup (days). Default: 30.",
+    )
+    # specialist research_lane capacity
+    # --research-lane-capacity locks concurrent LLM specialists (0=no dispatch, ceiling=2×GPU, clamped).
+    # Locked at session start (manifest + SharedState); PolicyGate denies mid-flight mutation.
+    opt.add_argument(
+        "--research-lane-capacity",
+        dest="research_lane_capacity",
+        type=int,
+        default=_default_research_lane_capacity(),
+        help="Max concurrent LLM specialist sub-agents on the "
+        "research_lane. 0 disables specialist "
+        "dispatch entirely (degrades to LLM-direct grid). The "
+        "default is the research-lane ceiling (2 x visible GPU "
+        "count, falling back to a conservative value when no GPU "
+        "is detected); values above the ceiling are silently "
+        "clamped down. Locked at session start.",
+    )
+    opt.add_argument(
+        "--gpu-specialist-capacity",
+        dest="gpu_specialist_capacity",
+        type=int,
+        default=_default_gpu_specialist_capacity(),
+        help="Number of GPUs available to specialists that request "
+        "needs_gpu=true. Defaults to the whole machine (visible GPU "
+        "count on the launch host); set "
+        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=0 (or pass 0) to "
+        "disable GPU specialists. GPU specialists serialize against the "
+        "serving lanes via gpu_research_lane. "
+        "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
+        "comma-separated GPU id pool when the specialist pool should "
+        "not use device ids 0..N-1. Locked at session start.",
+    )
+    # Advisory specialist-proposal scorer (ProposalScorer): scores each proposal_set with gateway models
+    # (0-10 + reason) as one reference for Orchestration; never gates. Add a model by appending its slug.
+    opt.add_argument(
+        "--proposal-scorer-models",
+        dest="proposal_scorer_models",
+        type=str,
+        default=",".join(DEFAULT_SCORER_MODELS),
+        help="Comma-separated gateway model slugs that independently "
+        "score each specialist proposal_set (advisory only; never "
+        "gates; rater identities are anonymized in the orchestration "
+        "prompt). Default 'claude-opus-4-8,gpt-5.5,"
+        "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
+        "Add a model by "
+        "appending its slug. Empty list disables scoring.",
+    )
+    opt.add_argument(
+        "--no-proposal-scoring",
+        dest="no_proposal_scoring",
+        action="store_true",
+        help="Disable the advisory specialist-proposal scorer entirely.",
+    )
+    # specialist sub-agent backend selection: Claude (default), inherits orchestration model; per-task caps bound LLM use.
+    opt.add_argument(
+        "--specialist-model",
+        dest="specialist_model",
+        type=str,
+        default=os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_MODEL", "") or None,
+        help="Claude model used for specialist sub-agents (defaults to "
+        "the orchestration --claude-model). KB_design §3.5 §6.",
+    )
+    opt.add_argument(
+        "--specialist-max-turns",
+        dest="specialist_max_turns",
+        type=int,
+        default=int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_MAX_TURNS",
+                str(_DEFAULT_SPECIALIST_MAX_TURNS),
+            )
+            or _DEFAULT_SPECIALIST_MAX_TURNS
+        ),
+        help="Hard cap on LLM turns per specialist task (KB_design "
+        "§3.5 §6). On exhaustion the runner synthesises an empty "
+        "specialist_done (Inv-5.3).",
+    )
+    opt.add_argument(
+        "--specialist-per-turn-max-seconds",
+        dest="specialist_per_turn_max_seconds",
+        type=float,
+        default=float(os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "600") or "600"),
+        help="Wall-clock fallback ceiling per specialist task when no "
+        "explicit wall_budget_sec is provided (legacy backstop, default "
+        "600s; production dispatches use the WS1 wall-clock budget).",
+    )
+    # specialist dispatch shape
+    opt.add_argument(
+        "--specialist-dispatch-mode",
+        dest="specialist_dispatch_mode",
+        type=str,
+        choices=("subprocess", "inprocess"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_SPECIALIST_DISPATCH_MODE",
+            "subprocess",
+        ).strip()
+        or "subprocess",
+        help="Specialist execution shape. 'subprocess' (default) spawns "
+        "a fresh `claude` CLI per task inside a per-task git worktree "
+        "for isolation (PR-A2). 'inprocess' keeps the legacy M5 path "
+        "(claude-agent-sdk in the orchestrator process) for tests / "
+        "environments without the claude binary.",
+    )
+    opt.add_argument(
+        "--specialist-mcp-config",
+        dest="specialist_mcp_config",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_SPECIALIST_MCP_CONFIG",
+            "",
+        ).strip()
+        or None,
+        help="Optional path to an MCP config JSON forwarded to the "
+        "subprocess claude (`--mcp-config`). Used to wire kb / pr "
+        "MCP servers into specialists. Default: None.",
+    )
+
+    # Integration toggles. Roofline refresh is unconditional now (fires at PRELUDE and every 10%
+    # cumulative_gain_validated crossing); the legacy composite/deny profile toggles are gone.
+    def _env_default_on(env_var: str) -> bool:
+        """Resolve a default-on boolean toggle from an environment variable.
+
+        Args:
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            bool: ``False`` only when the variable is explicitly set to ``"0"``;
+            ``True`` otherwise (including when unset).
+        """
+        return os.environ.get(env_var, "1").strip() != "0"
+
+    opt.add_argument(
+        "--allow-empty-kernel-shape",
+        dest="allow_empty_kernel_shape",
+        action="store_true",
+        default=os.environ.get(
+            "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE",
+            "0",
+        )
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
+        help="Escape hatch (default off): allow kernel optimization to "
+        "dispatch a candidate with no trace-anchored shape. Normally "
+        "a shapeless candidate is rejected with a structured error so "
+        "the run returns to ``trace_analyze`` instead of burning a "
+        "GEAK / OOB budget on an unanchored kernel. Env: "
+        "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
+    )
+    opt.add_argument(
+        "--enable-roofline",
+        dest="enable_roofline",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_ENABLE_ROOFLINE"),
+        help="Select which analysis action the Coordinator enqueues at "
+        "PRELUDE bootstrap and on every +10%% watermark crossing. "
+        "Default on: ``roofline`` (composite profile + "
+        "trace_analyze + analysis.md). Pass ``--no-enable-roofline`` "
+        "to use plain ``profile`` instead (lighter — captures the "
+        "trace only, skips trace_analyze). Behaviour is otherwise "
+        "identical (same idempotency keys, same pending-task "
+        "dispatch gate, same watermark anchor update). Env: "
+        "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    opt.add_argument(
+        "--research-scout",
+        dest="research_scout",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RESEARCH_SCOUT"),
+        help="Auto-dispatch a read-only research scout at PRELUDE (and "
+        "every --research-scout-interval EXPLORE rounds) that "
+        "collects proven priors — reference launch scripts, model "
+        "config.json architecture features, and cross-framework / "
+        "NVIDIA research — into ``research_hints.md`` and seeds "
+        "high-priority gaps. Default on; pass ``--no-research-scout`` "
+        "to disable the whole feature. Env: "
+        "INFERENCE_OPTIMIZER_RESEARCH_SCOUT=0.",
+    )
+    opt.add_argument(
+        "--research-scout-interval",
+        dest="research_scout_interval",
+        type=int,
+        default=3,
+        help="Re-dispatch the research scout every N EXPLORE rounds with "
+        "the current bottleneck context (append-only). Default 3. "
+        "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--static-recon",
+        dest="static_recon",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_STATIC_RECON"),
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        "that greps the framework source for un-bridged capability "
+        "switches (predicates that silently disable a faster path for "
+        "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "
+        "on ROCm) and seeds bridge candidates as gaps[]. Default on; "
+        "pass ``--no-static-recon`` to disable. Env: "
+        "INFERENCE_OPTIMIZER_STATIC_RECON=0.",
+    )
+    opt.add_argument(
+        "--recipe-sediment",
+        dest="recipe_sediment",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RECIPE_SEDIMENT"),
+        help="Sediment KEEP/REVERT provenance into the persistent recipe: "
+        "KEEP optimizations traceable to a research hint carry their "
+        "source + measured gain into ``what_worked``; REVERTs land in "
+        "``what_failed`` so the next warm-start avoids re-testing them. "
+        "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
+        "purely ephemeral. Env: INFERENCE_OPTIMIZER_RECIPE_SEDIMENT=0.",
+    )
+    opt.add_argument(
+        "--target-advisory",
+        dest="target_advisory",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_TARGET_ADVISORY"),
+        help="Inject an advisory 'External target gap' block (throughput / "
+        "TPOT / interactivity gap vs the LLM-authored competitor "
+        "target) into the orchestration and specialist prompts; when "
+        "the TPOT ratio dominates it nudges toward latency-reducing "
+        "directions. Advisory only — never gates Objective or scoring. "
+        "Default on; pass ``--no-target-advisory`` to disable. Env: "
+        "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
+    )
+    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC
+    # values, output to reports/conc_sweep_summary.json (see orchestrator/conc_sweep.py). Bounded by
+    # --conc-sweep-total-budget-sec; skip conditions short-circuit. Disable via --no-enable-conc-sweep.
+    opt.add_argument(
+        "--enable-conc-sweep",
+        dest="enable_conc_sweep",
+        action=argparse.BooleanOptionalAction,
+        default=(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP",
+                "",
+            )
+            .strip()
+            .lower()
+            not in ("0", "false", "no", "off")
+        ),
+        help="Run a post-optimization concurrency sweep (baseline vs "
+        "current_best across CONC) and write "
+        "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
+        "On by default; disable with --no-enable-conc-sweep or "
+        "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0.",
+    )
+    opt.add_argument(
+        "--conc-sweep-concs",
+        dest="conc_sweep_concs",
+        type=str,
+        default=_parse_conc_sweep_default(),
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 1,2,4,8,16,32,64,128.",
+    )
+    opt.add_argument(
+        "--conc-sweep-timeout-sec",
+        dest="conc_sweep_timeout_sec",
+        type=int,
+        default=int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC",
+                "1800",
+            )
+        ),
+        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
+        "Default 1800 (~30 min). Per-variant cap is also clamped "
+        "by the remaining --conc-sweep-total-budget-sec.",
+    )
+    opt.add_argument(
+        "--conc-sweep-total-budget-sec",
+        dest="conc_sweep_total_budget_sec",
+        type=int,
+        default=int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC",
+                "9000",
+            )
+        ),
+        help="Total wall-clock budget (seconds) for the whole conc-sweep "
+        "action, independent of the per-variant Magpie timeout. "
+        "Once exhausted, remaining variants are recorded as "
+        "status=skipped / error_class=budget_exhausted and the "
+        "JSON envelope carries budget_exhausted=true. Default 9000 "
+        "(~2.5h); set to 0 to disable. Also bounded above by the "
+        "main session wall-clock deadline since conc_sweep runs as "
+        "a SWEEP-phase action.",
+    )
+    # Retired flags operator scripts may still pass; hard-fail at argparse with a migration hint, not a silent alias.
+    _retired_hint = (
+        "Use ``--enable-roofline`` (default on) / ``--no-enable-roofline`` "
+        "instead. The PRELUDE-initial analysis task is unconditional and "
+        "the composite/direct-profile bifurcation has been removed."
+    )
+    for _retired in (
+        "--use-roofline-composite",
+        "--no-use-roofline-composite",
+        "--deny-direct-profile",
+        "--no-deny-direct-profile",
+        "--force-roofline-after-baseline",
+        "--no-force-roofline-after-baseline",
+    ):
+        opt.add_argument(
+            _retired,
+            action=_RetiredFlag,
+            hint=_retired_hint,
+        )
+
+    # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
+    # Default 2.0: kill the decision (warm) run once its warm hot-client benchmark phase exceeds
+    # the baseline warm measure time by 2x (outcome=KILLED_OVERTIME). The decision round reuses a
+    # pre-warmed server (client-only) and the kill clock starts at the server-ready marker, so the
+    # measured runtime and the anchor are both the warm client-only phase (apples-to-apples) and
+    # one-time cold-boot / aiter recompile no longer trips the kill.
+    # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
+    def _env_num_or(default, env_var: str, cast):
+        """Resolve a numeric CLI default from an environment variable.
+
+        Args:
+            default: Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+            cast: The numeric constructor to apply (``float`` or ``int``).
+
+        Returns:
+            The parsed env value cast via ``cast``, or ``cast(default)`` on
+            absence / parse error.
+        """
+        raw = os.environ.get(env_var, "").strip()
+        if not raw:
+            return cast(default)
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return cast(default)
+
+    opt.add_argument(
+        "--explore-overtime-kill-ratio",
+        dest="explore_overtime_kill_ratio",
+        type=float,
+        default=_env_num_or(
+            2.0,
+            "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
+            float,
+        ),
+        help="Per-variant explore overtime kill: each single-variant "
+        "Magpie run in the explore loop is reaped once its "
+        "POST-READY (pure hot client) wall-clock exceeds "
+        "``decision_anchor_sec * RATIO`` (the warm-decision anchor is "
+        "``baseline_warm_runtime_sec``; pre-ready boot / weight load / "
+        "first-request recompile is excluded — see "
+        "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY). The variant is "
+        "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
+        "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
+        "distinguish it from a hard timeout / crash. Default 2.0 (kill "
+        "at +100%% over the warm client anchor). Pass 0 to disable. "
+        "Env: INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
+    )
+    # Explore variant hard timeout — operator override for the auto-derived cap.
+    # ExploreExecutor auto-derives from baseline_runtime_sec*(kill_ratio+0.5); 0 (default) keeps auto-derive.
+    # Mirrored to SharedState.explore_variant_timeout_sec_override (injected as params['variant_timeout_sec']).
+    opt.add_argument(
+        "--explore-variant-timeout-sec",
+        dest="explore_variant_timeout_sec",
+        type=int,
+        default=_env_num_or(
+            0,
+            "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC",
+            int,
+        ),
+        help="Pin the per-variant hard timeout (seconds) inside the "
+        "EXPLORE phase. ``0`` (default) auto-derives from "
+        "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
+        "--explore-variant-timeout-safety-margin)`` once baseline "
+        "lands, with a 2400-14400 s range guard. Set to a positive "
+        "integer to pin (CI smoke runs / debugging). Env: "
+        "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC.",
+    )
+    opt.add_argument(
+        "--explore-variant-timeout-safety-margin",
+        dest="explore_variant_timeout_safety_margin",
+        type=float,
+        default=_env_num_or(
+            0.5,
+            "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN",
+            float,
+        ),
+        help="Headroom (as a fraction of baseline_runtime_sec) added on "
+        "top of --explore-overtime-kill-ratio when the EXPLORE hard "
+        "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
+        "buffer for variant cold starts: torch.compile AOTI compile, "
+        "fresh aiter shapes, spec-decoding draft load). Bump for "
+        "workloads with heavy compile cost; lower to tighten the "
+        "backstop. No effect when --explore-variant-timeout-sec is "
+        "set to a positive value. Env: "
+        "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN.",
+    )
+    # drop scoreboard
+    # Legacy action_scores is retired; flag controls a resumed session's leftover scoreboard:
+    # drop (default) strips the fields silently; warn additionally logs + adds a breakdown.warnings entry.
+    opt.add_argument(
+        "--legacy-action-scores",
+        dest="legacy_action_scores",
+        type=str,
+        choices=("drop", "warn"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES",
+            "drop",
+        ).strip()
+        or "drop",
+        help="Resume-mode handling of the legacy scoreboard "
+        "(``action_scores`` and friends). 'drop' (default) "
+        "silently discards. 'warn' logs a WARNING + adds a "
+        "breakdown.warnings entry. KB_design §3.9 §7.",
+    )
+    # SharedState evolution
+    # --migration-mode: strict (default) makes a missing fact-layer field in a non-empty state.json fatal (exit 1);
+    # lenient downgrades to WARNING. --reset-state backs up state.json and starts fresh (Cortex KB untouched).
+    opt.add_argument(
+        "--migration-mode",
+        dest="migration_mode",
+        type=str,
+        choices=("strict", "lenient"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_MIGRATION_MODE",
+            "strict",
+        ).strip()
+        or "strict",
+        help="Strictness of the legacy → v0.8 state.json migration. "
+        "'strict' (default) aborts on fact-layer field loss; "
+        "'lenient' logs WARNING and continues. KB_design §3.10 §5.3.",
+    )
+    opt.add_argument(
+        "--reset-state",
+        dest="reset_state",
+        action="store_true",
+        default=False,
+        help="Back up the existing ``state.json`` (if any) to "
+        "``state.json.preReset.<unix_ts>`` and start the session "
+        "from a blank SharedState. Cortex KB is NOT touched. "
+        "KB_design §3.10 §5.3.",
+    )
+    # observability
+    # --breakdown-include-transcripts: inline specialist transcript bodies (true) or path-only (false, default).
+    opt.add_argument(
+        "--breakdown-include-transcripts",
+        dest="breakdown_include_transcripts",
+        type=str,
+        choices=("true", "false"),
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
+            "false",
+        )
+        .strip()
+        .lower()
+        or "false",
+        help="Inline specialist transcript bodies into "
+        "``specialist_runs`` (true) or reference them by path "
+        "only (false, default). KB_design §3.12 §7.",
+    )
+    # plateau threshold tuning
+    # Swap library default plateau thresholds; land in SharedState.plateau_overrides, locked at session start.
+    opt.add_argument(
+        "--plateau-explore-keep-gain",
+        dest="plateau_explore_keep_gain",
+        type=float,
+        default=None,
+        help="EXPLORE plateau: max cumulative KEEP-gain (%%) across the "
+        "lookback window below which the AND condition fires. "
+        "Default 0.5.",
+    )
+    opt.add_argument(
+        "--plateau-explore-empty-streak",
+        dest="plateau_explore_empty_streak",
+        type=int,
+        default=None,
+        help="EXPLORE plateau: required count of *consecutive* specialist "
+        "rounds with empty proposal_set before the AND condition "
+        "fires. Default 3.",
+    )
+    opt.add_argument(
+        "--plateau-explore-lookback",
+        dest="plateau_explore_lookback",
+        type=int,
+        default=None,
+        help="EXPLORE plateau: number of trailing rounds the gain sum is computed over. Default 5.",
+    )
+    opt.add_argument(
+        "--plateau-kernel-revert-streak",
+        dest="plateau_kernel_revert_streak",
+        type=int,
+        default=None,
+        help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
+        "attempts to count as plateau (one half of the OR). "
+        "Default 3.",
+    )
+    opt.add_argument(
+        "--plateau-kernel-keep-gain",
+        dest="plateau_kernel_keep_gain",
+        type=float,
+        default=None,
+        help="KERNEL plateau: max cumulative KEEP-gain (%%) across the "
+        "lookback window below which the OR fires. Default 0.5.",
+    )
+    opt.add_argument(
+        "--plateau-kernel-lookback",
+        dest="plateau_kernel_lookback",
+        type=int,
+        default=None,
+        help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
+    )
+    # IR-6 — EXPLORE HARD force-exit thresholds
+    # Either condition fires explore_force_exit_low_budget (EXPLORE→KERNEL/SWEEP); non-negotiable, locked at start.
+    opt.add_argument(
+        "--explore-force-exit-hours-remaining",
+        dest="explore_force_exit_hours_remaining",
+        type=float,
+        default=None,
+        help="EXPLORE force-exit: total wall-clock remaining (hours) "
+        "below which EXPLORE exits immediately to the next phase, "
+        "regardless of plateau / steward. Default 3.0 (IR-6).",
+    )
+    opt.add_argument(
+        "--explore-force-exit-budget-pct",
+        dest="explore_force_exit_budget_pct",
+        type=float,
+        default=None,
+        help="EXPLORE force-exit: phase-budget remaining fraction "
+        "(0..1) below which EXPLORE exits immediately. Default "
+        "0.20 (IR-6).",
+    )
+    # phase budget percentages
+    # Each phase claims a fraction of the wall-clock budget (caps; may exit earlier). Sum need not equal 1.0.
+    # Both spellings are accepted for every phase: the legacy ``--max-minutes-*-pct``
+    # and the newer ``--phase-budget-*-pct`` (matches the ``phase_budget_*`` dest).
+    opt.add_argument(
+        "--max-minutes-prelude-pct",
+        "--phase-budget-prelude-pct",
+        dest="phase_budget_prelude_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
+    )
+    opt.add_argument(
+        "--max-minutes-framework-pct",
+        "--phase-budget-framework-pct",
+        dest="phase_budget_framework_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.15.",
+    )
+    opt.add_argument(
+        "--max-minutes-explore-pct",
+        "--phase-budget-explore-pct",
+        dest="phase_budget_explore_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for EXPLORE. Default: 0.375.",
+    )
+    opt.add_argument(
+        "--max-minutes-kernel-pct",
+        "--phase-budget-kernel-pct",
+        dest="phase_budget_kernel_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.305.",
+    )
+    opt.add_argument(
+        "--max-minutes-sweep-pct",
+        "--phase-budget-sweep-pct",
+        dest="phase_budget_sweep_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for SWEEP. Default: 0.12.",
+    )
+    opt.add_argument(
+        "--max-minutes-close-pct",
+        "--phase-budget-close-pct",
+        dest="phase_budget_close_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for CLOSE. Default: 0.02.",
+    )
+    opt.add_argument(
+        "--strict-phase",
+        dest="strict_phase",
+        action="store_true",
+        default=True,
+        help="(v0.8 M2 default) Enforce PolicyGate R1 phase_incompatible. "
+        "Action proposals outside the current phase's allowlist "
+        "return policy_denied so the LLM self-corrects.",
+    )
+    opt.add_argument(
+        "--no-strict-phase",
+        dest="strict_phase",
+        action="store_false",
+        help="Disable R1 enforcement (warn-only). Useful for back-compat smoke tests; production should stay strict.",
+    )
+
+    rec = sub.add_parser(
+        "recover-session",
+        help="Rebuild + push the session_breakdown for a session that exited "
+        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+    )
+    rec.add_argument(
+        "--session-dir",
+        type=Path,
+        required=True,
+        help="Session directory of the crashed run (contains state.json / reports/trace/ and the recorder fragments).",
+    )
+    rec.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
+    )
+    rec.add_argument(
+        "--backfill-trace",
+        action="store_true",
+        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
+        "generations. Use ONLY when the live emitter never ran for this "
+        "session (e.g. it was disabled during the run); otherwise it "
+        "duplicates generations already pushed live.",
+    )
+
+    return p
+
+
+
+
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: parse arguments and dispatch the requested subcommand.
+
+    Configures logging from the ``-v`` count, resolves any ``--*-prompt`` flag
+    that points at a file (reading its contents in place), and runs the
+    ``optimize`` subcommand via :func:`asyncio.run`. Prints help and returns a
+    non-zero code for unknown commands.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv[1:]`` when ``None``.
+
+    Returns:
+        int: The process exit code (``optimize`` result, or ``2`` for no/unknown
+        command).
+    """
+    # Force line-buffering so output piped through `tee` (or any
+    # non-TTY sink) flushes every line immediately instead of
+    # block-buffering ~8 KB.  Without this the top-level log appears
+    # frozen for the entire duration of a Magpie subprocess (~30-60 min)
+    # because no new print() calls happen while communicate() blocks.
+    # See #468.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    level = logging.WARNING - 10 * min(args.verbose, 2)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    )
+    if args.command == "optimize":
+        # Resolve any --*-prompt that point at a file.
+        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
+            v = getattr(args, attr)
+            if v and Path(v).exists():
+                setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        return asyncio.run(_run_optimize(args))
+    if args.command == "recover-session":
+        return _run_recover_session(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

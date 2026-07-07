@@ -31,8 +31,8 @@ from typing import Any
 
 import yaml
 
-from inference_optimizer.compat.payload_aliases import read_extra_server_args
-from inference_optimizer.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
+from hyperloom.inference_optimizer.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
     ensure_benchmark_serving_patched,
@@ -250,7 +250,7 @@ def _validate_trace_structure(
     # per_kernel_attribution_degraded and trigger a needless eager re-profile.
     # For diffusion the only meaningful health signal is check 7 (zero_ops:
     # metadata-only / repeat=0 empty window), which we always run below.
-    from inference_optimizer import framework_registry as _fw_reg
+    from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     scriptable = _fw_reg.is_scriptable(framework)
 
@@ -694,7 +694,7 @@ class ProfileExecutor(BaselineExecutor):
         # its own torch.profiler schedule. Patch it to retain the active window
         # (upstream default repeat=0 discards it -> empty trace) and skip the
         # InferenceX NUM_PROMPTS / PROFILE_EXTRA_BODY validation below.
-        from inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
             ensure_xdit_profiler_patched()
