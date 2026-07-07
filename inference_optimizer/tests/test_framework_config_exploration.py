@@ -76,6 +76,7 @@ def _fake_self(**state_overrides):
         framework_config_pending_grid=[],
         explore_search={},
         save=lambda *a, **k: None,
+        record_lifecycle_event=lambda **k: None,
     )
     for k, v in state_overrides.items():
         setattr(state, k, v)
@@ -707,3 +708,20 @@ def test_hold_generating_survives_save_error():
     s.shared_state.save = _raise
     assert _hold(s) is True
     assert s.shared_state.framework_config_lane_state == "running"
+
+
+def test_finish_lane_survives_lifecycle_error():
+    s = _fake_self()
+    s.shared_state.record_lifecycle_event = _raise
+    Coordinator._finish_framework_config_lane(s, reason="max_rounds")
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_record_survives_lifecycle_error():
+    s = _fake_self()
+    s.shared_state.record_lifecycle_event = _raise
+    task = SimpleNamespace(task_id="c", params={})
+    Coordinator._record_framework_config_exploration_result(
+        s, task=task, result={"per_variant_outcomes": []}
+    )
+    assert len(s.shared_state.framework_config_exploration_results) == 1

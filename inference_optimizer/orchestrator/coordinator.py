@@ -2359,18 +2359,18 @@ class Coordinator:
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
-        # (default OFF) FRAMEWORK config-exploration lane: before actually
-        # leaving FRAMEWORK_AGENT, run one explore-style config-grid round so
-        # FRAMEWORK gains the EXPLORE config-search capability. No-op unless
-        # framework_config_exploration_enabled is set, so the default flow is
-        # unchanged.
-        if self._framework_config_lane_should_engage(next_phase):
-            if await self._maybe_hold_for_framework_config_lane():
-                return
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
+        # (default OFF) FRAMEWORK config-exploration lane: before actually
+        # leaving FRAMEWORK_AGENT, run explore-style config-grid rounds so
+        # FRAMEWORK gains the EXPLORE config-search capability. Placed after the
+        # trajectory reviewer so holding the phase never skips it. No-op unless
+        # framework_config_exploration_enabled is set (default flow unchanged).
+        if self._framework_config_lane_should_engage(next_phase):
+            if await self._maybe_hold_for_framework_config_lane():
+                return
         if next_phase is None:
             return
         target, reason, evidence = next_phase
@@ -12850,7 +12850,7 @@ class Coordinator:
                 str(raw.get("note") or raw.get("provenance") or ""),
             )
 
-        if len(grid) < self._FRAMEWORK_CONFIG_GRID_CAP:
+        if not explicit_grid and len(grid) < self._FRAMEWORK_CONFIG_GRID_CAP:
             try:
                 from .action_executors.explore import _default_grid_for_framework
 
@@ -13070,6 +13070,15 @@ class Coordinator:
             reason,
             int(getattr(state, "framework_config_lane_round", 0) or 0),
         )
+        try:
+            state.record_lifecycle_event(
+                step="framework_config_lane",
+                status=_phase_state.LIFECYCLE_STATUS_END,
+                phase=_phase_state.PHASE_FRAMEWORK_AGENT,
+                detail=f"reason={reason} rounds={int(getattr(state, 'framework_config_lane_round', 0) or 0)}",
+            )
+        except Exception:  # noqa: BLE001 -- defensive; observability only
+            log.debug("framework_config: lane lifecycle emit failed", exc_info=True)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 -- defensive
@@ -13430,6 +13439,15 @@ class Coordinator:
         ):
             state.framework_config_exploration_results = []
         state.framework_config_exploration_results.append(row)
+        try:
+            state.record_lifecycle_event(
+                step="framework_config_round",
+                status=_phase_state.LIFECYCLE_STATUS_END,
+                phase=_phase_state.PHASE_FRAMEWORK_AGENT,
+                detail=f"task={row['task_id']} kept={kept} variants={row['variant_count']}",
+            )
+        except Exception:  # noqa: BLE001 -- defensive; observability only
+            log.debug("framework_config: round lifecycle emit failed", exc_info=True)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 -- defensive
