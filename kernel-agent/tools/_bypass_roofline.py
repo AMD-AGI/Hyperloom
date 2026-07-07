@@ -26,22 +26,32 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Compact AMD peak specs (mirrors inference_optimizer roofline_ceiling.HW_SPECS;
-# reimplemented so this tool imports nothing from the orchestrator package).
+# Compact AMD MAX-ACHIEVABLE (sustained) peak specs — the SAME convention as
+# inference_optimizer roofline_ceiling.HW_SPECS_ACHIEVABLE (from TraceLens arch
+# JSON), so per-kernel efficiency% shares ONE peak convention with the session
+# roofline ceiling. Reimplemented here so this tool imports nothing from the
+# orchestrator package. (The vendor dense peak was ~1.85x higher and understated
+# efficiency; using achievable makes efficiency% meaningful and comparable.)
 _PEAK_TFLOPS_MI300: dict[str, float] = {
-    "bf16": 1307.4, "bfloat16": 1307.4, "f16": 1307.4, "fp16": 1307.4, "float16": 1307.4,
-    "fp8": 2614.9, "f8": 2614.9, "float8_e4m3fn": 2614.9, "float8_e5m2": 2614.9,
-    "fp32": 163.4, "f32": 163.4, "float32": 163.4,
+    "bf16": 708.0, "bfloat16": 708.0, "f16": 654.0, "fp16": 654.0, "float16": 654.0,
+    "fp8": 1273.0, "f8": 1273.0, "float8_e4m3fn": 1273.0, "float8_e5m2": 1273.0,
+    "fp32": 163.0, "f32": 163.0, "float32": 163.0,
+}
+_PEAK_TFLOPS_MI325: dict[str, float] = {
+    "bf16": 843.0, "bfloat16": 843.0, "f16": 794.0, "fp16": 794.0, "float16": 794.0,
+    "fp8": 1519.0, "f8": 1519.0, "float8_e4m3fn": 1519.0, "float8_e5m2": 1519.0,
+    "fp32": 194.0, "f32": 194.0, "float32": 194.0,
 }
 _PEAK_TFLOPS_MI355: dict[str, float] = {
-    "bf16": 2516.6, "bfloat16": 2516.6, "f16": 2516.6, "fp16": 2516.6, "float16": 2516.6,
-    "fp8": 5033.2, "f8": 5033.2, "float8_e4m3fn": 5033.2, "float8_e5m2": 5033.2,
-    "mxfp4": 10066.4, "fp4": 10066.4, "float4": 10066.4,
+    "bf16": 1686.0, "bfloat16": 1686.0, "f16": 1686.0, "fp16": 1686.0, "float16": 1686.0,
+    "fp8": 3567.0, "f8": 3567.0, "float8_e4m3fn": 3567.0, "float8_e5m2": 3567.0,
+    "mxfp4": 5663.0, "fp4": 5663.0, "float4": 5663.0,
+    "fp32": 137.0, "f32": 137.0, "float32": 137.0,
 }
 _HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
     "mi308x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
-    "mi325x": {"hbm_bw_gbps": 6000.0, "peak_tflops": _PEAK_TFLOPS_MI300},
+    "mi325x": {"hbm_bw_gbps": 6000.0, "peak_tflops": _PEAK_TFLOPS_MI325},
     "mi355x": {"hbm_bw_gbps": 8000.0, "peak_tflops": _PEAK_TFLOPS_MI355},
 }
 _DEFAULT_GPU = "mi300x"

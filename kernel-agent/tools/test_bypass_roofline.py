@@ -217,3 +217,19 @@ def test_sdpa_cross_attention_shared_dim_without_score():
     nbytes = 2.0 * (B * Sq * H * D + B * Skv * H * D + B * Skv * H * D)
     assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
     assert "roofline_layout_inferred" not in r
+
+
+def test_efficiency_uses_achievable_peak_not_vendor():
+    # Per-kernel efficiency% must use the max-achievable peak (708 TFLOPS bf16
+    # mi300x) -- the SAME convention as the session roofline ceiling -- NOT the
+    # vendor dense peak (1307.4), which would understate efficiency ~1.85x.
+    r = compute_roofline(
+        category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
+        gpu_time_us=500.0, call_count=1, gpu_type="mi300x",
+    )
+    assert r is not None
+    achieved_flops = (2.0 * 4096 ** 3) / 500e-6
+    eff_achievable = achieved_flops / (708.0e12) * 100.0     # ~38.8%
+    eff_vendor = achieved_flops / (1307.4e12) * 100.0        # ~21.0%
+    assert abs(r["efficiency_percent"] - eff_achievable) < 0.5
+    assert abs(r["efficiency_percent"] - eff_vendor) > 5.0
