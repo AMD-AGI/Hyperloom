@@ -41,25 +41,6 @@ class FuncInfo:
 
 
 @dataclass
-class TensorInfo:
-    """A tensor-creating assignment extracted from a function body.
-
-    Attributes:
-        var_name (str): Name of the assigned variable.
-        creation_expr (str): The unparsed creation expression (e.g.
-            ``torch.randn(M, N, dtype=...)``).
-        shape_args (list[str]): Unparsed positional shape args plus any
-            non-device keyword args.
-        dtype_expr (str | None): The unparsed ``dtype=`` expression, or
-            ``None`` when not specified.
-    """
-    var_name: str
-    creation_expr: str
-    shape_args: list[str]
-    dtype_expr: str | None
-
-
-@dataclass
 class CallInfo:
     """A captured call site and its arguments.
 
@@ -253,62 +234,6 @@ class BenchmarkAnalyzer:
                         lineno=node.lineno,
                     )
         return None
-
-    def extract_tensor_creation(self, func: FuncInfo) -> list[TensorInfo]:
-        """Extract torch.randn/empty/zeros/ones calls from a function.
-
-        Args:
-            func (FuncInfo): The function whose body is scanned for
-                tensor-creating assignments.
-
-        Returns:
-            list[TensorInfo]: One :class:`TensorInfo` per recognised
-                tensor-creation assignment; empty if the body fails to
-                parse or contains none.
-        """
-        results: list[TensorInfo] = []
-        try:
-            func_tree = ast.parse(textwrap.dedent(func.source))
-        except SyntaxError:
-            return results
-
-        for node in ast.walk(func_tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            if not isinstance(node.value, ast.Call):
-                continue
-            call = node.value
-            func_name = self._call_func_name(call)
-            if func_name not in (
-                "torch.randn", "torch.empty", "torch.zeros",
-                "torch.ones", "torch.rand", "torch.empty_like",
-                "torch.randn_like",
-            ):
-                continue
-            target = node.targets[0]
-            if isinstance(target, ast.Name):
-                var_name = target.id
-            else:
-                continue
-
-            shape_args = []
-            dtype_expr = None
-            for arg in call.args:
-                shape_args.append(ast.unparse(arg))
-            for kw in call.keywords:
-                if kw.arg == "dtype":
-                    dtype_expr = ast.unparse(kw.value)
-                elif kw.arg not in ("device",):
-                    shape_args.append(f"{kw.arg}={ast.unparse(kw.value)}")
-
-            creation_expr = ast.unparse(node.value)
-            results.append(TensorInfo(
-                var_name=var_name,
-                creation_expr=creation_expr,
-                shape_args=shape_args,
-                dtype_expr=dtype_expr,
-            ))
-        return results
 
     def extract_call_to(self, func: FuncInfo, callee_name: str) -> CallInfo | None:
         """Find a call to callee_name within func's body and extract its args.
@@ -1573,13 +1498,9 @@ def maybe_generate_harness(
                 repo_root = str(parent)
                 break
 
-    filtered_imports: list[str] = []
-    for imp in imports:
-        filtered_imports.append(imp)
-
     harness_code = HARNESS_TEMPLATE.format(
         repo_root=repo_root,
-        imports_section="\n".join(filtered_imports),
+        imports_section="\n".join(imports),
         toplevel_stmts="\n".join(toplevel),
         function_defs="\n\n".join(func_defs_to_copy),
         all_configs=all_configs,

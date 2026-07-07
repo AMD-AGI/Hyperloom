@@ -1,16 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Guards for the OOB source-path resolution in ``kernel-agent/scripts/install.sh``.
-
-OOB used to live at ``$HYPERLOOM_BUNDLE/OOB`` (a separate ``/wekafs`` bundle that
-the hosted sandbox injected via a dedicated OOB path env). It now ships inside the
-KernelForge checkout at ``$FORGE_PATH/OOB``, so the installer derives the OOB
-source from the forge path and callers no longer need to pass an OOB path.
-
-The behavioural test extracts the real resolution block (between the BEGIN/END
-sentinels) from the shipped ``install.sh`` so it cannot silently drift from the
-script, and evaluates it in ``bash`` under several env scenarios.
-"""
+"""Guards for OOB source-path resolution in ``kernel-agent/scripts/install.sh``."""
 
 from __future__ import annotations
 

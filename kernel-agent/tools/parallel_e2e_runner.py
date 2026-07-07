@@ -18,7 +18,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,47 +29,20 @@ OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 # Local sibling import for the collective-name fallback (tools/ on sys.path).
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+from _io_utils import utc_now  # noqa: E402
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
 
 
-def utc_now() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Returns:
-        str: The timezone-aware current time formatted via
-            ``datetime.isoformat()``.
-    """
-    return datetime.now(timezone.utc).isoformat()
-
-
 def write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write ``data`` as pretty-printed, sorted JSON, creating parents.
-
-    Args:
-        path (Path): Destination file; parent directories are created.
-        data (dict[str, Any]): JSON-serializable mapping to write.
-    """
+    """Write pretty-printed sorted JSON, creating parents."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """Parse a ``KEY=VALUE`` env file and derive provider-key aliases.
-
-    Reads simple ``KEY=VALUE`` lines (ignoring blanks/comments, stripping
-    surrounding quotes), then fills common cross-provider fallbacks
-    (e.g. deriving Anthropic/OpenAI/OOB/GEAK keys and base URLs from
-    ``SAFE_API_KEY`` / ``AMD_API_KEY`` / ``*_BASE_URL``).
-
-    Args:
-        path (Path): Path to the env file. A missing file yields ``{}``.
-
-    Returns:
-        dict[str, str]: The parsed environment with derived aliases
-            applied.
-    """
+    """Parse a ``KEY=VALUE`` env file and derive provider-key aliases."""
     env: dict[str, str] = {}
     if not path.exists():
         return env
@@ -115,21 +87,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 def _extract_trailing_json(text: str) -> dict[str, Any]:
-    """Parse the last top-level JSON object in *text*.
-
-    kernel_optimization.py prints non-JSON lines (e.g. ray.init banner) before
-    its result JSON; we tolerate that by scanning from the end.
-
-    Args:
-        text (str): Combined stdout text that ends with a JSON object.
-
-    Returns:
-        dict[str, Any]: The parsed trailing JSON object.
-
-    Raises:
-        ValueError: If ``text`` is empty.
-        json.JSONDecodeError: If no valid JSON object can be parsed.
-    """
+    """Parse the last top-level JSON object from mixed stdout text."""
     if not text:
         raise ValueError("empty stdout")
     end = text.rfind("}")
@@ -161,22 +119,7 @@ def _extract_trailing_json(text: str) -> dict[str, Any]:
 
 
 def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: Path) -> dict[str, Any]:
-    """Run a subprocess, tee output to a log, and parse trailing JSON.
-
-    Args:
-        cmd (list[str]): The command vector to execute.
-        env (dict[str, str]): Environment for the subprocess. Keyword-only.
-        timeout_s (int): Subprocess timeout in seconds. Keyword-only.
-        log_path (Path): File to append the command and its combined
-            stdout/stderr to. Keyword-only.
-
-    Returns:
-        dict[str, Any]: The parsed trailing JSON object from stdout.
-
-    Raises:
-        RuntimeError: If the command exits non-zero.
-        subprocess.TimeoutExpired: If it exceeds ``timeout_s``.
-    """
+    """Run a subprocess, tee output to a log, and parse trailing JSON."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
         log.write("$ " + " ".join(cmd) + "\n")
@@ -196,16 +139,7 @@ def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: P
 
 
 def _ensure_ray_via_helper(num_gpus: int, log_path: Path) -> bool:
-    """Use the kernel-agent self-contained ray_runtime helper.
-
-    Args:
-        num_gpus (int): GPUs to request when starting a head node.
-        log_path (Path): File for Ray lifecycle output.
-
-    Returns:
-        bool: True if this call started Ray (caller should stop it),
-            False if a cluster was already running.
-    """
+    """Use the kernel-agent self-contained ray_runtime helper."""
     sys.path.insert(0, str(ROOT / "tools" / "backends"))
     from ray_runtime import ensure_ray_cluster  # type: ignore
 
@@ -328,12 +262,7 @@ def run_one_attempt(
     if harness_path:
         cmd.extend(["--test-harness-path", harness_path])
     started = time.time()
-    # Outer-wrapper timeout must cover the ACTUAL backend's budget: GEAK runs up to
-    # --geak-budget-min (default 180 min), OOB backends up to --budget-minutes
-    # (default 60). Using backend_budget_min unconditionally would SIGKILL
-    # kernel_optimization.py ~62 min in -> GEAK never finalizes its deploy artifact
-    # and the combined-E2E/integrate A/B is skipped. Match the inner budget + a
-    # finalize grace (>= GEAK finalize_grace 300s + kill_buffer 60s).
+    # Match the backend-specific budget plus finalization grace.
     _effective_budget_min = args.geak_budget_min if backend == "geak" else args.backend_budget_min
     try:
         result = run_json(cmd, env=local_env, timeout_s=int(_effective_budget_min * 60) + 360, log_path=log_path)
@@ -354,15 +283,7 @@ def run_one_attempt(
 
 
 def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
-    """Write the run summary as both JSON and a Markdown report.
-
-    Args:
-        run_dir (Path): Directory to write ``parallel_e2e_summary.json``
-            and ``parallel_e2e_summary.md`` into.
-        summary (dict[str, Any]): The accumulated run summary, including
-            ``session_id``, ``model_path``, ``parallel_results``, and
-            ``patch_retest_status``.
-    """
+    """Write the run summary as JSON and Markdown."""
     write_json(run_dir / "parallel_e2e_summary.json", summary)
     lines = [
         "# Kernel-agent Parallel E2E Summary",
@@ -397,16 +318,7 @@ def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    """CLI entry point: drive the full parallel end-to-end run.
-
-    Parses args, loads the env file, analyzes (or reuses) the trace,
-    selects a hot kernel, fans out backend attempts across Ray-managed
-    GPUs, writes the summary, and prints a final status JSON.
-
-    Returns:
-        int: 0 on success, 1 on any failure (the error is also recorded
-            in the summary and printed as JSON).
-    """
+    """Drive the full parallel end-to-end run."""
     parser = argparse.ArgumentParser(description="Run Kernel-agent real parallel E2E")
     parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
     parser.add_argument(
@@ -431,10 +343,7 @@ def main() -> int:
         "otherwise they iterate up to ~85%% of this budget "
         "and SIGTERM at 100%%.",
     )
-    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 180 min (3h).
-    # 180 matches GEAK's own full-mode budget (yaml run.budgets.full.total_s=10800s);
-    # the prior 130 killed GEAK ~50 min before its own deadline, mid round-2, so the
-    # deploy artifact never materialized and the combined-E2E A/B was skipped.
+    # Default tracks GEAK's own quick/full budgets plus finalization grace.
     _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180
     parser.add_argument(
         "--geak-budget-min",

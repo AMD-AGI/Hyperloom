@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Sandbox-hang RCA fixes (P1-A + P2).
+"""Sandbox-hang RCA fixes.
 
 Covers the orchestrator-side LLM-transport stability env helper and the
 process-group kill in ``_run_subprocess`` that reaps a hung grandchild (the

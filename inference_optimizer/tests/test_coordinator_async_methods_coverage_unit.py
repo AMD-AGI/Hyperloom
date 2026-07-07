@@ -8,7 +8,6 @@ orchestration checkpoint guard."""
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 
@@ -20,17 +19,6 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.paths import make_session_dir
-
-
-@pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return sd
 
 
 def _heartbeat() -> Intent:
@@ -72,12 +60,15 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
             "workspace": "/tmp/ws",
         },
     )
-    # warmup anchor wins as the comparison baseline; hot number kept separately
-    assert coord.shared_state.baseline_tput == 900.0
+    # Hot measure round is the conclusion baseline; cold warmup is audit-only.
+    assert coord.shared_state.baseline_tput == 1000.0
+    assert coord.shared_state.baseline_cold_tput == 900.0
     assert coord.shared_state.baseline_hot_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
     assert coord.shared_state.baseline_arg_error_streak == 0
     assert coord.shared_state.current_best["action"] == "baseline"
+    assert coord.shared_state.current_best["tput"] == 1000.0
+    assert coord.shared_state.current_best["cold_tput"] == 900.0
 
 
 @pytest.mark.asyncio
@@ -119,7 +110,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
     fast-fail once 3 total baseline failures accrue — neither per-class streak
     reaches its own threshold, so the combined backstop is what stops the run
-    (P5: otherwise the session burns the whole budget -> time_exhausted)."""
+    (otherwise the session burns the whole budget -> time_exhausted)."""
     def _task() -> Task:
         return Task(
             task_id="bl-mixed", kind="baseline", state="running",
@@ -352,6 +343,33 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
 
 
+@pytest.mark.asyncio
+async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinator) -> None:
+    """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 0.0
+    coord.shared_state.enablement_succeeded = False
+    await coord._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_close"),
+    )
+    # The premature close hint is NOT queued -> the enablement loop keeps going.
+    assert coord.shared_state.pending_escalate_hint != "skip_to_close"
+
+
+@pytest.mark.asyncio
+async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
+    """skip_to_close is honored once a baseline exists (guard no longer active)."""
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.baseline_tput = 1234.0
+    coord.shared_state.enablement_succeeded = True
+    await coord._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_close"),
+    )
+    assert coord.shared_state.pending_escalate_hint == "skip_to_close"
+
+
 # -- _scan_stale_specialists -----------------------------------------------
 @pytest.mark.asyncio
 async def test_scan_stale_specialists_empty(coord: Coordinator) -> None:
@@ -420,6 +438,72 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
         result_dict={"error_class": "boom", "reason": "bad"},
         kept=False,
     )
+
+
+# -- Problem 3: journal no longer records a reverted patch as KEEP -----------
+def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
+    """Regression for the "fake KEEP" bug: a reverted integrate_patch reaches the
+    fact hook with kept=True (``status != failed`` is promotable), yet the
+    journal must record REVERT with the REAL measured delta (from delta_pct)."""
+    from inference_optimizer.orchestrator.optimization_journal import (
+        OUTCOME_REVERT,
+    )
+    from inference_optimizer.orchestrator.task_registry import Task
+
+    task = Task(
+        task_id="t-revert-fake-keep",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="t-revert-fake-keep",
+    )
+    coord._record_fact_per_task(
+        task=task,
+        source_session_id="sess-a",
+        # The exact real-session signature: tput == baseline → delta_pct ~0,
+        # executor returns "reverted", dispatcher marks it promotable.
+        result_dict={
+            "status": "reverted",
+            "delta_pct": -0.44,
+            "output_throughput": 0.440529,
+            "reason": "throughput delta -0.44% < keep_threshold 1.00%",
+        },
+        kept=True,
+    )
+    entry = coord._ensure_journal().entries[-1]
+    assert entry.outcome == OUTCOME_REVERT
+    assert entry.gain_pct == -0.44  # real delta shown, not null
+    assert entry.reason and "keep_threshold" in entry.reason
+
+
+def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> None:
+    from inference_optimizer.orchestrator.optimization_journal import OUTCOME_KEEP
+    from inference_optimizer.orchestrator.task_registry import Task
+
+    task = Task(
+        task_id="t-real-keep",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="t-real-keep",
+    )
+    coord._record_fact_per_task(
+        task=task,
+        source_session_id="sess-a",
+        result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
+        kept=True,
+    )
+    entry = coord._ensure_journal().entries[-1]
+    assert entry.outcome == OUTCOME_KEEP
+    assert entry.gain_pct == 6.2
+
+
+def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
+    """Guard the key Problem-3 constraint: we must NOT change routing — a reverted
+    integrate_patch stays promotable so it still runs the pending_integrate
+    cleanup in _promote_to_shared_state (only the journal semantics changed)."""
+    assert coord._is_promotable_result("integrate_patch", {"status": "reverted"}) is True
+    assert coord._is_promotable_result("integrate_patch", {"status": "failed"}) is False
 
 
 # -- _compose_prompt additional branches -----------------------------------

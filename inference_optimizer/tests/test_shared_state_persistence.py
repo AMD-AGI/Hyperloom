@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-3 SharedState + Coordinator integration tests."""
+"""SharedState + Coordinator integration tests."""
 
 from __future__ import annotations
 
@@ -59,6 +59,8 @@ def test_save_load_round_trip(tmp_path):
         session_id="abc",
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         baseline_tput=1840.0,
+        baseline_cold_tput=1600.0,
+        baseline_hot_tput=1840.0,
         cumulative_gain=12.5,
         pruned_families=["deep_kernel"],
         current_best={"action": "backends", "tput": 2010.0},
@@ -68,6 +70,8 @@ def test_save_load_round_trip(tmp_path):
     assert s2.session_id == "abc"
     assert s2.model_name == "meta-llama/Llama-3.1-8B-Instruct"
     assert s2.baseline_tput == 1840.0
+    assert s2.baseline_cold_tput == 1600.0
+    assert s2.baseline_hot_tput == 1840.0
     assert s2.cumulative_gain == 12.5
     assert s2.pruned_families == ["deep_kernel"]
     assert s2.current_best == {"action": "backends", "tput": 2010.0}

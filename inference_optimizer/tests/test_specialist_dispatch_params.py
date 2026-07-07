@@ -564,3 +564,93 @@ def test_task_tool_granted_and_todowrite_granted():
 
     resolved = runner._resolve_tools(["Read", "Task", "TodoWrite", "Bash"])
     assert {"Read", "Task", "TodoWrite", "Bash"} <= set(resolved)
+
+
+# --------------------------------------------------------------------------- #
+# Problem 2 — domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
+# on legitimate keys leaking through params.tags untranslated).
+# --------------------------------------------------------------------------- #
+def test_normalize_dispatch_tags_translates_key_to_anchor():
+    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+
+    # A domain KEY in params.tags is translated to its kb_anchor.
+    assert normalize_dispatch_tags({"tags": ["serving_specialist"]}) == ["framework"]
+    assert normalize_dispatch_tags({"tags": ["kernel_switch_specialist"]}) == ["kernel_agent"]
+
+
+def test_normalize_dispatch_tags_keeps_valid_anchor_and_dedups():
+    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+
+    # An already-valid anchor is preserved unchanged.
+    assert normalize_dispatch_tags({"tags": ["framework"]}) == ["framework"]
+    # serving_specialist -> framework collapses with an explicit framework tag.
+    assert normalize_dispatch_tags({"tags": ["serving_specialist", "framework"]}) == ["framework"]
+
+
+def test_normalize_dispatch_tags_passes_garbage_through_for_rejection():
+    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+
+    # Genuinely unknown tags are NOT invented into an anchor — they pass
+    # through verbatim so PolicyGate's specialist_unknown_domain still fires.
+    assert normalize_dispatch_tags({"tags": ["totally_bogus"]}) == ["totally_bogus"]
+
+
+def test_normalize_dispatch_tags_domain_alias_translated():
+    from inference_optimizer.orchestrator.specialist_domains import normalize_dispatch_tags
+
+    # The legacy single-tag params.domain alias is translated the same way.
+    assert normalize_dispatch_tags({"domain": "system_specialist"}) == ["systems"]
+
+
+def test_dispatch_with_domain_key_tag_no_longer_rejected(gate, orchestration_role):
+    """The exact bug: tags=['serving_specialist'] (a KEY) used to be mis-rejected
+    as specialist_unknown_domain. It must now validate cleanly (key->framework)."""
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "domain",
+                "tags": ["serving_specialist"],
+                "gap_canonical_id": "gap.framework.scheduler.session-1",
+            }
+        ),
+    )
+
+
+def test_dispatch_with_genuine_garbage_tag_still_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "domain",
+                    "tags": ["totally_bogus"],
+                    "gap_canonical_id": "gap.x.session-1",
+                }
+            ),
+        )
+    assert exc.value.rule == "specialist_unknown_domain"
+
+
+def test_specialist_emit_hint_lists_all_eight_llm_domains():
+    """Fix 2: the specialist emit hint must enumerate all 8 LLM-selectable
+    domains (the two read-only scouts were previously omitted)."""
+    from types import SimpleNamespace
+
+    from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+        _format_emit_hint,
+    )
+
+    # _format_emit_hint only reads meta.name.
+    hint = _format_emit_hint(SimpleNamespace(name="specialist"))
+    for key in (
+        "serving_specialist",
+        "kernel_switch_specialist",
+        "comm_specialist",
+        "compiler_specialist",
+        "system_specialist",
+        "pr_intel_specialist",
+        "research_scout_specialist",
+        "static_recon_specialist",
+    ):
+        assert key in hint, key

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -1676,31 +1677,155 @@ class TestTracelensRootResolution:
 
     def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
-        expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos" / "TraceLens"
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        expected = tmp_path / "podlocal" / "TraceLens"
         assert krh._resolve_tracelens_root() == expected
 
     def test_root_error_none_when_present(self, tmp_path):
-        (tmp_path / "tl").mkdir()
-        assert krh._tracelens_root_error(tmp_path / "tl") is None
+        tl = tmp_path / "tl"
+        (tl / ".git").mkdir(parents=True)  # a usable git checkout
+        assert krh._tracelens_root_error(tl) is None
 
     def test_root_error_message_when_missing(self, tmp_path):
         err = krh._tracelens_root_error(tmp_path / "ghost")
         assert err is not None
         assert "TraceLens root not found" in err
 
-    def test_trace_analyze_handler_fails_fast_when_root_missing(self, tmp_path, monkeypatch):
-        # kernel-agent root present so we reach the TraceLens check.
+    def test_root_error_message_when_incomplete(self, tmp_path):
+        # Dir exists but is not a git checkout (no .git) -> unusable.
+        tl = tmp_path / "tl"
+        tl.mkdir()
+        err = krh._tracelens_root_error(tl)
+        assert err is not None
+        assert "incomplete" in err
+
+    def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(
+        self, tmp_path, monkeypatch
+    ):
+        # Default (non-override) root missing: handler must ATTEMPT self-heal
+        # (#722) before the fail-fast. We stub the heal to a no-op so the root
+        # stays missing and the handler still returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path / "no-tracelens-here"))
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "no-tracelens-here"))
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+
+        monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
+        out = asyncio.run(
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+        )
+        assert called["n"] == 1  # self-heal was attempted
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
+    def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
+        # #722/PR#789: a default checkout that EXISTS but is incomplete (dir
+        # present, no .git) must still trigger self-heal — gating on is_dir()
+        # alone would skip it.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        # Create an incomplete default checkout: the dir exists but has no .git.
+        incomplete = tmp_path / "podlocal" / "TraceLens"
+        incomplete.mkdir(parents=True)
+        (incomplete / "partial").write_text("half", encoding="utf-8")
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+            # Simulate an unrecoverable heal so the handler fail-fasts here
+            # instead of proceeding to launch the real tool subprocess.
+            shutil.rmtree(root, ignore_errors=True)
+
+        monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
+        out = asyncio.run(
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+        )
+        assert called["n"] == 1  # self-heal attempted despite the dir existing
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
+    def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
+        # #722/PR#789: a NON-default operator override that exists but is
+        # incomplete (dir present, no .git) must fail fast — never adopted as
+        # usable, never auto-cloned.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        override = tmp_path / "operator-tl"
+        override.mkdir()
+        (override / "partial").write_text("half", encoding="utf-8")  # no .git
+        monkeypatch.setenv("TRACELENS_ROOT", str(override))
+        heal_called = {"n": 0}
+        monkeypatch.setattr(
+            krh, "_maybe_selfheal_tracelens_root",
+            lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
+        )
         out = asyncio.run(
             krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
         )
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
+
+    def test_selfheal_skips_non_default_override(self, tmp_path, monkeypatch):
+        # An operator override at a NON-default path is never auto-cloned, even
+        # though TRACELENS_ROOT is set in env. Inject a counting fake module so a
+        # regression that reaches _ensure_tracelens_checkout would trip the assert.
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        override = tmp_path / "operator-tl"
+        monkeypatch.setenv("TRACELENS_ROOT", str(override))
+        called = {"n": 0}
+
+        def _fake_ensure(root, *, log_path=None):
+            called["n"] += 1
+
+        import sys as _sys
+        import types as _types
+
+        fake_mod = _types.ModuleType("tracelens_analysis")
+        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
+        _sys.modules["tracelens_analysis"] = fake_mod
+        monkeypatch.setattr(
+            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
+        )
+        try:
+            krh._maybe_selfheal_tracelens_root(override)
+        finally:
+            _sys.modules.pop("tracelens_analysis", None)
+        assert called["n"] == 0
+
+    def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
+        # #722: the default path is persisted as TRACELENS_ROOT in
+        # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
+        # A missing default path must still attempt self-heal.
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens"
+        monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
+        called = {"n": 0, "root": None}
+
+        def _fake_ensure(root, *, log_path=None):
+            called["n"] += 1
+            called["root"] = Path(root)
+
+        # Route _kernel_agent_tool_path to a fake module exposing
+        # _ensure_tracelens_checkout so the handler's dynamic import hits it.
+        import sys as _sys
+        import types as _types
+
+        fake_mod = _types.ModuleType("tracelens_analysis")
+        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
+        _sys.modules["tracelens_analysis"] = fake_mod
+        monkeypatch.setattr(
+            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
+        )
+        try:
+            krh._maybe_selfheal_tracelens_root(default_root)
+        finally:
+            _sys.modules.pop("tracelens_analysis", None)
+        assert called["n"] == 1
+        assert called["root"] == default_root
 
 
 class TestKernelOptArtifactBundleRecording:

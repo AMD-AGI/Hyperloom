@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-1 ActionRegistry + ActionMetadata + PolicyGate integration tests."""
+"""ActionRegistry + ActionMetadata + PolicyGate integration tests."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def test_valid_families_v06():
     )
 
 
-# ActionRegistry — loads shipped P1-1 actions
+# ActionRegistry — loads shipped actions
 @pytest.fixture
 def registry() -> ActionRegistry:
     return ActionRegistry().load()
@@ -248,7 +248,7 @@ def test_gate_allowed_tools_for_action_no_registry_falls_back():
 
 
 def test_gate_delegate_unknown_action_no_registry_passes():
-    """Without a registry wired, PolicyGate falls back to permissive (P0 path)."""
+    """Without a registry wired, PolicyGate falls back to permissive."""
     g = PolicyGate(role_registry=default_role_registry(), action_registry=None)
     g.validate_intent(
         "orchestration",

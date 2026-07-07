@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
+from .conftest import init_git_repo
+
 from inference_optimizer.orchestrator.action_executors.framework_agent import (
     FrameworkAgentExecutor,
     _candidate_slug,
@@ -27,33 +29,6 @@ from inference_optimizer.orchestrator.task_registry import Task
 
 
 # Helpers
-def _init_git_repo(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "FRAMEWORK Test"
-    env["GIT_AUTHOR_EMAIL"] = "fw-pr@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-
 
 _VALID_PATCH = """\
 diff --git a/src.py b/src.py
@@ -168,7 +143,7 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {  # source-less candidate
         "repo": "sgl-project/sglang",
@@ -191,12 +166,12 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Path):
-    """Regression for P2.a: missing explicit patches must short-circuit to
+    """Regression: missing explicit patches must short-circuit to
     no_patch, never falling back to the candidate's diff_url."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()  # carries a real diff_url
@@ -226,7 +201,7 @@ async def test_executor_apply_only_with_explicit_patch_succeeds(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -258,7 +233,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "bad.patch"
     patch_path.write_text(_BAD_PATCH, encoding="utf-8")
 
@@ -313,7 +288,7 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate(
         diff_url=f"file://{tmp_path / 'missing-diff.patch'}",
@@ -350,7 +325,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -395,7 +370,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -443,7 +418,7 @@ async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -486,7 +461,7 @@ async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -525,7 +500,7 @@ async def test_executor_revert_on_accuracy_regression(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -562,7 +537,7 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -604,11 +579,11 @@ index 0000000..1111111
 
 @pytest.mark.asyncio
 async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
-    """Regression for P1.c: B's REVERT must reset to A's KEEP commit, not baseline."""
+    """Regression: B's REVERT must reset to A's KEEP commit, not baseline."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
 
     patch_a = tmp_path / "a.patch"
     patch_a.write_text(_VALID_PATCH, encoding="utf-8")
@@ -670,7 +645,7 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
 
     patch_a = tmp_path / "a.patch"
     patch_a.write_text(_VALID_PATCH, encoding="utf-8")
@@ -866,11 +841,11 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
-    """P2 regression: a PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
+    """Regression: a PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "add.patch"
     patch_path.write_text(_PATCH_B_ADDS_FILE, encoding="utf-8")
 
@@ -910,11 +885,11 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
-    """P1 regression: a cross-repo candidate must fall back to diff_url, not checkout-head."""
+    """Regression: a cross-repo candidate must fall back to diff_url, not checkout-head."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     subprocess.run(
         ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/sgl-project/sglang.git"],
         check=True,
@@ -1040,7 +1015,7 @@ async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -1079,7 +1054,7 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 

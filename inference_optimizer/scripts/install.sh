@@ -106,7 +106,9 @@ KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
+# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
+# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
+_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
@@ -122,7 +124,13 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
 # (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
-MAGPIE_REF="${MAGPIE_REF:-b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7}"
+# Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
+# diffusion benchmark framework (#51); the previous pin
+# (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
+# rejects framework=xdit ("Unsupported framework: xdit"), breaking every
+# xDiT baseline. Still post the atomic-copy refactor, so the in-place patch
+# stays a no-op.
+MAGPIE_REF="${MAGPIE_REF:-e1be639428070e8d1e1ca21ca5414a84bc291d94}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at the same Magpie checkout. A single var keeps
 # the installer and runtime in lockstep; setting it never silently falls back to

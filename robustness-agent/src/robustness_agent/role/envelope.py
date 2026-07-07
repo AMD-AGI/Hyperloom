@@ -214,6 +214,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # locked so an LLM update_state can't forge/clear the degraded verdict.
         "degraded_mode",
         "model_warnings",
+        # Kernel-opt ledgers + Critic patch-verdict store (Coordinator/kernel-agent
+        # only writers); mirrors upstream, locked against LLM update_state.
+        "specialist_patch_verdicts",
+        "last_trace_analyze",
+        "last_kernel_opt",
+        "last_kernel_opt_dispatch_skip",
+        "kernel_opt_attempts",
     }
 )
 
@@ -254,8 +261,8 @@ class Intent:
 class BackendTurnResult:
     """Mirror of upstream ``backends.base.BackendTurnResult``.
 
-    The Coordinator inspects ``intents`` and ignores the rest in
-    P0-3 / P0-4. ``raw_text`` is recorded for debugging only.
+    The Coordinator inspects ``intents`` and ignores the rest.
+    ``raw_text`` is recorded for debugging only.
     """
 
     intents: list[Intent] = field(default_factory=list)

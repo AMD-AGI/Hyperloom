@@ -1,30 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for issue #433: at the container default
-``ulimit -n`` (1024) the Ray raylet is unstable (SIGABRT on startup /
-left as a zombie that only ``ray stop --force`` / SIGKILL can clear).
-Ray's raylet opens a large number of fds (sockets, plasma store,
-per-worker pipes); on a 384-CPU node 1024 is far too low.
+"""Regression tests for Ray fd-limit preflight before ``ray start``.
 
-The kernel-agent starts Ray itself via ``ray start --head`` from
-``ensure_ray_cluster`` and ``force_restart_local_cluster``. The child
-raylet inherits this process's ``RLIMIT_NOFILE``, so the runtime must
-run an fd-limit *preflight* that raises the soft limit (to
-``min(target, hard)``) BEFORE spawning ``ray start``.
-
-These tests encode that contract:
-  1. ``ensure_fd_limit`` raises a too-low soft limit up to the target,
-  2. ``ensure_fd_limit`` is a no-op when the soft limit is already high,
-  3. ``ensure_fd_limit`` clamps to the hard limit and warns when the
-     hard limit itself is below the target (the docker ``--ulimit``
-     requirement can only be satisfied at container-launch time), and
-  4. both ``ensure_ray_cluster`` and ``force_restart_local_cluster``
-     run the preflight BEFORE ``ray start``.
-
-Until the preflight lands, every test below fails (no ``ensure_fd_limit``
-symbol / no ``resource.setrlimit`` call before ``ray start``), which is
-exactly the on-disk gap described in #433.
-"""
+Ensure the child raylet does not inherit the low container default."""
 
 from __future__ import annotations
 
@@ -241,3 +219,34 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
     )
     assert "ray_start" in kinds
     assert kinds.index("setrlimit") < kinds.index("ray_start")
+
+
+def test_ensure_ray_cluster_binds_dashboard_to_loopback(monkeypatch):
+    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0,
+    so the unauthenticated Ray Jobs endpoint is not exposed on the pod network."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.ensure_ray_cluster()
+
+    starts = [cmd for kind, cmd in events if kind == "ray_start"]
+    assert starts, "ray start was not invoked"
+    assert "--dashboard-host=127.0.0.1" in starts[0]
+    assert "--dashboard-host=0.0.0.0" not in starts[0]
+
+
+def test_force_restart_local_cluster_binds_dashboard_to_loopback(monkeypatch):
+    """``force_restart_local_cluster`` must also bind the dashboard to loopback."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.force_restart_local_cluster()
+
+    starts = [cmd for kind, cmd in events if kind == "ray_start"]
+    assert starts, "ray start was not invoked"
+    assert "--dashboard-host=127.0.0.1" in starts[0]
+    assert "--dashboard-host=0.0.0.0" not in starts[0]

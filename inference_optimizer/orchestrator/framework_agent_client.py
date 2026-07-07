@@ -189,6 +189,8 @@ async def phase_discover(
     max_candidates: int = 5,
     batch_id: str = "",
     pr_states: list[str] | None = None,
+    excluded_candidate_ids: list[str] | None = None,
+    failed_candidate_context: list[dict[str, Any]] | None = None,
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """FRAMEWORK-phase batch discovery shim.
@@ -210,6 +212,14 @@ async def phase_discover(
             the legacy keyword extraction.
         max_candidates: Maximum number of candidate PRs to request.
         batch_id: Optional batch identifier.
+        pr_states: Optional PR-state filter (open / merged / closed).
+        excluded_candidate_ids: Candidate ids (pr_url / ref / ``PR:<n>``) the
+            session has already discovered or reached a terminal verdict on;
+            fa hard-filters these out of the batch (Step B hard-dedup).
+        failed_candidate_context: Compact ``{ref, status, gain_pct, why}`` rows
+            of candidates that already failed this session; fa uses them to
+            de-prioritise same-PR / equivalent candidates. Truncated to the
+            most recent 10 to keep the request bounded.
         timeout_sec: Subprocess wall-clock timeout in seconds.
 
     Returns:
@@ -226,6 +236,14 @@ async def phase_discover(
         "max_search_candidates": int(max_candidates),
         "batch_id": batch_id,
     }
+    excluded = [str(x).strip() for x in (excluded_candidate_ids or []) if str(x).strip()]
+    if excluded:
+        # Dedup preserving order for a deterministic request.
+        seen_ex: set[str] = set()
+        request["excluded_candidate_ids"] = [x for x in excluded if not (x in seen_ex or seen_ex.add(x))]
+    failed_ctx = [f for f in (failed_candidate_context or []) if isinstance(f, dict)]
+    if failed_ctx:
+        request["failed_candidate_context"] = failed_ctx[-10:]
     # Plumb the primus_cortex (PR-Monitor) base URL so the fa subprocess can
     # query internal primus PRs; without it phase-discover falls back to
     # GitHub-only. The PR-Monitor REST service IS the primus_cortex backend.

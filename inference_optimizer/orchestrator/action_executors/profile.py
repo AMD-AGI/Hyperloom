@@ -37,6 +37,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
     ensure_benchmark_serving_patched,
 )
+from ._xdit_patcher import ensure_xdit_profiler_patched
 from .baseline import BaselineExecutor
 
 
@@ -225,7 +226,7 @@ def _validate_trace_structure(
 
     Read-only; each check warns independently so partial signals stay actionable.
 
-    Returns a structured ``trace_health`` dict: ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, and ``issues`` (logged warning strings).
+    Returns a structured ``trace_health`` dict: ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, ``zero_ops`` (``"Op count": 0`` PyTorch Profiler span -> capture window never overlapped execution, metadata-only trace -> triggers roofline re-profile), and ``issues`` (logged warning strings).
 
     Args:
         trace_dir: The profile workspace trace directory to inspect.
@@ -239,21 +240,35 @@ def _validate_trace_structure(
     issues: list[str] = []
     per_kernel_attribution_degraded = False
     capture_traces_present = False
+    zero_ops = False
 
-    # --- Check 1: capture_traces/ presence ---
+    # Scriptable image frameworks (xDiT diffusion) produce a plain torch-
+    # profiler trace: no CUDA-graph capture sidecar (checks 1-2), no InferenceX
+    # execute_*/user_annotation per-step markers (check 3), and no steady-state
+    # splitter output (checks 4/6). Running those LLM/serving checks would emit
+    # spurious warnings and — worse — check 3 would set
+    # per_kernel_attribution_degraded and trigger a needless eager re-profile.
+    # For diffusion the only meaningful health signal is check 7 (zero_ops:
+    # metadata-only / repeat=0 empty window), which we always run below.
+    from ... import framework_registry as _fw_reg
+
+    scriptable = _fw_reg.is_scriptable(framework)
+
+    # --- Check 1: capture_traces/ presence (LLM/serving only) ---
     capture = trace_dir / "capture_traces"
     capture_files: list[Path] = []
-    if not capture.is_dir():
-        issues.append(
-            "[1] capture_traces/ subdirectory missing — graph capture "
-            "didn't fire. Verify EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS "
-            "include the TraceLens flag and the server-side patch landed."
-        )
-    else:
-        capture_files = sorted(p for p in capture.iterdir() if p.is_file())
-        capture_traces_present = bool(capture_files)
-        if not capture_files:
-            issues.append("[1] capture_traces/ exists but is empty — graph capture path fired but produced no files.")
+    if not scriptable:
+        if not capture.is_dir():
+            issues.append(
+                "[1] capture_traces/ subdirectory missing — graph capture "
+                "didn't fire. Verify EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS "
+                "include the TraceLens flag and the server-side patch landed."
+            )
+        else:
+            capture_files = sorted(p for p in capture.iterdir() if p.is_file())
+            capture_traces_present = bool(capture_files)
+            if not capture_files:
+                issues.append("[1] capture_traces/ exists but is empty — graph capture path fired but produced no files.")
 
     # --- Check 2 (Deval): capture file has cpu_op + Input Dims ---
     # Sample the heaviest capture file; gate cpu_op-with-Input-Dims fraction
@@ -311,7 +326,8 @@ def _validate_trace_structure(
             # confirm via a streaming scan (the 2 MB window misses markers on
             # 600 MB+ traces) to avoid false "annotations didn't fire" warnings.
             confirmed_absent = (
-                execute_count == 0
+                not scriptable
+                and execute_count == 0
                 and user_ann_count == 0
                 and not (
                     _trace_contains(main_traces[0], '"execute_')
@@ -332,7 +348,7 @@ def _validate_trace_structure(
     # An empty split means the splitter ran but got no usable events.
     split = trace_dir / "trace_split"
     split_files: list[Path] = []
-    if split.is_dir():
+    if split.is_dir() and not scriptable:
         split_files = sorted(p for p in split.iterdir() if p.is_file())
         empty_splits: list[str] = []
         for sp in split_files:
@@ -356,7 +372,7 @@ def _validate_trace_structure(
 
     # --- Check 6 (Hyperloom-specific #210 smoking-gun): _extend_* / ---
     # _decode_* without _steady_state_* in trace_split/.
-    if split.is_dir():
+    if split.is_dir() and not scriptable:
         names = [p.name for p in split_files]
         has_extend = any("_extend_" in n or "extend_only_" in n for n in names)
         has_decode = any("_decode_" in n or "decode_only_" in n for n in names)
@@ -371,6 +387,32 @@ def _validate_trace_structure(
                 "Confirm _inferencex_patcher patched Magpie's bundled "
                 "InferenceX (#210; check $MAGPIE_PATH/InferenceX/utils/"
                 "bench_serving/benchmark_serving.py)."
+            )
+
+    # --- Check 7 (Hyperloom): torch-profiler captured zero ops ---
+    # A metadata-only trace (no ``cpu_op`` / ``kernel`` events, just process/
+    # thread labels + a lone ``hipDeviceSynchronize``) means the profiler active
+    # window never recorded real execution. Observed on xDiT diffusion: the
+    # ``torch.profiler.schedule`` default ``repeat=0`` cycles back to a new
+    # collection right after the single active step, discarding the recorded
+    # window (empty ``profile_trace_rank_*.json.gz``). The trace is unusable for
+    # roofline; flag it so roofline re-profiles instead of caching an empty
+    # snapshot (silent 0% gain). Note: the ``"Op count"`` value in the
+    # ``PyTorch Profiler`` span is 0 even on HEALTHY traces, so key on the
+    # presence of ``cpu_op`` / ``kernel`` events instead.
+    if main_traces:
+        has_ops = _trace_contains(
+            main_traces[0], '"cat": "cpu_op"'
+        ) or _trace_contains(main_traces[0], '"cat": "kernel"')
+        if not has_ops:
+            zero_ops = True
+            issues.append(
+                f"[7] main trace {main_traces[0].name} has NO cpu_op / kernel "
+                "events — the torch-profiler active window recorded nothing "
+                "(metadata-only trace). On xDiT/diffusion this is the "
+                "torch.profiler.schedule repeat=0 discard (the active window is "
+                "dropped when the schedule restarts after the last active "
+                "step). The trace is unusable for roofline; re-profile needed."
             )
 
     # --- Check 5 (Deval): sglang kernel_shape_profiler presence ---
@@ -398,6 +440,7 @@ def _validate_trace_structure(
         "issues": issues,
         "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
         "capture_traces_present": capture_traces_present,
+        "zero_ops": zero_ops,
     }
 
 
@@ -644,6 +687,18 @@ class ProfileExecutor(BaselineExecutor):
                 "error": f"cannot read materialized profile config {config_path}: {exc}",
             }
         bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        framework = ""
+        if isinstance(bench, dict):
+            framework = str(bench.get("framework") or "").strip().lower()
+        # Scriptable diffusion (xDiT) has no InferenceX server; it profiles via
+        # its own torch.profiler schedule. Patch it to retain the active window
+        # (upstream default repeat=0 discards it -> empty trace) and skip the
+        # InferenceX NUM_PROMPTS / PROFILE_EXTRA_BODY validation below.
+        from ... import framework_registry
+
+        if framework_registry.is_scriptable(framework):
+            ensure_xdit_profiler_patched()
+            return None
         inferencex_path = ""
         if isinstance(bench, dict):
             inferencex_path = str(bench.get("inferencex_path") or "").strip()

@@ -53,12 +53,15 @@ _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline
 # failures (any error_class), so mixed classes can't dodge the per-class streaks.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+# Enablement stall cap: consecutive enablement rounds that neither made the
+# combo runnable nor advanced to a NEW failure signature. Reaching it stops the
+# loop with stop_reason ``enablement_stalled`` instead of re-deriving the same
+# fix until the wall-clock deadline. A *progressing* round resets the streak, so
+# an N-gap serial enablement is bounded by N + this cap, not capped at N.
+_ENABLEMENT_MAX_STALL: int = int(os.environ.get("INFERENCE_OPTIMIZER_ENABLEMENT_MAX_STALL", "3") or "3")
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
-# Sentinel returned by _rank_framework_agent_candidates_llm / _select_best_framework_agent_candidate
-# when the ranker explicitly signals that no candidate is applicable.
-_FRAMEWORK_AGENT_NONE_APPLICABLE: object = object()
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
@@ -92,6 +95,7 @@ from .gpu_pool import (
     GPU_LEASE_TTL_GRACE,
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
+    resolve_whole_machine_devices,
 )
 from .resource_lock import (
     KNOWN_LANES,
@@ -139,6 +143,34 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
 
 # Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK).
 DEFAULT_FRAMEWORK_MAX_CANDIDATES: int = 8
+
+
+def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
+    """Extract launch/traceback text from a failed baseline result payload.
+
+    Feeds ``framework_agent.enablement.classify_failure``. Concatenates the
+    most likely error-bearing fields (``error`` / ``stderr`` / ``log_tail`` /
+    ``traceback`` / ``reason``) so a "can't even boot" baseline failure becomes
+    classifiable text. Returns ``""`` when nothing usable is present.
+
+    Args:
+        result_payload: The failed task's result dict (``None`` treated empty).
+
+    Returns:
+        str: Concatenated, trimmed launch-log text (may be ``""``).
+    """
+    if not isinstance(result_payload, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
+        val = result_payload.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+        elif isinstance(val, (list, tuple)):
+            joined = "\n".join(str(x) for x in val if str(x).strip())
+            if joined.strip():
+                parts.append(joined.strip())
+    return "\n".join(parts).strip()
 
 
 def _framework_config_levers_from_done(
@@ -807,6 +839,14 @@ class Coordinator:
                 int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
                 serving_tp=self._resolve_serving_tp(),
             ),
+        )
+        # Framework-authoring pool over the whole node (serving cards not carved
+        # off, no gpu_specialist_capacity gate). Shares the ``gpu_leases`` table
+        # with ``gpu_specialist_pool``; the cap-1 ``gpu_research_lane`` mutex
+        # serializes the two so they never hold cards at the same time.
+        self.framework_gpu_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_whole_machine_devices(),
         )
         # Dispatcher re-scan poll: while awaiting in-flight tasks, re-scan the
         # queue at this cadence so a queued GPU task starts the moment its lane
@@ -3317,6 +3357,16 @@ class Coordinator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
+        # When the baseline could not launch, dispatch a one-shot
+        # enablement_specialist before the perf PR-discovery loop. Guarded via
+        # ``enablement_dispatched``.
+        try:
+            enablement_tid = await self._maybe_enqueue_enablement_specialist()
+        except Exception:  # noqa: BLE001 — never wedge the perf pump
+            log.exception("ENABLEMENT: enqueue failed")
+            enablement_tid = ""
+        if enablement_tid:
+            return
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
         # Skip if a framework task is already queued or running.
@@ -3383,14 +3433,6 @@ class Coordinator:
         # Pick the most promising un-dispatched candidate (agent-ranked), or
         # request a new batch if exhausted.
         next_candidate = await self._select_best_framework_agent_candidate()
-        if next_candidate is _FRAMEWORK_AGENT_NONE_APPLICABLE:
-            self._record_framework_agent_phase_done(
-                reason="no_applicable_candidates",
-                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
-            )
-            state.framework_agent_phase_done = True
-            state.save(self.session_dir)
-            return
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
@@ -3410,28 +3452,41 @@ class Coordinator:
             ok = await self._discover_next_framework_batch()
             if not ok:
                 failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
-                if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT or failures == 0:
-                    # Retries exhausted or clean empty payload — both real exits; stamp a summary row.
+                if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
+                    # Transient discover failures exhausted — real exit.
                     self._record_framework_agent_phase_done(
-                        reason=(
-                            "discover_retries_exhausted"
-                            if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-                            else "discover_empty_payload"
-                        ),
+                        reason="discover_retries_exhausted",
+                        failure_count=failures,
+                    )
+                    state.framework_agent_phase_done = True
+                    state.save(self.session_dir)
+                    return
+                if failures == 0:
+                    # Empty-but-valid payload. A single empty batch can be a
+                    # transient upstream blip (cortex/PR-Monitor/GitHub search
+                    # flapping), so tolerate a bounded number of consecutive
+                    # empties across ticks before giving up — otherwise one
+                    # momentary empty result silently skips the whole phase.
+                    empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
+                    state.framework_agent_empty_discoveries = empties
+                    if empties < _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
+                        log.info(
+                            "FRAMEWORK: empty discovery batch (%d/%d) — retrying on a later tick",
+                            empties,
+                            _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                        )
+                        state.save(self.session_dir)
+                        return
+                    self._record_framework_agent_phase_done(
+                        reason="discover_empty_payload",
                         failure_count=failures,
                     )
                 state.framework_agent_phase_done = True
                 state.save(self.session_dir)
                 return
+            # A non-empty batch cleared any prior empty-discovery streak.
+            state.framework_agent_empty_discoveries = 0
             next_candidate = await self._select_best_framework_agent_candidate()
-            if next_candidate is _FRAMEWORK_AGENT_NONE_APPLICABLE:
-                self._record_framework_agent_phase_done(
-                    reason="no_applicable_candidates",
-                    failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
-                )
-                state.framework_agent_phase_done = True
-                state.save(self.session_dir)
-                return
             if next_candidate is None:
                 self._record_framework_agent_phase_done(
                     reason="discover_returned_no_new_candidates",
@@ -3448,9 +3503,7 @@ class Coordinator:
         # audit preserves the legacy both-tracks behaviour (zero regression).
         audit = await self._audit_framework_agent_candidate(next_candidate)
         audit_step = str((audit or {}).get("recommended_next_step") or "")
-        _cand_id_log = str(
-            next_candidate.get("candidate_id") or next_candidate.get("pr_url") or next_candidate.get("ref") or ""
-        )
+        _cand_id_log = self._framework_candidate_key(next_candidate)
         # G5: only honour a skip when the audit is confident AND evidence-backed;
         # otherwise fall through to authoring (never silently skip a GPU test on
         # a low-confidence already-present claim).
@@ -3520,7 +3573,7 @@ class Coordinator:
             or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
         unprocessed_ids = {
-            str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            self._framework_candidate_key(c)
             for c in self._unprocessed_framework_agent_candidates()
         }
         try:
@@ -3684,16 +3737,14 @@ class Coordinator:
 
             write_semantic_audit(
                 self.session_dir,
-                candidate_id=str(
-                    candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or ""
-                ),
+                candidate_id=self._framework_candidate_key(candidate),
                 verdict=audit,
             )
         except Exception:  # noqa: BLE001 — observability is best-effort
             log.debug("FRAMEWORK: write_semantic_audit failed", exc_info=True)
         log.info(
             "FRAMEWORK: audit candidate=%s status=%s appl=%s next=%s",
-            candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "",
+            self._framework_candidate_key(candidate),
             audit.get("semantic_status"),
             audit.get("applicability"),
             audit.get("recommended_next_step"),
@@ -3747,7 +3798,7 @@ class Coordinator:
             audit: The semantic-audit verdict driving the skip.
         """
         state = self.shared_state
-        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
+        cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         semantic = str((audit or {}).get("semantic_status") or "")
         status = "already_present" if semantic.startswith("already_") else "not_applicable"
@@ -3837,7 +3888,7 @@ class Coordinator:
             short-circuits the re-dispatch).
         """
         state = self.shared_state
-        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
+        cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.{cand_id}"
         title = str(candidate.get("title") or "").strip()
@@ -3910,6 +3961,8 @@ class Coordinator:
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
+            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
+            **self._framework_gpu_params(),
         }
         try:
             await self._warm_specialist_params(params)
@@ -3921,11 +3974,14 @@ class Coordinator:
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
+        # Add gpu_research_lane + a budget-sourced TTL: this internal dispatch
+        # bypasses intent_router.
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
-            requires_lanes=["research_lane"],
+            requires_lanes=lanes,
             allowed_tools=[
                 "Read",
                 "Grep",
@@ -3937,7 +3993,7 @@ class Coordinator:
                 "WebFetch",
             ],
             side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=3600,
+            lease_ttl_sec=ttl,
         )
         # Livelock break (cross-resume): if the authoring specialist for this
         # candidate ALREADY exists in a TERMINAL state but the candidate still
@@ -3953,11 +4009,7 @@ class Coordinator:
         from .task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
-            already_rows = {
-                str(p.get("candidate_id") or "")
-                for p in (getattr(state, "framework_agent_phase_progress", None) or [])
-                if isinstance(p, dict)
-            }
+            already_rows = self._framework_processed_candidate_keys()
             # Only stamp when the authored deliverable is genuinely NOT in flight.
             # A specialist that produced a config-lever / patch deliverable routes
             # it to an integrate_patch (often first as a pending Critic proposal,
@@ -4015,11 +4067,792 @@ class Coordinator:
         )
         return spec_tid
 
+    @staticmethod
+    def _coerce_needs_gpu(value: Any) -> bool:
+        """Coerce a params ``needs_gpu`` value (bool | str) to bool.
+
+        Matches the truthy set used by ``intent_router`` / the dispatcher so a
+        JSON-string ``"true"`` and a real ``True`` route identically.
+
+        Args:
+            value: The raw ``needs_gpu`` params value.
+
+        Returns:
+            bool: Whether the specialist requests a GPU lease.
+        """
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    def _framework_gpu_params(self) -> dict[str, Any]:
+        """Return the ``{needs_gpu, gpu_count}`` params for framework authoring.
+
+        ``gpu_count`` defaults to the whole-machine pool capacity.
+
+        Returns:
+            dict: ``{"needs_gpu": True, "gpu_count": <n>}`` on single-node hosts
+            with a non-empty whole-machine pool, else ``{}`` (authoring falls
+            back to the research-lane-only path).
+        """
+        try:
+            from .action_executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                return {}
+        except Exception:  # noqa: BLE001 — treat probe failure as single-node
+            log.debug("framework GPU: multi-node probe failed", exc_info=True)
+        cap = int(getattr(self.framework_gpu_pool, "capacity", 0) or 0)
+        if cap <= 0:
+            return {}
+        return {"needs_gpu": True, "gpu_count": cap}
+
+    def _framework_authoring_lanes_ttl(
+        self, params: dict[str, Any], *, base_ttl_sec: int
+    ) -> tuple[list[str], int]:
+        """Resolve lanes + lease TTL for an internally-dispatched framework specialist.
+
+        When ``needs_gpu`` is set the task acquires the cap-1
+        ``gpu_research_lane`` (in addition to ``research_lane``) and its lease
+        TTL is re-sourced from the GPU wall budget.
+
+        Args:
+            params: The specialist params (checked for ``needs_gpu``).
+            base_ttl_sec: The default lane lease TTL (raised, never lowered, for
+                a GPU task).
+
+        Returns:
+            ``(lanes, ttl_sec)`` — ``["research_lane"]`` (+ ``gpu_research_lane``
+            when GPU) and the (possibly budget-raised) lease TTL.
+        """
+        lanes = ["research_lane"]
+        ttl = int(base_ttl_sec or 0)
+        if self._coerce_needs_gpu(params.get("needs_gpu")):
+            lanes.append("gpu_research_lane")
+            try:
+                ttl = self._gpu_lease_ttl_sec(ttl)
+            except Exception:  # noqa: BLE001 — fall back to the base TTL
+                log.exception(
+                    "framework GPU: gpu_research_lane TTL re-source failed; "
+                    "using base TTL",
+                )
+        return lanes, ttl
+
+    def _build_enablement_specialist_params(
+        self, launch_log: str, *, attempt: int = 0
+    ) -> dict[str, Any] | None:
+        """Build enablement-specialist params from a captured launch failure.
+
+        Classifies the failure (advisory ``kind`` only — see Q1 hardening),
+        plans bridging discovery, runs a **best-effort** candidate-PR enumeration
+        (network; fully exception-guarded, degrades to repos-only), and renders
+        the authoring mandate via
+        ``framework_agent.enablement_authoring.build_mandate`` (the single source
+        of the enablement prompt). Returns ``None`` **only** when the launch log
+        is blank (nothing to act on); a non-blank log always yields params, even
+        when it classifies as ``UNKNOWN`` — the LLM specialist repairs from the
+        raw log so a brand-new gap type never wedges the run.
+
+        On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
+        different bridging PR leads, and the mandate notes flag that prior
+        attempts reverted — steering the sub-agent toward a different bridge.
+
+        Args:
+            launch_log: Captured launch / traceback text.
+            attempt: Zero-based dispatch index; drives candidate rotation and a
+                retry hint in the mandate.
+
+        Returns:
+            dict | None: Specialist task params (tagged ``enablement`` +
+            ``framework_agent_authoring``) or ``None``.
+        """
+        text = (launch_log or "").strip()
+        if not text:
+            return None
+        from framework_agent.enablement import EnablementRequest, classify_failure
+        from framework_agent.enablement_authoring import build_mandate
+        from framework_agent.enablement_discovery import build_search_plan
+        from framework_agent.repo_map import repo_url_for_framework
+
+        state = self.shared_state
+        framework = (getattr(state, "framework", "") or "").strip().lower()
+        model = (getattr(state, "model_name", "") or "").strip()
+        repo_url = repo_url_for_framework(framework)
+
+        # Taxonomy-independent dispatch (Q1 hardening): we dispatch a specialist
+        # for ANY non-blank launch log, even one that classifies as ``UNKNOWN``.
+        # The enumerated ``kind`` is advisory only (it routes bridge-repo hints
+        # and labels the mandate); it is NOT a gate. A brand-new failure the
+        # rule table has never seen must still get a repair attempt — the LLM
+        # specialist reads the full raw log regardless of ``kind`` — otherwise
+        # every novel gap would wedge the run in needs_human_review. Blank logs
+        # (nothing to act on) are the only non-dispatch case (handled above).
+        signature = classify_failure(text)
+        req = EnablementRequest(
+            framework=framework,
+            model=model or "(target model)",
+            repo_url=repo_url,
+            launch_log=text,
+            gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
+        )
+        plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
+        candidate_refs = self._discover_enablement_candidate_refs(req, plan)
+        # Lead with a different candidate each attempt (deterministic
+        # left-rotation).
+        if candidate_refs and attempt:
+            n = len(candidate_refs)
+            k = attempt % n
+            candidate_refs = candidate_refs[k:] + candidate_refs[:k]
+        source_context = self._read_enablement_source_context(signature)
+        # Auto-feedback (structural): for a weight-init failure, derive the
+        # checkpoint's ground-truth per-layer weight inventory from the model's
+        # safetensors index and fold it into the mandate. This makes the loop
+        # self-correct from the checkpoint on every retry instead of re-deriving
+        # a wrong sharing rule from the raw error alone (no manual hints needed).
+        weight_facts = self._derive_checkpoint_weight_facts(text)
+        if weight_facts:
+            source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
+        mandate = build_mandate(
+            req,
+            signature=signature,
+            candidate_refs=candidate_refs,
+            source_context=source_context,
+        )
+        # Patches from prior rounds that made forward progress (each cleared an
+        # earlier crash). They are re-applied as a base before this round's
+        # patch (serial-gap stacking), so the specialist must author a fix that
+        # composes ON TOP of them — targeting the *current* (deeper) failure.
+        base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
+        base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
+        notes = mandate.task_description
+        if base_patches or base_setup:
+            progress_bits = []
+            if base_patches:
+                progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
+            if base_setup:
+                progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
+            notes = (
+                "STACKED ENABLEMENT (progress so far): the following already "
+                "cleared earlier boot crashes and WILL be re-applied/re-run as a "
+                "base before your changes — do NOT redo them; fix only the CURRENT "
+                "(deeper) failure, composing on top. " + "; ".join(progress_bits)
+                + "\n\n" + notes
+            )
+        elif attempt:
+            notes = (
+                f"RETRY (attempt {attempt + 1}): a previous enablement patch for this "
+                f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
+                f"bridging approach / candidate than before.\n\n" + notes
+            )
+        gap_cid = f"gap.enablement.{signature.kind}"
+        return {
+            "domain": "enablement_specialist",
+            "gap_canonical_id": gap_cid,
+            "gap_symptom": (
+                f"{framework or '?'} cannot launch {model or 'the target model'}: "
+                f"{signature.kind}"
+            ),
+            "gap_layer": "framework",
+            "gap_evidence": {"model": model, "failure_kind": signature.kind},
+            "framework": framework,
+            # Reuse the FRAMEWORK authoring machinery; the enablement tag routes
+            # the integrate gate to runnable_decision rather than the perf gate.
+            "framework_agent_authoring": True,
+            "enablement": True,
+            "enablement_attempt": attempt,
+            "enablement_failure_kind": signature.kind,
+            "enablement_search_repos": list(plan.repos),
+            # Pre-patch failure signature, replayed by integrate_patch against
+            # the post-patch failure.
+            "enablement_before_signature": signature.to_dict(),
+            "enablement_candidate_refs": list(candidate_refs),
+            # Progressing patches from prior rounds, stacked as a base before
+            # this round's patch (see integrate_patch enablement_base_patches).
+            "enablement_base_patches": base_patches,
+            # Allowlisted install/setup commands from prior rounds, replayed by
+            # integrate_patch before boot (durable env setup — Q3). Forwarded to
+            # the synthetic integrate_patch task by _autosubmit_specialist_patch.
+            "enablement_setup_commands": base_setup,
+            "launch_probe": req.launch_probe,
+            "source": "coordinator_internal",
+            "readonly": False,
+            "notes": notes,
+            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
+            **self._framework_gpu_params(),
+        }
+
+    def _read_enablement_source_context(
+        self, signature: Any, *, window: int = 12
+    ) -> str:
+        """Best-effort read a small source window near the offending site.
+
+        Resolves ``signature.offending_file`` against the framework/ROCm source
+        allowlist, then returns ``window`` lines centred on the first occurrence
+        of ``offending_symbol`` (or the file head when the symbol is absent).
+        Fully exception-guarded: any failure returns ``""`` so the mandate
+        degrades to the no-context form (G is grounding, never a hard dependency).
+
+        Args:
+            signature: The classified :class:`FailureSignature`.
+            window: Total number of lines to return around the hit.
+
+        Returns:
+            str: A ``file:line`` header + snippet, or ``""``.
+        """
+        offending_file = str(getattr(signature, "offending_file", "") or "").strip()
+        if not offending_file:
+            return ""
+        symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
+        try:
+            from pathlib import Path
+
+            candidates: list[Path] = []
+            p = Path(offending_file)
+            if p.is_absolute():
+                candidates.append(p)
+            else:
+                from .framework_paths import resolve_source_file_allowlist
+
+                for root in resolve_source_file_allowlist():
+                    candidates.append(Path(str(root)) / offending_file)
+                    # Also try matching by basename under each root is too broad;
+                    # keep it to the joined relative path only.
+            target: Path | None = next((c for c in candidates if c.is_file()), None)
+            if target is None:
+                return ""
+            lines = target.read_text(errors="replace").splitlines()
+            if not lines:
+                return ""
+            hit = 0
+            if symbol:
+                for i, ln in enumerate(lines):
+                    if symbol in ln:
+                        hit = i
+                        break
+            half = max(1, window // 2)
+            start = max(0, hit - half)
+            end = min(len(lines), start + window)
+            snippet = "\n".join(
+                f"{n + 1:>5}| {lines[n]}" for n in range(start, end)
+            )
+            return f"# {target} (lines {start + 1}-{end})\n{snippet}"
+        except Exception:  # noqa: BLE001 — grounding is best-effort
+            log.debug(
+                "enablement: source-context read failed for %s",
+                offending_file,
+                exc_info=True,
+            )
+            return ""
+
+    def _derive_checkpoint_weight_facts(self, launch_log: str) -> str:
+        """Auto-derive ground-truth checkpoint-weight facts for a weight-init failure.
+
+        When a launch fails with a *weight-loading* error — vLLM/HF strict init
+        (``weights were not initialized from checkpoint``) or a state_dict
+        mismatch (``Missing/Unexpected key(s) in state_dict``) — the offending
+        parameter names in the traceback are only *half* the picture: the
+        specialist also needs to know which of those names ACTUALLY EXIST in the
+        checkpoint (so it can copy/alias from a real source) versus which are
+        instantiated by the model but absent from the checkpoint (so they need
+        synthesis/sharing). Prior enablement rounds kept re-deriving a wrong
+        sharing rule because that ground truth was never fed back.
+
+        This parses the failing ``model...`` parameter names out of the launch
+        log, then cross-references the model's ``*.safetensors.index.json`` (or
+        ``pytorch_model.bin.index.json``) ``weight_map`` to report, per offending
+        family, which layer indices carry that weight in the checkpoint and which
+        do not. The result is a compact, verifiable FACTS block that is appended
+        to the enablement mandate on EVERY retry, so the loop self-corrects from
+        the checkpoint instead of guessing. Fully exception-guarded: any failure
+        (no index, unreadable, no matches) returns ``""`` and the mandate degrades
+        to the log-only form.
+
+        Args:
+            launch_log: The captured launch / traceback text.
+
+        Returns:
+            str: A ``CHECKPOINT WEIGHT FACTS`` block, or ``""``.
+        """
+        text = (launch_log or "")
+        low = text.lower()
+        try:
+            import glob as _glob
+            import json as _json
+            import re as _re
+            from pathlib import Path as _Path
+
+            # Offending parameter names in the traceback (e.g.
+            # 'model.layers.5.self_attn.indexer.k_norm.weight'). Parsed FIRST so
+            # the trigger is robust to a head-truncated launch log that dropped
+            # the "not initialized from checkpoint" phrase but still carries the
+            # quoted weight names (the real signal we need).
+            offending = set(_re.findall(r"['\"]((?:model|language_model|transformer)\.[\w.]+)['\"]", text))
+            weighty = {o for o in offending if o.endswith((".weight", ".bias", "_scale"))}
+            phrase_hit = (
+                "not initialized from checkpoint" in low
+                or "missing key" in low
+                or "unexpected key" in low
+                or "error(s) in loading state_dict" in low
+            )
+            # Fire when the log names offending weights/biases even if the
+            # explanatory phrase was truncated off; require weight-shaped names
+            # so we do not misfire on unrelated quoted 'model.*' tokens.
+            if not (phrase_hit or weighty):
+                return ""
+            if not offending:
+                return ""
+            model_path = str(getattr(self.shared_state, "model_path", "") or "").strip()
+            if not model_path or not _Path(model_path).is_dir():
+                return ""
+            # Load the checkpoint weight_map (sharded index) or list single-file keys.
+            weight_map: dict[str, Any] = {}
+            idx_files = _glob.glob(f"{model_path}/*.index.json")
+            if idx_files:
+                data = _json.loads(_Path(idx_files[0]).read_text(errors="replace"))
+                weight_map = data.get("weight_map", {}) if isinstance(data, dict) else {}
+            if not weight_map:
+                return ""
+            ckpt_keys = set(weight_map.keys())
+            # Group offending names by a layer-index-stripped "family" so we can
+            # report the per-layer presence pattern compactly.
+            def _family(name: str) -> str:
+                return _re.sub(r"\.\d+\.", ".{N}.", name)
+
+            def _layer_idx(name: str) -> int | None:
+                m = _re.search(r"\.(\d+)\.", name)
+                return int(m.group(1)) if m else None
+
+            fams: dict[str, dict[str, Any]] = {}
+            for nm in offending:
+                fam = _family(nm)
+                d = fams.setdefault(fam, {"missing_layers": set()})
+                li = _layer_idx(nm)
+                if li is not None:
+                    d["missing_layers"].add(li)
+            lines: list[str] = []
+            for fam in sorted(fams):
+                # For this family, which layer indices DO exist in the checkpoint?
+                fam_re = _re.compile("^" + _re.escape(fam).replace(r"\{N\}", r"\d+") + "$")
+                present_layers = sorted(
+                    {li for k in ckpt_keys if fam_re.match(k) for li in [_layer_idx(k)] if li is not None}
+                )
+                missing_layers = sorted(fams[fam]["missing_layers"])
+                if present_layers:
+                    lines.append(
+                        f"- '{fam}': PRESENT in checkpoint for layers {present_layers}; "
+                        f"MISSING (instantiated by model, absent from checkpoint) for layers "
+                        f"{missing_layers}. To satisfy the strict init check, the missing layers "
+                        f"must obtain this tensor from a present layer (copy/alias from the nearest "
+                        f"preceding present layer) OR the model must not instantiate it there."
+                    )
+                else:
+                    lines.append(
+                        f"- '{fam}': NOT present in the checkpoint for ANY layer "
+                        f"(missing for layers {missing_layers}). The checkpoint has no source for "
+                        f"this tensor — the model should not require it (guard/skip its "
+                        f"instantiation) rather than copy it."
+                    )
+            if not lines:
+                return ""
+            header = (
+                "CHECKPOINT WEIGHT FACTS (auto-derived from the model's "
+                "safetensors index — GROUND TRUTH, prefer over assumptions). The "
+                "boot failed on weight initialization; for each offending tensor "
+                "family, here is exactly which layers carry it in the checkpoint:"
+            )
+            footer = (
+                "IMPORTANT: verify the exact model class + its load_weights() entry "
+                "point actually used for this architecture (grep the framework "
+                "source for the architecture/model_type) and confirm the parameter-"
+                "dict key naming (with/without a 'model.' prefix) at that scope "
+                "BEFORE writing copy logic — a prior fix silently no-op'd because "
+                "it edited the wrong loader / used mismatched key names, so the copy "
+                "never executed and the SAME weights stayed uninitialized."
+            )
+            return header + "\n" + "\n".join(lines) + "\n" + footer
+        except Exception:  # noqa: BLE001 — auto-facts are best-effort grounding
+            log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
+            return ""
+
+    def _discover_enablement_candidate_refs(
+        self, req: Any, plan: Any
+    ) -> tuple[str, ...]:
+        """Best-effort enumerate + rank bridging PRs for an enablement failure.
+
+        Enumerates candidate PRs across every repo in ``plan.repos`` (framework
+        + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
+        ranks each :class:`framework_agent.models.Candidate` with
+        ``score_enablement_title`` (per-Candidate so the ref/html_url is
+        preserved — ``rank_titles`` only scores bare strings) and returns the
+        top ``req.max_search_candidates`` refs (``html_url`` preferred).
+
+        Network + git; **fully exception-guarded**: any failure degrades to an
+        empty tuple so the mandate falls back to repos-only.
+
+        Args:
+            req: The :class:`framework_agent.enablement.EnablementRequest`.
+            plan: The :class:`framework_agent.enablement_discovery.EnablementSearchPlan`.
+
+        Returns:
+            tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
+        """
+        from framework_agent.enablement_discovery import score_enablement_title
+        from framework_agent.models import Candidate, ExploreRequest
+        from framework_agent.sources import enumerate_candidates
+
+        max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
+        # Only search primus_cortex when its URL is configured.
+        primus_url = str(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
+        if primus_url:
+            search_modes = ["primus_cortex", "github"]
+            primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+        else:
+            search_modes = ["github"]
+            primus_block = {}
+
+        collected: list[Candidate] = []
+        for repo in plan.repos:
+            try:
+                explore_req = ExploreRequest.from_dict(
+                    {
+                        "framework": getattr(req, "framework", "") or "sglang",
+                        "repo_url": repo,
+                        "work_dir": str(getattr(req, "work_dir", "/tmp/framework-agent")),
+                        "baseline": {"throughput": 1.0},
+                        "search_perf_prs": True,
+                        "search_modes": search_modes,
+                        "keywords": list(plan.keywords),
+                        "pr_states": ["open"],
+                        "max_search_candidates": max_candidates,
+                        **primus_block,
+                    }
+                )
+                collected.extend(enumerate_candidates(explore_req))
+            except Exception:  # noqa: BLE001 — discovery is best-effort
+                log.debug(
+                    "enablement: candidate discovery failed for repo=%s",
+                    repo,
+                    exc_info=True,
+                )
+                continue
+
+        if not collected:
+            return ()
+        ranked = sorted(
+            collected,
+            key=lambda c: score_enablement_title(getattr(c, "title", "") or "", plan),
+            reverse=True,
+        )
+        refs: list[str] = []
+        seen: set[str] = set()
+        for cand in ranked:
+            ref = str(getattr(cand, "html_url", "") or getattr(cand, "ref", "") or "").strip()
+            if ref and ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+            if len(refs) >= max_candidates:
+                break
+        return tuple(refs)
+
+    async def _maybe_enqueue_enablement_specialist(self) -> str:
+        """Dispatch an enablement_specialist when baseline cannot launch.
+
+        Retries until the combo runs or the run wall-clock deadline passes (no
+        attempt-count cap). Guards:
+
+        * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
+        * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
+          on REVERT by :meth:`_maybe_rearm_enablement` so the next tick retries
+          with the next bridging candidate (``enablement_attempts`` rotates it).
+        * run deadline passed — stop dispatching new work near the close.
+
+        When the captured log classifies to ``UNKNOWN``, no authoring is
+        dispatched; a one-shot ``needs_human_review`` record is emitted (deduped
+        per distinct log). No-op on multi-node.
+
+        Returns:
+            str: The dispatched specialist ``task_id`` (empty when skipped).
+        """
+        state = self.shared_state
+        if bool(getattr(state, "enablement_succeeded", False)):
+            return ""
+        if bool(getattr(state, "enablement_dispatched", False)):
+            return ""
+        if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
+            return ""
+        if int(getattr(state, "baseline_failure_streak", 0) or 0) < 1:
+            return ""
+        # Stop opening new enablement attempts once the run deadline has passed.
+        deadline = getattr(self, "_run_deadline", None)
+        if deadline is not None and time.monotonic() >= float(deadline):
+            return ""
+        launch_log = str(getattr(state, "enablement_launch_log", "") or "")
+        attempt = int(getattr(state, "enablement_attempts", 0) or 0)
+        params = self._build_enablement_specialist_params(launch_log, attempt=attempt)
+        if params is None:
+            # A non-blank log that classifies to UNKNOWN is recorded for human
+            # review, once per distinct log.
+            await self._maybe_record_enablement_human_review(launch_log)
+            return ""
+        from .action_executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return ""
+        try:
+            await self._warm_specialist_params(params)
+        except Exception:  # noqa: BLE001 — best-effort warmup
+            log.debug("enablement: warm specialist params failed", exc_info=True)
+        idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}:{attempt}"
+        # Add gpu_research_lane + a budget-sourced TTL: this internal dispatch
+        # bypasses intent_router.
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        spec_task, _existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=lanes,
+            allowed_tools=[
+                "Read",
+                "Grep",
+                "Glob",
+                "Write",
+                "Edit",
+                "Bash",
+                "WebSearch",
+                "WebFetch",
+            ],
+            side_effects=["writes_results", "writes_patches"],
+            lease_ttl_sec=ttl,
+        )
+        state.enablement_dispatched = True
+        state.enablement_attempts = attempt + 1
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("enablement: save after dispatch failed", exc_info=True)
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
+        log.info(
+            "ENABLEMENT: dispatched authoring specialist kind=%s attempt=%d task=%s",
+            params.get("enablement_failure_kind"),
+            attempt + 1,
+            spec_tid,
+        )
+        return spec_tid
+
+    async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
+        """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
+
+        The enablement path only dispatches authoring for *actionable* failure
+        signatures; a non-blank log that classifies to ``UNKNOWN`` used to be
+        silently dropped. Instead, emit a single observation
+        (deduped per distinct log via a stored hash) carrying the classified
+        signature (``raw_excerpt`` + ``offending_file``) so an operator can pick
+        it up. No sub-agent is dispatched.
+
+        Args:
+            launch_log: The captured launch / traceback text.
+        """
+        text = (launch_log or "").strip()
+        if not text:
+            return
+        import hashlib
+
+        from framework_agent.enablement import classify_failure
+
+        signature = classify_failure(text)
+        if signature.is_actionable:
+            return
+        digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()
+        state = self.shared_state
+        seen = getattr(state, "enablement_human_review_logged", None)
+        if not isinstance(seen, list):
+            seen = []
+            state.enablement_human_review_logged = seen
+        if digest in seen:
+            return
+        seen.append(digest)
+        framework = (getattr(state, "framework", "") or "").strip().lower()
+        model = (getattr(state, "model_name", "") or "").strip()
+        try:
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "enablement_needs_human_review",
+                    "applicability": "needs_human_review",
+                    "framework": framework,
+                    "model": model,
+                    "failure_kind": signature.kind,
+                    "signature": signature.to_dict(),
+                    "reason": (
+                        "baseline launch failure did not match any actionable "
+                        "enablement signature; needs human triage"
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("enablement: human-review record failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("enablement: save after human-review failed", exc_info=True)
+        log.info(
+            "ENABLEMENT: recorded needs_human_review for UNKNOWN failure kind=%s",
+            signature.kind,
+        )
+
+    def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
+        """Re-arm, advance, or terminate the enablement retry loop.
+
+        Called on every ``integrate_patch`` completion. For an enablement patch
+        there are three outcomes:
+
+        * ``kept`` — the combo is now fully runnable: terminal success
+          (``enablement_succeeded=True``).
+        * ``advanced`` — the patch cleared the prior crash and the boot now
+          stops at a *new, deeper* gap (serial enablement). **Stack** the patch
+          (append to ``enablement_kept_patches``), replace
+          ``enablement_launch_log`` with the new failure so the next round
+          classifies and targets gap #(n+1), reset the stall streak, and clear
+          the in-flight guard to dispatch the next round.
+        * anything else (``reverted`` / apply / bench failure) — no progress:
+          bump ``enablement_stall_streak``; once it reaches
+          :data:`_ENABLEMENT_MAX_STALL`, stop the run with
+          ``stop_reason='enablement_stalled'`` instead of looping on the same
+          gap; otherwise clear the guard so the next round retries a different
+          approach.
+
+        Args:
+            res: The integrate_patch result dict (may be ``None`` / non-dict).
+        """
+        if not isinstance(res, dict) or not res.get("enablement"):
+            return
+        state = self.shared_state
+        status = str(res.get("status") or "")
+        stop_set = ""
+
+        def _stack_setup_commands() -> None:
+            """Append this round's applied setup commands to the durable stack."""
+            cur = list(getattr(state, "enablement_setup_commands", None) or [])
+            for c in res.get("setup_commands_applied") or []:
+                sc = str(c)
+                if sc and sc not in cur:
+                    cur.append(sc)
+            state.enablement_setup_commands = cur
+
+        def _reset_baseline_failure_backstop() -> None:
+            """Clear the baseline-failure counters on enablement forward progress.
+
+            The baseline fast-fail backstop (``baseline_failure_streak`` /
+            ``baseline_total_failures`` → ``stop_reason='baseline_failed'`` at
+            :data:`_BASELINE_MAX_TOTAL_FAILURES`) exists to stop a run whose
+            baseline keeps failing *the same way*. But a **serial** enablement
+            makes the baseline re-fail on purpose: each round clears gap #n and
+            the next baseline/integrate boot stops at a *new, deeper* gap #(n+1).
+            Those crashes are progress, not a stuck baseline — yet the backstop
+            counts them independently of enablement (the counters only reset on
+            an actual baseline SUCCESS), so N serial gaps trip ``baseline_failed``
+            at N=3 and guillotine a healthy, advancing loop. Reset them whenever
+            enablement advances/succeeds so the honest ``enablement_stalled`` cap
+            (consecutive NO-progress rounds) becomes the sole enablement-phase
+            fast-fail; a real baseline regression after enablement completes still
+            re-arms the streak normally.
+            """
+            state.baseline_failure_streak = 0
+            state.baseline_arg_error_streak = 0
+            state.baseline_total_failures = 0
+
+        if status == "kept":
+            state.enablement_succeeded = True
+            state.enablement_stall_streak = 0
+            _reset_baseline_failure_backstop()
+            _stack_setup_commands()
+        elif status == "advanced" or bool(res.get("advanced")):
+            # Forward progress on a serial enablement: stack the progressing
+            # patch(es) + setup commands and pivot the next round to the
+            # newly-revealed gap.
+            kept = list(getattr(state, "enablement_kept_patches", None) or [])
+            for p in res.get("patches_applied") or []:
+                sp = str(p)
+                if sp and sp not in kept:
+                    kept.append(sp)
+            state.enablement_kept_patches = kept
+            _stack_setup_commands()
+            new_log = str(res.get("enablement_launch_log") or "").strip()
+            if new_log:
+                state.enablement_launch_log = new_log
+            state.enablement_stall_streak = 0
+            # Serial-gap revalidation crashes are progress, not a stuck
+            # baseline: clear the baseline fast-fail backstop (see helper).
+            _reset_baseline_failure_backstop()
+            state.enablement_dispatched = False
+        else:
+            # No progress: count toward the stall cap.
+            state.enablement_stall_streak = int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+            if state.enablement_stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+                state.set_stop_reason("enablement_stalled")
+                stop_set = "enablement_stalled"
+            else:
+                state.enablement_dispatched = False
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("enablement: save after rearm failed", exc_info=True)
+        log.info(
+            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s "
+            "stacked=%d stall_streak=%d next_attempt=%d%s",
+            status,
+            bool(getattr(state, "enablement_succeeded", False)),
+            status == "advanced" or bool(res.get("advanced")),
+            len(getattr(state, "enablement_kept_patches", None) or []),
+            int(getattr(state, "enablement_stall_streak", 0) or 0),
+            int(getattr(state, "enablement_attempts", 0) or 0),
+            f" stop_reason={stop_set}" if stop_set else "",
+        )
+
+    @staticmethod
+    def _framework_candidate_key(row: dict[str, Any] | None) -> str:
+        """Canonical FRAMEWORK candidate dedup/progress key (see ``candidate_key``).
+
+        Thin wrapper over
+        :func:`framework_agent_artifacts.candidate_key` so every candidate
+        selection / dedup / progress-row / idempotency site derives the key
+        from one place (``candidate_id or pr_url or ref``). Prevents the
+        asymmetry where a candidate carrying only a ``pr_url`` failed to dedup
+        against its own progress row.
+
+        Args:
+            row: A candidate dict or ``framework_agent_phase_progress`` row.
+
+        Returns:
+            The candidate key, or ``""`` when no identity field is set.
+        """
+        from .framework_agent_artifacts import candidate_key
+
+        return candidate_key(row)
+
+    def _framework_processed_candidate_keys(self) -> set[str]:
+        """Set of candidate keys that already carry a terminal progress row.
+
+        A candidate is "processed" once any ``framework_agent_phase_progress``
+        row is keyed on it; such a candidate must never be re-selected. Progress
+        rows store the key in their ``candidate_id`` field, so this reuses
+        :meth:`_framework_candidate_key`.
+
+        Returns:
+            The set of processed candidate keys (possibly empty).
+        """
+        return {
+            self._framework_candidate_key(p)
+            for p in (getattr(self.shared_state, "framework_agent_phase_progress", None) or [])
+            if isinstance(p, dict) and self._framework_candidate_key(p)
+        }
+
     def _unprocessed_framework_agent_candidates(self) -> list[dict[str, Any]]:
         """Return all not-yet-processed candidates in the latest batch (order preserved).
 
-        Processed = the candidate id already appears in
-        ``framework_agent_phase_progress``.
+        Processed = the candidate key already appears in
+        ``framework_agent_phase_progress`` (see
+        :meth:`_framework_processed_candidate_keys`).
 
         Returns:
             The list of candidate dicts lacking a progress row (possibly empty).
@@ -4034,16 +4867,12 @@ class Coordinator:
         candidates = latest.get("candidates") or []
         if not isinstance(candidates, list):
             return []
-        processed = {
-            str(p.get("candidate_id") or "")
-            for p in (getattr(state, "framework_agent_phase_progress", None) or [])
-            if isinstance(p, dict)
-        }
+        processed = self._framework_processed_candidate_keys()
         out: list[dict[str, Any]] = []
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
-            cand_id = str(cand.get("candidate_id") or cand.get("pr_url") or cand.get("ref") or "")
+            cand_id = self._framework_candidate_key(cand)
             if cand_id and cand_id not in processed:
                 out.append(cand)
         return out
@@ -4085,8 +4914,6 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
             log.debug("FRAMEWORK: agent candidate ranking failed", exc_info=True)
             chosen = None
-        if chosen is _FRAMEWORK_AGENT_NONE_APPLICABLE:
-            return _FRAMEWORK_AGENT_NONE_APPLICABLE  # type: ignore[return-value]
         if chosen is not None:
             return chosen
         # Deterministic fallback: discovery order.
@@ -4138,21 +4965,34 @@ class Coordinator:
         ctx_lines.append("")
         ctx_lines.append("Candidates (choose the ONE most likely to raise throughput):")
         for i, c in enumerate(listed):
-            cid = str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            cid = self._framework_candidate_key(c)
             title = str(c.get("title") or "").strip()
             repo = str(c.get("repo") or c.get("discovered_repo_url") or "").strip()
             audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
             appl = str((audit or {}).get("applicability") or "") if audit else ""
             extra = f" [audit_applicability={appl}]" if appl else ""
             ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        # Step C — soft guidance: fold this session's already-tried / failed
+        # candidates into the prompt as negative samples so the ranker stops
+        # re-picking equivalents. Purely derived from the ledgers (zero extra
+        # LLM cost); best-effort — a build failure must never wedge ranking.
+        try:
+            tried_block = self._render_framework_memory_for_prompt(
+                self._build_framework_working_memory(),
+            )
+        except Exception:  # noqa: BLE001 — advisory only
+            log.debug("FRAMEWORK: working-memory render for ranker failed", exc_info=True)
+            tried_block = ""
+        if tried_block:
+            ctx_lines.append("")
+            ctx_lines.append(tried_block)
         ctx_lines.append("")
         ctx_lines.append(
-            "Prefer PRs that target this model's architecture/precision/GPU and "
-            "the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
-            "Deprioritize PRs scoped to unrelated models, archs, or GPUs. "
-            "If NO candidate is applicable to this workload, reply "
-            '{"applicable": false, "reason": "<short>"}. '
-            'Otherwise reply {"candidate_id": "<id>", "reason": "<short>"}.'
+            "Prefer PRs from this session's own framework repo, especially those "
+            "targeting the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
+            "A cross-framework PR is acceptable when it carries transferable high-value "
+            "serving tech worth porting. Always choose exactly ONE candidate; reply "
+            '{"candidate_id": "<id>", "reason": "<short>"}.'
         )
         prompt = "\n".join(ctx_lines)
 
@@ -4197,16 +5037,6 @@ class Coordinator:
             end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
                 obj = _json.loads(text[start : end + 1])
-                # Explicit "none applicable" signal — only when the key is present
-                # and its value is exactly false (avoid false positives from
-                # truthy/missing values).
-                if obj.get("applicable") is False:
-                    reason = str(obj.get("reason") or "").strip()
-                    log.info(
-                        "FRAMEWORK: ranker signalled no applicable candidate reason=%s",
-                        reason[:160],
-                    )
-                    return _FRAMEWORK_AGENT_NONE_APPLICABLE  # type: ignore[return-value]
                 chosen_id = str(obj.get("candidate_id") or "").strip()
                 reason = str(obj.get("reason") or "").strip()
         except Exception:  # noqa: BLE001
@@ -4314,12 +5144,9 @@ class Coordinator:
             for cand in batch.get("candidates") or []:
                 if not isinstance(cand, dict):
                     continue
-                cid = str(
-                    cand.get("candidate_id")
-                    or cand.get("pr_url")
-                    or cand.get("ref")
-                    or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
-                )
+                # Canonical key (candidate_id/pr_url/ref); synthetic repo-PR
+                # fallback only when the candidate carries no identity field.
+                cid = self._framework_candidate_key(cand) or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
                 if cid:
                     ids.add(cid)
         # Fold in PR ids the research scout already mined so the two mechanisms never re-process a PR.
@@ -4340,6 +5167,117 @@ class Coordinator:
             if cid:
                 refs.append(cid)
         return refs
+
+    # Statuses that mean the candidate was ADOPTED (positive). Everything else
+    # in framework_agent_phase_progress is a negative signal for the ranker.
+    _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
+
+    # Max tried-candidate rows fed into the ranker/discovery working memory
+    # (most-recent-first), to keep the prompt bounded.
+    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
+
+    def _build_framework_working_memory(self) -> dict[str, Any]:
+        """Aggregate the FRAMEWORK working memory from the three ledgers (deterministic, zero-LLM).
+
+        Mirrors ``orchestration_memory`` for the framework layer: a structured,
+        purely-derived view of "what this session already tried / excluded /
+        learned", so discovery and the candidate ranker can be biased away from
+        repeating failed candidates. No new data source — it aggregates
+        ``framework_agent_phase_progress`` (terminal rows, reliably populated
+        after the P0 fix), ``framework_agent_critic_decisions`` (recent Critic
+        verdicts) and the batch dedup set.
+
+        Returns:
+            A dict with:
+              - ``tried_and_why``: recent terminal candidates as
+                ``{ref, status, gain_pct, why}`` (most recent last, capped).
+              - ``excluded_refs``: sorted union of known-candidate ids and
+                candidates that already carry a terminal progress row (hard
+                dedup source for discovery — Step B).
+              - ``learnings``: deduped Critic rationales for denied candidates.
+              - ``pending``: still-unprocessed candidate refs in the latest batch.
+        """
+        state = self.shared_state
+        progress = getattr(state, "framework_agent_phase_progress", None) or []
+        rows = [p for p in progress if isinstance(p, dict) and self._framework_candidate_key(p)]
+        tried: list[dict[str, Any]] = []
+        for row in rows[-self._FRAMEWORK_TRIED_MEMORY_CAP :]:
+            status = str(row.get("status") or "").strip()
+            gain = row.get("gain_pct")
+            why = str(row.get("rationale") or row.get("reason") or "").strip()
+            tried.append(
+                {
+                    "ref": self._framework_candidate_key(row),
+                    "status": status,
+                    "gain_pct": (float(gain) if isinstance(gain, (int, float)) else None),
+                    "why": why[:200],
+                }
+            )
+        # Learnings: distinct Critic denial rationales (negative priors), capped.
+        learnings: list[str] = []
+        seen_learn: set[str] = set()
+        for dec in getattr(state, "framework_agent_critic_decisions", None) or []:
+            if not isinstance(dec, dict):
+                continue
+            if str(dec.get("verdict") or "").strip().lower() not in ("reject", "critic_denied", "deny"):
+                continue
+            rationale = str(dec.get("rationale") or "").strip()
+            if rationale and rationale not in seen_learn:
+                seen_learn.add(rationale)
+                learnings.append(rationale[:200])
+            if len(learnings) >= self._FRAMEWORK_TRIED_MEMORY_CAP:
+                break
+        pending = [self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()]
+        excluded = self._framework_known_candidate_ids() | self._framework_processed_candidate_keys()
+        return {
+            "tried_and_why": tried,
+            "excluded_refs": sorted(r for r in excluded if r),
+            "learnings": learnings,
+            "pending": [r for r in pending if r],
+        }
+
+    @staticmethod
+    def _render_framework_memory_for_prompt(memory: dict[str, Any] | None) -> str:
+        """Render the FRAMEWORK working memory into prompt text (mirror of ``render_memory_for_seed``).
+
+        Emits a bounded ``tried_and_why`` / ``learnings`` bullet block framed as
+        "already tried this session — avoid proposing the same or equivalent".
+        Returns ``""`` when there is nothing tried yet (fresh phase), so callers
+        can skip the section cleanly.
+
+        Args:
+            memory: A record from :meth:`_build_framework_working_memory`.
+
+        Returns:
+            The rendered prompt text, or ``""`` when empty.
+        """
+        if not isinstance(memory, dict) or not memory:
+            return ""
+        tried = memory.get("tried_and_why") or []
+        learnings = memory.get("learnings") or []
+        if not tried and not learnings:
+            return ""
+        lines: list[str] = [
+            "Already tried THIS session (avoid proposing the same PR or an "
+            "equivalent change — prefer a candidate that attacks a different "
+            "bottleneck):",
+        ]
+        for t in tried:
+            if not isinstance(t, dict):
+                continue
+            ref = str(t.get("ref") or "").strip()
+            if not ref:
+                continue
+            status = str(t.get("status") or "").strip() or "?"
+            gain = t.get("gain_pct")
+            gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
+            why = str(t.get("why") or "").strip()
+            why_str = f" — {why}" if why else ""
+            lines.append(f"  - {ref} [{status}]{gain_str}{why_str}")
+        if learnings:
+            lines.append("Learnings (avoid these dead ends):")
+            lines.extend(f"  - {str(x)}" for x in learnings)
+        return "\n".join(lines)
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
         """Repo URLs to query for the FRAMEWORK batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
@@ -4653,6 +5591,16 @@ class Coordinator:
         )
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_agent_discover_repo_urls(framework)
+        # Step A/B — feed the session working memory into discovery so fa
+        # hard-filters already-seen/terminal candidates and de-prioritises
+        # equivalents. Best-effort: a build failure must never wedge discovery.
+        try:
+            fw_memory = self._build_framework_working_memory()
+        except Exception:  # noqa: BLE001 — advisory only
+            log.debug("FRAMEWORK: working-memory build for discovery failed", exc_info=True)
+            fw_memory = {}
+        excluded_candidate_ids = list(fw_memory.get("excluded_refs") or [])
+        failed_candidate_context = list(fw_memory.get("tried_and_why") or [])[-10:]
         payload: dict[str, Any] | None = None
         merged_candidates: list[dict[str, Any]] = []
         batch_id = ""
@@ -4673,6 +5621,8 @@ class Coordinator:
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
                     pr_states=["open", "merged", "closed"],
+                    excluded_candidate_ids=excluded_candidate_ids,
+                    failed_candidate_context=failed_candidate_context,
                     timeout_sec=per_repo_timeout,
                 )
             except Exception as exc:  # noqa: BLE001 — defensive
@@ -4724,8 +5674,12 @@ class Coordinator:
         if not merged_candidates:
             return False
         batch_id = str((payload or {}).get("batch_id") or "")
-        # Cross-batch + cross-repo de-dup so the new batch only carries genuinely new PRs.
-        seen_ids = self._framework_known_candidate_ids()
+        # Cross-batch + cross-repo de-dup so the new batch only carries genuinely
+        # new PRs. Coordinator-side hard-dedup backstop (Step B): even if fa
+        # forgot to honour ``excluded_candidate_ids``, re-filter here against the
+        # full excluded set (known candidate ids ∪ candidates that already carry
+        # a terminal progress row) so a failed/tested PR is never re-queued.
+        seen_ids = self._framework_known_candidate_ids() | self._framework_processed_candidate_keys()
         primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate for consistent executor fields + a stable progress-ledger id.
         norm: list[dict[str, Any]] = []
@@ -4789,7 +5743,7 @@ class Coordinator:
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
         }
-        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or "")
+        cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         try:
             await self.tasks.create_or_return_existing(
@@ -4814,21 +5768,15 @@ class Coordinator:
                 exc,
             )
             # Record enqueue_failed progress row so the candidate is skipped next tick (else the loop spins).
-            progress = getattr(state, "framework_agent_phase_progress", None)
-            if not isinstance(progress, list):
-                progress = []
-                state.framework_agent_phase_progress = progress
-            progress.append(
-                {
-                    "candidate_id": cand_id,
-                    "batch_id": candidate.get("batch_id") or "",
-                    "task_id": None,
-                    "status": "enqueue_failed",
-                    "error": repr(exc),
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=str(candidate.get("batch_id") or ""),
+                status="enqueue_failed",
+                kept=False,
+                rationale=repr(exc),
+                provenance="pump",
+                extra={"error": repr(exc)},
             )
-            state.save(self.session_dir)
 
     _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
@@ -4902,12 +5850,7 @@ class Coordinator:
             audit_step: The resolved route (``direct_framework`` /
                 ``author_via_specialist`` / ``""`` for legacy both-tracks).
         """
-        cand_id = str(
-            candidate.get("candidate_id")
-            or candidate.get("pr_url")
-            or candidate.get("ref")
-            or ""
-        )
+        cand_id = self._framework_candidate_key(candidate)
         batch_id = str(candidate.get("batch_id") or "")
         # Dedup: a candidate is already awaiting its pre-screen verdict.
         for p in self.state.pending_proposals.values():
@@ -4921,6 +5864,39 @@ class Coordinator:
                     return
             except Exception:  # noqa: BLE001 — defensive
                 continue
+        # P0-4 repeated-review backstop: count how many times this candidate has
+        # been sent for review. Under healthy operation a candidate is submitted
+        # once (a terminal row makes it "processed"); repeated submissions mean a
+        # terminal-row leak let it be re-selected. Past the abort threshold,
+        # force a terminal row and stop — no single candidate can burn the phase.
+        if cand_id:
+            counts = getattr(self.shared_state, "framework_agent_review_counts", None)
+            if not isinstance(counts, dict):
+                counts = {}
+                self.shared_state.framework_agent_review_counts = counts
+            count = int(counts.get(cand_id, 0) or 0) + 1
+            counts[cand_id] = count
+            if count > self._MAX_REPEATED_REVIEW_SUBMISSIONS:
+                log.warning(
+                    "FRAMEWORK: candidate=%s submitted for review %d times "
+                    "(> cap %d); aborting to protect the phase budget",
+                    cand_id,
+                    count,
+                    self._MAX_REPEATED_REVIEW_SUBMISSIONS,
+                )
+                self._stamp_framework_progress(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="repeated_review_abort",
+                    kept=False,
+                    rationale=(
+                        f"submitted for review {count} times "
+                        f"(> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})"
+                    ),
+                    provenance="pump",
+                    extra={"review_submissions": count},
+                )
+                return
         propose_payload: dict[str, Any] = {
             "action_name": "framework_agent",
             "provenance": "framework_agent",
@@ -4992,7 +5968,11 @@ class Coordinator:
         candidate = dict(payload.get("candidate") or {})
         audit = payload.get("audit") if isinstance(payload.get("audit"), dict) else {}
         audit_step = str(payload.get("audit_step") or "")
-        cand_id = str(payload.get("framework_agent_candidate_id") or "")
+        cand_id = str(
+            payload.get("framework_agent_candidate_id")
+            or self._framework_candidate_key(candidate)
+        )
+        batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
@@ -5005,12 +5985,14 @@ class Coordinator:
         log.info(
             "FRAMEWORK: critic-approved candidate=%s batch=%s audit_step=%s raw=%s author=%s",
             cand_id,
-            str(payload.get("batch_id") or ""),
+            batch_id,
             audit_step or "<unknown>",
             want_raw,
             want_author,
         )
         if want_raw:
+            # _enqueue_framework_agent_task owns its own enqueue_failed terminal
+            # row on failure, so a raw-track candidate always ends up processed.
             await self._enqueue_framework_agent_task(candidate)
         if want_author and authoring_enabled:
             try:
@@ -5023,6 +6005,128 @@ class Coordinator:
                     "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,
                 )
+                # Author-only route (no raw track to own a terminal row): stamp
+                # materialize_failed so an approved-but-undispatchable candidate
+                # is not re-selected every tick (P0 terminal-row invariant).
+                if not want_raw:
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=batch_id,
+                        status="materialize_failed",
+                        kept=False,
+                        rationale=repr(exc),
+                        provenance="pump",
+                        extra={"error": repr(exc)},
+                    )
+
+    def _stamp_framework_progress(
+        self,
+        *,
+        candidate_id: str,
+        batch_id: str = "",
+        status: str,
+        kept: bool = False,
+        rationale: str = "",
+        provenance: str = "",
+        gain_pct: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
+        """Idempotently stamp a terminal ``framework_agent_phase_progress`` row.
+
+        The single terminal-row writer for every FRAMEWORK path that ends a
+        candidate's life without a benched executor result (critic denial,
+        needs_review dead-ends, materialize/enqueue failures, silent apply/bench
+        failures, repeated-review aborts). Guarantees the P0 invariant: any
+        candidate that can no longer advance carries exactly one terminal row,
+        so the pump's plateau / phase-done early-exit accrues instead of relying
+        on the budget-cap backstop.
+
+        Idempotent: a candidate key that already has ANY progress row is left
+        untouched (returns ``False``) so a later path can never double-stamp or
+        overwrite an earlier verdict. Writes the row + a ``decision.json`` and
+        persists SharedState. Best-effort on the artifact/save side (never
+        raises into the pump).
+
+        Args:
+            candidate_id: The canonical candidate key (see
+                :meth:`_framework_candidate_key`).
+            batch_id: The discovery batch the candidate belonged to.
+            status: The terminal status (e.g. ``critic_denied`` /
+                ``no_result_failed`` / ``reauthor_cap`` …).
+            kept: Whether the candidate was promoted (terminal rows are almost
+                always ``False``).
+            rationale: Human-readable reason recorded on the row + decision.json.
+            provenance: Origin tag for the decision.json (``critic`` / ``pump``
+                / ``executor`` …).
+            gain_pct: Measured delta, when one exists.
+            extra: Optional additional fields merged into the decision.json.
+
+        Returns:
+            ``True`` when a new row was appended; ``False`` when the candidate
+            already had a row (idempotent no-op) or the key was empty.
+        """
+        cand_id = str(candidate_id or "")
+        if not cand_id:
+            return False
+        state = self.shared_state
+        progress = getattr(state, "framework_agent_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            state.framework_agent_phase_progress = progress
+        if cand_id in {
+            self._framework_candidate_key(p)
+            for p in progress
+            if isinstance(p, dict)
+        }:
+            return False
+        row: dict[str, Any] = {
+            "candidate_id": cand_id,
+            "batch_id": str(batch_id or ""),
+            "status": str(status or ""),
+            "kept": bool(kept),
+            "rationale": str(rationale or ""),
+            "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
+            "provenance": str(provenance or ""),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``)
+        # onto the row too, without clobbering the canonical fields above, so
+        # downstream consumers see the same detail the decision.json carries.
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                row.setdefault(str(k), v)
+        progress.append(row)
+        try:
+            from .framework_agent_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=str(batch_id or ""),
+                status=str(status or ""),
+                kept=bool(kept),
+                provenance=str(provenance or ""),
+                reason=str(rationale or ""),
+                gain_pct=gain_pct,
+                extra=extra if isinstance(extra, dict) else None,
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK: stamp decision.json write failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
+                cand_id,
+                status,
+            )
+        log.info(
+            "FRAMEWORK: stamped terminal progress candidate=%s batch=%s status=%s",
+            cand_id,
+            str(batch_id or ""),
+            status,
+        )
+        return True
 
     async def _record_framework_agent_critic_denied(
         self,
@@ -5039,45 +6143,20 @@ class Coordinator:
             pending: The rejected framework_agent pending proposal.
             reasoning: The Critic's free-text rationale.
         """
-        state = self.shared_state
         payload = pending.payload or {}
-        cand_id = str(payload.get("framework_agent_candidate_id") or "")
-        batch_id = str(payload.get("batch_id") or "")
-        progress = getattr(state, "framework_agent_phase_progress", None)
-        if not isinstance(progress, list):
-            progress = []
-            state.framework_agent_phase_progress = progress
-        progress.append(
-            {
-                "candidate_id": cand_id,
-                "batch_id": batch_id,
-                "task_id": None,
-                "status": "critic_denied",
-                "rationale": str(reasoning or ""),
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
+        cand_id = str(
+            payload.get("framework_agent_candidate_id")
+            or self._framework_candidate_key(payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None)
         )
-        try:
-            from .framework_agent_artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="critic_denied",
-                kept=False,
-                provenance="critic",
-                reason=str(reasoning or ""),
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: critic_denied decision.json write failed", exc_info=True)
-        try:
-            state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "save after framework_agent critic_denied failed for candidate=%s",
-                cand_id,
-            )
+        batch_id = str(payload.get("batch_id") or "")
+        self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=batch_id,
+            status="critic_denied",
+            kept=False,
+            rationale=str(reasoning or ""),
+            provenance="critic",
+        )
         log.info(
             "FRAMEWORK: critic rejected candidate=%s batch=%s rationale=%r",
             cand_id,
@@ -5101,13 +6180,10 @@ class Coordinator:
             advisory: The serialized Critic advisory.
         """
         advisory = advisory or {}
-        required_evidence = [
-            str(x).strip()
-            for x in (advisory.get("required_evidence") or [])
-            if str(x).strip()
-        ]
-        if not required_evidence:
-            return
+        # Resolve the candidate identity FIRST so the two dead-end returns below
+        # (no required_evidence / reauthor cap) can stamp a terminal progress row
+        # — a needs_review verdict that neither re-authors nor materializes would
+        # otherwise leave the candidate row-less and re-selected forever (P0).
         action_name = str(getattr(pending, "action_name", "") or "")
         payload = getattr(pending, "payload", {}) or {}
         candidate: dict[str, Any] = {}
@@ -5150,13 +6226,26 @@ class Coordinator:
             audit = raw_audit if isinstance(raw_audit, dict) else {}
         else:
             return
-        cand_id = str(
-            candidate.get("candidate_id")
-            or candidate.get("pr_url")
-            or candidate.get("ref")
-            or ""
-        ).strip()
+        cand_id = self._framework_candidate_key(candidate)
         if not cand_id:
+            return
+        batch_id = str(candidate.get("batch_id") or payload.get("batch_id") or "")
+        required_evidence = [
+            str(x).strip()
+            for x in (advisory.get("required_evidence") or [])
+            if str(x).strip()
+        ]
+        if not required_evidence:
+            # needs_review with nothing to act on: no re-author is possible, so
+            # this is terminal for the candidate. Stamp it so the pump advances.
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="needs_review_no_evidence",
+                kept=False,
+                rationale=str(advisory.get("advice_text") or "")[:500],
+                provenance="critic",
+            )
             return
         # Skip if the candidate is already materializing as a live integrate_patch task.
         try:
@@ -5185,6 +6274,16 @@ class Coordinator:
                     "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
                     "verdict": "needs_review",
                 },
+            )
+            # Re-author budget exhausted: terminal for the candidate. Stamp so
+            # the pump stops re-selecting it once this proposal drains.
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="reauthor_cap",
+                kept=False,
+                rationale=f"reauthor attempts >= cap ({self._MAX_REAUTHOR_ATTEMPTS})",
+                provenance="pump",
             )
             return
         attempt = prior + 1
@@ -5512,13 +6611,13 @@ class Coordinator:
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
-        """Extract Hyperloom's bench 口径 for the PerfSkills handoff.
+        """Extract Hyperloom's bench measurement protocol for the PerfSkills handoff.
 
         Reads the materialized baseline recipe's ``benchmark.envs`` (the exact
         knobs Magpie benched with) and falls back to the process env. Returns
         only the keys that resolve so absent values leave PerfSkills on its own
-        standalone defaults. Never raises — 口径 propagation must not block the
-        KERNEL_AGENT phase.
+        standalone defaults. Never raises — measurement-protocol propagation must
+        not block the KERNEL_AGENT phase.
         """
         envs: dict[str, Any] = {}
         try:
@@ -5629,7 +6728,7 @@ class Coordinator:
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
             "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
         }
-        # Bench 口径 (measurement protocol): forward the SAME knobs Hyperloom
+        # Bench measurement protocol: forward the SAME knobs Hyperloom
         # actually benched with so PerfSkills' internal e2e measures identically.
         # Without this PerfSkills falls back to its own standalone defaults
         # (e.g. RANDOM_RANGE_RATIO=1 fixed-length vs Hyperloom's 0 variable-length)
@@ -5693,7 +6792,7 @@ class Coordinator:
                 / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"
             ),
             # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
-            # benchmark_serving.py) so final/sweep numbers are cross-harness 可比.
+            # benchmark_serving.py) so final/sweep numbers are cross-harness comparable.
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # Pin the serving / optimization GPU set so PerfSkills never guesses:
@@ -6781,6 +7880,10 @@ class Coordinator:
     # Max re-author rounds per candidate on a needs_review verdict.
     _MAX_REAUTHOR_ATTEMPTS: int = 1
 
+    # P0-4 backstop: max Critic-review submissions for a single candidate before
+    # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.
+    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
+
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
 
@@ -7326,19 +8429,16 @@ class Coordinator:
             tput = float(tput_raw) if tput_raw is not None else 0.0
         except (TypeError, ValueError):
             tput = 0.0
-        # ``tput`` (output_throughput) is the HOT measure round; kept only for
-        # reporting (``hot_tput``). The fair comparison value — used for gain,
-        # the stack entry, and current_best.tput (the explore/sweep anchor) —
-        # MUST be the single-fresh-server (warmup) round so it matches the
-        # measurement basis of explore/sweep variants. Fall back to ``tput``
-        # for a single-run replay that has no separate warmup round.
-        single_raw = result.get("warmup_round_tput")
+        # ``tput`` (output_throughput) is the HOT measure round and is the
+        # comparison value for gain/current_best. The discarded warmup round is
+        # retained only for audit so warm-replay does not reintroduce
+        # cold-before/hot-after drift.
+        cold_raw = result.get("warmup_round_tput")
         try:
-            single_round_tput = float(single_raw) if single_raw is not None else 0.0
+            cold_round_tput = float(cold_raw) if cold_raw is not None else 0.0
         except (TypeError, ValueError):
-            single_round_tput = 0.0
-        if single_round_tput <= 0:
-            single_round_tput = tput
+            cold_round_tput = 0.0
+        single_round_tput = tput
         hot_tput = tput
         # Use the baseline_tput captured at enqueue time so a mid-replay baseline rerun can't shift the anchor; fall back to live state.baseline_tput.
         anchor_raw = None
@@ -7418,6 +8518,7 @@ class Coordinator:
                 "extra_envs": warm_envs,
                 "tput": float(single_round_tput),
                 "hot_tput": float(hot_tput),
+                "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
                 "gain_pct": round(measured_gain, 3),
                 "workspace": str(result.get("workspace") or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -7444,7 +8545,8 @@ class Coordinator:
             gp = list(getattr(state, "gain_per_stack_entry", []) or [])
             gp.append(round(measured_gain, 3))
             state.gain_per_stack_entry = gp
-            # Cumulative gain from absolute tput/baseline (stack is superposition, not additive deltas). Single-round basis (matches explore/sweep + baseline anchor).
+            # Cumulative gain is absolute tput vs baseline, not additive stack
+            # deltas. Both sides use the hot measure-round contract.
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
@@ -7453,10 +8555,9 @@ class Coordinator:
             state.current_best = {
                 "action": "warm_replay",
                 "name": "warm_replay",
-                # Single-round anchor (NOT hot) so explore/sweep variants are
-                # judged on a comparable basis; hot kept under hot_tput.
                 "tput": single_round_tput,
                 "hot_tput": hot_tput,
+                "cold_tput": cold_round_tput if cold_round_tput > 0 else None,
                 # Canonical key — matches the current_best shape _lift_to_current_best writes for KEEPs.
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
@@ -9475,8 +10576,34 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("FRAMEWORK pump (%s) failed", caller)
 
+    async def _pump_enablement_safely(self, *, caller: str) -> None:
+        """Phase-independent enablement pump — runs every tick.
+
+        A baseline that cannot even *launch* traps the run in PRELUDE forever:
+        the only PRELUDE exit gate is ``baseline_tput > 0``, which a
+        non-runnable (model, backend) combo never reaches. The enablement
+        authoring dispatch used to live only inside
+        :meth:`_pump_framework_agent_phase` (guarded on
+        ``phase == FRAMEWORK_AGENT``), so it could never fire for the exact
+        "can't boot at all" scenario it exists to repair — the run instead hit
+        the 3-failure ``baseline_failed`` stop.
+
+        This wrapper drives :meth:`_maybe_enqueue_enablement_specialist` from
+        every coordinator tick, independent of phase. All dispatch guards
+        (dispatched-in-flight, already-succeeded, ``baseline_tput > 0``,
+        failure-streak, run deadline, single-node) live inside that method, so
+        calling it unconditionally here is safe and idempotent.
+
+        Args:
+            caller: Label identifying the caller ("tick" / "run"), for logs.
+        """
+        try:
+            await self._maybe_enqueue_enablement_specialist()
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.exception("ENABLEMENT pump (%s) failed", caller)
+
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
+        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
 
         Args:
             n: Number of full reactor+dispatcher passes to run (default 1).
@@ -9489,6 +10616,9 @@ class Coordinator:
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch. Best-effort.
             await self._pump_framework_agent_phase_safely(caller="tick")
+            # Phase-independent enablement pump: repair a non-runnable combo
+            # before it wedges the run in PRELUDE (see method docstring).
+            await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
@@ -9625,6 +10755,9 @@ class Coordinator:
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
                         await self._pump_framework_agent_phase_safely(caller="run")
+                        # Phase-independent enablement pump (see method docstring):
+                        # repair a non-runnable combo stuck in PRELUDE.
+                        await self._pump_enablement_safely(caller="run")
                     # phase machine advance at tick boundary; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._advance_phase_if_needed()
@@ -11335,12 +12468,7 @@ class Coordinator:
         batch_id = str(params.get("framework_batch_id") or "")
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []
-        already = {
-            str(p.get("candidate_id") or "")
-            for p in self.shared_state.framework_agent_phase_progress
-            if isinstance(p, dict)
-        }
-        if cand_id in already:
+        if cand_id in self._framework_processed_candidate_keys():
             return
         # Map the cached audit verdict to a terminal status.
         audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
@@ -12677,6 +13805,29 @@ class Coordinator:
                     integrate_params["framework_agent_candidate_id"] = fa_cand
                 if fa_batch:
                     integrate_params["framework_batch_id"] = fa_batch
+            # Propagate the enablement marker (+ optional launch probe) so
+            # integrate_patch applies the runnable_decision gate.
+            if bool(spec_params.get("enablement")):
+                integrate_params["enablement"] = True
+                probe = str(spec_params.get("launch_probe") or "").strip()
+                if probe:
+                    integrate_params["launch_probe"] = probe
+                # Forward the pre-patch failure signature so the runnable gate
+                # can detect the same actionable failure re-appearing post-patch.
+                before_sig = spec_params.get("enablement_before_signature")
+                if isinstance(before_sig, dict):
+                    integrate_params["enablement_before_signature"] = before_sig
+                # Forward the stacked base patches (prior progressing rounds) so
+                # integrate_patch re-applies them before this round's patch.
+                base_patches = spec_params.get("enablement_base_patches")
+                if isinstance(base_patches, list) and base_patches:
+                    integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
+                # Forward stacked base setup commands (prior rounds' installs) so
+                # integrate_patch replays them before boot; the current round's
+                # own setup_commands are read from specialist_done directly.
+                base_setup = spec_params.get("enablement_setup_commands")
+                if isinstance(base_setup, list) and base_setup:
+                    integrate_params["enablement_setup_commands"] = [str(c) for c in base_setup]
         except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",
@@ -13032,6 +14183,17 @@ class Coordinator:
             action_name (str | None): Explicit action name override; falls back
                 to ``intent.payload['action_name']``.
         """
+        # Surface every PolicyGate denial in the standard process log (not just
+        # on the bus) so security rejections — including the newly-gated
+        # framework_source_root / CORE-field / path-containment checks — are
+        # observable in ops logs. Denials are exceptional, so this is not noisy.
+        log.warning(
+            "PolicyGate denied intent: source=%s type=%s rule=%s reason=%s",
+            source,
+            intent.type.value,
+            denied.rule,
+            str(denied),
+        )
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",
@@ -13316,6 +14478,24 @@ class Coordinator:
             result=result_payload,
         )
         any_changed = True
+        # FRAMEWORK apply/bench silent failure (P0 death-loop root cause): a
+        # framework_agent task that settles ``status="failed"`` (or empty) never
+        # reaches the promote branch that writes the terminal progress row, so
+        # without stamping here the candidate stays "unprocessed" and the pump
+        # re-selects it every tick until the budget cap. Stamp no_result_failed.
+        if task.kind == "framework_agent":
+            cand = (task.params or {}).get("candidate")
+            cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
+            if cand_id:
+                self._stamp_framework_progress(
+                    candidate_id=cand_id,
+                    batch_id=str((task.params or {}).get("batch_id") or ""),
+                    status="no_result_failed",
+                    kept=False,
+                    rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
+                    provenance="executor",
+                    extra={"status": str(result_payload.get("status") or "")},
+                )
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors (fast_exit_arg_error) get their own streak so
         # they don't burn the slow-baseline retry budget on deterministic
@@ -13326,6 +14506,21 @@ class Coordinator:
         # eager fallback. Scope is baseline-only; explore/sweep do not benefit.
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             err_class = result_payload.get("error_class", "")
+            # Enablement-aware backstop suppression: while a serial enablement is
+            # actively engaged, baseline boots re-fail *on purpose* — each round
+            # clears gap #n and the next boot stops at a new, deeper gap #(n+1).
+            # Those crashes are progress, so the ``baseline_failed`` fast-fail
+            # (streak / total) must NOT fire here; the honest ``enablement_stalled``
+            # cap (consecutive NO-progress rounds in _maybe_rearm_enablement) is
+            # the correct fast-fail in this regime. Engaged = a progressing patch
+            # already stacked OR a specialist currently dispatched/attempting.
+            # ``fast_exit_arg_error`` is deterministic (a bad CLI arg the same
+            # params never fix) and stays gated on its own streak regardless.
+            enablement_engaged = bool(
+                (getattr(self.shared_state, "enablement_kept_patches", None) or [])
+                or getattr(self.shared_state, "enablement_dispatched", False)
+                or int(getattr(self.shared_state, "enablement_attempts", 0) or 0) > 0
+            )
             if err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
@@ -13333,7 +14528,7 @@ class Coordinator:
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
-                if self.shared_state.baseline_failure_streak >= 3:
+                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: mixed error_classes split the per-class
             # streaks above so neither reaches its threshold and the session
@@ -13344,6 +14539,7 @@ class Coordinator:
                 self.shared_state.baseline_total_failures
                 >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
+                and not enablement_engaged
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
@@ -13355,6 +14551,12 @@ class Coordinator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
+            # Stash the launch/traceback text for the FRAMEWORK pump to classify
+            # and dispatch an enablement_specialist. Fast arg errors are excluded.
+            if err_class != "fast_exit_arg_error":
+                launch_log = _extract_enablement_launch_log(result_payload)
+                if launch_log:
+                    self.shared_state.enablement_launch_log = launch_log
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
@@ -13591,24 +14793,30 @@ class Coordinator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
-                    # Default ``gpu_count`` to the serving TP so a TP-coupled
-                    # comm / decode-at-scale gap is reproducible on the real
-                    # topology (1 card can't bench it). The specialist may still
-                    # ask for fewer (single-card kernel probe) via explicit
-                    # ``gpu_count`` — that wins. Falls back to 1 when serving TP
-                    # is unknown.
-                    default_gpu_count = self._resolve_serving_tp() or 1
+                    # A framework-authoring specialist leases the whole machine
+                    # from ``framework_gpu_pool``; every other GPU specialist
+                    # leases from the carved ``gpu_specialist_pool``.
+                    is_framework_authoring = bool(
+                        params.get("framework_agent_authoring")
+                    )
+                    if is_framework_authoring:
+                        gpu_pool = self.framework_gpu_pool
+                        # Default to the whole machine; an explicit gpu_count
+                        # still wins (capped at pool capacity).
+                        default_gpu_count = gpu_pool.capacity or 1
+                    else:
+                        gpu_pool = self.gpu_specialist_pool
+                        # Default ``gpu_count`` to the serving TP; an explicit
+                        # ``gpu_count`` wins. Falls back to 1 when serving TP is
+                        # unknown.
+                        default_gpu_count = self._resolve_serving_tp() or 1
                     try:
                         gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
                     except (TypeError, ValueError):
                         gpu_count = default_gpu_count
-                    # A bench / E2E-capable specialist (``bench=true``) starts
-                    # a real TP-sharded server on its leased cards, which is
-                    # impossible with fewer than the serving TP. Floor gpu_count
-                    # up to TP so an explicit ``gpu_count=1`` from the prompt
-                    # cannot strand a bench specialist on a single card. Pure
-                    # microbench / profiling specialists set ``bench=false`` and
-                    # keep their explicit (possibly single-card) count.
+                    # A bench-capable specialist (``bench=true``) floors
+                    # gpu_count up to the serving TP; microbench / profiling
+                    # specialists (``bench=false``) keep their explicit count.
                     bench_raw = params.get("bench", False)
                     bench = (
                         bench_raw.strip().lower() in ("1", "true", "yes", "on")
@@ -13634,7 +14842,7 @@ class Coordinator:
                     # and in intent_router) so they cannot drift apart — the cards
                     # are never reclaimed while the agent is still computing.
                     gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
-                    gpu_lease = await self.gpu_specialist_pool.try_acquire(
+                    gpu_lease = await gpu_pool.try_acquire(
                         count=gpu_count,
                         holder_id=task.task_id,
                         task_id=task.task_id,
@@ -13921,6 +15129,16 @@ class Coordinator:
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
+                # A reverted enablement patch clears the in-flight guard so the
+                # next FRAMEWORK pump tick retries with the next bridging
+                # candidate; a kept patch is terminal.
+                try:
+                    self._maybe_rearm_enablement(getattr(result, "result", None))
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "ENABLEMENT rearm failed for task=%s",
+                        task.task_id,
+                    )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.
             kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
             try:
@@ -14414,35 +15632,23 @@ class Coordinator:
         audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
             tput = result.get("output_throughput")
+            warmup_anchor = result.get("warmup_round_tput")
             if isinstance(tput, (int, float)) and tput > 0:
-                # Fair-comparison anchor for measurement parity.
-                # The baseline cold-start guard runs a warmup round on a
-                # fresh server (discarded for *reporting*) then a measure
-                # round that REUSES the now-hot server — the measure
-                # number (``output_throughput``) is systematically ~10-15%
-                # higher than a single fresh-server round, because an
-                # 8-request client warmup does not fully warm vLLM/SGLang
-                # (graph capture, scheduler, allocator) the way a full
-                # prior benchmark does. Every ``explore`` / ``sweep``
-                # variant, by contrast, RESTARTS the server and runs a
-                # single round, so judging them against the hot measure
-                # number penalizes each variant by that same ~10-15% and
-                # genuinely-good params can never clear the KEEP threshold.
-                # Use the warmup round's single-fresh-server tput as the
-                # comparison ANCHOR (apples-to-apples with variants) when
-                # the double-run captured it; keep the hot number for
-                # ``current_best`` / reporting below.
-                warmup_anchor = result.get("warmup_round_tput")
+                # Baseline's conclusion contract is the hot measure round:
+                # BaselineExecutor already discards the cold first round and
+                # returns the second round as ``output_throughput``. Keep the
+                # discarded value only as an audit field so leaderboard/report
+                # gain math never mixes cold-before with hot-after.
                 if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                    self.shared_state.baseline_tput = float(warmup_anchor)
+                    self.shared_state.baseline_tput = float(tput)
+                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
                     self.shared_state.baseline_hot_tput = float(tput)
                     log.info(
-                        "baseline anchor: using single-round warmup tput "
-                        "%.1f as comparison anchor (hot measure %.1f kept "
-                        "for reporting) — measurement parity with explore/"
-                        "sweep variants",
-                        float(warmup_anchor),
+                        "baseline anchor: using hot measure tput %.1f as "
+                        "baseline_tput (discarded cold warmup %.1f kept as "
+                        "baseline_cold_tput)",
                         float(tput),
+                        float(warmup_anchor),
                     )
                 else:
                     self.shared_state.baseline_tput = float(tput)
@@ -14482,21 +15688,20 @@ class Coordinator:
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
                 changed = True
-            # current_best.tput is the comparison ANCHOR every explore /
-            # sweep variant is judged against (the Coordinator injects it
-            # as ``params['base_tput']`` in _handle_delegate /
-            # _materialize_approved_proposal). It MUST be the fair
-            # single-fresh-server anchor (``baseline_tput``, which the
-            # block above set to the warmup-round number under the
-            # double-run), NOT the hot measure round — otherwise every
-            # cold-restarted variant is judged against an unbeatable hot
-            # baseline and can never KEEP. Keep the hot number under a
-            # separate ``hot_tput`` field for reporting.
+            # current_best.tput follows the same hot baseline contract.
+            # run_grid/explore/integrate_patch measure optimization candidates
+            # on the same warm second-round basis when lifecycle reuse is
+            # available, so the numerator and denominator stay aligned.
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
                 "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
+                "cold_tput": (
+                    float(warmup_anchor)
+                    if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0
+                    else None
+                ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
@@ -14537,13 +15742,9 @@ class Coordinator:
                         "PRELUDE: warm-recipe history injection failed: %r",
                         exc,
                     )
-                # Step 2 — warm-recipe replay. Anchor the replay gain on the
-                # SINGLE-fresh-server-round baseline (``state.baseline_tput``,
-                # the same anchor explore/sweep variants are judged against),
-                # NOT the hot measure ``tput`` — otherwise warm-replay's gain
-                # and current_best land on the hot basis and every
-                # single-round explore variant is judged against an unbeatable
-                # hot bar (mirrors the baseline-promote invariant).
+                # Step 2 — warm-recipe replay. Anchor replay gain on the hot
+                # baseline_tput contract; candidate replays also return their
+                # hot measure round.
                 try:
                     await self._maybe_enqueue_warm_replay(
                         baseline_tput=float(self.shared_state.baseline_tput or tput),
@@ -14948,8 +16149,23 @@ class Coordinator:
             # KEEP lift to current_best + optimization_stack + cumulative_gain_validated + watermark roofline.
             status = str(result.get("status") or "")
             candidate = result.get("candidate") or {}
-            cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
-            batch_id = str(result.get("batch_id") or candidate.get("batch_id") or "")
+            cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
+            # Silent apply/bench failure: the executor returned a promotable-
+            # looking result (status != "failed") but with no candidate / no
+            # status (empty result dict). Recover the candidate key from the
+            # task params and coerce the status so the row is a real terminal
+            # verdict the pump can dedup on, not a blank row keyed on "" (P0).
+            if not cand_id and task is not None:
+                task_cand = (getattr(task, "params", None) or {}).get("candidate")
+                cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
+            if not status:
+                status = "no_result_failed"
+            batch_id = str(
+                result.get("batch_id")
+                or candidate.get("batch_id")
+                or ((getattr(task, "params", None) or {}).get("batch_id") if task is not None else "")
+                or ""
+            )
             delta_pct = result.get("delta_pct")
             new_tput = result.get("output_throughput")
             kept_flag = status == "kept"

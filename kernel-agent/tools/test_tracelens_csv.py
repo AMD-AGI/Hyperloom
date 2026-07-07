@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for the kernel-agent tracelens_analysis filter fixes.
-
-Locks the ``is_kernel_event`` fix to require strict ``cat == 'kernel'`` (fuzzy
-name/category matching had promoted a CPU sync to the #1 hot kernel). Production
-TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
-"""
+"""Regression tests for tracelens_analysis candidate extraction and routing."""
 
 from __future__ import annotations
 
@@ -24,6 +19,33 @@ if str(_TOOL_DIR) not in sys.path:
 
 import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
+
+
+def test_default_top_k_uses_large_pool_by_default(monkeypatch):
+    """Issue #667: the candidate-build pool defaults to a large value, not 10."""
+    monkeypatch.delenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", raising=False)
+    assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
+    assert tla._default_top_k() > 10
+
+
+def test_default_top_k_env_override(monkeypatch):
+    """Issue #667: HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "25")
+    assert tla._default_top_k() == 25
+
+
+def test_default_top_k_zero_means_unbounded(monkeypatch):
+    """Issue #667: 0/negative disables the build-time cap (huge internal cap)."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "0")
+    assert tla._default_top_k() >= 1_000_000
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "-5")
+    assert tla._default_top_k() >= 1_000_000
+
+
+def test_default_top_k_invalid_falls_back(monkeypatch):
+    """Issue #667: a non-integer env value falls back to the default pool."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "not-an-int")
+    assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
 
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
@@ -95,7 +117,7 @@ def test_deterministic_pipeline_failure_cannot_return_partial_hot_kernels():
     with pytest.raises(RuntimeError, match="refusing to return partial hot_kernels"):
         tla._raise_on_failed_deterministic_pipeline(2)
 
-    tla._raise_on_failed_deterministic_pipeline(0)
+    assert tla._raise_on_failed_deterministic_pipeline(0) is None
 
 
 def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):

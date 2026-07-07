@@ -451,18 +451,65 @@ def _resolve_tracelens_root() -> Path:
 
 
 def _tracelens_root_error(root: Path) -> str | None:
-    """Validate that the resolved TraceLens root exists on disk.
+    """Validate that the resolved TraceLens root is a usable git checkout.
+
+    A directory that exists but lacks ``.git`` (e.g. an installer's half-done
+    clone) is NOT usable and must be reported so a non-default override fails
+    fast and a default path is self-healed (#722/PR#789).
 
     Returns:
-        str | None: A human-readable error when the checkout is missing, or
-            ``None`` when it is present and usable.
+        str | None: A human-readable error when the checkout is missing or
+            incomplete, or ``None`` when it is a usable git checkout.
     """
     if not root.is_dir():
         return (
             f"TraceLens root not found: {root}; run kernel-agent/scripts/install.sh "
             "or set TRACELENS_ROOT to an existing checkout"
         )
+    if not (root / ".git").exists():
+        return (
+            f"TraceLens root incomplete (not a git checkout): {root}; "
+            "run kernel-agent/scripts/install.sh or set TRACELENS_ROOT to a valid checkout"
+        )
     return None
+
+
+def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
+    """Rebuild the pod-local TraceLens checkout if it vanished mid-run (#722).
+
+    Only the installer-managed default path is healed; an explicit
+    ``TRACELENS_ROOT`` override pointing elsewhere is operator-maintained and
+    must fail fast when missing (mirrors kernel-agent/scripts/install.sh).
+    Best-effort: any failure is swallowed so the caller's normal validation
+    produces the user-facing error.
+
+    NB: the default path is itself persisted as ``TRACELENS_ROOT`` in
+    kernel-agent.env.sh, so "env is set" is NOT a reliable override signal —
+    compare the resolved path against the installer default instead.
+    """
+    from inference_optimizer import paths
+
+    default_root = paths.open_source_root() / "TraceLens"
+    try:
+        is_default = Path(root).resolve() == default_root.resolve()
+    except OSError:
+        is_default = False
+    if not is_default:
+        return  # explicit operator override at a non-default path: never auto-clone
+    try:
+        tool = _kernel_agent_tool_path("tracelens_analysis.py")
+        tools_dir = str(tool.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+
+        heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
+        heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
+        _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
+    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
+        _log = getattr(log, "warning", None)
+        if _log:
+            _log("trace_analyze: TraceLens self-heal failed: %s", exc)
 
 
 def _kernel_agent_tool_path(tool_name: str) -> Path:
@@ -2371,8 +2418,14 @@ async def trace_analyze_handler(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
     # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh) and fail fast before launching the tool.
+    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
+    # vanished mid-run (#722), self-heal it before the fail-fast validation.
     tracelens_root = _resolve_tracelens_root()
+    # Self-heal when the checkout is missing OR incomplete (exists but no .git,
+    # e.g. a concurrent install's half-done clone). Gating only on is_dir()
+    # would let an incomplete default checkout bypass self-heal (#722/PR#789).
+    if not (tracelens_root / ".git").exists():
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
     tl_err = _tracelens_root_error(tracelens_root)
     if tl_err:
         return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
@@ -2392,6 +2445,14 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
+    # Scriptable image frameworks (xDiT diffusion) are server-less and have no
+    # LLM decode steady-state window, so the TraceLens steady-state splitter
+    # cannot produce chunks and hard-fails (trace_split_no_steady_state). Feed
+    # the raw trace to TraceLens directly and drop the (LLM-only) --split-* hints.
+    from ..framework_registry import is_scriptable
+
+    scriptable = is_scriptable(framework)
+
     # Load materialized baseline workload metadata once: feeds splitter CLI flags (--split-*) so the steady-state window is correct, and enriches hot_kernels downstream.
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
@@ -2403,8 +2464,6 @@ async def trace_analyze_handler(
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
-        "--top-k",
-        str(payload.get("top_k", 10)),
         "--workspace-path",
         workspace_path,
         # Pass the resolved root explicitly so the tool never depends on the
@@ -2412,6 +2471,13 @@ async def trace_analyze_handler(
         "--tracelens-root",
         str(tracelens_root),
     ]
+    # Kernel-candidate POOL size (issue #667): only forward --top-k when the
+    # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
+    # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
+    # candidate-build cap and the dispatch-side budget (source-fn grouping + op
+    # dedup + attempt cap) stay decoupled and share a single source of truth.
+    if payload.get("top_k") is not None:
+        cmd += ["--top-k", str(payload.get("top_k"))]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
@@ -2421,16 +2487,30 @@ async def trace_analyze_handler(
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
 
-    # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
-    split_conc = payload.get("split_conc") or workload.get("conc")
-    if split_conc not in (None, ""):
-        cmd += ["--split-conc", str(split_conc).strip()]
-    split_osl = payload.get("split_osl") or workload.get("osl")
-    if split_osl not in (None, ""):
-        cmd += ["--split-osl", str(split_osl).strip()]
-    split_r = payload.get("split_r") or workload.get("random_range_ratio")
-    if split_r not in (None, ""):
-        cmd += ["--split-r", str(split_r).strip()]
+    if scriptable:
+        # No steady-state window to extract; skip the splitter entirely.
+        cmd += ["--skip-split"]
+        # Forward the denoise-step count so the diffusion workload roofline can
+        # emit per-denoise-step timings. Priority: payload override (steps in
+        # the profiled window) > baseline workload metadata (full schedule).
+        num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
+        if num_denoise not in (None, ""):
+            try:
+                if int(num_denoise) > 0:
+                    cmd += ["--num-denoise-steps", str(int(num_denoise))]
+            except (TypeError, ValueError):
+                pass
+    else:
+        # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
+        split_conc = payload.get("split_conc") or workload.get("conc")
+        if split_conc not in (None, ""):
+            cmd += ["--split-conc", str(split_conc).strip()]
+        split_osl = payload.get("split_osl") or workload.get("osl")
+        if split_osl not in (None, ""):
+            cmd += ["--split-osl", str(split_osl).strip()]
+        split_r = payload.get("split_r") or workload.get("random_range_ratio")
+        if split_r not in (None, ""):
+            cmd += ["--split-r", str(split_r).strip()]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")

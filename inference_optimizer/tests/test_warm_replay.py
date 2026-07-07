@@ -305,7 +305,7 @@ async def test_warm_replay_enqueues_with_warm_best_config_args_envs(tmp_path):
 
 @pytest.mark.asyncio
 async def test_warm_replay_enqueues_with_v2_arbor_top_level_best_config(tmp_path):
-    """Regression (P0): warm-replay must read best_config from the v2 arbor TOP LEVEL, else it skips with best_config_empty."""
+    """Regression: warm-replay must read best_config from the v2 arbor TOP LEVEL, else it skips with best_config_empty."""
     recipe = _warm_recipe_v2_arbor(
         extra_sglang_args="--attention-backend AITER",
         extra_envs={"VLLM_ROCM_USE_AITER": "1"},
@@ -313,7 +313,7 @@ async def test_warm_replay_enqueues_with_v2_arbor_top_level_best_config(tmp_path
     )
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
-    assert task is not None, "v2 arbor top-level best_config not read (P0)"
+    assert task is not None, "v2 arbor top-level best_config not read"
     params = coord.tasks.calls[0]["params"]
     assert params["extra_sglang_args"] == "--attention-backend AITER"
     assert params["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
@@ -489,11 +489,10 @@ def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
     assert coord.shared_state.current_best["action"] == "warm_replay"
 
 
-def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
-    """Double-run replay: current_best.tput / stack.tput / gain MUST use the
-    single-round (warmup) value, NOT the hot measure — so explore/sweep
-    variants (measured single-round) are judged against a comparable bar.
-    The hot measure is retained only under ``hot_tput`` for reporting.
+def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
+    """Double-run replay uses the hot measure round for gain/current_best.
+
+    The discarded warmup round is retained only under ``cold_tput`` for audit.
     """
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
@@ -509,8 +508,7 @@ def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
             "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
         }
     )
-    # Hot measure 738 (+23%) is discarded for the anchor; the single-round
-    # warmup 690 (+15% vs baseline 600) is the fair comparison value.
+    # Hot measure 738 (+23%) is the comparison value; warmup 690 is audit-only.
     result = {
         "status": "succeeded",
         "output_throughput": 738.0,
@@ -520,15 +518,16 @@ def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
 
     cb = coord.shared_state.current_best
     assert cb["action"] == "warm_replay"
-    # Critical invariant: explore/sweep anchor is single-round, not hot.
-    assert cb["tput"] == 690.0
+    assert cb["tput"] == 738.0
     assert cb["hot_tput"] == 738.0
+    assert cb["cold_tput"] == 690.0
     entry = coord.shared_state.optimization_stack[0]
-    assert entry["tput"] == 690.0
+    assert entry["tput"] == 738.0
     assert entry["hot_tput"] == 738.0
-    assert entry["gain_pct"] == 15.0
-    assert coord.shared_state.cumulative_gain == 15.0
-    assert coord.shared_state.cumulative_gain_validated == 15.0
+    assert entry["cold_tput"] == 690.0
+    assert entry["gain_pct"] == 23.0
+    assert coord.shared_state.cumulative_gain == 23.0
+    assert coord.shared_state.cumulative_gain_validated == 23.0
 
 
 def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
@@ -763,7 +762,7 @@ def test_inject_warm_recipe_history_adds_what_failed_rows(tmp_path):
 
 
 def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
-    """Regression (P0-B): the injector must read v2 ``what_failed`` at the TOP LEVEL, else negative-history injection no-ops."""
+    """Regression: the injector must read v2 ``what_failed`` at the TOP LEVEL, else negative-history injection no-ops."""
     recipe = {
         "tier": "exact",
         "confidence": 1.0,
@@ -784,7 +783,7 @@ def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     coord.shared_state.explore_search = {}
     added = coord._inject_warm_recipe_history_into_ledger()
-    assert added == 1, "v2 arbor top-level what_failed not read (P0-B)"
+    assert added == 1, "v2 arbor top-level what_failed not read"
     rejected = coord.shared_state.explore_search["rejected"]
     assert len(rejected) == 1
     assert rejected[0]["source"] == "warm_start_recipe"

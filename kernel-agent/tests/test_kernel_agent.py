@@ -100,7 +100,7 @@ def write_vendor_trace(path: Path) -> None:
 
 
 class UpdateStatusTimingTests(unittest.TestCase):
-    """Hyperloom P2-3: ``update_status`` writes ``ended_at``/``duration_seconds`` on terminal states."""
+    """``update_status`` writes ``ended_at``/``duration_seconds`` on terminal states."""
 
     def _import_module(self):
         # tools dir must be on sys.path so the sibling import resolves.
@@ -114,6 +114,7 @@ class UpdateStatusTimingTests(unittest.TestCase):
             TRACE_TOOL,
         )
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
 
@@ -224,7 +225,7 @@ class KernelAgentToolTests(unittest.TestCase):
         # Open-source deps default to a pod-local base, decoupled from USER_DATA_PATH,
         # with HYPERLOOM_OPEN_SOURCE_ROOT as an optional override.
         self.assertIn(
-            '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"',
+            '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"',
             install_text,
         )
         self.assertIn('MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"', install_text)
@@ -312,8 +313,12 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertIn('TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
-        self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
-        self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
+        # #722: clone AND pin the ref inside the temp sibling, then atomically
+        # rename — never publish an unpinned/half-cloned $TRACELENS_ROOT.
+        self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp"', install_text)
+        self.assertIn('git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
+        self.assertIn('git -C "$_tl_tmp" checkout -q FETCH_HEAD', install_text)
+        self.assertIn('mv "$_tl_tmp" "$TRACELENS_ROOT"', install_text)
         # PerfSkills (GEAK_v4) existing-checkout path must realign to PERFSKILLS_REF,
         # mirroring ensure_geak — not just log "already present".
         self.assertIn('git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"', install_text)
@@ -912,15 +917,6 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
 
     def test_env_var_overrides_default(self) -> None:
         """HYPERLOOM_GEAK_COST_LIMIT must override the argparse default."""
-        env = {**os.environ, "HYPERLOOM_GEAK_COST_LIMIT": "12.5"}
-        probe = (
-            "import sys, re, runpy\n"
-            f"sys.argv = ['kernel_optimization.py', '--help']\n"
-            "try:\n"
-            f"    runpy.run_path(r'{OPT_TOOL}', run_name='__main__')\n"
-            "except SystemExit:\n"
-            "    pass\n"
-        )
         # AST fallback: evaluate the default expression in a controlled namespace.
         import ast
 

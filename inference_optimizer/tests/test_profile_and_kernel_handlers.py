@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P2-2 tests: ProfileExecutor + kernel REQUEST programmatic handlers."""
+"""ProfileExecutor + kernel REQUEST programmatic handler tests."""
 
 from __future__ import annotations
 
@@ -53,7 +53,9 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
-    tracelens_root.mkdir()
+    # A usable checkout needs .git (#722/PR#789 completeness gate); a bare dir
+    # is now treated as an incomplete override and fails fast.
+    (tracelens_root / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
     return make_session_dir()
 
@@ -1630,6 +1632,66 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     assert run["scan"]["analysis_route"] == "bypass"
     # Underlying toolchain is still tracelens; no empty versions["bypass"].
     assert "bypass" not in out.get("versions", {})
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_omits_top_k_when_not_requested(
+    session_dir,
+    monkeypatch,
+):
+    """Issue #667: without an explicit ``top_k`` the handler must NOT pass
+    ``--top-k`` so tracelens_analysis.py applies its own large-pool default
+    (candidate-build cap decoupled from the dispatch-side budget)."""
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] in ("ok", "succeeded", "failed")
+    assert "--top-k" not in captured["cmd"]
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_forwards_explicit_top_k(
+    session_dir,
+    monkeypatch,
+):
+    """Issue #667: an explicit ``top_k`` request param is still forwarded to
+    the tool as ``--top-k <n>`` (operator/LLM override path)."""
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+            "top_k": 20,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] in ("ok", "succeeded", "failed")
+    cmd = captured["cmd"]
+    assert "--top-k" in cmd
+    assert cmd[cmd.index("--top-k") + 1] == "20"
 
 
 @pytest.mark.asyncio

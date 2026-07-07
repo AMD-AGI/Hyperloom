@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import py_compile
 import re
@@ -19,6 +20,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+# Sibling import works whether run as a script or loaded via importlib.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import source_text_looks_complete  # noqa: E402
+
+sys.path.pop(0)
+
+log = logging.getLogger(__name__)
 
 
 COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
@@ -289,49 +298,8 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
     return {"path": str(path), "backup_path": str(dst)}
 
 
-def _source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically check that the patch text is a full source file.
-
-    For Python, requires the text to compile and contain a recognisable
-    top-level marker; for compiled sources, requires a C/C++/HIP marker.
-
-    Args:
-        text (str): The candidate source text.
-        suffix (str): The lower-cased target file suffix (e.g. ``.py``).
-
-    Returns:
-        bool: ``True`` when the text looks like a complete source file of the
-            given suffix, else ``False``.
-    """
-    stripped = text.strip()
-    if not stripped or "```" in stripped:
-        return False
-    if suffix == ".py":
-        try:
-            compile(stripped + "\n", "<optimized_kernel>", "exec")
-        except SyntaxError:
-            return False
-        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
-    if suffix in COMPILED_SOURCE_SUFFIXES:
-        return any(
-            marker in stripped
-            for marker in (
-                "#include",
-                "__global__",
-                "__device__",
-                "extern ",
-                "namespace ",
-                "template",
-                "void ",
-                "int ",
-                "float ",
-                "half",
-                "torch::",
-            )
-        )
-    return False
-
-
+# Shared source-completeness heuristic (see _io_utils.source_text_looks_complete).
+_source_text_looks_complete = source_text_looks_complete
 def _validate_patch_source(patch: Path, target: Path) -> None:
     """Validate that ``patch`` is a complete drop-in replacement for ``target``.
 
@@ -579,6 +547,32 @@ def _contained_dest(repo_root: Path, rel_path: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"patch path escapes repo root {root}: {rel_path}") from exc
     return dest
+
+
+def _within_root(path: Path, root: Path) -> bool:
+    """Return True when ``path`` (symlinks resolved) stays inside ``root``.
+
+    Args:
+        path (Path): candidate path (need not exist).
+        root (Path): the containment root.
+
+    Returns:
+        bool: True when the resolved ``path`` equals or is nested under the
+            resolved ``root``; False on any resolution error or escape.
+    """
+    try:
+        p = path.resolve()
+        r = root.resolve()
+    except (OSError, RuntimeError):
+        return False
+    try:
+        return p == r or p.is_relative_to(r)
+    except AttributeError:  # pragma: no cover — Python <3.9
+        try:
+            p.relative_to(r)
+            return True
+        except ValueError:
+            return False
 
 
 def apply_snapshot(
@@ -859,6 +853,21 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     backup_path = Path(jit_build_backup.get("backup_path", ""))
     if not src or not backup_path:
         return {"status": "skipped", "reason": "incomplete backup record"}
+    # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
+    # Only the importable aiter jit/build dir is a legitimate destination.
+    expected = _aiter_jit_build_dir()
+    if expected is None or not _within_root(src, expected):
+        log.warning(
+            "revert: skipping jit/build restore; recorded src %s does not match the "
+            "importable aiter jit/build dir %s (aiter reinstalled/relocated, cross-process "
+            "resume, or a forged manifest). jit/build left invalidated; next import re-JITs.",
+            src,
+            expected,
+        )
+        return {
+            "status": "skipped",
+            "reason": f"jit/build src {src} is not the importable aiter jit/build dir",
+        }
     if not backup_path.exists():
         return {
             "status": "skipped",
@@ -886,37 +895,8 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     return {"status": "ok", "restored_to": str(src)}
 
 
-# ---------------------------------------------------------------------------
-# PR-K2: aiter cpp_itfs RUNTIME-compiled cache invalidation.
-#
-# Distinct from the ``@compile_ops`` jit/build cache handled above. aiter's
-# ``csrc/cpp_itfs`` kernels (e.g. paged_attention -> ``pa_ragged``) are NOT
-# produced by ``setup.py develop``; they are runtime-compiled on first call
-# by ``compile_template_op`` (aiter ``csrc/cpp_itfs/utils.py``) into
-# ``$AITER_ROOT_DIR/build/<md_name>_<md5(params)>/lib.so`` (default
-# ``$HOME/.aiter/build``). The cache folder name hashes kernel *parameters*,
-# NOT source content, so the pristine and the patched build of the same
-# kernel collide on the SAME directory. ``compile_template_op`` rebuilds only
-# when ``lib.so`` is missing (``not_built``), so after we patch the ``.cuh``
-# and run the (no-op for this class) ``setup.py develop``, the next server
-# reuses the STALE pristine ``lib.so``; the integrate re-baseline then
-# measures ~0% and a genuinely-good kernel is flagged NEEDS_REVIEW / REVERT
-# (observed -0.17% on a +2.5% paged_attention kernel; see GH #458).
-#
-# ``setup.py develop`` cannot refresh this kernel class, and the jit/build
-# move above never touches ``$HOME/.aiter/build``. So for cpp_itfs targets we
-# ALSO move the affected runtime-cache dirs aside before the rebuild step --
-# scoped to the patched module's ``MD_NAME`` prefix(es) when determinable,
-# else the whole cpp_itfs build root the scheduler uses -- so the re-baseline
-# server runtime-recompiles the patched kernel from clean state.
-# ``shutil.move`` keeps it reversible; :func:`_restore_aiter_cpp_itfs_cache`
-# moves the backup back on revert. ``integrate_handler`` additionally sets
-# ``AITER_REBUILD=1`` on the re-baseline server and gates KEEP on a verified
-# fresh rebuild via :func:`verify_cpp_itfs_rebuilt`.
-#
-# Scope: ONLY aiter cpp_itfs targets. Non-cpp_itfs aiter targets, sglang and
-# vllm keep their current behaviour bit-for-bit (this is a no-op for them).
-# ---------------------------------------------------------------------------
+# aiter cpp_itfs kernels are runtime-compiled into parameter-keyed caches.
+# Move matching cache dirs aside so patched sources rebuild, then restore on revert.
 _AITER_CPP_ITFS_MARKER = "/aiter/csrc/cpp_itfs/"
 _MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
 
@@ -1120,11 +1100,23 @@ def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any
     moved = cache_backup.get("moved") or []
     if not moved:
         return {"status": "skipped", "reason": "nothing was moved"}
+    # ``src`` is an ``rmtree`` target read from an untrusted manifest; only the
+    # aiter cpp_itfs runtime build dir is a legitimate restore location.
+    build_dir = _aiter_cpp_itfs_build_dir()
     restored: list[str] = []
     for entry in moved:
         src = Path(entry.get("src", ""))  # original cache location
         backup_path = Path(entry.get("backup_path", ""))
         if not str(src) or not str(backup_path) or not backup_path.exists():
+            continue
+        if not _within_root(src, build_dir):
+            log.warning(
+                "revert: skipping cpp_itfs cache restore; recorded src %s is outside the "
+                "aiter cpp_itfs build dir %s ($AITER_ROOT_DIR/$HOME differ across "
+                "apply/revert, or a forged manifest). Cache left invalidated; next call recompiles.",
+                src,
+                build_dir,
+            )
             continue
         if src.exists():
             try:
