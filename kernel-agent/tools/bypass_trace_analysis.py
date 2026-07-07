@@ -43,6 +43,10 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bypass_report as _report  # noqa: E402
 import _bypass_trace_reader as _reader  # noqa: E402
+from _idle_gate import (  # noqa: E402
+    build_high_idle_warning,
+    resolve_idle_pct_threshold,
+)
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
@@ -417,6 +421,24 @@ def main(argv: list[str] | None = None) -> int:
     kernel_sequence_path = bypass_dir / "kernel_sequence.json"
     kernel_metrics_csv_path = bypass_dir / "kernel_metrics.csv"
     kernel_summary_csv_path = bypass_dir / "kernel_summary.csv"
+
+    # High-idle gate (contract parity with the TraceLens route): when the GPU is
+    # idle for more than the shared threshold of the trace wall span, per-kernel
+    # rewriting cannot move end-to-end latency, so suppress every candidate list
+    # and surface a high_gpu_idle_pct warning for the Coordinator to route to
+    # parameter optimization. Uses the SAME threshold/metric/warning as TraceLens.
+    idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
+    idle_pct_threshold = resolve_idle_pct_threshold()
+    if isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
+        for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
+            candidates[_cand_key] = []
+        trace_health_warnings.append(
+            build_high_idle_warning(
+                idle_pct=float(idle_pct_value),
+                threshold_pct=idle_pct_threshold,
+                report_path=analysis_md_path,
+            )
+        )
 
     # Stamp the report path onto each candidate (downstream reads it).
     for cand in candidates.get("hot_kernels", []):

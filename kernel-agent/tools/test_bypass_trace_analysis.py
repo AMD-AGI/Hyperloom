@@ -33,6 +33,17 @@ _TRACE_EVENTS = [
     {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1300, "dur": 200, "args": {"correlation": 7}},
 ]
 
+# Same two kernels but separated by a large idle gap so the GPU busy span is a
+# tiny fraction of the trace wall span (idle_pct ~ 99%), tripping the idle gate.
+_HIGH_IDLE_TRACE_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
+    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 7, "External id": 200}},
+    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 1000, "dur": 100, "args": {"correlation": 5}},
+    {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 100000, "dur": 100, "args": {"correlation": 7}},
+]
+
 
 def _run(argv, capsys):
     rc = bta.main(argv)
@@ -140,6 +151,45 @@ def test_multi_rank_provenance_and_warning(tmp_path, capsys, monkeypatch):
     assert "bypass_multi_rank_single_analyzed" in codes
     manifest = json.loads(Path(result["artifact_paths"]["trace_input_manifest"]).read_text())
     assert manifest["rank_count"] == 2 and manifest["analyzed_rank"] == 0
+
+
+def test_high_gpu_idle_gate_suppresses_hot_kernels(tmp_path, capsys, monkeypatch):
+    # F3: contract parity with the TraceLens route -- when the GPU is idle beyond
+    # the shared threshold, bypass suppresses every candidate list and surfaces a
+    # high_gpu_idle_pct warning so the Coordinator routes to parameter opt.
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "idle.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _HIGH_IDLE_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["status"] == "ok"
+    # timeline confirms the high-idle regime that trips the default 80% gate
+    assert result["timeline"]["idle_pct"] > 80.0
+    # every candidate list is suppressed (parity with TraceLens agent_candidates=[])
+    assert result["hot_kernels"] == []
+    assert result["routable_kernels"] == []
+    assert result["skipped_kernels"] == []
+    warn = next(w for w in result["trace_health_warnings"] if w["code"] == "high_gpu_idle_pct")
+    assert warn["threshold_pct"] == 80.0
+    assert warn["idle_pct"] > 80.0
+    # kernel_candidates.json on disk is suppressed too (downstream dispatch reads it)
+    kc = json.loads(Path(result["artifact_paths"]["kernel_candidates"]).read_text())
+    assert kc["hot_kernels"] == [] and kc.get("routable_kernels") == []
+
+
+def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
+    # A high threshold disables the gate: the same idle trace keeps its hot kernels.
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.setenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", "99.999")
+    trace = tmp_path / "idle.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _HIGH_IDLE_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["hot_kernels"], "gate must not fire below the configured threshold"
+    assert "high_gpu_idle_pct" not in {w["code"] for w in result["trace_health_warnings"]}
 
 
 # ── boundary inputs end-to-end (P0-3) ────────────────────────────────────────

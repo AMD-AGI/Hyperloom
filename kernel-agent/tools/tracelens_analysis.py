@@ -61,6 +61,16 @@ from tracelens_skill_runner import (
 # Standalone-tool workspace-root resolver (cannot import inference_optimizer.paths; see _paths.py).
 from _paths import workspace_root
 
+# Idle-gate threshold + high-idle warning: shared single source of truth so the
+# TraceLens and bypass routes gate on identical semantics (kept as private
+# aliases to preserve existing references/tests in this module).
+from _idle_gate import (
+    HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
+    HIGH_IDLE_PCT_THRESHOLD_ENV,
+    build_high_idle_warning as _build_high_idle_warning,
+    resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
+)
+
 
 # ---------------------------------------------------------------------------
 # Kernel-candidate pool size (issue #667).
@@ -674,8 +684,8 @@ def resolve_op_source(
     )
 
 
-HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
-HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
+# HIGH_IDLE_PCT_THRESHOLD_* and the idle-gate helpers now live in _idle_gate
+# (imported above) as the shared single source of truth across trace routes.
 
 ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
 ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
@@ -718,28 +728,6 @@ def _resolve_tracelens_model() -> str:
     return raw.lower().replace(".", "-")
 
 
-def _resolve_idle_pct_threshold() -> float:
-    """Return the idle-percent gate threshold (default 80.0%).
-
-    Relaxed from the docx §2 ~20% target to 80% because real SGLang inference traces
-    sit structurally at ~50-60% idle (host scheduling + JIT/launch overhead), which the
-    20% gate over-suppressed. Pin via ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
-
-    Returns:
-        The idle-percent gate threshold.
-    """
-    raw = os.environ.get(HIGH_IDLE_PCT_THRESHOLD_ENV, "").strip()
-    if not raw:
-        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    if value < 0.0:
-        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    return value
-
-
 def _resolve_arch_benchmark_timeout_s() -> int:
     """Return the GPU arch microbenchmark timeout in seconds (floor 600s).
 
@@ -758,44 +746,6 @@ def _resolve_arch_benchmark_timeout_s() -> int:
     except (TypeError, ValueError):
         return ARCH_BENCHMARK_TIMEOUT_FLOOR_S
     return max(ARCH_BENCHMARK_TIMEOUT_FLOOR_S, value)
-
-
-def _build_high_idle_warning(
-    *,
-    idle_pct: float,
-    threshold_pct: float,
-    report_path: Path,
-) -> dict[str, Any]:
-    """Build the ``trace_health_warnings[]`` entry for a high-idle trace.
-
-    Consumed by ``trace_analyze_handler`` T4 to route to param optimization.
-
-    Args:
-        idle_pct: The measured GPU idle percentage.
-        threshold_pct: The idle-gate threshold that was exceeded.
-        report_path: Path to the source report, recorded in the entry.
-
-    Returns:
-        The structured ``high_gpu_idle_pct`` warning entry.
-    """
-    return {
-        "code": "high_gpu_idle_pct",
-        "severity": "warning",
-        "idle_pct": round(idle_pct, 2),
-        "threshold_pct": round(threshold_pct, 2),
-        "source": str(report_path),
-        "message": (
-            f"GPU was idle {idle_pct:.2f}% of trace wall time (threshold "
-            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §2 "
-            "(idle-gate sanity check in Possible Approach (Hyperloom v3)), "
-            "kernel-level rewriting is unlikely to improve end-to-end "
-            "latency in this regime — recommend parameter optimization "
-            "(batch size, KV-cache shape, prefill/decode split) over "
-            "per-kernel rewrites. Hyperloom is suppressing the hot-kernel "
-            "candidate list and surfacing this warning so the Coordinator "
-            "can route to params/backends."
-        ),
-    }
 
 
 def _build_trace_split_warning(
