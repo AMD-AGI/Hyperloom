@@ -1109,12 +1109,103 @@ def compute_diffusion_mem_img_per_sec(
     return 1.0 / total_s if total_s > 0 else 0.0
 
 
-def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload) -> RooflineBreakdown:
-    """Diffusion (xDiT) roofline breakdown in images/sec (memory-bound).
+def _read_diffusion_dit_meta(model_path: str) -> tuple[int, int, int, int] | None:
+    """DiT transformer shape from ``<model>/transformer/config.json`` for the
+    compute-bound diffusion ceiling.
 
-    Values are carried in the ``*_tok_per_sec`` fields for wire compatibility;
-    the images/sec unit is tagged at the snapshot layer (``throughput_unit``).
-    Compute-bound ceiling is deferred (needs DiT FLOPs modeling + validation).
+    Estimates DiT-ONLY params (``~12 * L * H**2`` — the standard transformer
+    per-layer count: 4H^2 attention + 8H^2 MLP), NOT the total ``weight_bytes``
+    (which also holds the text encoder + VAE that do NOT run per denoising step;
+    using the total would over-count and produce an invalid, too-low ceiling).
+    Latent token count is ``(sample_size / patch_size)**2``.
+
+    Args:
+        model_path: Local diffusers model directory.
+
+    Returns:
+        ``(dit_params, latent_tokens, num_layers, hidden_size)``, or ``None`` when
+        the transformer config is unreadable / missing fields (caller degrades to
+        the memory-only ceiling).
+    """
+    try:
+        cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
+    hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
+    if hidden <= 0:
+        heads = int(cfg.get("num_attention_heads") or 0)
+        head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
+        hidden = heads * head_dim
+    patch = int(cfg.get("patch_size") or 1) or 1
+    sample = int(cfg.get("sample_size") or 0)
+    if num_layers <= 0 or hidden <= 0 or sample <= 0:
+        return None
+    latent_tokens = (sample // patch) ** 2
+    dit_params = 12 * num_layers * hidden * hidden
+    if latent_tokens <= 0 or dit_params <= 0:
+        return None
+    return dit_params, latent_tokens, num_layers, hidden
+
+
+def compute_diffusion_compute_img_per_sec(
+    *,
+    gpu_type: str,
+    num_gpus: int,
+    precision_tag: str,
+    dit_params: int,
+    latent_tokens: int,
+    num_layers: int,
+    hidden_size: int,
+    num_steps: int,
+) -> float:
+    """Compute-roofline ceiling for diffusion image throughput (images/sec).
+
+    Per denoising step the DiT does ``2 * dit_params * T`` linear FLOPs (the
+    2N-per-token rule over ``T`` latent tokens) plus ``4 * L * T**2 * H``
+    attention-score FLOPs (QK^T + A·V, weightless); one image is ``num_steps``
+    such steps. ``F_peak`` is the max-achievable (sustained) TFLOPS — the SAME
+    convention as the memory ceiling and the LLM ceiling (vendor peak only as a
+    coverage-gap fallback). VAE decode (one-time) is intentionally excluded: a
+    small, documented under-count that keeps this a valid upper bound.
+
+    Args:
+        gpu_type: GPU type key for the peak TFLOPS lookup.
+        num_gpus: Tensor/sequence-parallel degree (floored at 1).
+        precision_tag: Precision key for the peak TFLOPS lookup.
+        dit_params: DiT-only parameter count (see :func:`_read_diffusion_dit_meta`).
+        latent_tokens: Latent tokens processed per denoising step.
+        num_layers: DiT transformer layers (for the attention-score term).
+        hidden_size: DiT model dim (for the attention-score term).
+        num_steps: Denoising steps per image.
+
+    Returns:
+        The compute-bound images/sec ceiling, or ``0.0`` on degenerate input.
+    """
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
+        return 0.0
+    linear = 2.0 * dit_params * latent_tokens
+    attn = 4.0 * max(num_layers, 0) * (latent_tokens ** 2) * max(hidden_size, 0)
+    flops_per_image = num_steps * (linear + attn)
+    if flops_per_image <= 0:
+        return 0.0
+    peak_flops = peak_tflops * 1e12 * max(num_gpus, 1)
+    return peak_flops / flops_per_image
+
+
+def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload) -> RooflineBreakdown:
+    """Diffusion (xDiT) roofline breakdown in images/sec.
+
+    Ceiling = ``min(memory, compute)`` (the binding side), like the LLM path.
+    Memory: per-step full-weight read. Compute: a config-analytical DiT FLOP
+    model (see :func:`compute_diffusion_compute_img_per_sec`) — route-independent,
+    so it tightens the (previously memory-only, too-loose) ceiling for every xDiT
+    run. Degrades to memory-only when the DiT transformer config is unreadable.
+    Values ride the ``*_tok_per_sec`` fields; the img/s unit is tagged at the
+    snapshot layer (``throughput_unit``).
 
     Args:
         state: Shared run state (for the denoising step count).
@@ -1136,9 +1227,27 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
         weight_bytes=meta.weight_bytes,
         num_steps=num_steps,
     )
-    if mem_img_s <= 0:
+    # Compute-bound side from a config-analytical DiT FLOP model (route-independent
+    # -- the memory-only ceiling was too loose since diffusion is usually
+    # compute-bound). Degrades to 0.0 (memory-only) when the config is unreadable.
+    cmp_img_s = 0.0
+    dit = _read_diffusion_dit_meta(runtime.model_path)
+    if dit is not None:
+        dit_params, latent_tokens, num_layers, hidden = dit
+        cmp_img_s = compute_diffusion_compute_img_per_sec(
+            gpu_type=runtime.gpu_type,
+            num_gpus=runtime.tp,
+            precision_tag=runtime.precision or "bf16",
+            dit_params=dit_params,
+            latent_tokens=latent_tokens,
+            num_layers=num_layers,
+            hidden_size=hidden,
+            num_steps=num_steps,
+        )
+    if mem_img_s <= 0 and cmp_img_s <= 0:
         return _EMPTY_BREAKDOWN
-    return RooflineBreakdown(mem_img_s, 0.0, mem_img_s, "memory")
+    peak, bound = select_peak_and_bound(mem_img_s, cmp_img_s)
+    return RooflineBreakdown(mem_img_s, cmp_img_s, peak, bound)
 
 
 def compute_roofline_breakdown_from_state(

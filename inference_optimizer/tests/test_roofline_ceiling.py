@@ -14,11 +14,14 @@ from inference_optimizer.orchestrator import roofline_ceiling as _rc
 from inference_optimizer.orchestrator.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
+    RuntimeWorkload,
+    _read_diffusion_dit_meta,
     _resolve_achievable_tflops,
     _resolve_dtype_bytes,
     _resolve_peak_tflops,
     apply_runtime_dtype,
     compute_compute_bound_ceiling_tok_per_sec,
+    compute_diffusion_compute_img_per_sec,
     compute_diffusion_mem_img_per_sec,
     compute_kv_bytes_per_token,
     compute_peak_from_state,
@@ -925,6 +928,89 @@ class TestResolvePeakTFLOPS:
     def test_empty_inputs_zero(self):
         assert _resolve_peak_tflops("", "bf16") == 0.0
         assert _resolve_peak_tflops("mi355x", "") == 0.0
+
+
+class TestDiffusionComputeCeiling:
+    """xDiT compute-bound ceiling (config-analytical DiT FLOP model) + min() wiring."""
+
+    def test_compute_ceiling_hand_calc_sana_like(self):
+        # Sana-like DiT: L=20, H=2240, dit_params=12*L*H^2, T=1024, 20 steps, mi325x bf16.
+        L, H, T, steps = 20, 2240, 1024, 20
+        dit_params = 12 * L * H * H
+        img_s = compute_diffusion_compute_img_per_sec(
+            gpu_type="mi325x", num_gpus=1, precision_tag="bf16",
+            dit_params=dit_params, latent_tokens=T, num_layers=L, hidden_size=H, num_steps=steps,
+        )
+        peak = _resolve_achievable_tflops("mi325x", "bf16") * 1e12  # 843e12
+        flops_per_image = steps * (2.0 * dit_params * T + 4.0 * L * T * T * H)
+        assert img_s == pytest.approx(peak / flops_per_image, rel=1e-9)
+        assert img_s == pytest.approx(15.88, rel=1e-2)  # ~16 img/s, far tighter than mem ~93
+
+    def test_compute_ceiling_uses_achievable_not_vendor(self):
+        common = dict(
+            gpu_type="mi300x", num_gpus=1, precision_tag="bf16",
+            dit_params=1_000_000_000, latent_tokens=1024, num_layers=20, hidden_size=2048, num_steps=20,
+        )
+        img_s = compute_diffusion_compute_img_per_sec(**common)
+        flops = 20 * (2.0 * 1e9 * 1024 + 4.0 * 20 * 1024 ** 2 * 2048)
+        assert img_s == pytest.approx((_resolve_achievable_tflops("mi300x", "bf16") * 1e12) / flops, rel=1e-9)
+        assert img_s != pytest.approx((_resolve_peak_tflops("mi300x", "bf16") * 1e12) / flops, rel=1e-3)
+
+    def test_compute_ceiling_zero_on_degenerate(self):
+        base = dict(
+            gpu_type="mi300x", num_gpus=1, precision_tag="bf16",
+            dit_params=1_000_000_000, latent_tokens=1024, num_layers=20, hidden_size=2048, num_steps=20,
+        )
+        assert compute_diffusion_compute_img_per_sec(**{**base, "dit_params": 0}) == 0.0
+        assert compute_diffusion_compute_img_per_sec(**{**base, "num_steps": 0}) == 0.0
+        assert compute_diffusion_compute_img_per_sec(**{**base, "gpu_type": "h100"}) == 0.0
+
+    def test_read_dit_meta_from_transformer_config(self, tmp_path):
+        import json as _json
+        td = tmp_path / "transformer"
+        td.mkdir()
+        (td / "config.json").write_text(_json.dumps({
+            "num_layers": 20, "num_attention_heads": 70, "attention_head_dim": 32,
+            "patch_size": 1, "sample_size": 32,
+        }))
+        dit = _read_diffusion_dit_meta(str(tmp_path))
+        assert dit is not None
+        dit_params, latent_tokens, num_layers, hidden = dit
+        assert num_layers == 20 and hidden == 2240
+        assert latent_tokens == 1024
+        assert dit_params == 12 * 20 * 2240 * 2240
+
+    def test_read_dit_meta_none_when_missing(self, tmp_path):
+        assert _read_diffusion_dit_meta(str(tmp_path)) is None
+
+    def _rt(self):
+        return RuntimeWorkload(
+            model_path="/x", gpu_type="mi325x", precision="bf16", framework="xdit",
+            tp=1, concurrency=1, isl=0, osl=0, server_args="",
+        )
+
+    def test_breakdown_takes_min_compute_bound(self, monkeypatch):
+        import types
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=3_200_000_000))
+        monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp: (12 * 20 * 2240 ** 2, 1024, 20, 2240))
+        bd = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
+        assert bd.cmp_tok_per_sec > 0
+        assert bd.mem_tok_per_sec > bd.cmp_tok_per_sec  # memory ceiling is looser
+        assert bd.bound_kind == "compute"
+        assert bd.peak_tok_per_sec == pytest.approx(bd.cmp_tok_per_sec, rel=1e-9)
+
+    def test_breakdown_degrades_to_memory_without_dit_config(self, monkeypatch):
+        import types
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=3_200_000_000))
+        monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp: None)
+        bd = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
+        assert bd.cmp_tok_per_sec == 0.0
+        assert bd.bound_kind == "memory"
+        assert bd.peak_tok_per_sec == pytest.approx(bd.mem_tok_per_sec, rel=1e-9)
 
 
 class TestComputeBoundCeiling:
