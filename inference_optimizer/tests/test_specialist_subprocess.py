@@ -22,19 +22,19 @@ import pytest
 
 from .conftest import init_git_repo
 
-from hyperloom.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialists.runner import (
     DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
-from hyperloom.orchestrator.specialist_subprocess import (
+from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _pick_worktree_base,
     _setup_worktree,
 )
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 # Fixtures

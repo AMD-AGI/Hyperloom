@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.action_registry import ActionRegistry
-from hyperloom.orchestrator.phase_state import (
+from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.orchestrator.phases.machine_state import (
     PHASE_ALLOWED_ACTIONS,
     PHASE_EXPLORE,
 )
-from hyperloom.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
     build_orchestration_prompt,

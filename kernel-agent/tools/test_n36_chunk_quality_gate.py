@@ -310,7 +310,7 @@ def test_missing_execution_details_csv_returns_none(tl_module, split_dir):
 # N26 retry allowlist contract
 def test_n26_retry_allowlist_includes_low_quality_code():
     """Pin that the N26 retry allowlist includes the N36 code, else auto-retry never fires."""
-    from hyperloom.orchestrator.action_executors import (
+    from hyperloom.orchestrator.actions.executors import (
         roofline as ro,
     )
 

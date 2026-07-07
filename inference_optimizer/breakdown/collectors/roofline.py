@@ -46,7 +46,7 @@ def collect_roofline(
         return []
     try:
         # Lazy import to avoid the orchestrator → breakdown → orchestrator circular path.
-        from hyperloom.orchestrator.roofline_snapshot import (
+        from hyperloom.orchestrator.kernel.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator import kernel_request_handlers as krh
+from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
 # -- _honest_flag (umbrella + per-fix override) ---------------------------

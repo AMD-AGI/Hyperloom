@@ -22,8 +22,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.framework_agent_artifacts import candidate_key
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.framework.artifacts import candidate_key
 
 
 # ---------------------------------------------------------------------------

@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.action_executors import _git as gitmod
-from hyperloom.orchestrator.action_executors import framework_agent as fp
+from hyperloom.orchestrator.actions.executors import _git as gitmod
+from hyperloom.orchestrator.actions.executors import framework_agent as fp
 
 
 class _CP:

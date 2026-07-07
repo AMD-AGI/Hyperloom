@@ -20,7 +20,7 @@ import pytest
 
 from inference_optimizer.breakdown.recorder import assemble_parts
 from inference_optimizer.breakdown.recorder import instrument
-from hyperloom.orchestrator import kernel_request_handlers as krh
+from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
 # --------------------------------------------------------------------------- #

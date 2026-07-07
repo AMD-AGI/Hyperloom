@@ -13,13 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator import policy as policy_module
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.policy import gate as policy_module
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
 )

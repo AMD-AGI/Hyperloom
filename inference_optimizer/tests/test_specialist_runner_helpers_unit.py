@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from hyperloom.orchestrator import specialist_runner as sr
-from hyperloom.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialists import runner as sr
+from hyperloom.orchestrator.specialists.runner import (
     SpecialistFailureType,
     SpecialistRunner,
     build_empty_specialist_done,

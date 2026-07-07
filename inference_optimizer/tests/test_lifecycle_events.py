@@ -20,14 +20,14 @@ Covers the operator-facing phase/step boundary log:
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.phase_state import (
+from hyperloom.orchestrator.phases.machine_state import (
     LIFECYCLE_STATUSES,
     PHASE_KERNEL_AGENT,
     lifecycle_label,
     make_lifecycle_event,
 )
-from hyperloom.orchestrator.policy import CORE_STATE_FIELDS
-from hyperloom.orchestrator.shared_state import (
+from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
+from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
     SharedState,
 )

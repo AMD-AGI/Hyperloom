@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 @dataclass

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.action_executors.profile import ProfileExecutor
-from hyperloom.orchestrator.backends import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 from inference_optimizer.paths import make_session_dir
 
 
@@ -59,7 +59,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
         }
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.action_executors.profile.BaselineExecutor.__call__",
+        "hyperloom.orchestrator.actions.executors.profile.BaselineExecutor.__call__",
         fake_call,
     )
     # ``profile`` is no longer registered; mirror RooflineExecutor by passing the
@@ -81,7 +81,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
 
 def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
     """#575/#735: capture scan finds everything under capture_traces/ but no real trace."""
-    from hyperloom.orchestrator.action_executors.profile import (
+    from hyperloom.orchestrator.actions.executors.profile import (
         _capture_sidecar_traces_for_dir,
     )
 
@@ -108,7 +108,7 @@ def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
 
 def test_trace_files_for_dir_excludes_capture_traces(tmp_path):
     """#735: vLLM graph_capture_*.trace.json.gz under capture_traces/ is NOT a primary trace."""
-    from hyperloom.orchestrator.action_executors.profile import (
+    from hyperloom.orchestrator.actions.executors.profile import (
         _trace_files_for_dir,
     )
 
@@ -148,7 +148,7 @@ async def test_profile_executor_falls_back_to_capture_sidecars(tmp_path, monkeyp
         }
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.action_executors.profile.BaselineExecutor.__call__",
+        "hyperloom.orchestrator.actions.executors.profile.BaselineExecutor.__call__",
         fake_call,
     )
     task = Task(

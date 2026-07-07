@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def test_format_discovered_flags():

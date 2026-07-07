@@ -8,7 +8,7 @@ guards in ``_run_combined_e2e_sync``) without launching a server or GPU work.
 
 from __future__ import annotations
 
-from hyperloom.orchestrator import kernel_request_handlers as krh
+from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
 # ---- _collect_combined_e2e_pairs ----

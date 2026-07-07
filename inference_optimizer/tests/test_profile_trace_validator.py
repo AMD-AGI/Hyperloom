@@ -9,7 +9,7 @@ import json
 import logging
 from pathlib import Path
 
-from hyperloom.orchestrator.action_executors.profile import (
+from hyperloom.orchestrator.actions.executors.profile import (
     _validate_trace_structure,
 )
 

@@ -20,8 +20,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hyperloom.orchestrator import phase_state as ps
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
@@ -93,8 +93,8 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv(CYCLIC_ENV, "1")
     from inference_optimizer.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.coordinator import Coordinator
-    from hyperloom.orchestrator.backends import (
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
         MockKernelBackend,

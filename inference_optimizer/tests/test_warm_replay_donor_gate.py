@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.cortex_t0 import (
+from hyperloom.orchestrator.knowledge.cortex_t0 import (
     _donor_is_trustworthy,
     _find_config_donor,
 )

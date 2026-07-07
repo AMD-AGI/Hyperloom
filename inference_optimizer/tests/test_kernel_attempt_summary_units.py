@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator import kernel_attempt_summary as kas
+from hyperloom.orchestrator.kernel import attempt_summary as kas
 
 
 def test_is_real_artifact_path_variants():

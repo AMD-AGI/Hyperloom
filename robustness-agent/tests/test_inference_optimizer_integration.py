@@ -21,12 +21,12 @@ def _try_import_upstream():
             sys.path.insert(0, str(root / "src"))
             break
     try:
-        from hyperloom.orchestrator.agent_role import default_role_registry
+        from hyperloom.orchestrator.roles.agent_role import default_role_registry
         from inference_optimizer.protocol.intent import (
             Intent as UpstreamIntent,
             IntentType as UpstreamIntentType,
         )
-        from hyperloom.orchestrator.policy import PolicyDenied, PolicyGate
+        from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
     except ImportError:
         return None
     return {

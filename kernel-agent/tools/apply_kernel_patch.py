@@ -62,7 +62,7 @@ def known_target_roots() -> tuple[str, ...]:
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
         return _CACHED_KNOWN_TARGET_ROOTS
     try:
-        from hyperloom.orchestrator.framework_paths import (
+        from hyperloom.orchestrator.framework.paths import (
             resolve_patch_target_roots,
         )
 

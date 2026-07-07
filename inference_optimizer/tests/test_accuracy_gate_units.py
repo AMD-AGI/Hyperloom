@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.action_executors import _accuracy_gate as ag
+from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 
 
 class TestIsHighAccuracyRisk:

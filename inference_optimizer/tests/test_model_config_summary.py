@@ -264,7 +264,7 @@ def test_qwen3_vl_resolves_to_qwen3_family(tmp_path: Path) -> None:
 
 def test_summary_round_trips_through_state_json(tmp_path: Path) -> None:
     # E2E: model_info computed at launch must survive save -> load on state.json.
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     m = _write_config(
         tmp_path / "Qwen3-8B",

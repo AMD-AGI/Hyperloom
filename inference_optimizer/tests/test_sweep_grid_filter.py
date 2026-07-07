@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.action_executors import sweep
+from hyperloom.orchestrator.actions.executors import sweep
 
 
 class TestBuildGridMaxModelLenFilter:

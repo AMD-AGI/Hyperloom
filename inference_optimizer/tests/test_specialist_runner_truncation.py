@@ -7,15 +7,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator.specialist_domains import (
+from hyperloom.orchestrator.specialists.domains import (
     SpecialistDomain,
 )
-from hyperloom.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialists.runner import (
     SpecialistRunner,
     _PreparedRun,
 )
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 def _make_runner() -> SpecialistRunner:

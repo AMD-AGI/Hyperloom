@@ -15,30 +15,30 @@ from unittest.mock import patch
 import pytest
 
 from inference_optimizer import cli as optimizer_cli
-from hyperloom.orchestrator import kernel_request_handlers as krh
-from hyperloom.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     _default_baseline_config,
     _materialize_config_with_envs,
 )
-from hyperloom.orchestrator.action_executors.profile import (
+from hyperloom.orchestrator.actions.executors.profile import (
     PROFILE_DEFAULT_CONFIG,
     ProfileExecutor,
     _default_profile_config,
     _sanitize_profile_server_args,
 )
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.task_registry import TaskRegistry
-from hyperloom.orchestrator.resource_lock import (
+from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.sub_agent_runner import (
+from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
 from inference_optimizer.manifest import build_manifest
@@ -599,7 +599,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
 # Regression #194 §4 / §5: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
     """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
-    from hyperloom.orchestrator.action_executors import _workload_envs
+    from hyperloom.orchestrator.actions.executors import _workload_envs
 
     counts = {"vllm": 0, "sglang": 0}
 
@@ -1000,7 +1000,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
 
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
-    import hyperloom.orchestrator.action_executors.profile as profile_mod
+    import hyperloom.orchestrator.actions.executors.profile as profile_mod
 
     # The symbols must be re-exportable for monkey-patching.
     assert profile_mod.ensure_benchmark_lib_patched is not None
@@ -1071,7 +1071,7 @@ def test_default_baseline_config_resolves_atom_when_env_set(monkeypatch):
 
 def test_server_args_env_name_atom():
     """B1: atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
-    from hyperloom.orchestrator.action_executors._grid_runner import (
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
         server_args_env_name,
     )
 
@@ -1220,7 +1220,7 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
 @pytest.mark.asyncio
 async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""
-    from hyperloom.orchestrator.action_executors.roofline import (
+    from hyperloom.orchestrator.actions.executors.roofline import (
         RooflineExecutor,
     )
 
@@ -1228,7 +1228,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     rexec = RooflineExecutor(shared_state=SimpleNamespace())
 
     # Sentinel: prove the lazy import / sub-step orchestration is reached.
-    import hyperloom.orchestrator.action_executors.profile as profile_mod
+    import hyperloom.orchestrator.actions.executors.profile as profile_mod
 
     async def _explode(_ctx):
         raise AssertionError("profile_executor must not be invoked under atom")
@@ -1295,7 +1295,7 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed
     ):
         res = await sub.run_task(task)
 
@@ -1382,7 +1382,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     )
     sub.register_executor("profile", pe)
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -1453,7 +1453,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
     )
     sub.register_executor("profile", pe)
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed
     ):
         res = await sub.run_task(task)
 
@@ -1518,7 +1518,7 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     )
     sub.register_executor("profile", pe)
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -1851,7 +1851,7 @@ async def test_trace_analyze_handler_backfills_workload_context_from_state(
     monkeypatch,
 ):
     """When the payload omits framework/gpu_type/model, the handler falls back to SharedState for the real workload context."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.framework = "vllm"
@@ -1973,7 +1973,7 @@ async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
     monkeypatch,
 ):
     """GEAK candidates must inherit the materialized Magpie workload config."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     config_path = tmp_path / "profile_config.with_envs.yaml"
     config_path.write_text(
@@ -2241,7 +2241,7 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
 
 def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
     """``record_trace_analyze`` keeps ``trace_health_warnings`` verbatim in ``last_trace_analyze`` for next-tick rendering."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     warning = {
@@ -2265,7 +2265,7 @@ def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
 
 def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
     """Steady-state: the cached entry exposes ``trace_health_warnings`` as an empty list, not an absent field."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze(
@@ -2280,7 +2280,7 @@ def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
 
 def test_record_trace_analyze_persists_task_groups(session_dir):
     """893bc6f: ``task_groups`` must flow into ``last_trace_analyze`` so the multi-KEEP queue collapses members of the same AST function into one slot."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     groups = [
@@ -2359,7 +2359,7 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
 
 def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
     """With no ``task_groups`` field (legacy TraceLens output), the cached entry defaults to an empty list."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze(
@@ -2376,7 +2376,7 @@ def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
 
 def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
     """Defensive: only well-formed warning dicts with a ``code`` key are accepted into ``last_trace_analyze``."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze(
@@ -2399,7 +2399,7 @@ def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
 
 def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
     """Prompt rendering: a persisted idle warning surfaces inline with its numeric context."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze(
@@ -2428,7 +2428,7 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
 
 def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
     """Tool-failure warning carries ``returncode``; the prompt must surface ``rc=N`` to distinguish a crash from a benign skip."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze(
@@ -2454,7 +2454,7 @@ def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
 
 def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session_dir):
     """Format-stability guard: with no warnings, the prompt line must NOT gain a ``warnings=[]`` suffix (snapshot tests pin the legacy format)."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze(
@@ -2474,7 +2474,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
     monkeypatch,
 ):
     """End-to-end: T3 idle warning flows handler → SharedState.last_trace_analyze → Orchestration prompt line."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
@@ -2519,7 +2519,7 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
     monkeypatch,
 ):
     """T4: a permanent TraceLens failure warning must reach the Orchestration prompt."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
@@ -2687,7 +2687,7 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
 
 
 def test_run_optimization_handler_backfills_target_platform_from_state(session_dir):
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     state.gpu_type = "mi325x"
@@ -3748,7 +3748,7 @@ def test_batch_candidates_filters_rejected_kernel_ids(
     _candidates_factory,
 ):
     """PR-C: a kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
         [
@@ -3773,7 +3773,7 @@ def test_batch_candidates_filters_kernels_with_recorded_attempts(
     _candidates_factory,
 ):
     """PR-C max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
         [
@@ -3800,7 +3800,7 @@ def test_batch_candidates_task_group_falls_back_to_live_member(
     _candidates_factory,
 ):
     """When the primary (k002) is rejected, the task_group still dispatches via the next live member (k001)."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
         hot_kernels=[
@@ -3830,7 +3830,7 @@ def test_batch_candidates_skips_group_when_all_members_rejected(
     _candidates_factory,
 ):
     """If every member of a task_group is unusable, the group skips cleanly."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
         hot_kernels=[
@@ -3959,7 +3959,7 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     session_dir,
 ):
     """``_resolve_integrate_payload`` looks up patch_path / source_file from the per-kernel ``kernel_opt_attempts`` ledger so any queued KEEP can integrate."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     # Two KEEPs landed but last_kernel_opt only holds the strongest (k009).

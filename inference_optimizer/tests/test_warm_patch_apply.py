@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.actions.executors.baseline import (
     _apply_warm_patches,
 )
 

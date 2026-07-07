@@ -16,17 +16,17 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.action_executors.report import (
+from hyperloom.orchestrator.actions.executors.report import (
     ReportExecutor,
 )
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 from inference_optimizer.paths import make_session_dir
 
 
@@ -114,7 +114,7 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
     """After an inline 'trace_analyze' handler, the kernel cursor moves past the request."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def fake_handler(payload, *, session_dir):
             return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
@@ -159,7 +159,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
     """Successful trace_analyze caches; an identical request short-circuits the handler."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         candidates_path = tmp_path / "kernel_candidates.json"
         candidates_path.write_text("{}", encoding="utf-8")
@@ -230,7 +230,7 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
     """A new profile clears the trace_analyze cache and stamps the server config."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator.task_registry import Task
+        from hyperloom.orchestrator.state.task_registry import Task
 
         c.shared_state.last_trace_analyze = {
             "trace_input": "/old/trace.json.gz",

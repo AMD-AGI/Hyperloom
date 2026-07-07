@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from hyperloom.orchestrator.framework_paths import (
+    from hyperloom.orchestrator.framework.paths import (
         resolve_patch_target_roots as _resolve_patch_target_roots,
     )
 except ImportError:

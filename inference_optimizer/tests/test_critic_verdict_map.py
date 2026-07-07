@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.orchestrator.agent_role import default_role_registry
-from hyperloom.orchestrator.coordinator import (
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     CoordinatorState,
     PendingProposal,
@@ -23,12 +23,12 @@ from inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
     REVIEW_VERDICTS,
 )
-from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+from hyperloom.orchestrator.prompts.critic_prompt_builder import (
     build_critic_prompt,
 )
 
@@ -393,8 +393,8 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
     """advise_fix_plan 2b: the rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
-    from hyperloom.orchestrator.coordinator import _format_inbox_event
-    from hyperloom.orchestrator.message_bus import Message
+    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
         proposal_msg_id="msg-adv",
@@ -449,8 +449,8 @@ async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
 @pytest.mark.asyncio
 async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     """A verdict with no advisory fields rebroadcasts only verdict/reasoning, and the inbox line stays minimal."""
-    from hyperloom.orchestrator.coordinator import _format_inbox_event
-    from hyperloom.orchestrator.message_bus import Message
+    from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
+    from hyperloom.orchestrator.bus.message_bus import Message
 
     pending = PendingProposal(
         proposal_msg_id="msg-bare",
@@ -483,7 +483,7 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
 
 # 4. Critic prompt — OUTPUT PROTOCOL documents the single-verdict shape
 def _critic_prompt_text() -> str:
-    from hyperloom.orchestrator.action_registry import ActionRegistry
+    from hyperloom.orchestrator.actions.registry import ActionRegistry
 
     registry = ActionRegistry()
     registry.load()
@@ -525,7 +525,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     class _StubTaskRegistry:
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
-            from hyperloom.orchestrator.task_registry import Task
+            from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
@@ -578,7 +578,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     class _StubTaskRegistry:
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
-            from hyperloom.orchestrator.task_registry import Task
+            from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
@@ -657,7 +657,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     class _TaskRegistry:
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
-            from hyperloom.orchestrator.task_registry import Task
+            from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
@@ -692,8 +692,8 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
 
 # 7. Specialist prompt — max_proposals self-curation contract (Section 1 + 8)
 def _build_specialist_prompt_text(max_proposals: int) -> str:
-    from hyperloom.orchestrator.specialist_domains import get_domain
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.specialists.domains import get_domain
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         build_specialist_prompts,
     )
@@ -711,10 +711,10 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
 
 def test_default_specialist_max_proposals_is_twelve():
     """Single-source-of-truth: policy.py owns the self-curation target (=12) and the builder re-exports it."""
-    from hyperloom.orchestrator.policy import (
+    from hyperloom.orchestrator.policy.gate import (
         DEFAULT_SPECIALIST_MAX_PROPOSALS,
     )
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
     )
 
@@ -744,7 +744,7 @@ class TestCriticPromptBuilder:
 
     @pytest.fixture
     def registry(self):
-        from hyperloom.orchestrator.action_registry import ActionRegistry
+        from hyperloom.orchestrator.actions.registry import ActionRegistry
 
         return ActionRegistry().load()
 
@@ -755,10 +755,10 @@ class TestCriticPromptBuilder:
         return asset_system_prompts_dir() / "critic.md"
 
     def test_section_headers_present(self, registry):
-        from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
-        from hyperloom.orchestrator.system_prompts.prompt_builder import (
+        from hyperloom.orchestrator.prompts.prompt_builder import (
             default_enabled_actions,
         )
 
@@ -783,10 +783,10 @@ class TestCriticPromptBuilder:
             assert header in text, f"missing {header}"
 
     def test_deterministic(self, registry):
-        from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
-        from hyperloom.orchestrator.system_prompts.prompt_builder import (
+        from hyperloom.orchestrator.prompts.prompt_builder import (
             default_enabled_actions,
         )
 
@@ -802,7 +802,7 @@ class TestCriticPromptBuilder:
 
     def test_full_prompt_contains_all_registered_actions(self, registry):
         """Regression guard: every action in _meta must appear in §3."""
-        from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
 
@@ -818,10 +818,10 @@ class TestCriticPromptBuilder:
             assert f"**{name}**" in text, f"action {name!r} missing from KNOWN ACTIONS"
 
     def test_validate_stack_in_both_modes(self, registry):
-        from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
-        from hyperloom.orchestrator.system_prompts.prompt_builder import (
+        from hyperloom.orchestrator.prompts.prompt_builder import (
             default_enabled_actions,
         )
 
@@ -838,10 +838,10 @@ class TestCriticPromptBuilder:
             assert "validate_stack" in text, f"validate_stack missing (no_kernel={no_kernel})"
 
     def test_no_kernel_mode_drops_kernel_owned(self, registry):
-        from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
-        from hyperloom.orchestrator.system_prompts.prompt_builder import (
+        from hyperloom.orchestrator.prompts.prompt_builder import (
             default_enabled_actions,
         )
 
@@ -937,7 +937,7 @@ class TestN38ActionVerdictClass:
     """N38 (May 2026): per-action ``verdict_class`` metadata so new actions don't reintroduce N33/N35/N37 deadlocks."""
 
     def test_action_metadata_has_verdict_class_field(self):
-        from hyperloom.orchestrator.action_registry import (
+        from hyperloom.orchestrator.actions.registry import (
             ActionMetadata,
         )
 
@@ -948,7 +948,7 @@ class TestN38ActionVerdictClass:
         )
 
     def test_default_classifier_covers_all_registered_actions(self):
-        from hyperloom.orchestrator.action_registry import (
+        from hyperloom.orchestrator.actions.registry import (
             ActionRegistry,
         )
 
@@ -963,7 +963,7 @@ class TestN38ActionVerdictClass:
         )
 
     def test_default_classifier_matches_expected_buckets(self):
-        from hyperloom.orchestrator.action_registry import (
+        from hyperloom.orchestrator.actions.registry import (
             ActionRegistry,
         )
 
@@ -995,7 +995,7 @@ class TestN38ActionVerdictClass:
             assert klass(n) == "exploration", n
 
     def test_critic_agent_backend_accepts_action_verdict_policy(self, tmp_path):
-        from hyperloom.orchestrator.backends.critic_agent import (
+        from hyperloom.orchestrator.roles.critic_agent import (
             CriticAgentBackend,
         )
 
@@ -1033,7 +1033,7 @@ class TestN38ActionVerdictClass:
     def test_critic_agent_backend_injects_policy_into_judge_bundle(self, tmp_path):
         import asyncio
         import json as _json
-        from hyperloom.orchestrator.backends.critic_agent import (
+        from hyperloom.orchestrator.roles.critic_agent import (
             CriticAgentBackend,
             RuntimeCall,
         )

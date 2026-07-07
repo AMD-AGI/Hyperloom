@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator import specialist_rebench as sr
+from hyperloom.orchestrator.specialists import rebench as sr
 
 
 def test_pick_free_port_never_production() -> None:

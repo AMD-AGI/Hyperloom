@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.action_executors._framework_gap_composer import (
+from hyperloom.orchestrator.actions.executors._framework_gap_composer import (
     _extract_bottleneck_from_breakdown,
     _model_class_to_search_token,
     _normalize_model_class,

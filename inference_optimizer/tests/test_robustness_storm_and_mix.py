@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # 1. Intervention-mix ledger basics
@@ -82,8 +82,8 @@ def test_specialist_dispatch_counter_resets():
 
 # 4. Coordinator hook: explore KEEP → config; integrate_patch kept → code_patch
 def test_coordinator_intervention_hook_records_config_for_explore():
-    from hyperloom.orchestrator.coordinator import Coordinator
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.task_registry import Task
 
     c = Coordinator.__new__(Coordinator)
     c.shared_state = SharedState(session_id="pr-a8-config")
@@ -107,8 +107,8 @@ def test_coordinator_intervention_hook_records_config_for_explore():
 
 def test_coordinator_intervention_hook_skips_explore_with_no_winners():
     """An empty-winners explore round records a ``config_attempt`` but doesn't advance the counter."""
-    from hyperloom.orchestrator.coordinator import Coordinator
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.task_registry import Task
 
     c = Coordinator.__new__(Coordinator)
     c.shared_state = SharedState(session_id="pr-a8-skip")
@@ -127,8 +127,8 @@ def test_coordinator_intervention_hook_skips_explore_with_no_winners():
 
 
 def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
-    from hyperloom.orchestrator.coordinator import Coordinator
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.task_registry import Task
 
     c = Coordinator.__new__(Coordinator)
     c.shared_state = SharedState(session_id="pr-a8-code")
@@ -156,8 +156,8 @@ def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
 
 def test_coordinator_intervention_hook_records_integrate_attempts():
     """Non-KEEP integrate_patch attempts land on the ledger but don't reset the counter."""
-    from hyperloom.orchestrator.coordinator import Coordinator
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.task_registry import Task
 
     c = Coordinator.__new__(Coordinator)
     c.shared_state = SharedState(session_id="pr-a8-noop")

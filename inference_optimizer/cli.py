@@ -118,7 +118,7 @@ from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _snapshot_system_prompts,
     resolve_model_display_name,
 )
-from hyperloom.orchestrator.action_executors._aiter_jit import (
+from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_LOCK_STALE_MINUTES,
     clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
 )
@@ -211,13 +211,13 @@ __all__ = [
 ]
 from . import framework_registry
 from .manifest import load_manifest, write_manifest
-from hyperloom.orchestrator.action_registry import ActionRegistry
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
-from hyperloom.orchestrator.framework_paths import resolve_source_file_allowlist
-from hyperloom.orchestrator.objective import Objective, build_objective
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
+from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+from hyperloom.orchestrator.state.objective import Objective, build_objective
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
@@ -1109,7 +1109,7 @@ def _emit_preflight_diagnostics(
         args (argparse.Namespace | None): Parsed CLI args; when present, KB /
             PR-monitor status lines are added.
     """
-    from hyperloom.orchestrator.action_executors.baseline import (
+    from hyperloom.orchestrator.actions.executors.baseline import (
         BASELINE_COLD_START_TIMEOUT_SEC,
         BASELINE_DEFAULT_TIMEOUT_SEC,
         _probe_aiter_jit_cache,
@@ -1645,7 +1645,7 @@ def _preflight(
                 os.environ[alias] = safe_key
                 print(f"Preflight: filled {alias} from SAFE_API_KEY")
     # --- Resolve install interpreters ---
-    from hyperloom.orchestrator.action_executors._grid_runner import _resolve_magpie_python
+    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_magpie_python
 
     magpie_python = _resolve_magpie_python()
 
@@ -2208,11 +2208,11 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
     Keys MUST be the canonical phase names from
-    :mod:`hyperloom.orchestrator.phase_state`; otherwise
+    :mod:`hyperloom.orchestrator.phases.machine_state`; otherwise
     :func:`normalize_budget_pct` silently drops the entry and the phase falls
     back to its library default.
     """
-    from hyperloom.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
         PHASE_EXPLORE,
         PHASE_FRAMEWORK_AGENT,
@@ -2991,7 +2991,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # When kernel is disabled, strip it from the role registry (no tick / no backend expectation).
     role_registry = None
     if no_kernel:
-        from hyperloom.orchestrator.agent_role import default_role_registry
+        from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
         role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
 
@@ -3261,7 +3261,7 @@ def _default_research_lane_capacity() -> int:
             return int(env)
         except ValueError:
             pass
-    from hyperloom.orchestrator.policy import research_lane_ceiling
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     return research_lane_ceiling()
 
@@ -3284,7 +3284,7 @@ def _default_gpu_specialist_capacity() -> int:
             return max(0, int(env))
         except ValueError:
             pass
-    from hyperloom.orchestrator.policy import detect_gpu_count
+    from hyperloom.orchestrator.policy.gate import detect_gpu_count
 
     return detect_gpu_count()
 
@@ -3295,7 +3295,7 @@ def _build_parser() -> argparse.ArgumentParser:
     Returns:
         The configured :class:`argparse.ArgumentParser`.
     """
-    from hyperloom.orchestrator.specialist_domains import (
+    from hyperloom.orchestrator.specialists.domains import (
         DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
     )
 
@@ -3328,7 +3328,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "rest of the run optimizes the quantized model. Ignored on "
         "--resume.",
     )
-    from hyperloom.orchestrator.quantization_schemes import QUANT_SCHEME_CHOICES
+    from hyperloom.orchestrator.phases.quantization_schemes import QUANT_SCHEME_CHOICES
 
     opt.add_argument(
         "--quantize-scheme",

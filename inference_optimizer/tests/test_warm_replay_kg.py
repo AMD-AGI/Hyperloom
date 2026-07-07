@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.cortex_t0 import _build_warm_start_context
+from hyperloom.orchestrator.knowledge.cortex_t0 import _build_warm_start_context
 from inference_optimizer.recipe_kb.kg_client import KGClient
 
 _FACTS_PAGE = """# KG
@@ -123,7 +123,7 @@ def test_graph_guided_knobs_enabled_by_flag(monkeypatch: Any) -> None:
 def test_filter_warm_patches_advisory_and_expiry() -> None:
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     patches = [
         {"patch_file": "good.py", "measured_gain_pct": 10},
@@ -142,7 +142,7 @@ def test_filter_warm_patches_advisory_and_expiry() -> None:
 def test_filter_warm_patches_keeps_low_confidence_advisory() -> None:
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     patches = [{"patch_file": "maybe.py", "measured_gain_pct": 5}]
     advisory = [{"patch_file": "maybe.py", "confidence": 0.5}]  # below 0.75 threshold
@@ -153,8 +153,8 @@ def test_filter_warm_patches_keeps_low_confidence_advisory() -> None:
 
 
 def test_specialist_prompt_renders_kg_recommended_knobs() -> None:
-    from hyperloom.orchestrator.specialist_domains import get_domain
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.specialists.domains import get_domain
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         build_specialist_prompts,
     )
@@ -179,8 +179,8 @@ def test_specialist_prompt_renders_kg_recommended_knobs() -> None:
 
 
 def test_specialist_prompt_renders_kg_guided_knobs() -> None:
-    from hyperloom.orchestrator.specialist_domains import get_domain
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.specialists.domains import get_domain
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         build_specialist_prompts,
     )
@@ -215,8 +215,8 @@ def test_specialist_prompt_renders_kg_guided_knobs() -> None:
 
 
 def test_specialist_prompt_kg_section_placeholder_when_empty() -> None:
-    from hyperloom.orchestrator.specialist_domains import get_domain
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.specialists.domains import get_domain
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         build_specialist_prompts,
     )
@@ -250,7 +250,7 @@ def _emit_decision(monkeypatch: Any, kg: Any, **kwargs: Any) -> None:
     from types import SimpleNamespace
 
     import inference_optimizer.recipe_kb.kg_client as kgmod
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     monkeypatch.setattr(kgmod, "get_kg_client", lambda: kg)
     selfish = SimpleNamespace(shared_state=SimpleNamespace(gpu_type="mi300x", framework="sglang"))

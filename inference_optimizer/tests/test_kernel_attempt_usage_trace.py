@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator.kernel_request_handlers import (
+from hyperloom.orchestrator.kernel.request_handlers import (
     _trace_kernel_attempt_usage,
 )
 from inference_optimizer.session_paths import llm_calls_path
@@ -154,7 +154,7 @@ def test_forge_attempt_without_marker_is_noop(tmp_path: Path) -> None:
 def test_forge_steps_written_to_audit(tmp_path: Path) -> None:
     """A forge attempt's FORGE_STEPS marker lands per-iteration + summary rows
     in reports/trace/forge_steps.jsonl, keyed by kernel id."""
-    from hyperloom.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel.request_handlers import (
         _trace_kernel_attempt_steps,
     )
     from inference_optimizer.session_paths import forge_steps_path
@@ -190,7 +190,7 @@ def test_forge_steps_written_to_audit(tmp_path: Path) -> None:
 
 
 def test_forge_steps_noop_without_marker(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel.request_handlers import (
         _trace_kernel_attempt_steps,
     )
     from inference_optimizer.session_paths import forge_steps_path

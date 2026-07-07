@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer import cli
-from hyperloom.orchestrator import quantization_request_handlers as qrh
-from hyperloom.orchestrator import quantization_schemes as qs
+from hyperloom.orchestrator.phases import quantization_request_handlers as qrh
+from hyperloom.orchestrator.phases import quantization_schemes as qs
 
 
 @pytest.fixture(autouse=True)

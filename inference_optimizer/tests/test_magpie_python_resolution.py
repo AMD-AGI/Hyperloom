@@ -8,7 +8,7 @@ import logging
 import subprocess
 
 
-from hyperloom.orchestrator.action_executors import _grid_runner
+from hyperloom.orchestrator.actions.executors import _grid_runner
 
 
 def test_env_magpie_python_used_when_it_can_import(monkeypatch):

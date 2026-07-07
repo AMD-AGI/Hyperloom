@@ -40,7 +40,7 @@ def test_gain_math_branches() -> None:
 # orchestrator.kb_writeback                                                    #
 # --------------------------------------------------------------------------- #
 def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator import kb_writeback
+    from hyperloom.orchestrator.knowledge import kb_writeback
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
     root = kb_writeback._default_kb_root()
@@ -48,7 +48,7 @@ def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
-    from hyperloom.orchestrator import kb_writeback
+    from hyperloom.orchestrator.knowledge import kb_writeback
 
     with pytest.raises(ValueError):
         await kb_writeback.write_framework_record(
@@ -62,7 +62,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
 
 
 async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator import kb_writeback
+    from hyperloom.orchestrator.knowledge import kb_writeback
 
     monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "fa")
     path = await kb_writeback.write_framework_record(
@@ -131,7 +131,7 @@ def test_framework_registry_surface() -> None:
 # orchestrator.quantization_schemes                                          #
 # --------------------------------------------------------------------------- #
 def test_quantization_join_and_prompt() -> None:
-    from hyperloom.orchestrator import quantization_schemes as qs
+    from hyperloom.orchestrator.phases import quantization_schemes as qs
 
     assert qs._join_clauses([]) == ""  # line 131
     assert qs._join_clauses(["a"]) == "a"
@@ -148,7 +148,7 @@ def test_quantization_join_and_prompt() -> None:
 # orchestrator.objective                                                      #
 # --------------------------------------------------------------------------- #
 def test_tput_objective_progress_zero() -> None:
-    from hyperloom.orchestrator.objective import TargetTputObjective
+    from hyperloom.orchestrator.state.objective import TargetTputObjective
 
     obj = TargetTputObjective(target_tput_per_gpu=100.0)
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
@@ -158,7 +158,7 @@ def test_tput_objective_progress_zero() -> None:
 
 
 def test_baseline_objective_progress_zero_ref(tmp_path) -> None:
-    from hyperloom.orchestrator.objective import TargetBaselineObjective
+    from hyperloom.orchestrator.state.objective import TargetBaselineObjective
 
     report = tmp_path / "benchmark_report.json"
     report.write_text(json.dumps({"throughput": {"output_throughput": 50.0}}), encoding="utf-8")
@@ -171,7 +171,7 @@ def test_baseline_objective_progress_zero_ref(tmp_path) -> None:
 
 
 def test_baseline_objective_invalid_dir() -> None:
-    from hyperloom.orchestrator.objective import ObjectiveError, TargetBaselineObjective
+    from hyperloom.orchestrator.state.objective import ObjectiveError, TargetBaselineObjective
 
     with pytest.raises(ObjectiveError):
         TargetBaselineObjective(baseline_dir="/nonexistent/path/zzz")
@@ -232,7 +232,7 @@ def test_attempt_from_dict_with_fitness() -> None:
 def test_file_lock_no_fcntl(monkeypatch, tmp_path) -> None:
     import builtins
 
-    from hyperloom.orchestrator.action_executors import _file_lock
+    from hyperloom.orchestrator.actions.executors import _file_lock
 
     real_import = builtins.__import__
 
@@ -249,7 +249,7 @@ def test_file_lock_no_fcntl(monkeypatch, tmp_path) -> None:
 
 
 def test_file_lock_acquires(tmp_path) -> None:
-    from hyperloom.orchestrator.action_executors import _file_lock
+    from hyperloom.orchestrator.actions.executors import _file_lock
 
     with _file_lock.best_effort_file_lock(str(tmp_path / "lock"), label="t"):
         pass
@@ -259,7 +259,7 @@ def test_file_lock_acquires(tmp_path) -> None:
 # orchestrator.action_executors._framework_gap_composer                       #
 # --------------------------------------------------------------------------- #
 def test_framework_gap_bottleneck(tmp_path) -> None:
-    from hyperloom.orchestrator.action_executors import _framework_gap_composer as gc
+    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
 
     # top_kernels as list of strings (lines 91-92).
     bp = tmp_path / "bd.json"
@@ -276,7 +276,7 @@ def test_framework_gap_bottleneck(tmp_path) -> None:
 
 
 def test_framework_gap_compose() -> None:
-    from hyperloom.orchestrator.action_executors import _framework_gap_composer as gc
+    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
 
     desc, keywords = gc.compose_gap(framework="sglang", gpu_type="MI300X", model_class="moe_mla")
     assert "sglang" in keywords
@@ -381,7 +381,7 @@ def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
 # orchestrator.backends._runtime_bridge                                       #
 # --------------------------------------------------------------------------- #
 def test_runtime_bridge_success(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.backends import _runtime_bridge as rb
+    from hyperloom.orchestrator.roles import _runtime_bridge as rb
 
     captured = {}
 
@@ -403,8 +403,8 @@ def test_runtime_bridge_success(monkeypatch, tmp_path) -> None:
 
 
 def test_runtime_bridge_timeout(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.backends import _runtime_bridge as rb
-    from hyperloom.orchestrator.backends.base import BackendError
+    from hyperloom.orchestrator.roles import _runtime_bridge as rb
+    from hyperloom.orchestrator.roles.base import BackendError
 
     def fake_run(cmd, **kwargs):
         raise rb.subprocess.TimeoutExpired(cmd=cmd, timeout=5.0)
@@ -422,8 +422,8 @@ def test_runtime_bridge_timeout(monkeypatch, tmp_path) -> None:
 
 
 def test_runtime_bridge_not_found_and_nonzero(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.backends import _runtime_bridge as rb
-    from hyperloom.orchestrator.backends.base import BackendError
+    from hyperloom.orchestrator.roles import _runtime_bridge as rb
+    from hyperloom.orchestrator.roles.base import BackendError
 
     call = rb.RuntimeCall(
         phase="tick",

@@ -15,12 +15,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors._grid_runner import (
     DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
     inject_sglang_watchdog_timeout,
     resolve_sglang_watchdog_timeout,
 )
-from hyperloom.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
 )
 

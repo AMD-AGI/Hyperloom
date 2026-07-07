@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _ok_result(

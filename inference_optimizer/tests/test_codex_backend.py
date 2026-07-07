@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.backends import CodexBackend
-from hyperloom.orchestrator.backends.base import BackendError
-from hyperloom.orchestrator.backends.codex import _extract_envelope
+from hyperloom.orchestrator.roles import CodexBackend
+from hyperloom.orchestrator.roles.base import BackendError
+from hyperloom.orchestrator.roles.codex import _extract_envelope
 from inference_optimizer.protocol.intent import (
     IntentType,
     NoIntentEmitted,

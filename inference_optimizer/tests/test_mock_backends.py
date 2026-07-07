@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
     MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 

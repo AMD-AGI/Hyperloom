@@ -40,7 +40,7 @@ def _seed_state(session_dir: Path, monkeypatch):
         "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR",
         str(session_dir),
     )
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -1001,7 +1001,7 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
 
 
 def test_stop_reason_is_canonical_vocab():
-    from hyperloom.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phases.machine_state import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )

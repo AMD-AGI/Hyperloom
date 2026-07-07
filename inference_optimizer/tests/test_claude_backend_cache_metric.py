@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from inference_optimizer.protocol.intent import IntentType
-from hyperloom.orchestrator.backends.claude import ClaudeBackend
+from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
 
 # Fake SDK plumbing

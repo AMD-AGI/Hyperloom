@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator import kernel_request_handlers as krh
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # fixtures

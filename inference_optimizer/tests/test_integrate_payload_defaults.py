@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator import kernel_request_handlers as krh
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
@@ -186,7 +186,7 @@ class TestIntegrateHandlerHonoursStateDefault:
                 captured["params"] = dict(ctx.task.params)
                 return {"output_throughput": 1100.0, "completed_requests": 10}
 
-        from hyperloom.orchestrator.action_executors import baseline as baseline_mod
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
         monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
 

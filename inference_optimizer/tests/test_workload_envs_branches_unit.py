@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.action_executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 
 def _clear_env(monkeypatch):

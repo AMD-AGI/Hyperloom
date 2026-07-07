@@ -274,7 +274,7 @@ def analyze(
     Returns:
         The persisted ``BaselineSummary`` describing the comparison outcome.
     """
-    from hyperloom.orchestrator import research_hints
+    from hyperloom.orchestrator.knowledge import research_hints
 
     canonical_model = to_inferencex_name(model_path) or ""
     query = BaselineQuery(

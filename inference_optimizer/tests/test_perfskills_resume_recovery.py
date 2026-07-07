@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.phase_state import ESCALATE_HINT_SKIP_TO_SWEEP
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_SKIP_TO_SWEEP
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 class _TaskRegistry:
@@ -80,7 +80,7 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
         raise RuntimeError("runner should not be resolved when result.json exists")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel_request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
         _runner_should_not_be_needed,
     )
 
@@ -151,7 +151,7 @@ async def test_perfskills_kernel_phase_does_not_reuse_already_promoted_result(
         raise RuntimeError("stop before launching subprocess")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel_request_handlers._kernel_agent_tool_path",
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
         _runner_resolved,
     )
 

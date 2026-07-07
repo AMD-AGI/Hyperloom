@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -57,7 +57,7 @@ def coord(tmp_path: Path) -> Coordinator:
     c.shared_state = _BareState()
     c.bus = _RecordingBus()
     c.cortex_kb = None
-    from hyperloom.orchestrator.coordinator import CoordinatorState
+    from hyperloom.orchestrator.loop.coordinator import CoordinatorState
 
     c.state = CoordinatorState()
     c._sequence_denial_for_action = lambda *_a, **_kw: None  # type: ignore[assignment]
@@ -78,7 +78,7 @@ def test_roofline_pending_gate_hooks_removed():
             f"would silently re-introduce the "
             f"wait_for_auto_roofline gate."
         )
-    import hyperloom.orchestrator.coordinator as coord_mod
+    import hyperloom.orchestrator.loop.coordinator as coord_mod
 
     assert not hasattr(coord_mod, "_ROOFLINE_GATED_ACTIONS")
 

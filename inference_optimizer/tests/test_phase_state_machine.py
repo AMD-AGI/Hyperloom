@@ -9,14 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator import phase_state
+from hyperloom.orchestrator.phases import machine_state as phase_state
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     PolicyDenied,
     PolicyGate,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
@@ -268,7 +268,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
 
 def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
     """#522: baseline_arg_error must survive set_stop_reason (not map to unknown)."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="t", model_name="m", model_path="m")
     written = state.set_stop_reason("baseline_arg_error")
@@ -424,7 +424,7 @@ def test_core_state_fields_includes_phase_fields():
 
 # PolicyGate R1 phase_incompatible
 def _make_role_registry():
-    from hyperloom.orchestrator.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
     return default_role_registry()
 
@@ -645,14 +645,14 @@ def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
 # Coordinator initialises phase on fresh sessions
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
-    from hyperloom.orchestrator.backends import (
+    from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
         MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     silent = ScriptedPlan(
         turns=[],

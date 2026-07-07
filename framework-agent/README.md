@@ -96,7 +96,7 @@ inference_optimizer optimize \
 ```
 
 See `inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
-and `src/hyperloom/orchestrator/action_executors/framework_agent.py`.
+and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
 
 ## Design references
 

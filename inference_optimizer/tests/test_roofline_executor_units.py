@@ -5,7 +5,7 @@ from __future__ import annotations
 """Focused unit tests for roofline executor guard/branch/fallback paths.
 
 These target the residual uncovered lines in
-``src/hyperloom/orchestrator/action_executors/roofline.py``:
+``src/hyperloom/orchestrator/actions/executors/roofline.py``:
 non-dict / bad-shape guards in the pure helpers, the exception-path
 cuda-graph escalation, the ``close_post_opt`` output-name branch, the
 retry-returns-non-dict path, the session-dir save fast-paths (success +
@@ -20,17 +20,17 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.action_executors import roofline as rf
-from hyperloom.orchestrator.action_executors.roofline import (
+from hyperloom.orchestrator.actions.executors import roofline as rf
+from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_steady_state_retry_mode,
     _profile_err_text,
     _profile_server_log_tail,
     make_roofline_executor,
 )
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 # --------------------------------------------------------------------------
@@ -88,10 +88,10 @@ def _patch_subs(profile_result, ta_result):
         return ta_result
 
     return patch(
-        "hyperloom.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
         new=fake_ta,
     )
 
@@ -231,7 +231,7 @@ def test_profile_server_log_tail_swallows_oserror(monkeypatch, tmp_path):
 def test_profile_server_log_tail_swallows_importerror(monkeypatch):
     # lines 193-194 via ImportError branch: patch the lazy import target so
     # importing _find_server_logs raises.
-    import hyperloom.orchestrator.action_executors.benchmark_result as br
+    import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
     def boom(_slot):
         raise ImportError("simulated import failure")
@@ -278,10 +278,10 @@ async def test_profile_exception_with_capture_signature_escalates_eager(tmp_path
     state = _state()
     executor = RooflineExecutor(shared_state=state)
     with patch(
-        "hyperloom.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
         result = await executor(_ctx(tmp_path))
@@ -313,10 +313,10 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
     ctx = _ctx(tmp_path, params={"base_extra_args": "", "reason": "close_post_opt"})
     executor = RooflineExecutor(shared_state=state)
     with patch(
-        "hyperloom.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
         result = await executor(ctx)
@@ -359,10 +359,10 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
     state.last_trace_analyze = {"analysis_md_text": "stale", "roofline_snapshot_id": 9}
     executor = RooflineExecutor(shared_state=state)
     with patch(
-        "hyperloom.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
         result = await executor(_ctx(tmp_path))

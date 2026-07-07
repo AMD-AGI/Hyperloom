@@ -12,13 +12,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.agent_role import default_role_registry
-from hyperloom.orchestrator.backends.mock_backend import (
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,

@@ -1,5 +1,5 @@
 # Magpie baseline benchmark config for xDiT (diffusion, server-less).
-# Used by hyperloom.orchestrator.action_executors.baseline /
+# Used by hyperloom.orchestrator.actions.executors.baseline /
 # sweep / explore as the default benchmark config when $FRAMEWORK=xdit.
 #
 # xDiT is a SCRIPTABLE (server-less) framework: there is no OpenAI server, no

@@ -1,6 +1,6 @@
 # Coordinator Inbox Protocol
 
-The Coordinator (`hyperloom.orchestrator.coordinator.Coordinator`)
+The Coordinator (`hyperloom.orchestrator.loop.coordinator.Coordinator`)
 hands every reactor a prompt with the layout below. Critic must consume
 this format (or the equivalent payload that an A2A host preserves
 verbatim into `request.raw_prompt`).
@@ -59,7 +59,7 @@ The intent envelope shape is:
 
 | Field | Values | Source |
 |---|---|---|
-| `intent_type` (Critic) | `review_verdict`, `send_message`, `alert` | `hyperloom.orchestrator.agent_role._CRITIC_INTENTS` |
+| `intent_type` (Critic) | `review_verdict`, `send_message`, `alert` | `hyperloom.orchestrator.roles.agent_role._CRITIC_INTENTS` |
 | `verdict` | `approve`, `reject`, `redirect`, `advise`, `needs_review` | `policy.REVIEW_VERDICTS` |
 | `source` | `critic`, `mock`, `timeout`, `critic_unavailable` | `references/verdict_schema.md` |
 

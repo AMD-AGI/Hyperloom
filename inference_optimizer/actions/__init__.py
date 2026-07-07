@@ -5,7 +5,7 @@
 Layout:
 
 * ``_meta/<name>.yaml`` — machine-readable action metadata loaded by
-  :class:`hyperloom.orchestrator.action_registry.ActionRegistry`
+  :class:`hyperloom.orchestrator.actions.registry.ActionRegistry`
 * ``<name>.md`` — agent-facing playbook (loaded lazily by SubAgentRunner
   when composing a sub-agent prompt; not required for PolicyGate)
 
@@ -13,5 +13,5 @@ v0.6 ships **19 OptimizationActions** total. The 5 "kernel_agent-owned" actions
 (kernel_opt / integrate / deep_kernel_analysis / operator_tuning /
 vendor_kernel_config) are reachable only via REQUEST(target_agent="kernel_agent")
 — PolicyGate rejects direct delegate of any name in
-:data:`hyperloom.orchestrator.policy.KERNEL_AGENT_OWNED_ACTIONS`.
+:data:`hyperloom.orchestrator.policy.gate.KERNEL_AGENT_OWNED_ACTIONS`.
 """

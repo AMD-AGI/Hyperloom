@@ -10,7 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from hyperloom.orchestrator.specialist_patch_safety import (
+from hyperloom.orchestrator.specialists.patch_safety import (
     GROUND_APPLIES,
     GROUND_MISSING_TARGET,
     GROUND_NOT_DIFF,

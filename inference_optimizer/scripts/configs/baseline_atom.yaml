@@ -1,5 +1,5 @@
 # Magpie baseline benchmark config for Atom.
-# Used by hyperloom.orchestrator.action_executors.baseline /
+# Used by hyperloom.orchestrator.actions.executors.baseline /
 # sweep / backends / params as the default benchmark config when
 # $FRAMEWORK=atom.
 #

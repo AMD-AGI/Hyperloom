@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from hyperloom.orchestrator.optimization_journal import (
+from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )

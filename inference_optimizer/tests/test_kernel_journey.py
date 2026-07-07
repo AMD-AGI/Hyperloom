@@ -300,7 +300,7 @@ def test_relabel_perfskills_geak_journey_rewrites_all_geak_tokens() -> None:
     # The GEAK-e2e pipeline's GEAK must be relabeled to geak_v4 everywhere it
     # appears in the interface file, so SBD never conflates it with the generic
     # kernel-agent ``geak`` lane. Non-geak tokens (claude) are untouched.
-    from hyperloom.orchestrator.coordinator import (
+    from hyperloom.orchestrator.loop.coordinator import (
         _relabel_perfskills_geak_journey,
     )
 
@@ -342,7 +342,7 @@ def test_relabel_perfskills_geak_journey_rewrites_all_geak_tokens() -> None:
 
 
 def test_relabel_perfskills_geak_journey_noop_without_geak() -> None:
-    from hyperloom.orchestrator.coordinator import (
+    from hyperloom.orchestrator.loop.coordinator import (
         _relabel_perfskills_geak_journey,
     )
 

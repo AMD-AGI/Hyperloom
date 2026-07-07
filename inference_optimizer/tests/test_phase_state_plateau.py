@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.phase_state import (
+from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     ESCALATE_HINT_BUDGET_BUMP_CAP,
     ESCALATE_HINT_BUDGET_BUMP_DELTA,
@@ -31,7 +31,7 @@ from hyperloom.orchestrator.phase_state import (
     is_valid_stop_reason,
     kernel_work_pending,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # 1. ESCALATE_HINT vocab

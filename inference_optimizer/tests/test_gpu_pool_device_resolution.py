@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.gpu_pool import resolve_gpu_specialist_devices
+from hyperloom.orchestrator.bus.gpu_pool import resolve_gpu_specialist_devices
 
 
 _MASK_VARS = (

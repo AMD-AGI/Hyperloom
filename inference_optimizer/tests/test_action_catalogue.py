@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.action_registry import (
+from hyperloom.orchestrator.actions.registry import (
     ActionRegistry,
     VALID_FAMILIES,
     VALID_PIPELINE_PHASES,
 )
-from hyperloom.orchestrator.policy import KERNEL_AGENT_OWNED_ACTIONS
+from hyperloom.orchestrator.policy.gate import KERNEL_AGENT_OWNED_ACTIONS
 from inference_optimizer.protocol.action_surfaces import (
     FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES,
     FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
@@ -84,8 +84,8 @@ def test_kernel_owned_actions_all_in_registry(registry):
 def test_action_surface_constants_are_shared():
     """Policy, prompt rendering, and CLI must not carry divergent action lists."""
     from inference_optimizer.cli import _NOOP_KINDS_KERNEL_ONLY
-    from hyperloom.orchestrator import policy
-    from hyperloom.orchestrator.system_prompts import prompt_builder
+    from hyperloom.orchestrator.policy import gate as policy
+    from hyperloom.orchestrator.prompts import prompt_builder
 
     assert policy.KERNEL_AGENT_OWNED_ACTIONS is SURFACE_KERNEL_AGENT_OWNED_ACTIONS
     assert prompt_builder.KERNEL_AGENT_OWNED_ACTIONS is SURFACE_KERNEL_AGENT_OWNED_ACTIONS
@@ -114,7 +114,7 @@ def test_prompt_enabled_actions_are_live_registry_actions(registry):
 
 
 def test_phase_allowlist_actions_are_live_registry_actions(registry):
-    from hyperloom.orchestrator.phase_state import PHASE_ALLOWED_ACTIONS
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
 
     retired = {
         "setup",
@@ -131,7 +131,7 @@ def test_phase_allowlist_actions_are_live_registry_actions(registry):
 
 
 def test_action_surface_sets_are_phase_aligned():
-    from hyperloom.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phases.machine_state import (
         PHASE_ALLOWED_ACTIONS,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,

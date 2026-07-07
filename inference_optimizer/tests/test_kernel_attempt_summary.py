@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-from hyperloom.orchestrator.kernel_attempt_summary import (
+from hyperloom.orchestrator.kernel.attempt_summary import (
     CATEGORY_ATTEMPTED_REJECTED,
     CATEGORY_INTEGRATED,
     CATEGORY_IN_FLIGHT,
@@ -20,7 +20,7 @@ from hyperloom.orchestrator.kernel_attempt_summary import (
     UNATTEMPTED_NO_SOURCE,
     build_kernel_optimization_summary,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # Fixtures

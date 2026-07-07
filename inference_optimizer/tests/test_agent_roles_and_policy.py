@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.agent_role import (
+from hyperloom.orchestrator.roles.agent_role import (
     BackendType,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -17,7 +17,7 @@ from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     DELEGATE_ACTION_REQUIRED_PAYLOAD,
     DELEGATE_ACTION_SOURCE_ALLOWLIST,
@@ -31,7 +31,7 @@ from hyperloom.orchestrator.policy import (
     ROBUSTNESS_ONLY_INTENTS,
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_optimizer.paths import asset_system_prompts_dir
 
 
@@ -644,7 +644,7 @@ def test_gate_update_state_degraded_markers_rejected(gate):
 def test_allowed_tools_claude_returns_emit_intent(gate):
     assert gate.allowed_tools_for_agent("kernel_agent") == ["emit_intent"]
     assert gate.allowed_tools_for_agent("robustness") == ["emit_intent"]
-    from hyperloom.orchestrator.backends.mcp_context_tools import (
+    from hyperloom.orchestrator.roles.mcp_context_tools import (
         CONTEXT_TOOL_NAMES,
     )
 

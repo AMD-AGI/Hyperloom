@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator import framework_agent_client as _fa_client
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 class _StateStub:

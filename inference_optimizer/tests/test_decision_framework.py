@@ -13,13 +13,13 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
@@ -45,7 +45,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver so the unit test never spawns a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.action_executors import _grid_runner
+    from hyperloom.orchestrator.actions.executors import _grid_runner
 
     monkeypatch.setattr(
         _grid_runner,
@@ -71,7 +71,7 @@ async def test_run_optimization_response_records_to_shared_state(
         }
         c.shared_state.save(session_dir)
         # Stub the handler so we don't shell out.
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def fake(payload, *, session_dir, **kwargs):
             return {
@@ -121,7 +121,7 @@ async def test_trace_analyze_does_not_record_kernel_opt(
     """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def fake(payload, *, session_dir):
             return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
@@ -158,7 +158,7 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
         }
         c.shared_state.save(session_dir)
 
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def fake(payload, *, session_dir):
             return {
@@ -226,7 +226,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         c.shared_state.continue_kernel_after_gemm = False
         calls: list[dict] = []
 
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def fake_handler(payload, *, session_dir):
             calls.append(dict(payload))
@@ -277,7 +277,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
         c.shared_state.continue_kernel_after_gemm = True
         c.shared_state.untried_hot_reusable_kernels = lambda: ["k001"]  # type: ignore[method-assign]
 
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def fake_gemm(payload, *, session_dir):
             return {
@@ -307,7 +307,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
 # D — native-only guard for kernel optimization handler
 @pytest.mark.asyncio
 async def test_run_optimization_handler_rejects_compile_generated_source(session_dir):
-    from hyperloom.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel.request_handlers import (
         run_optimization_handler,
     )
 
@@ -327,7 +327,7 @@ async def test_run_optimization_handler_rejects_compile_generated_source(session
 
 @pytest.mark.asyncio
 async def test_run_optimization_handler_rejects_missing_native_source(session_dir):
-    from hyperloom.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel.request_handlers import (
         run_optimization_handler,
     )
 
@@ -344,7 +344,7 @@ async def test_run_optimization_handler_uses_candidates_path_native_guard(
     session_dir,
     tmp_path,
 ):
-    from hyperloom.orchestrator.kernel_request_handlers import (
+    from hyperloom.orchestrator.kernel.request_handlers import (
         run_optimization_handler,
     )
 
@@ -384,7 +384,7 @@ async def test_run_optimization_handler_forwards_verification_evidence(
     tmp_path,
     monkeypatch,
 ):
-    from hyperloom.orchestrator import kernel_request_handlers as krh
+    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
@@ -436,7 +436,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     tmp_path,
     monkeypatch,
 ):
-    from hyperloom.orchestrator import kernel_request_handlers as krh
+    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     # PR-I (M4 main merge): disable the default min_gpu_pct gate so the test focuses on the backend-fallback ladder.
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")

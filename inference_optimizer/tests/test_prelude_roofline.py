@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 # Stubs — minimal SharedState + TaskRegistry doubles.
@@ -47,7 +47,7 @@ class _StubTaskRegistry:
         if existing is not None:
             return existing, True
         import uuid as _uuid
-        from hyperloom.orchestrator.task_registry import Task
+        from hyperloom.orchestrator.state.task_registry import Task
 
         task = Task(
             task_id=_uuid.uuid4().hex,
@@ -100,7 +100,7 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     coord.shared_state.current_best = {
         "extra_server_args": "--enable-torch-compile --quantization fp8",
     }
-    import hyperloom.orchestrator.roofline_ceiling as rc
+    import hyperloom.orchestrator.kernel.roofline_ceiling as rc
 
     monkeypatch.setattr(
         rc,

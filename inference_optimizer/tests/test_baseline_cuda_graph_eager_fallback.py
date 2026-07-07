@@ -18,16 +18,16 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.action_executors import (
+from hyperloom.orchestrator.actions.executors import (
     baseline as baseline_module,
 )
-from hyperloom.orchestrator.action_executors.baseline import (
+from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     _disable_cuda_graph_flag,
     _is_cuda_graph_capture_failure,
     _with_cuda_graph_disabled,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def test_cuda_graph_capture_markers_detected():
@@ -257,7 +257,7 @@ def _run_executor_with_server_log(
     ctx = _make_ctx(task_params)
     with (
         patch(
-            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
             side_effect=fake_run,
         ),
         patch.object(

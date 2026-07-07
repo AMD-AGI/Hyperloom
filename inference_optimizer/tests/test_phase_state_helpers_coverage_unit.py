@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator import phase_state as ps
+from hyperloom.orchestrator.phases import machine_state as ps
 
 
 # -- escalate hints --------------------------------------------------------

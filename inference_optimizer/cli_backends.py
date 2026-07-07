@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import framework_registry
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
     CriticAgentBackend,
@@ -23,7 +23,7 @@ from hyperloom.orchestrator.backends import (
     MockRobustnessBackend,
     RobustnessAgentBackend,
 )
-from hyperloom.orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
+from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 
 
 def _build_backends(
@@ -87,7 +87,7 @@ def _build_backends(
         # approves exploration / archival actions without demanding the
         # before/after evidence they themselves produce.
         try:
-            from hyperloom.orchestrator.action_registry import (
+            from hyperloom.orchestrator.actions.registry import (
                 ActionRegistry,
             )
 

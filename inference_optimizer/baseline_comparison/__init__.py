@@ -10,9 +10,9 @@ Strict design boundary: nothing here ever writes to ``SharedState``,
 never participates in the orchestrator's scoring or Objective, never
 shows up in any agent's system prompt. The only consumers are:
 
-* :class:`hyperloom.orchestrator.action_executors.TargetAnalysisExecutor`
+* :class:`hyperloom.orchestrator.actions.executors.TargetAnalysisExecutor`
   — calls :func:`target_analyzer.analyze` once per session.
-* :class:`hyperloom.orchestrator.action_executors.ReportExecutor`
+* :class:`hyperloom.orchestrator.actions.executors.ReportExecutor`
   — reads ``target_analysis/target_baseline.json`` to render an advisory
   section in ``final.md``.
 

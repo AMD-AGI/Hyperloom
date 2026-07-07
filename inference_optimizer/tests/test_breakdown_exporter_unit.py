@@ -147,7 +147,7 @@ def test_write_minimal_final_report_idempotent(tmp_path):
 
 def test_write_minimal_final_report_with_attempts(tmp_path):
     # Populate SharedState so the last_* attempt + sweep branches render.
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(tmp_path)
     state.last_sweep = {"grid_size": 3, "best_overall": {"output_throughput": 99.5}, "ts": "t0"}
@@ -191,7 +191,7 @@ def test_write_minimal_final_json_idempotent(tmp_path):
 def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
     # A prior crash-safe fallback (safety_net=true) is stale after --resume and
     # must be overwritten with the current state, NOT preserved.
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     reports = tmp_path / "reports"
     reports.mkdir(parents=True, exist_ok=True)
@@ -229,7 +229,7 @@ def test_write_minimal_final_json_recovers_corrupt(tmp_path):
 
 
 def test_write_minimal_final_json_fields(tmp_path):
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(tmp_path)
     state.session_id = "sess-464"

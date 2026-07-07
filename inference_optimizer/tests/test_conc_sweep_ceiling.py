@@ -11,14 +11,14 @@ import pytest
 
 # Imported first to break a circular dependency between conc_sweep and
 # action_executors.conc_sweep (else the module fails to collect in isolation).
-from hyperloom.orchestrator.action_executors._grid_runner import (  # noqa: F401
+from hyperloom.orchestrator.actions.executors._grid_runner import (  # noqa: F401
     VariantResult,
 )
-from hyperloom.orchestrator.conc_sweep import _build_roofline_ceiling
-from hyperloom.orchestrator.roofline_ceiling import ModelMeta
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
+from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
+from hyperloom.orchestrator.state.shared_state import SharedState
 
-_LOAD_META_PATH = "hyperloom.orchestrator.conc_sweep.load_model_meta"
+_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep.load_model_meta"
 
 
 def _make_state(

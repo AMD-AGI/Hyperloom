@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # Helpers

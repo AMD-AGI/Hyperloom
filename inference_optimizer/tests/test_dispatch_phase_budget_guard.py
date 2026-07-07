@@ -12,8 +12,8 @@ from __future__ import annotations
 import time
 import types
 
-import hyperloom.orchestrator.phase_state as ps
-from hyperloom.orchestrator.coordinator import Coordinator
+import hyperloom.orchestrator.phases.machine_state as ps
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 def _stub(*, phase: str, elapsed_h: float, max_minutes: int = 2880, cycle_minutes: float = 360.0):

@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator import policy as pol
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy import gate as pol
+from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
     _delegate_field_present,
@@ -21,7 +21,7 @@ from hyperloom.orchestrator.policy import (
     gpu_specialist_ceiling,
     research_lane_ceiling,
 )
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
 # -- _value_is_present -----------------------------------------------------

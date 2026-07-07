@@ -165,7 +165,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     # --quantize-scheme enum (the UI/backend path) to a prompt.
     prompt = getattr(args, "quantize", None)
     if not prompt:
-        from hyperloom.orchestrator.quantization_schemes import (
+        from hyperloom.orchestrator.phases.quantization_schemes import (
             SchemeNotSupportedError,
             resolve_scheme_prompt,
             validate_scheme,
@@ -226,7 +226,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     # importing cleanly even in environments without the quantization deps.
     # _run_optimize already runs under asyncio.run, so await the async form
     # directly (the sync wrapper would call asyncio.run inside a live loop).
-    from hyperloom.orchestrator.quantization_request_handlers import (
+    from hyperloom.orchestrator.phases.quantization_request_handlers import (
         run_quantization_prelude_async,
     )
 

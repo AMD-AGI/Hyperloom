@@ -15,10 +15,10 @@ import json
 import pytest
 
 from inference_optimizer import framework_registry as fr
-from hyperloom.orchestrator.action_executors import _accuracy_gate as ag
-from hyperloom.orchestrator.action_executors import benchmark_result as br
-from hyperloom.orchestrator.action_executors import _grid_runner as gr
-from hyperloom.orchestrator.action_executors import explore as ex
+from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
+from hyperloom.orchestrator.actions.executors import benchmark_result as br
+from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import explore as ex
 
 
 class TestFrameworkRegistry:
@@ -275,13 +275,13 @@ class TestScriptableMeasurement:
 
 class TestConfigResolvers:
     def test_baseline_config_xdit(self, monkeypatch):
-        from hyperloom.orchestrator.action_executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
         monkeypatch.setenv("FRAMEWORK", "xdit")
         assert we.default_baseline_config().name == "baseline_xdit.yaml"
 
     def test_profile_config_xdit(self, monkeypatch):
-        from hyperloom.orchestrator.action_executors import profile as pf
+        from hyperloom.orchestrator.actions.executors import profile as pf
 
         monkeypatch.setenv("FRAMEWORK", "xdit")
         assert pf._default_profile_config().name == "profile_xdit.yaml"
@@ -327,7 +327,7 @@ class TestLifecycleScriptableSkip:
         }
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        from hyperloom.orchestrator.action_executors._server_lifecycle import (
+        from hyperloom.orchestrator.actions.executors._server_lifecycle import (
             resolve_lifecycle_params,
         )
         result = resolve_lifecycle_params(cfg_file)
@@ -344,7 +344,7 @@ class TestLifecycleScriptableSkip:
         }
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        from hyperloom.orchestrator.action_executors._server_lifecycle import (
+        from hyperloom.orchestrator.actions.executors._server_lifecycle import (
             resolve_lifecycle_params,
         )
         result = resolve_lifecycle_params(cfg_file)
@@ -356,20 +356,20 @@ class TestRooflineSnapshotUnits:
     the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
         assert rs._fmt_tput(None, "vllm") == "—"
 
     def test_fmt_tput_scriptable_renders_latency_ms(self):
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         out = rs._fmt_tput(0.15528, "xdit")
         assert out == "6440.0 ms"
         assert "tok/s" not in out
 
     def test_build_snapshot_carries_framework(self):
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
@@ -377,7 +377,7 @@ class TestRooflineSnapshotUnits:
         assert snap["framework"] == "xdit"
 
     def test_metrics_table_scriptable_achieved_is_ms(self):
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
@@ -391,7 +391,7 @@ class TestRooflineSnapshotUnits:
     def test_snapshot_carries_latency_siblings_and_within(self):
         """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and
         drive a unit-agnostic within/gap when no decode ceiling applies."""
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -411,7 +411,7 @@ class TestRooflineSnapshotUnits:
 
     def test_metrics_table_scriptable_shows_compute_ceiling(self):
         """The compact table surfaces the ms compute-roofline floor + within%."""
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -431,7 +431,7 @@ class TestRooflineSnapshotUnits:
 
     def test_serving_snapshot_latency_siblings_are_none(self):
         """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
-        from hyperloom.orchestrator import roofline_snapshot as rs
+        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -514,7 +514,7 @@ class TestValidateTraceStructureScriptable:
             fh.write(json.dumps(payload))
 
     def test_scriptable_no_attribution_degradation(self, tmp_path):
-        from hyperloom.orchestrator.action_executors import profile as pf
+        from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=True)
         health = pf._validate_trace_structure(tmp_path, "xdit")
@@ -525,7 +525,7 @@ class TestValidateTraceStructureScriptable:
         assert not any("[3]" in i for i in health["issues"])
 
     def test_scriptable_zero_ops_still_flagged(self, tmp_path):
-        from hyperloom.orchestrator.action_executors import profile as pf
+        from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=False)
         health = pf._validate_trace_structure(tmp_path, "xdit")
@@ -533,7 +533,7 @@ class TestValidateTraceStructureScriptable:
         assert health["zero_ops"] is True
 
     def test_serving_still_flags_missing_annotations(self, tmp_path):
-        from hyperloom.orchestrator.action_executors import profile as pf
+        from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=True)
         health = pf._validate_trace_structure(tmp_path, "vllm")

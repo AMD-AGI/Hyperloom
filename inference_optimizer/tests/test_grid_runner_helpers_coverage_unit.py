@@ -11,12 +11,12 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.orchestrator.action_executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
 # tree-reform.MD P2.2: compatibility-filter helpers were extracted to the
 # ``_grid_variant_filter`` sibling; patch them there (apply_compatibility_filter
 # resolves them in that module's namespace, not via the _grid_runner re-export).
-from hyperloom.orchestrator.action_executors import _grid_variant_filter as vf
+from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:

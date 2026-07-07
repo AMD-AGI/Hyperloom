@@ -13,7 +13,7 @@ import pytest
 
 from .conftest import git_commit_all, init_git_repo
 
-from hyperloom.orchestrator.action_executors.integrate_patch import (
+from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _apply_patch_no_git,
     _git_apply,
@@ -26,8 +26,8 @@ from hyperloom.orchestrator.action_executors.integrate_patch import (
     _revert_patches_no_git,
     _run_setup_commands,
 )
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 # Helpers
@@ -388,7 +388,7 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
     affect pod-side serving. A neutral skip lets the session keep running
     every other action (the Coordinator only records integrate_patch results
     whose status == 'kept', so a skip rolls no failure tally)."""
-    from hyperloom.orchestrator.action_executors import (
+    from hyperloom.orchestrator.actions.executors import (
         _multi_node_env as mne,
     )
 
@@ -432,7 +432,7 @@ async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypa
     """Single-node (is_multi_node False): the guard must NOT fire — the
     executor proceeds to the normal apply path bit-for-bit. This is the
     regression lock for the 'never affect single-node' hard requirement."""
-    from hyperloom.orchestrator.action_executors import (
+    from hyperloom.orchestrator.actions.executors import (
         _multi_node_env as mne,
     )
 
@@ -836,7 +836,7 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
     """Q3: enablement integrate replays setup_commands and surfaces them in the result."""
-    import hyperloom.orchestrator.action_executors.integrate_patch as ip_mod
+    import hyperloom.orchestrator.actions.executors.integrate_patch as ip_mod
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -884,7 +884,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
 # 5. CLI registration
 def test_integrate_patch_executor_imports_clean():
     """The real executor module must import without side effects."""
-    from hyperloom.orchestrator.action_executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
 
     assert hasattr(ip_mod, "IntegratePatchExecutor")
     assert callable(ip_mod.IntegratePatchExecutor)

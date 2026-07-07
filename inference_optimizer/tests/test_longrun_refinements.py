@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hyperloom.orchestrator import phase_state as ps
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"

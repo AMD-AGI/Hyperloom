@@ -105,7 +105,7 @@ def _runs_actions() -> frozenset[str]:
         The set of action names that own a runs-workspace.
     """
     try:
-        from hyperloom.orchestrator.action_registry import ActionRegistry  # local: avoid import-time cycle
+        from hyperloom.orchestrator.actions.registry import ActionRegistry  # local: avoid import-time cycle
 
         registry = ActionRegistry().load()
     except Exception:

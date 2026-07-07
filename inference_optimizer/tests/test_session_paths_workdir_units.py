@@ -70,7 +70,7 @@ def test_runs_actions_fallback_on_import_failure(monkeypatch):
     import inference_optimizer.session_paths as sp
 
     # Force the registry construction path to raise so the fallback is used.
-    import hyperloom.orchestrator.action_registry as ar
+    import hyperloom.orchestrator.actions.registry as ar
 
     class _Boom:
         def load(self):

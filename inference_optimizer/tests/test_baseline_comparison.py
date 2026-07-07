@@ -230,7 +230,7 @@ def _make_rows() -> list[dict[str, Any]]:
 
 
 def _write_competitor_target(session_dir: Path, per_conc: list[dict[str, Any]]) -> None:
-    from hyperloom.orchestrator import research_hints
+    from hyperloom.orchestrator.knowledge import research_hints
 
     research_hints.write_competitor_target(
         session_dir,
@@ -361,7 +361,7 @@ def test_analyze_no_competitor_target(tmp_path):
 
 def test_analyze_sourceless_target_dropped(tmp_path):
     """Per-conc rows without a source are discarded; all-sourceless degrades to no_match."""
-    from hyperloom.orchestrator import research_hints
+    from hyperloom.orchestrator.knowledge import research_hints
 
     # Emulate a hand-edited file with a sourceless row to exercise load-time filter.
     from inference_optimizer import session_paths
@@ -425,7 +425,7 @@ def _ext_payload(**overrides) -> dict[str, Any]:
 
 
 def test_report_section_renders_no_target_gpu_marker():
-    from hyperloom.orchestrator.action_executors.report import (
+    from hyperloom.orchestrator.actions.executors.report import (
         _format_external_baseline_section,
     )
 
@@ -446,7 +446,7 @@ def test_report_section_renders_no_target_gpu_marker():
 
 
 def test_report_section_renders_ok_with_reference_best():
-    from hyperloom.orchestrator.action_executors.report import (
+    from hyperloom.orchestrator.actions.executors.report import (
         _format_external_baseline_section,
     )
 
@@ -457,7 +457,7 @@ def test_report_section_renders_ok_with_reference_best():
 
 
 def test_report_section_renders_fetch_error_with_warning():
-    from hyperloom.orchestrator.action_executors.report import (
+    from hyperloom.orchestrator.actions.executors.report import (
         _format_external_baseline_section,
     )
 

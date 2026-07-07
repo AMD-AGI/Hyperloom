@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 
 
 @pytest.fixture

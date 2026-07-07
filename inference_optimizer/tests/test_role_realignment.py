@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.action_registry import ActionRegistry
+from hyperloom.orchestrator.actions.registry import ActionRegistry
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.system_prompts.critic_prompt_builder import (
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.prompts.critic_prompt_builder import (
     build_critic_prompt,
 )
-from hyperloom.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
@@ -264,14 +264,14 @@ def _silent_intent() -> Intent:
 
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
-    from hyperloom.orchestrator.backends import (
+    from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
         MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     backends = {

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 # fixtures
@@ -645,7 +645,7 @@ def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
 @pytest.mark.asyncio
 async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
     """A failed replay must leave ``warm_replay_in_flight`` False so PRELUDE can exit."""
-    from hyperloom.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phases.machine_state import (
         warm_replay_in_flight,
     )
 
@@ -813,7 +813,7 @@ def test_inject_warm_recipe_history_is_idempotent(tmp_path):
 
 def test_inject_warm_recipe_history_dedupes_with_existing_ledger(tmp_path):
     """A ledger row with the same fingerprint is not duplicated."""
-    from hyperloom.orchestrator.action_executors._canonical_fingerprint import (
+    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
         canonical_fingerprint,
     )
 

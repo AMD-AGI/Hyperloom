@@ -165,7 +165,7 @@ schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
 > Inside a running session, the equivalent guard is Kernel-agent IR-4
 > (`kill_server` + `check_gpu_memory` before every server (re)start —
-> see `src/hyperloom/orchestrator/system_prompts/kernel_agent.md`). IR-1 above is the
+> see `src/hyperloom/orchestrator/prompts/kernel_agent.md`). IR-1 above is the
 > *outer* gate that fires before the optimizer process exists.
 
 ### IR-2 — install.sh MUST succeed before every launch
@@ -213,7 +213,7 @@ entire IR-3 step.
 ### IR-4 / IR-6 / IR-7 — EXPLORE phase contracts (Coordinator-internal)
 
 These govern the optimizer's EXPLORE phase, not the launcher; the full
-contract lives in `src/hyperloom/orchestrator/system_prompts/orchestration.md`. In
+contract lives in `src/hyperloom/orchestrator/prompts/orchestration.md`. In
 brief:
 
 - **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
@@ -490,7 +490,7 @@ inference_optimizer optimize \
 - **Structured path for UI/backends**: instead of free text, pass
   `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
   `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
-  curated prompt internally (`src/hyperloom/orchestrator/quantization_schemes.py`). `none` or
+  curated prompt internally (`src/hyperloom/orchestrator/phases/quantization_schemes.py`). `none` or
   omit = no quantization. Free-text `--quantize` takes priority when both given.
 - **Keep `--precision` consistent with the quantization.** When a quantization
   scheme is requested, also set `--precision`/`PRECISION` to that scheme (e.g.
@@ -1011,7 +1011,7 @@ The optimizer should:
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
-  (`src/hyperloom/orchestrator/roofline_ceiling.py`) for the report's
+  (`src/hyperloom/orchestrator/kernel/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
   `last_trace_analyze`.

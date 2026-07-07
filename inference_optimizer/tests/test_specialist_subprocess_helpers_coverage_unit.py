@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 
-from hyperloom.orchestrator import specialist_subprocess as ss
-from hyperloom.orchestrator.specialist_subprocess import (
+from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _pick_worktree_base,
@@ -126,7 +126,7 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
 def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) -> None:
     import json
 
-    from hyperloom.orchestrator.specialist_leaf import LEAF_AGENT_NAME
+    from hyperloom.orchestrator.specialists.leaf import LEAF_AGENT_NAME
 
     d = _dispatcher()
     ws = tmp_path / "ws"

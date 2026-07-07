@@ -21,12 +21,12 @@ import yaml
 
 from inference_optimizer import cli
 from inference_optimizer import cli_model_gate
-from hyperloom.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors._grid_runner import (
     DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
     HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,
     inject_sglang_moe_runner_backend,
 )
-from hyperloom.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors._workload_envs import (
     _remove_moe_runner_backend_arg,
     materialize_config_with_envs,
 )

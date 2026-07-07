@@ -20,7 +20,7 @@ import inspect
 import pytest
 
 from inference_optimizer import cli
-from hyperloom.orchestrator.phase_state import (
+from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PHASE_BUDGET_PCT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,

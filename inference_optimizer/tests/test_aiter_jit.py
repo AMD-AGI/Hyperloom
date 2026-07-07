@@ -17,8 +17,8 @@ try:
 except ModuleNotFoundError:  # psutil is an optional runtime dependency
     psutil = None
 
-from hyperloom.orchestrator.action_executors import _aiter_jit
-from hyperloom.orchestrator.action_executors import baseline
+from hyperloom.orchestrator.actions.executors import _aiter_jit
+from hyperloom.orchestrator.actions.executors import baseline
 
 
 # The ``_any_live_compiler`` probe degrades to ``None`` when psutil is absent

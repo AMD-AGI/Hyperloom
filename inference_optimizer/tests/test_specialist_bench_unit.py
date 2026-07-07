@@ -10,7 +10,7 @@ so only the worktree git helpers remain here.
 from __future__ import annotations
 
 
-from hyperloom.orchestrator import specialist_bench as sb
+from hyperloom.orchestrator.specialists import bench as sb
 
 
 # ---- envelopes ----

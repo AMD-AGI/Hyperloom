@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 
-from hyperloom.orchestrator import specialist_subprocess as ss
-from hyperloom.orchestrator.specialist_subprocess import (
+from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
 )
 

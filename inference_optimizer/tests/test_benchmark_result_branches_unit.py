@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator.action_executors import benchmark_result as br
+from hyperloom.orchestrator.actions.executors import benchmark_result as br
 
 
 def _write_json(path: Path, data: dict) -> Path:

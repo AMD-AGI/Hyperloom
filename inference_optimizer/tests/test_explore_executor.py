@@ -12,32 +12,32 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.action_executors import (
+from hyperloom.orchestrator.actions.executors import (
     ExploreExecutor,
 )
-from hyperloom.orchestrator.action_executors.explore import (
+from hyperloom.orchestrator.actions.executors.explore import (
     DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
     DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC,
     _compute_explore_variant_timeout,
 )
-from hyperloom.orchestrator.action_executors._canonical_fingerprint import (
+from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
     canonical_fingerprint,
 )
-from hyperloom.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
     variant_fingerprint,
 )
-from hyperloom.orchestrator.action_executors.explore import (
+from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
 )
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.resource_lock import (
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.task_registry import TaskRegistry
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from inference_optimizer.storage import SqliteConnection
 from inference_optimizer.breakdown.collectors import (
     collect_capability_summary,
@@ -260,7 +260,7 @@ async def test_explore_executor_auto_derives_variant_timeout(
     async def _spy_run_grid(*args, **kwargs):
         captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
         # Return one fake successful result so the executor proceeds.
-        from hyperloom.orchestrator.action_executors._grid_runner import (
+        from hyperloom.orchestrator.actions.executors._grid_runner import (
             VariantResult,
         )
 
@@ -301,7 +301,7 @@ async def test_explore_executor_auto_derives_variant_timeout(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors.explore.run_grid",
+        "hyperloom.orchestrator.actions.executors.explore.run_grid",
         side_effect=_spy_run_grid,
     ):
         res = await sub.run_task(task)
@@ -327,7 +327,7 @@ async def test_explore_executor_safety_margin_param_overrides_default(
 
     async def _spy_run_grid(*args, **kwargs):
         captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
-        from hyperloom.orchestrator.action_executors._grid_runner import (
+        from hyperloom.orchestrator.actions.executors._grid_runner import (
             VariantResult,
         )
 
@@ -369,7 +369,7 @@ async def test_explore_executor_safety_margin_param_overrides_default(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors.explore.run_grid",
+        "hyperloom.orchestrator.actions.executors.explore.run_grid",
         side_effect=_spy_run_grid,
     ):
         res = await sub.run_task(task)
@@ -393,7 +393,7 @@ async def test_explore_executor_explicit_variant_timeout_wins(
 
     async def _spy_run_grid(*args, **kwargs):
         captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
-        from hyperloom.orchestrator.action_executors._grid_runner import (
+        from hyperloom.orchestrator.actions.executors._grid_runner import (
             VariantResult,
         )
 
@@ -434,7 +434,7 @@ async def test_explore_executor_explicit_variant_timeout_wins(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors.explore.run_grid",
+        "hyperloom.orchestrator.actions.executors.explore.run_grid",
         side_effect=_spy_run_grid,
     ):
         res = await sub.run_task(task)
@@ -504,7 +504,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -580,7 +580,7 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -642,7 +642,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -718,7 +718,7 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -776,7 +776,7 @@ async def test_explore_executor_warm_decision_runs_three_rounds_on_keep(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -832,7 +832,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -898,7 +898,7 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -916,7 +916,7 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
 
 def test_default_keep_and_stack_stable_thresholds():
     """Pin the KEEP gate (1.0%) and the lower stack-rebench stability floor (0.5%)."""
-    from hyperloom.orchestrator.action_executors.explore import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         DEFAULT_KEEP_THRESHOLD_PCT,
         DEFAULT_STACK_STABLE_PCT,
     )
@@ -929,7 +929,7 @@ def test_default_keep_and_stack_stable_thresholds():
 
 def test_stack_stable_floor_arithmetic_at_new_default():
     """Integration-pin: +0.6% rebench clears the 0.5% floor, +0.3% falls below and is evicted."""
-    from hyperloom.orchestrator.action_executors.explore import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         DEFAULT_STACK_STABLE_PCT,
     )
 
@@ -959,7 +959,7 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     output_dir = tmp_path / "explore-overtime"
 
     # Return the OVERTIME_KILL_RETURNCODE sentinel directly to bypass the poll loop.
-    from hyperloom.orchestrator.action_executors._subprocess_kill import (
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         OVERTIME_KILL_RETURNCODE,
     )
 
@@ -995,7 +995,7 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_kill,
     ):
         res = await sub.run_task(task)
@@ -1079,7 +1079,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_kill,
     ):
         res = await sub.run_task(task)
@@ -1293,7 +1293,7 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
     received_grid: list[list[str]] = []
 
     # Patch ``run_grid`` bound INSIDE the explore module (imported at module load).
-    from hyperloom.orchestrator.action_executors import (
+    from hyperloom.orchestrator.actions.executors import (
         explore as explore_mod,
     )
 
@@ -1359,7 +1359,7 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch.delenv("MODEL_PATH", raising=False)
     monkeypatch.delenv("FRAMEWORK", raising=False)
     # Force the help-text probe to return empty (simulates atom not importable).
-    from hyperloom.orchestrator.action_executors import (
+    from hyperloom.orchestrator.actions.executors import (
         _grid_runner,
     )
 
@@ -1379,7 +1379,7 @@ def test_grid_variants_from_payload_coerces_list_extra_args():
     space-joined into a shell-arg string, not stringified into a Python repr
     (which Magpie would splice verbatim into ``vllm serve`` -> the server
     rejects it as ``unrecognized arguments`` and the variant aborts)."""
-    from hyperloom.orchestrator.action_executors.explore import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         _grid_variants_from_payload,
     )
 

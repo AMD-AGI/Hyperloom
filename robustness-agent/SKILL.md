@@ -101,7 +101,7 @@ Exit code `0` = logical success (zero or more intents); `2` = adapter /
 configuration bug.
 
 The host-side wrapper that drives this subprocess lives in
-`src/hyperloom/orchestrator/backends/robustness_agent.py:RobustnessAgentBackend`,
+`src/hyperloom/orchestrator/roles/robustness_agent.py:RobustnessAgentBackend`,
 mirroring the layout of `CriticAgentBackend`. End-to-end tests in
 `inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
 `robustness-agent/tests/test_runtime_cli.py` together cover the full

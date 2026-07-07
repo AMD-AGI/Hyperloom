@@ -12,25 +12,25 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator import kernel_request_handlers as krh
-from hyperloom.orchestrator.action_executors import (
+from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.actions.executors import (
     ReportExecutor,
 )
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.sub_agent_runner import (
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
-from hyperloom.orchestrator.resource_lock import (
+from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.storage import SqliteConnection
 
@@ -45,7 +45,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver so the unit test never spawns a real probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.action_executors import _grid_runner
+    from hyperloom.orchestrator.actions.executors import _grid_runner
 
     monkeypatch.setattr(
         _grid_runner,
@@ -189,7 +189,7 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -250,7 +250,7 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -309,7 +309,7 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -366,7 +366,7 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -407,7 +407,7 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -444,7 +444,7 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "REVERT"
@@ -490,7 +490,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -503,7 +503,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     assert res["decision"] == "REVERT"
     assert res["error"] == "re-baseline did not succeed"
     assert isinstance(res["error_class"], str) and res["error_class"]
-    from hyperloom.orchestrator import shared_state as _ss
+    from hyperloom.orchestrator.state import shared_state as _ss
 
     assert res["error_class"] not in _ss._INTEGRATE_FAULT_ERROR_CLASSES
 
@@ -550,7 +550,7 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -605,7 +605,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -738,7 +738,7 @@ async def test_integrate_handler_injects_extra_server_args(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -781,7 +781,7 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "NEEDS_REVIEW"
@@ -829,7 +829,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
         }
         c.shared_state.save(session_dir)
         with patch(
-            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
         ):
             await c._handle_intent(
                 "orchestration",
@@ -924,7 +924,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
             },
         }
         with patch(
-            "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
         ):
             for _ in range(4):
                 await c._handle_intent(
@@ -1106,7 +1106,7 @@ async def test_integrate_keep_schedules_after_kernel_opt_rocprof(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
@@ -1150,7 +1150,7 @@ async def test_integrate_revert_skips_after_kernel_opt_rocprof(
         "skip_rebuild": True,
     }
     with patch(
-        "hyperloom.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 

@@ -9,15 +9,15 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.action_executors.roofline import (
+from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_trace_path,
     _failed,
     make_roofline_executor,
 )
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 # Test fixtures
@@ -76,10 +76,10 @@ def _patch_subs(profile_result, ta_result):
         return ta_result
 
     return patch(
-        "hyperloom.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
         new=fake_ta,
     )
 
@@ -416,19 +416,19 @@ def test_resolve_session_dir_handles_missing_extra():
 # roofline executor SharedState mutations to state.json.
 import json
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
     MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import (
+from hyperloom.orchestrator.loop.coordinator import (
     _AUDIT_ACTIONS as COORDINATOR_AUDIT_ACTIONS,
     Coordinator,
 )
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.shared_state import (
+from hyperloom.orchestrator.state.shared_state import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
     _KEY_METRIC_MAP,
 )
@@ -779,7 +779,7 @@ def test_strip_keeps_surrounding_markdown_intact():
 
 # (formerly test_n26_steady_state_auto_retry.py) — N26: RooflineExecutor auto-retries
 # trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.
-from hyperloom.orchestrator.action_executors.roofline import (
+from hyperloom.orchestrator.actions.executors.roofline import (
     _extract_steady_state_retry_mode,
 )
 
@@ -911,11 +911,11 @@ def _run_roofline_captured_payload(tmp_path, *, reason: str) -> dict:
     executor = RooflineExecutor(shared_state=state)
     with (
         patch(
-            "hyperloom.orchestrator.action_executors.profile.profile_executor",
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -1008,11 +1008,11 @@ def _n26_patch_subs(profile_result, ta_results):
 
     return (
         patch(
-            "hyperloom.orchestrator.action_executors.profile.profile_executor",
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
             new=fake_ta,
         ),
         ta_calls,
@@ -1162,11 +1162,11 @@ async def test_retry_exception_propagates(tmp_path):
     executor = RooflineExecutor(shared_state=state)
     with (
         patch(
-            "hyperloom.orchestrator.action_executors.profile.profile_executor",
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -1209,11 +1209,11 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
     executor = RooflineExecutor(shared_state=state)
     with (
         patch(
-            "hyperloom.orchestrator.action_executors.profile.profile_executor",
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
             new=fake_ta,
         ),
     ):

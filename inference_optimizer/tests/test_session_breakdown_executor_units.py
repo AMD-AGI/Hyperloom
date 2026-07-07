@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.action_executors import session_breakdown as sb
+from hyperloom.orchestrator.actions.executors import session_breakdown as sb
 
 
 # Helpers

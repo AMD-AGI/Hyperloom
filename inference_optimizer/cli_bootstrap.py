@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from .paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
 from .session_paths import agent_prompt_snapshot
 from .cli_model_gate import _load_model_arch, _load_model_config_tags
@@ -70,7 +70,7 @@ def _seed_shared_state(
         The seeded :class:`SharedState` instance.
     """
     # research_lane capacity is locked for the session; clamp to [0, ceiling] (2×GPU) to protect quota/PR-Monitor.
-    from hyperloom.orchestrator.policy import (
+    from hyperloom.orchestrator.policy.gate import (
         detect_gpu_count,
         research_lane_ceiling,
     )
@@ -435,7 +435,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
 def _print_kernel_opt_summary_line(state: SharedState) -> None:
     """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
     try:
-        from hyperloom.orchestrator.kernel_attempt_summary import (
+        from hyperloom.orchestrator.kernel.attempt_summary import (
             build_kernel_optimization_summary,
         )
         session_dir = _resolve_session_dir_for_summary(state)

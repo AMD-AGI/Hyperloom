@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.action_registry import (
+from hyperloom.orchestrator.actions.registry import (
     ActionRegistry,
     VALID_PIPELINE_PHASES,
 )
-from hyperloom.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
@@ -63,7 +63,7 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
 def test_recover_is_robustness_delegate_only_with_real_executor(registry):
     """``recover`` is ROBUSTNESS_DELEGATE_ONLY: real executor + metadata, but off the Orchestration prompt surface."""
     from inference_optimizer.cli import _REAL_EXECUTORS_FULL
-    from hyperloom.orchestrator.action_executors.recover import (
+    from hyperloom.orchestrator.actions.executors.recover import (
         RecoverExecutor,
         recover_executor,
     )

@@ -8,8 +8,8 @@ import re
 
 import pytest
 
-from hyperloom.orchestrator.backends import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -114,7 +114,7 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
     """v0.8 §3.9 — the denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy import PolicyDenied
+        from hyperloom.orchestrator.policy.gate import PolicyDenied
 
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -144,7 +144,7 @@ async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir)
     """Long-run continuity: the streak >= 5 auto-prune_family reaction was removed; the family is NOT pruned."""
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy import PolicyDenied
+        from hyperloom.orchestrator.policy.gate import PolicyDenied
 
         intent = _delegate(action="params", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -172,7 +172,7 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
     """Long-run continuity: the streak >= 10 ``policy_loop`` stop was removed; stop_reason stays unset."""
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy import PolicyDenied
+        from hyperloom.orchestrator.policy.gate import PolicyDenied
 
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -199,7 +199,7 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
 async def test_successful_delegate_resets_policy_denial_streak(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        from hyperloom.orchestrator.policy import PolicyDenied
+        from hyperloom.orchestrator.policy.gate import PolicyDenied
 
         intent = _delegate(key="k-reset")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
@@ -220,20 +220,20 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
 
 import pytest
 
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from hyperloom.orchestrator.phase_state import (
+from hyperloom.orchestrator.phases.machine_state import (
     PHASE_ALLOWED_ACTIONS,
     PHASE_EXPLORE,
 )
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
 )
-from hyperloom.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
 )
 
@@ -332,7 +332,7 @@ def test_cli_real_executors_still_contains_explore_and_sweep():
 # Mission-summary + robustness prompt point at explore, not retired names
 def test_dead_c_mission_summary_tag_points_at_explore():
     """KB_gaps/Dead-C — the ``stack changed`` warning points at ``explore``, not the retired ``validate_stack``."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState(
         baseline_tput=100.0,
@@ -345,7 +345,7 @@ def test_dead_c_mission_summary_tag_points_at_explore():
 
 
 def test_mission_summary_surfaces_resume_pending_revalidation():
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState(
         baseline_tput=100.0,

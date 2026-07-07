@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.action_executors._magpie_patcher import (
+from hyperloom.orchestrator.actions.executors._magpie_patcher import (
     _ATOMIC_REASON_ALREADY_PATCHED,
     _ATOMIC_REASON_APPLIED,
     _ATOMIC_REASON_MISSING,
@@ -609,7 +609,7 @@ def test_patched_block_uses_unique_aliases():
 
 
 # Helper-method unit tests (formerly test_magpie_patcher_units.py)
-from hyperloom.orchestrator.action_executors import _magpie_patcher as mp
+from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
 
 # Legacy block wrapped in a tiny function body so the file tokenises as Python.

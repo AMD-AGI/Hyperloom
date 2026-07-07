@@ -93,8 +93,8 @@ def test_known_frameworks_constant_matches_dict():
 
 def test_repo_map_in_sync_with_io_fallback():
     """G1 — both ``_FRAMEWORK_TO_REPO_URL`` dicts must stay identical so a drift can't silently break the framework loop. Skipped when inference_optimizer is absent."""
-    pytest.importorskip("hyperloom.orchestrator.framework_agent_client")
-    from hyperloom.orchestrator import framework_agent_client as fac
+    pytest.importorskip("hyperloom.orchestrator.framework.client")
+    from hyperloom.orchestrator.framework import client as fac
 
     # The IO fallback dict only lives in the ``except ImportError`` branch, so
     # when framework_agent is importable the symbol isn't module-bound; read source.

@@ -11,15 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.message_bus import Message
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.bus.message_bus import Message
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -400,7 +400,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coord: Coordinator, monkeypatch) -> None:
     # Gap C: a crashed integrate window with NO kept result but applied patches →
     # reverse-apply (rollback) + clear the sentinel.
-    import hyperloom.orchestrator.action_executors.integrate_patch as ip
+    import hyperloom.orchestrator.actions.executors.integrate_patch as ip
 
     reversed_calls: list[str] = []
 
@@ -703,7 +703,7 @@ async def test_stop_cancels_and_closes(coord: Coordinator) -> None:
 
 # -- _pump_dispatcher_once --------------------------------------------------
 def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=None):
-    from hyperloom.orchestrator.sub_agent_runner import SubAgentResult
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
     return SubAgentResult(task_id=task_id, state=state, result=result if result is not None else {}, error=error)
 
@@ -1039,7 +1039,7 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
     monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
     monkeypatch.setattr(coord.advisory, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
     monkeypatch.setattr(coord.advisory, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
-    from hyperloom.orchestrator import research_hints as rh
+    from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-BLOCK")
 
@@ -1076,7 +1076,7 @@ async def test_compose_prompt_orchestration_advisory_blocks_raise(
     monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", _boom)
     monkeypatch.setattr(coord.advisory, "_priors_match_advisory_block", _boom)
     monkeypatch.setattr(coord.advisory, "_plateau_advisory_block", _boom)
-    from hyperloom.orchestrator import research_hints as rh
+    from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", _boom)
 
@@ -1120,7 +1120,7 @@ async def test_compose_prompt_robustness_lists_stale_specialists(
 
 # -- _promote_to_shared_state additional branches ---------------------------
 def _ptask(tid: str, kind: str):
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
 
@@ -1133,7 +1133,7 @@ async def test_promote_baseline_no_warmup_parses_materialized(
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"  # skip cascade
     # tree-reform.MD P2.2 3b-1: _promote_to_shared_state moved to the _writeback
     # collaborator, which binds _parse_baseline_workload_extra in its own module.
-    import hyperloom.orchestrator._writeback as mod
+    import hyperloom.orchestrator.loop.writeback as mod
 
     monkeypatch.setattr(mod, "_parse_baseline_workload_extra", lambda path: {"isl": 256})
     await coord._promote_to_shared_state(
@@ -1153,7 +1153,7 @@ async def test_promote_baseline_materialized_parse_raises(
     monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
-    import hyperloom.orchestrator.coordinator as mod
+    import hyperloom.orchestrator.loop.coordinator as mod
 
     def _boom(path):
         raise RuntimeError("parse failed")
@@ -1365,13 +1365,13 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
         },
     )
     monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", lambda: "GAP-NOTES")
-    from hyperloom.orchestrator import research_hints as rh
+    from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
-    import hyperloom.orchestrator.shared_state as ss_mod
+    import hyperloom.orchestrator.state.shared_state as ss_mod
 
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
-    from hyperloom.orchestrator import framework_paths as fp
+    from hyperloom.orchestrator.framework import paths as fp
 
     monkeypatch.setattr(fp, "resolve_source_file_allowlist", lambda: ["/src/root"])
 
@@ -1389,7 +1389,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 # -- _record_fact_per_task (cortex KB path) ---------------------------------
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     coord.cortex_kb = object()  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
@@ -1408,7 +1408,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
 
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     coord.cortex_kb = object()
     amends: list[dict] = []
@@ -1427,7 +1427,7 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 # -- _plateau_advisory_block (triggered) ------------------------------------
 @pytest.mark.asyncio
 async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_EXPLORE
     monkeypatch.setattr(
@@ -1443,7 +1443,7 @@ async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatc
 
 @pytest.mark.asyncio
 async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_KERNEL_AGENT
     monkeypatch.setattr(ps, "compute_plateau_kernel", lambda *a, **k: (True, {"revert_streak": 4}))
@@ -1453,7 +1453,7 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
 
 @pytest.mark.asyncio
 async def test_plateau_advisory_framework_triggered(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
@@ -1607,7 +1607,7 @@ def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
 # -- _handle_intent routing -------------------------------------------------
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy import PolicyDenied
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     recorded: list = []
 
@@ -1668,7 +1668,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
 # -- _advance_phase_if_needed -----------------------------------------------
 @pytest.mark.asyncio
 async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "EXPLORE"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "x", {}))
@@ -1682,7 +1682,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
 
 @pytest.mark.asyncio
 async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "PRELUDE"
     monkeypatch.setattr(
@@ -1699,7 +1699,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 
 @pytest.mark.asyncio
 async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.stop_reason = ""
@@ -1717,7 +1717,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 # -- _materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
-    from hyperloom.orchestrator.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.coordinator import PendingProposal
 
     return PendingProposal(
         proposal_msg_id=msg_id,
@@ -1789,7 +1789,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy import PolicyDenied
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     monkeypatch.setattr(
         coord.gating,
@@ -1837,7 +1837,7 @@ def _make_real_patch(coord: Coordinator, sid: str) -> None:
 
 @pytest.mark.asyncio
 async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     sid = "spec-verdict"
     _make_real_patch(coord, sid)
@@ -1853,8 +1853,8 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
 
 @pytest.mark.asyncio
 async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
-    from hyperloom.orchestrator.coordinator import PendingProposal
+    from hyperloom.orchestrator.state.task_registry import Task
+    from hyperloom.orchestrator.loop.coordinator import PendingProposal
 
     sid = "spec-inflight"
     _make_real_patch(coord, sid)
@@ -1876,7 +1876,7 @@ async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> N
 
 # -- _promote_warm_replay branches ------------------------------------------
 def _warm_task():
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     return Task(
         task_id="warm-x",
@@ -1959,7 +1959,7 @@ async def test_cortex_finalize_merges_existing_row(coord: Coordinator, monkeypat
 @pytest.mark.asyncio
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
     async def _fake_run(task, **kw):
-        from hyperloom.orchestrator.sub_agent_runner import SubAgentResult
+        from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
         return SubAgentResult(task_id=task.task_id, state="succeeded", result={}, error=None)
 
@@ -1971,7 +1971,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
 # -- _pump_framework_agent_phase -----------------------------------------------
 def _enter_framework(coord: Coordinator) -> None:
-    import hyperloom.orchestrator.phase_state as ps
+    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     coord.shared_state.framework_agent_phase_done = False
@@ -1999,7 +1999,7 @@ async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator)
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator import framework_agent_client as _fa_client
+    from hyperloom.orchestrator.framework import client as _fa_client
 
     _enter_framework(coord)
     coord.shared_state.framework_agent_discover_failures = 0
@@ -2070,7 +2070,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
 @pytest.mark.asyncio
 async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
-    from hyperloom.orchestrator.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.coordinator import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m1",
@@ -2090,7 +2090,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
 @pytest.mark.asyncio
 async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
     """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
-    from hyperloom.orchestrator.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.coordinator import PendingProposal
 
     enq: list = []
 

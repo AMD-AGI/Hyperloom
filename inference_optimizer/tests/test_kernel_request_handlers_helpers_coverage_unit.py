@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 
-from hyperloom.orchestrator import kernel_request_handlers as krh
+from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
 # -- _normalize_precision / _normalize_kernel_id --------------------------

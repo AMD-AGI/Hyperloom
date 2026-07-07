@@ -236,7 +236,7 @@ def build_hyperloom_arch_spec(platform: str) -> dict | None:
         has no achievable spec for the platform.
     """
     try:
-        from hyperloom.orchestrator.roofline_ceiling import HW_SPECS_ACHIEVABLE
+        from hyperloom.orchestrator.kernel.roofline_ceiling import HW_SPECS_ACHIEVABLE
     except Exception:
         return None
     spec = HW_SPECS_ACHIEVABLE.get((platform or "").strip().lower())

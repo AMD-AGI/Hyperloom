@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.orchestration_memory import (
+from hyperloom.orchestrator.state.orchestration_memory import (
     CheckpointPolicy,
     CheckpointTracker,
     build_memory_record,
@@ -14,7 +14,7 @@ from hyperloom.orchestrator.orchestration_memory import (
     parse_checkpoint_reply,
     render_memory_for_seed,
 )
-from hyperloom.orchestrator import orchestration_memory as om
+from hyperloom.orchestrator.state import orchestration_memory as om
 
 
 # ---- CheckpointPolicy ----

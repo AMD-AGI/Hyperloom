@@ -16,7 +16,7 @@ from inference_optimizer.cli import (
     _parse_conc_sweep_default,
     _resolve_run_max_model_len,
 )
-from hyperloom.orchestrator.action_executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     materialize_config_with_envs,
 )

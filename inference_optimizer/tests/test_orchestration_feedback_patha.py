@@ -6,19 +6,19 @@ import asyncio
 
 import pytest
 
-from hyperloom.orchestrator.backends import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.backends.mcp_context_tools import (
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles.mcp_context_tools import (
     CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_SPECS,
     ContextProvider,
 )
-from hyperloom.orchestrator.coordinator import (
+from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     _first_present,
     _format_inbox_event,
 )
-from hyperloom.orchestrator.message_bus import Message
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.bus.message_bus import Message
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from inference_optimizer.paths import make_session_dir
 
 

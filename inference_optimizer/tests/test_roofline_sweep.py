@@ -42,7 +42,7 @@ def test_extract_templates_optimized_via_envs_only() -> None:
 
 # compute_ceiling: parity with the underlying roofline_ceiling helper
 def test_compute_ceiling_matches_underlying_formula() -> None:
-    from hyperloom.orchestrator.roofline_ceiling import (
+    from hyperloom.orchestrator.kernel.roofline_ceiling import (
         ModelMeta,
         compute_theoretical_peak_output_tok_per_sec,
     )
@@ -139,7 +139,7 @@ class _FakeServer:
 
 
 def test_sweep_one_template_dispatches_per_conc(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.roofline_ceiling import ModelMeta
+    from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 
     meta = ModelMeta(
         weight_bytes=60_000_000_000,
@@ -179,7 +179,7 @@ def test_sweep_one_template_dispatches_per_conc(tmp_path: Path) -> None:
 
 
 def test_sweep_one_template_marks_failed_bench_as_oom(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.roofline_ceiling import ModelMeta
+    from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 
     meta = ModelMeta(
         weight_bytes=60_000_000_000,

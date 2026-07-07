@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 # Stubs — minimal SharedState + TaskRegistry doubles.
@@ -59,7 +59,7 @@ class _StubTaskRegistry:
         if existing is not None:
             return existing, True
         import uuid as _uuid
-        from hyperloom.orchestrator.task_registry import Task
+        from hyperloom.orchestrator.state.task_registry import Task
 
         task = Task(
             task_id=_uuid.uuid4().hex,
@@ -73,7 +73,7 @@ class _StubTaskRegistry:
         return task, False
 
     async def get(self, task_id: str):
-        from hyperloom.orchestrator.task_registry import TaskNotFound
+        from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
         t = self._tasks.get(task_id)
         if t is None:
@@ -199,7 +199,7 @@ class TestWatermarkRatioEnvOverride:
         monkeypatch: pytest.MonkeyPatch,
     ):
         """The module-level resolver returns 1.10 when the env var is unset."""
-        from hyperloom.orchestrator.coordinator import (
+        from hyperloom.orchestrator.loop.coordinator import (
             _resolve_roofline_watermark_ratio,
         )
 

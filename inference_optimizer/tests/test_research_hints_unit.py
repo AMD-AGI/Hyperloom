@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.orchestrator import research_hints as rh
+from hyperloom.orchestrator.knowledge import research_hints as rh
 from inference_optimizer import session_paths
 
 

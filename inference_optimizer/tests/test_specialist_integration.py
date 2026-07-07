@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.backends.mock_backend import (
+from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
@@ -21,7 +21,7 @@ from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
 
 # Fixtures — mocks limited to network surfaces (LLM + KB)
@@ -175,7 +175,7 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
 @pytest.mark.asyncio
 async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     """Warmup mutates ``params`` with the flattened PR feed, pr_monitor_available, and warm-start fields."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = _FakeKnowledgePlane()
@@ -212,7 +212,7 @@ async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
     """``--degraded-kb`` (knowledge_plane=None) still leaves a valid empty ``pr_feed``."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = None
@@ -235,7 +235,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
 @pytest.mark.asyncio
 async def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
     """A pre-populated ``params['pr_feed']`` is not clobbered — the explicit value wins."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = _FakeKnowledgePlane()
@@ -434,7 +434,7 @@ def test_cli_specialist_flags_present():
 
 def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     import inference_optimizer.cli as cli_mod
-    from hyperloom.orchestrator import policy as policy_mod
+    from hyperloom.orchestrator.policy import gate as policy_mod
 
     # research-lane-capacity default is GPU-derived; pin the GPU count for determinism.
     monkeypatch.delenv(
@@ -452,7 +452,7 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     )
     # Default capacity is the research-lane ceiling (2 × visible GPU).
     assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
-    from hyperloom.orchestrator.specialist_domains import (
+    from hyperloom.orchestrator.specialists.domains import (
         DEFAULT_SPECIALIST_MAX_TURNS,
     )
 

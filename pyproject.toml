@@ -73,10 +73,11 @@ inference_optimizer = [
     "kb/framework/*.md",
     "kb/recipes/*.json",
 ]
-# tree-reform.MD P2.3: orchestrator/system_prompts/*.md moved with the
-# orchestrator -> src/hyperloom/orchestrator promotion.
+# tree-reform.MD P2.3: system_prompts/*.md moved with the
+# orchestrator -> src/hyperloom/orchestrator promotion (stage A) and further
+# into orchestrator/prompts/ during the internal subpackage split (stage B).
 hyperloom = [
-    "orchestrator/system_prompts/*.md",
+    "orchestrator/prompts/*.md",
 ]
 
 [tool.pytest.ini_options]
@@ -159,9 +160,9 @@ omit = [
     "inference_optimizer/multi_node/scripts/*",
     "inference_optimizer/multi_node/_internal/*",
     # Subprocess wrappers + multi-node server lifecycle.
-    "src/hyperloom/orchestrator/action_executors/_subprocess_kill.py",
-    "src/hyperloom/orchestrator/action_executors/_multi_node_server_lifecycle.py",
-    "src/hyperloom/orchestrator/action_executors/_multi_node_env.py",
+    "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
+    "src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py",
+    "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "inference_optimizer/breakdown/reporters/llm_client.py",
     # Robustness-agent standalone reactor CLI wrapper.
@@ -209,10 +210,10 @@ omit = [
     # benchmark_lib.sh rewriting that already has dedicated integration
     # coverage; the per-call IO error branches are not unit-testable
     # without monkeypatching open()/fcntl wholesale.
-    "src/hyperloom/orchestrator/action_executors/_inferencex_patcher.py",
+    "src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py",
     # TraceLens server patcher — large subprocess pipeline (`git apply`
     # / `patch --fuzz=2` fallback) covered by integration tests.
-    "src/hyperloom/orchestrator/action_executors/_server_patcher.py",
+    "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
     # breakdown/collectors.py is a 6k-line data-collection module
     # exercised end-to-end by the breakdown reporter tests. Direct
     # unit-testing every leaf path doubles the test surface for
@@ -223,18 +224,18 @@ omit = [
     # Subprocess transport for the robustness-agent runtime CLI; the
     # in-process role contract is covered by the role/runtime/cli tests
     # plus the e2e harness in inference_optimizer/tests/test_p2_robustness_agent_e2e.
-    "src/hyperloom/orchestrator/backends/robustness_agent.py",
+    "src/hyperloom/orchestrator/roles/robustness_agent.py",
     # Legacy conductor SQLite bridge superseded by the M1 reactor / CLI
     # transport. Kept for backwards compat; not unit-tested.
     "robustness-agent/src/robustness_agent/conductor.py",
     # Critic agent backend talks to the critic-agent runtime via a real
     # subprocess transport; exercised end-to-end by the critic_agent_e2e
     # marker tests.
-    "src/hyperloom/orchestrator/backends/critic_agent.py",
+    "src/hyperloom/orchestrator/roles/critic_agent.py",
     # Profile / baseline executors are subprocess-heavy benchmark drivers
     # covered by the dedicated profile/baseline parametric test suites.
-    "src/hyperloom/orchestrator/action_executors/profile.py",
-    "src/hyperloom/orchestrator/action_executors/baseline.py",
+    "src/hyperloom/orchestrator/actions/executors/profile.py",
+    "src/hyperloom/orchestrator/actions/executors/baseline.py",
     # Legacy robustness-agent monitors superseded by the M1 reactor;
     # provider-side tests exercise the GPU/disk/server probes today.
     "robustness-agent/src/robustness_agent/monitors/server_health.py",
@@ -357,18 +358,21 @@ ignore = ["E501", "E741"]
 "**/tests/**/*.py" = ["F811", "E402", "F841"]
 # Modules that intentionally place imports after a module docstring + early
 # constants / conditional setup (lazy or ordering-sensitive imports).
-"src/hyperloom/orchestrator/coordinator.py" = ["E402"]
+# tree-reform.MD P2.3 stage B: path updated for the loop/ subpackage move.
+"src/hyperloom/orchestrator/loop/coordinator.py" = ["E402"]
 # tree-reform.MD P2.2: SharedState mixins are imported after the module-level
 # helpers/constants they close over (cycle-safe ordering), so the mixin import
-# sits below the top import block.
-"src/hyperloom/orchestrator/shared_state.py" = ["E402"]
+# sits below the top import block. P2.3 stage B: path updated for state/.
+"src/hyperloom/orchestrator/state/shared_state.py" = ["E402"]
 # tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,dynamo}.py
 # after the base helpers/constants they import back are already defined
 # (cycle-safe ordering), so the import sits below the top import block.
 "inference_optimizer/multi_node/cli.py" = ["E402"]
 "inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
 "inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
-"src/hyperloom/orchestrator/specialist_runner.py" = ["E402"]
-"src/hyperloom/orchestrator/roofline_ceiling.py" = ["E402"]
-"src/hyperloom/orchestrator/system_prompts/specialist_prompt_builder.py" = ["E402"]
+# tree-reform.MD P2.3 stage B: paths updated for the specialists/, kernel/,
+# and prompts/ subpackage moves.
+"src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
+"src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
+"src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "critic-agent/runtime/decision_reviewer.py" = ["E402"]

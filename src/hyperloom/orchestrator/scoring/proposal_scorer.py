@@ -1,0 +1,528 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""ProposalScorer — purely advisory multi-model scorer for specialist proposals.
+
+Scores each variant with one or more LLM models (advisory only; never
+sorts/ranks/auto-selects, never touches Critic/PolicyGate). Each model scored
+independently via ``asyncio.gather``.
+
+Output schema (``score`` return value)::
+
+    {"scale": "0-10", "models": {"<slug>": {"<name>": {"score": <0-10>, "reason": "<str>"}}}, "errors": {...}}
+
+Test seam: pass ``client_factory`` to bypass real client construction.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from .._json_io import extract_first_json_with_key
+from ..roles.base import parse_call_timeout_env
+from ..loop.coordinator_helpers import format_exc_brief
+from ..trace.conversation_trace import ConversationRecord, append_conversation
+from ..trace.llm_trace import LLMCallRecord, append_llm_call
+
+log = logging.getLogger(__name__)
+
+
+DEFAULT_SCORER_MODELS: tuple[str, ...] = (
+    "claude-opus-4-8",
+    "gpt-5.5",
+    # Kimi K2.6 / Gemini 3.1 Pro are reasoning models needing the larger 4096 token cap; Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
+    "dvue-aoai-005-Kimi-K2.6",
+    "gemini/gemini-3.1-pro-preview",
+)
+
+# Soft cap on proposals fed to each model so a pathological set can't blow up the prompt.
+_MAX_PROPOSALS_SCORED: int = 16
+_MAX_FIELD_CHARS: int = 600
+
+
+_SCORING_INSTRUCTIONS = """
+You are scoring candidate serving-config variants proposed by a perf
+specialist for an LLM-inference optimization run on AMD GPUs.
+
+For EACH proposal below, output a single composite score from 0 to 10:
+how likely / how much this variant improves serving THROUGHPUT for the
+stated gap, grounded ONLY in the evidence shown. 10 = very likely a
+large win; 0 = irrelevant or likely harmful. Be calibrated, not generous.
+
+Output ONLY one compact JSON object, no prose, no markdown fence needed:
+
+{"scores": {"<proposal_name>": {"score": <0-10 number>, "reason": "<= 15 words"}}}
+
+Rules:
+- One entry per proposal, keyed by its exact "name".
+- "reason" MUST be <= 15 words. Keep it terse to keep the reply short.
+- Do not add keys other than "score" and "reason".
+""".strip()
+
+
+# Bare top-level "scores" object.
+_BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
+
+
+def _extract_scores_json(text: str) -> dict[str, Any] | None:
+    """Pull the first valid ``{"scores": {...}}`` object out of a reply."""
+    return extract_first_json_with_key(text, "scores", _BARE_JSON_RE)
+
+
+def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
+    """Stringify a value and truncate it to a maximum length.
+
+    Args:
+        value: Value to stringify (``None`` becomes an empty string).
+        limit: Maximum number of characters to keep.
+
+    Returns:
+        The string, suffixed with an ellipsis if it was truncated.
+    """
+    s = "" if value is None else str(value)
+    return s if len(s) <= limit else (s[:limit] + "…")
+
+
+def _coerce_score(raw: Any) -> float | None:
+    """Coerce a model-emitted score into a clamped [0, 10] float.
+
+    Args:
+        raw: Raw score value emitted by a model.
+
+    Returns:
+        The score clamped to ``[0, 10]``, or ``None`` if it could not be
+        coerced to a finite number.
+    """
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val):
+        return None
+    return max(0.0, min(10.0, val))
+
+
+def _normalise_model_scores(
+    parsed: dict[str, Any],
+    *,
+    proposal_names: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons).
+
+    Args:
+        parsed: A parsed ``{"scores": {...}}`` dict from a model reply.
+        proposal_names: Names of the proposals that were actually scored;
+            scores for any other name are discarded.
+
+    Returns:
+        A mapping of proposal name to its clamped score and truncated reason.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    scores = parsed.get("scores")
+    if not isinstance(scores, dict):
+        return out
+    known = set(proposal_names)
+    for name, entry in scores.items():
+        key = str(name)
+        if key not in known or not isinstance(entry, dict):
+            continue
+        score = _coerce_score(entry.get("score"))
+        if score is None:
+            continue
+        out[key] = {
+            "score": score,
+            "reason": _clip(entry.get("reason"), limit=160),
+        }
+    return out
+
+
+@dataclass
+class ProposalScorer:
+    """Advisory multi-model scorer (see module docstring)."""
+
+    models: tuple[str, ...] = DEFAULT_SCORER_MODELS
+    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL; the
+    # AMD single-gateway ANTHROPIC_* vars stay accepted as fallbacks below.
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url_env: str = "OPENAI_BASE_URL"
+    # 4096 so reasoning raters (e.g. Kimi K2.6) can finish reasoning and still emit the scores JSON.
+    max_completion_tokens: int = 4096
+    call_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(
+            "INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC",
+            default=120.0,
+        )
+    )
+
+    # Test seam — set to bypass real OpenAI client construction.
+    client_factory: Callable[[], Any] | None = None
+
+    # When set, each model-scoring call appends its token
+    # usage to ``<session_dir>/reports/trace/llm_calls.jsonl`` under
+    # ``component=proposal_scorer``. ``None`` (the default, and the case
+    # in unit tests) disables trace writes entirely.
+    session_dir: Path | None = None
+
+    _client: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Normalize the model list and optionally eager-build the client.
+
+        Strips and de-blanks the configured model names. If a
+        ``client_factory`` is provided the client is built immediately;
+        otherwise it is constructed lazily on first use so an
+        unconfigured environment degrades per-call rather than at boot.
+        """
+        self.models = tuple(m for m in (str(x).strip() for x in (self.models or ())) if m)
+        if self.client_factory is not None:
+            self._client = self.client_factory()
+            return
+        # Lazy: construct on first use so an unconfigured env degrades per-call, not at boot.
+        self._client = None
+
+    def _ensure_client(self) -> Any:
+        """Return the cached client, constructing one on first use.
+
+        Returns:
+            The OpenAI-compatible async client.
+
+        Raises:
+            RuntimeError: If the ``openai`` SDK is missing or no API key
+                is configured in the environment.
+        """
+        if self._client is not None:
+            return self._client
+        try:
+            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("openai SDK not installed; run `pip install openai>=1.50`") from exc
+        api_key = (
+            os.environ.get(self.api_key_env)
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        )
+        if not api_key:
+            raise RuntimeError(f"{self.api_key_env} not set in env (ProposalScorer cannot auth)")
+        base_url = (
+            os.environ.get(self.base_url_env)
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
+        )
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = AsyncOpenAI(**kwargs)
+        return self._client
+
+    # ------------------------------------------------------------------
+    def _build_prompt(
+        self,
+        *,
+        gap: dict[str, Any],
+        proposals: list[dict[str, Any]],
+    ) -> str:
+        """Build ONE group-scoring prompt covering every proposal.
+
+        Args:
+            gap: The gap being addressed (domain, symptom, evidence, etc.).
+            proposals: Candidate variants to embed in the prompt.
+
+        Returns:
+            The assembled prompt text describing the gap and proposals.
+        """
+        lines: list[str] = ["=== Gap ==="]
+        lines.append(f"domain: {_clip(gap.get('domain'), limit=80)}")
+        lines.append(f"gap_canonical_id: {_clip(gap.get('gap_canonical_id'), limit=160)}")
+        symptom = gap.get("gap_symptom") or gap.get("summary")
+        if symptom:
+            lines.append(f"symptom: {_clip(symptom)}")
+        evidence = gap.get("gap_evidence")
+        if evidence:
+            lines.append(f"evidence: {_clip(json.dumps(evidence, sort_keys=True))}")
+
+        lines.append("")
+        lines.append("=== Proposals to score ===")
+        for i, p in enumerate(proposals):
+            name = str(p.get("name") or f"proposal_{i}")
+            lines.append(f"- name: {name}")
+            if p.get("extra_args"):
+                lines.append(f"  extra_args: {_clip(p.get('extra_args'))}")
+            if p.get("extra_envs"):
+                lines.append(f"  extra_envs: {_clip(json.dumps(p.get('extra_envs'), sort_keys=True))}")
+            if p.get("reason"):
+                lines.append(f"  reason: {_clip(p.get('reason'))}")
+            if p.get("kb_evidence"):
+                lines.append(f"  kb_evidence: {_clip(json.dumps(p.get('kb_evidence'), sort_keys=True))}")
+        return "\n".join(lines)
+
+    async def _score_one_model(
+        self,
+        model: str,
+        prompt: str,
+        proposal_names: list[str],
+        *,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Score every proposal with a single model (raises on failure; caller records the per-model error).
+
+        Args:
+            model: The model slug to score with.
+            prompt: The base scoring prompt (instructions are appended).
+            proposal_names: Names of the proposals being scored.
+
+        Returns:
+            A mapping of proposal name to its normalised score and reason.
+
+        Raises:
+            RuntimeError: If the call times out or the reply has no
+                parseable scores JSON.
+        """
+        client = self._ensure_client()
+        full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
+        messages = [{"role": "user", "content": full_prompt}]
+        _t0 = time.perf_counter()
+
+        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
+        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted. Stream
+        # and accumulate the deltas, pulling usage from the final chunk.
+        #
+        # The deadline must cover BOTH stream creation and the chunk-consumption
+        # loop: a proxy can establish the stream and then stall mid-body, so a
+        # timeout around creation alone would let this hang indefinitely. We wrap
+        # the whole read in a single ``asyncio.wait_for`` (``asyncio.timeout`` is
+        # 3.11+, and this project still targets 3.10).
+        async def _read_stream() -> tuple[list[str], Any]:
+            parts: list[str] = []
+            usage_obj = None
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_completion_tokens=self.max_completion_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    usage_obj = chunk.usage
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta is not None and delta.content:
+                        parts.append(delta.content)
+            return parts, usage_obj
+
+        try:
+            text_parts, usage = await asyncio.wait_for(_read_stream(), timeout=self.call_timeout_s)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
+        # Record this model's token spend before parsing (best-effort;
+        # no-op when ``session_dir`` is unset).
+        self._trace_scorer_llm_call(
+            model,
+            usage,
+            latency_ms=latency_ms,
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
+        )
+        text = "".join(text_parts)
+        # Persist the full (redacted) prompt + reply so the
+        # scorer's conversation lines up with its token row.
+        self._record_scorer_conversation(
+            model,
+            full_prompt,
+            text,
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
+        )
+        parsed = _extract_scores_json(text)
+        if parsed is None:
+            raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
+        return _normalise_model_scores(parsed, proposal_names=proposal_names)
+
+    def _trace_scorer_llm_call(
+        self,
+        model: str,
+        usage: Any,
+        *,
+        latency_ms: int | None = None,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
+
+        No-op when ``session_dir`` is unset. OpenAI usage carries
+        ``prompt_tokens`` / ``completion_tokens`` (no cache split). ``task_id``
+        ties the scoring spend back to the specialist round it scored, and
+        ``tick`` / ``phase`` (threaded from the coordinator dispatch point)
+        place it on the timeline instead of relying on ts-window backfill.
+        Best-effort: never raises into the scoring path.
+
+        Args:
+            model: The model slug whose usage is being recorded.
+            usage: The OpenAI usage object from the response, or ``None``.
+            latency_ms: Wall-clock latency of the scoring call, when measured.
+            task_id: The specialist round this scoring spend is attributed to.
+            tick: Timeline tick threaded from the coordinator dispatch point.
+            phase: Optimization phase threaded from the coordinator dispatch point.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            input_tokens = None
+            output_tokens = None
+            if usage is not None:
+                pt = getattr(usage, "prompt_tokens", None)
+                ct = getattr(usage, "completion_tokens", None)
+                input_tokens = int(pt) if pt is not None else None
+                output_tokens = int(ct) if ct is not None else None
+            record = LLMCallRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",  # must match the conversation row's
+                model=str(model),  # role for Langfuse token<->text pairing
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer llm_call append failed for model=%s",
+                model,
+                exc_info=True,
+            )
+
+    def _record_scorer_conversation(
+        self,
+        model: str,
+        prompt: str,
+        response: str,
+        *,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a proposal-scoring call.
+
+        Persists the full (redacted) scoring prompt + model reply under
+        ``component=proposal_scorer``, mirroring the per-call token row from
+        :meth:`_trace_scorer_llm_call`. No-op when ``session_dir`` is unset
+        (tests) or when both prompt and reply are empty. tick/phase are
+        unknown here (the scorer runs off the dispatch path); the collector
+        backfills phase from the ts window. Best-effort: never raises into
+        the scoring path.
+
+        Args:
+            model: The model slug whose conversation is being recorded.
+            prompt: The full (redacted) scoring prompt sent to the model.
+            response: The model's reply text.
+        """
+        if self.session_dir is None:
+            return
+        if not prompt and not response:
+            return
+        try:
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
+                model=str(model),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer conversation append failed for model=%s",
+                model,
+                exc_info=True,
+            )
+
+    async def score(
+        self,
+        *,
+        gap: dict[str, Any],
+        proposals: list[dict[str, Any]],
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> dict[str, Any]:
+        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised).
+
+        ``task_id`` (the specialist round being scored) is stamped on every
+        per-model trace row so the collector can attribute the scoring spend
+        to that decision instead of dropping it into ``unattributed``;
+        ``tick`` / ``phase`` (threaded from the coordinator dispatch point)
+        place the rows on the timeline.
+
+        Args:
+            gap: The gap the proposals are meant to address.
+            proposals: Candidate variants to score (non-dict entries ignored).
+            task_id: The specialist round being scored, stamped on trace rows.
+            tick: Timeline tick threaded from the coordinator dispatch point.
+            phase: Optimization phase threaded from the coordinator dispatch point.
+
+        Returns:
+            A dict with the scoring ``scale``, per-model ``models`` scores,
+            and per-model ``errors``.
+        """
+        proposals = [p for p in (proposals or []) if isinstance(p, dict)]
+        if not proposals or not self.models:
+            return {"scale": "0-10", "models": {}, "errors": {}}
+        if len(proposals) > _MAX_PROPOSALS_SCORED:
+            proposals = proposals[:_MAX_PROPOSALS_SCORED]
+        proposal_names = [str(p.get("name") or f"proposal_{i}") for i, p in enumerate(proposals)]
+        prompt = self._build_prompt(gap=gap, proposals=proposals)
+
+        results = await asyncio.gather(
+            *(
+                self._score_one_model(
+                    m,
+                    prompt,
+                    proposal_names,
+                    task_id=task_id,
+                    tick=tick,
+                    phase=phase,
+                )
+                for m in self.models
+            ),
+            return_exceptions=True,
+        )
+        models_out: dict[str, dict[str, Any]] = {}
+        errors: dict[str, str] = {}
+        for model, res in zip(self.models, results):
+            if isinstance(res, BaseException):
+                errors[model] = format_exc_brief(res, limit=200)
+                log.warning(
+                    "ProposalScorer: model=%s failed: %r",
+                    model,
+                    res,
+                )
+                continue
+            if res:
+                models_out[model] = res
+            else:
+                errors[model] = "no usable scores returned"
+        return {"scale": "0-10", "models": models_out, "errors": errors}
+
+
+__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS", "_extract_scores_json"]

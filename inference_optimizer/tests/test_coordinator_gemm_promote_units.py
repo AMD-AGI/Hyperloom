@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 
 import inference_optimizer.model_config_utils as mcu_mod
-import hyperloom.orchestrator.action_executors.explore as explore_mod
-import hyperloom.orchestrator.kernel_request_handlers as krh_mod
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.shared_state import SharedState
+import hyperloom.orchestrator.actions.executors.explore as explore_mod
+import hyperloom.orchestrator.kernel.request_handlers as krh_mod
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _journal_entries(session_dir: Path) -> list[dict]:

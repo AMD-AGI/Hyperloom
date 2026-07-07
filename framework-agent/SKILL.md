@@ -45,7 +45,7 @@ fa kb list|show|search|contribute|synthesize ...   # knowledge-base ops
 IO coordinator). `fa phase-discover` is the thin shim driven by the
 Coordinator's per-candidate pump in the FRAMEWORK_AGENT phase (between
 PRELUDE and EXPLORE in `inference_optimizer`); it is the **only**
-subcommand `src/hyperloom/orchestrator/framework_agent_client.py`
+subcommand `src/hyperloom/orchestrator/framework/client.py`
 invokes. Don't use `phase-discover` outside that context.
 
 ## FRAMEWORK_AGENT phase (`fa phase-discover`)

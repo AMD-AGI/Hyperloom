@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom.orchestrator.cortex_t0 import (
+from hyperloom.orchestrator.knowledge.cortex_t0 import (
     _extract_patches_from_prs_tested,
 )
 from inference_optimizer.recipe_kb.gbrain_remote_client import _json_list
@@ -388,7 +388,7 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
     }
 
     # Step 5: Executor _apply_warm_patches filters
-    from hyperloom.orchestrator.action_executors.baseline import (
+    from hyperloom.orchestrator.actions.executors.baseline import (
         _apply_warm_patches,
     )
 

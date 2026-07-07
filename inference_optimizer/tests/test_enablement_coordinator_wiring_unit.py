@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import (
+from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     _extract_enablement_launch_log,
 )
@@ -219,7 +219,7 @@ def _enqueue_self(**state_kw):
 
 @pytest.mark.asyncio
 async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
@@ -236,7 +236,7 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_noop_when_already_succeeded(monkeypatch):
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(enablement_succeeded=True)
@@ -248,7 +248,7 @@ async def test_enqueue_noop_when_already_succeeded(monkeypatch):
 async def test_enqueue_noop_when_run_deadline_passed(monkeypatch):
     import time as _time
 
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
@@ -261,7 +261,7 @@ async def test_enqueue_noop_when_run_deadline_passed(monkeypatch):
 @pytest.mark.asyncio
 async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     from framework_agent.models import Candidate
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     cands = [
@@ -298,7 +298,7 @@ async def test_rearm_kept_is_terminal(monkeypatch):
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     assert fake.shared_state.enablement_succeeded is True
     # A subsequent enqueue attempt is a no-op.
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
@@ -371,7 +371,7 @@ async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_stall_cap_stops_run(monkeypatch):
     """N consecutive no-progress reverts stop the run with enablement_stalled."""
-    from hyperloom.orchestrator.coordinator import _ENABLEMENT_MAX_STALL
+    from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_STALL
 
     fake = _enqueue_self(enablement_dispatched=True)
     st = fake.shared_state
@@ -447,7 +447,7 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch):
 
 def test_enablement_close_guard_blocks_premature_skip_to_close():
     """Q2: pre-enablement (baseline never established) the close guard is active."""
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState()
     s.phase = "PRELUDE"
@@ -500,7 +500,7 @@ async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch):
     the run never gets stuck waiting on a human just because a failure did not
     match an enumerated classifier rule.
     """
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
@@ -516,7 +516,7 @@ async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_noop_when_already_dispatched(monkeypatch):
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(enablement_dispatched=True)
@@ -527,7 +527,7 @@ async def test_enqueue_noop_when_already_dispatched(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_noop_when_baseline_runnable(monkeypatch):
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(baseline_tput=1234.0)
@@ -536,7 +536,7 @@ async def test_enqueue_noop_when_baseline_runnable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_noop_when_no_failure_streak(monkeypatch):
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(baseline_failure_streak=0)
@@ -545,7 +545,7 @@ async def test_enqueue_noop_when_no_failure_streak(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_noop_on_multi_node(monkeypatch):
-    from hyperloom.orchestrator.action_executors import _multi_node_env as mne
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     fake = _enqueue_self()

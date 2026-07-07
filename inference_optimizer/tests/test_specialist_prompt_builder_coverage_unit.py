@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
     build_specialist_prompts_for_domain,
     _render_measured_impact,
     _format_version_note,
 )
-from hyperloom.orchestrator.specialist_domains import get_domain
+from hyperloom.orchestrator.specialists.domains import get_domain
 
 
 _DOMAIN_KEYS = (
@@ -217,7 +217,7 @@ def test_gpu_autonomy_block_and_auto_retry():
     # GPU specialists (with a card allocation) get the on-GPU autonomy block
     # framing broad scripting/profiling/serving freedom + the optional rebench.
     assert "On-GPU autonomy" in sys_p
-    assert "specialist_rebench" in sys_p
+    assert "specialists.rebench" in sys_p
     assert "Auto-retry notice" in sys_p
 
 

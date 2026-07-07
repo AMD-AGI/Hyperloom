@@ -14,12 +14,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.orchestrator.proposal_scorer import (
+from hyperloom.orchestrator.scoring.proposal_scorer import (
     DEFAULT_SCORER_MODELS,
     ProposalScorer,
     _extract_scores_json,
 )
-from hyperloom.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 from inference_optimizer.session_paths import (
     conversations_path,
     llm_calls_path,
@@ -330,7 +330,7 @@ class _StubSharedState:
 
 
 def _coord(tmp_path: Path, scorer):
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -421,7 +421,7 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
 
 # 3. Renderer
 def _real_state():
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     return SharedState()
 

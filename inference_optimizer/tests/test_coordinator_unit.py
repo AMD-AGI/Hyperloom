@@ -10,14 +10,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-from hyperloom.orchestrator.coordinator import (
+from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     _first_present,
     _format_inbox_event,
     _lifecycle_paths,
 )
-from hyperloom.orchestrator.message_bus import Message
-from hyperloom.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.bus.message_bus import Message
+from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 
 
 def test_first_present_non_dict_and_branches():

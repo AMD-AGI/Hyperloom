@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.roofline_ceiling import (
+from hyperloom.orchestrator.kernel.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
     _resolve_dtype_bytes,
@@ -603,7 +603,7 @@ class TestResolveEffectiveConcurrency:
     """Concurrency fallback chain (PR-A): state.conc -> baseline yaml envs.CONC -> 1."""
 
     def test_state_conc_wins_when_positive(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -611,7 +611,7 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 32
 
     def test_falls_back_to_baseline_yaml_envs_conc(self, tmp_path):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -633,7 +633,7 @@ class TestResolveEffectiveConcurrency:
         tmp_path,
     ):
         """P0 fix: the materialized baseline yaml's ``CONC`` wins over ``state.conc`` (session 095726Z: state stayed at default 8 while the run used 64)."""
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -651,7 +651,7 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 64
 
     def test_missing_yaml_falls_back_to_one(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -664,7 +664,7 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 1
 
     def test_malformed_yaml_falls_back_to_one(self, tmp_path):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -677,7 +677,7 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 1
 
     def test_yaml_without_conc_falls_back_to_one(self, tmp_path):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -693,7 +693,7 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 1
 
     def test_no_last_baseline_falls_back_to_one(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
 
@@ -1037,7 +1037,7 @@ class TestRooflineBreakdownClassification:
 
     def _mock_state_and_helpers(self, monkeypatch, mem_val, cmp_val):
         """Stub ``load_model_meta`` + both ceilings to control the (mem, cmp) ordering directly."""
-        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.kernel import roofline_ceiling
 
         meta = ModelMeta(
             weight_bytes=10_000_000_000,
@@ -1104,7 +1104,7 @@ class TestRooflineBreakdownClassification:
         assert br.bound_kind == "compute"
 
     def test_quantized_legacy_fallback_uses_activation_kv_dtype(self, monkeypatch):
-        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.kernel import roofline_ceiling
 
         meta = ModelMeta(
             weight_bytes=10_000_000_000,
@@ -1155,7 +1155,7 @@ class TestRooflineBreakdownClassification:
         assert compute_peak_from_state(state) == 2000.0
 
     def test_returns_empty_breakdown_on_missing_model(self, monkeypatch):
-        from hyperloom.orchestrator import roofline_ceiling
+        from hyperloom.orchestrator.kernel import roofline_ceiling
 
         monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: None)
         state = SimpleNamespace(model_path="", gpu_type="mi355x", tp=1)
@@ -1370,7 +1370,7 @@ class TestPerfModelBreakdown:
 
     def _make_meta(self) -> "ModelMeta":
         """Minimal dense Llama-style ModelMeta."""
-        from hyperloom.orchestrator.roofline_ceiling import ModelMeta
+        from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 
         return ModelMeta(
             weight_bytes=int(13e9),  # ~13 GB weight
@@ -1386,7 +1386,7 @@ class TestPerfModelBreakdown:
         )
 
     def test_returns_none_for_unknown_gpu(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
 
@@ -1401,7 +1401,7 @@ class TestPerfModelBreakdown:
         assert result is None
 
     def test_returns_none_when_meta_missing_hidden(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             ModelMeta,
             compute_roofline_from_perfmodel,
         )
@@ -1424,7 +1424,7 @@ class TestPerfModelBreakdown:
         assert result is None
 
     def test_hw_specs_achievable_coverage(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             HW_SPECS_ACHIEVABLE,
             _resolve_achievable_tflops,
         )
@@ -1438,7 +1438,7 @@ class TestPerfModelBreakdown:
 
     def test_perfmodel_breakdown_when_traceLens_available(self):
         """When model metadata is complete the result is a valid PerfModelBreakdown."""
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_from_perfmodel,
             PerfModelBreakdown,
         )
@@ -1480,7 +1480,7 @@ class TestPerfModelMoE:
 
     def _make_qwen3_a3b_meta(self) -> "ModelMeta":
         """Qwen3-30B-A3B geometry: 128 experts, top-8, moe_inter=768."""
-        from hyperloom.orchestrator.roofline_ceiling import ModelMeta
+        from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 
         return ModelMeta(
             weight_bytes=61_064_245_248,
@@ -1502,7 +1502,7 @@ class TestPerfModelMoE:
     def test_moe_ffn_uses_moe_intermediate_size(self):
         """With moe_intermediate_size set, PerfModel uses FusedMoE formula
         (coupon E_active) not the per-token fixed-topk formula."""
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
 
@@ -1525,7 +1525,7 @@ class TestPerfModelMoE:
     def test_moe_ceiling_is_upper_bound_conc16(self):
         """PerfModel (FusedMoE coupon formula) ceiling for Qwen3-30B-A3B at conc=16
         must be >= 1754 tok/s (real InferenceX measurement on MI300X)."""
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
 
@@ -1545,7 +1545,7 @@ class TestPerfModelMoE:
     def test_moe_ceiling_is_upper_bound_conc64(self):
         """At conc=64, FusedMoE coupon formula should give a tighter (lower) ceiling
         than the B=1 per-token estimate because E_active grows toward num_experts."""
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
 
@@ -1579,7 +1579,7 @@ class TestPerfModelTransparentReplacement:
     def test_uses_perfmodel_peak_when_config_available(self, tmp_path):
         """For a known GPU + complete config, peak comes from PerfModel."""
         from types import SimpleNamespace
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_breakdown_from_state,
             compute_roofline_from_perfmodel,
             load_model_meta,
@@ -1625,7 +1625,7 @@ class TestPerfModelTransparentReplacement:
         For Qwen3-30B-A3B at conc=64, the FusedMoE ceiling must be above
         the measured 6244 tok/s (from TestPhysicalInterpretation095726Z)."""
         from types import SimpleNamespace
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_breakdown_from_state,
             compute_roofline_from_perfmodel,
             load_model_meta,
@@ -1664,7 +1664,7 @@ class TestPerfModelTransparentReplacement:
     def test_falls_back_to_legacy_for_unknown_gpu(self, tmp_path):
         """For an unknown GPU (PerfModel returns None), legacy ceiling is used."""
         from types import SimpleNamespace
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             compute_roofline_breakdown_from_state,
         )
 
@@ -2161,7 +2161,7 @@ class TestReadBaselineServerArgs:
 
     def test_reads_server_args_from_yaml(self, tmp_path):
         import yaml as _yaml  # type: ignore[reportMissingModuleSource]
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             read_baseline_server_args,
         )
 
@@ -2184,7 +2184,7 @@ class TestReadBaselineServerArgs:
         assert read_baseline_server_args(state) == "--attention-backend AITER"
 
     def test_returns_empty_when_yaml_missing(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             read_baseline_server_args,
         )
 
@@ -2194,7 +2194,7 @@ class TestReadBaselineServerArgs:
         assert read_baseline_server_args(state) == ""
 
     def test_falls_back_to_last_baseline_payload_when_yaml_missing(self):
-        from hyperloom.orchestrator.roofline_ceiling import (
+        from hyperloom.orchestrator.kernel.roofline_ceiling import (
             read_baseline_server_args,
         )
 
@@ -2241,14 +2241,14 @@ class TestPreludeRooflineWarmReplayIntegration:
         import asyncio
         from unittest.mock import patch
 
-        from hyperloom.orchestrator.action_executors.roofline import (
+        from hyperloom.orchestrator.actions.executors.roofline import (
             RooflineExecutor,
         )
-        from hyperloom.orchestrator.shared_state import SharedState
-        from hyperloom.orchestrator.sub_agent_runner import (
+        from hyperloom.orchestrator.state.shared_state import SharedState
+        from hyperloom.orchestrator.loop.sub_agent_runner import (
             RunnerContext,
         )
-        from hyperloom.orchestrator.task_registry import Task
+        from hyperloom.orchestrator.state.task_registry import Task
 
         _write_synthetic_model(
             tmp_path / "m",
@@ -2311,11 +2311,11 @@ class TestPreludeRooflineWarmReplayIntegration:
         executor = RooflineExecutor(shared_state=state)
         with (
             patch(
-                "hyperloom.orchestrator.action_executors.profile.profile_executor",
+                "hyperloom.orchestrator.actions.executors.profile.profile_executor",
                 new=fake_profile,
             ),
             patch(
-                "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+                "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
                 new=fake_ta,
             ),
         ):

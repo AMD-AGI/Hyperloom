@@ -22,8 +22,8 @@ def _try_import_inference_optimizer():
             break
     try:
         import inference_optimizer.protocol.intent as upstream_ip
-        import hyperloom.orchestrator.policy as upstream_policy
-        import hyperloom.orchestrator.agent_role as upstream_role
+        import hyperloom.orchestrator.policy.gate as upstream_policy
+        import hyperloom.orchestrator.roles.agent_role as upstream_role
     except ImportError:
         return None
     return upstream_ip, upstream_policy, upstream_role

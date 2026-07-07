@@ -18,12 +18,12 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.orchestrator.cortex_t0 import run_t0_anchor
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
+from hyperloom.orchestrator.state.shared_state import SharedState
 from .paths import workspace_root as _workspace_root_resolve
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
-    from hyperloom.orchestrator.knowledge_plane import KnowledgePlane
+    from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 
 
 log = logging.getLogger(__name__)
@@ -238,11 +238,11 @@ def _bootstrap_knowledge_plane(
     Returns:
         KnowledgePlane: The wired KnowledgePlane facade.
     """
-    from hyperloom.orchestrator.knowledge_plane import (
+    from hyperloom.orchestrator.knowledge.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
     )
-    from hyperloom.orchestrator.pr_monitor import (
+    from hyperloom.orchestrator.knowledge.pr_monitor import (
         DEFAULT_PR_FEED_WINDOW_DAYS,
         DEFAULT_PR_MONITOR_MCP_URL,
         PRMonitorClient,

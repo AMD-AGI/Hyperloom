@@ -357,7 +357,7 @@ def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
             return max(0, int(raw))
         except (TypeError, ValueError):
             pass
-    from hyperloom.orchestrator.policy import detect_gpu_count
+    from hyperloom.orchestrator.policy.gate import detect_gpu_count
 
     return detect_gpu_count()
 

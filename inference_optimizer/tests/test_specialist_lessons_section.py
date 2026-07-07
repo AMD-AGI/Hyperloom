@@ -15,11 +15,11 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.specialist_domains import (
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
-from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _section_lessons,
     _section_pitfalls,

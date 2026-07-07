@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 def test_empty_ledger_renders_nothing():

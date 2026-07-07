@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.orchestrator import coordinator_helpers as ch
+from hyperloom.orchestrator.loop import coordinator_helpers as ch
 
 
 # ---- _infer_model_class_from_config ----

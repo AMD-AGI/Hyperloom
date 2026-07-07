@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.action_executors import _robustness_pulse as rp
+from hyperloom.orchestrator.roles import robustness_pulse as rp
 
 
 # _enabled()

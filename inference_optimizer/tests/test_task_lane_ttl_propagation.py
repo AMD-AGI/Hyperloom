@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.action_registry import ActionRegistry
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 class _Stub:
@@ -53,7 +53,7 @@ def test_missing_registry_falls_back():
 
 
 def test_resolved_lanes_are_dispatcher_known():
-    from hyperloom.orchestrator.resource_lock import KNOWN_LANES
+    from hyperloom.orchestrator.bus.resource_lock import KNOWN_LANES
 
     for kind in ("specialist", "roofline", "profile", "integrate_patch", "explore"):
         lanes, _ = _resolve(_Stub(), kind)

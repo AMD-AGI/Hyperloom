@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.objective import (
+from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
     TargetBaselineObjective,
     TargetGainObjective,
@@ -16,7 +16,7 @@ from hyperloom.orchestrator.objective import (
     TimeOnlyObjective,
     build_objective,
 )
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def test_target_gain_pressure_and_describe():

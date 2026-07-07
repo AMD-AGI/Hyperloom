@@ -232,3 +232,40 @@
 **教训**:批量抽取工具(`extract_collaborator.py` 之类)如果按"处理簇的顺序"逐条 `dict[key] = value` 追加,产出的注册表顺序是**工具遍历顺序**而不是**设计要求的语义顺序**;若设计文档对顺序有明确要求(如本例"最大的放最后"),必须在**每次抽取批次完成后**额外跑一次"顺序审计"(读 dict/property 声明的字面量顺序,和设计文档比对),不能假设"抽取脚本产出即最终形态"。同时,"每个簇的方法数是否与设计文档的估计值(如 `~28`)吻合"是检测漏迁的一个廉价信号——`27` vs 估计的 `~28` 这种"差 1"的小偏差,在数量级对得上时很容易被忽略为"约数误差",但用一个独立只读审计子代理对照映射表逐条 `grep`/`hasattr` 复核,是唯一可靠的完备性验证手段(比单纯看"测试全绿"更严格,因为像 `_cached_kernel_request` 这种遗漏方法本身没有被拆分破坏、只是"没搬家",测试完全绿,不会暴露问题)。
 
 **验收**: `ruff check` coordinator.py + `_phase_kernel.py` 全绿;`Coordinator._COLLAB_MODULES`/`_DELEGATED` 的 9 个 phase 键顺序程序化验证与要求顺序完全一致;`phase_kernel` 簇 28 个方法(含新补的 `_cached_kernel_request`)hasattr 全部命中 `KernelPhase`;`phase_framework` 确认为 9 个簇中方法数最多(48)且位于注册表/属性声明的最后;targeted 测试(`test_lifecycle_wiring.py` 等 1246 个 coordinator/kernel/intent_router/lifecycle 相关测试)+ 全量非-e2e 门 `8498 passed, 3 skipped, 47 deselected`(与 3b-2 完成时的数字完全一致,证明这是纯内部重排 + 补漏,无行为变化)。
+
+---
+
+## 10. P2.3 实战(已完成,门绿 8498)= orchestrator 提升为顶级包 + 内部按 14 个领域子包重组
+
+P2.3 分两个独立阶段执行,每阶段各自过一次全量非-e2e 门,分两个 commit 提交(`83858ea7` 物理提升 / 后续 commit 内部重组)。
+
+### 10.1 阶段 A:`inference_optimizer/orchestrator/` → `src/hyperloom/orchestrator/`(纯物理提升,内部结构不变)
+
+**执行前侦察(关键,避免"边搬边猜")**:先派一个只读子代理对全库做 7 类系统性扫描——(1)全库对 `inference_optimizer.orchestrator` 的绝对 import(265 文件/1098 行);(2)`inference_optimizer/` 内部反向 import 进 orchestrator 的相对 import(17 文件,因搬走后同包相对 import 必须变绝对);(3)orchestrator 内部反向 import 出 `inference_optimizer` 兄弟包的相对 import(~58 文件/138 行,同理必须变绝对);(4)动态 import(`importlib.import_module(f"...")`、`__import__(...)`)——揪出 `coordinator.py` 的 `_CoordinatorMeta.__getattr__` 里 `importlib.import_module(f"inference_optimizer.orchestrator.{mod}")` 这个 f-string 动态 import,codemod 的静态 AST 改写**完全看不到**它,必须人工改一行;(5)测试里 `monkeypatch.setattr("inference_optimizer.orchestrator.X.Y", ...)` 字符串目标(~330 处/30+ 文件)+ `caplog.at_level(..., logger=...)` 的 logger 名字符串(因为 `logging.getLogger(__name__)` 的 `__name__` 就是搬移后的新模块路径,这类字符串必须跟着改,否则测试断言的 logger 名和实际发出日志的 logger 名对不上,静默失败);(6)`pyproject.toml` 里以字符串路径为 key 的配置(`coverage.omit`/`ruff.per-file-ignores`/`package-data`);(7)`docs/`、各 sibling agent 的 `SKILL.md`/`README.md` 里的散落 prose 引用。**这套"7 类扫描"是可复用的通用清单**,任何"把一个包搬到另一个命名空间"的操作都应该先跑一遍。
+
+**LibCST codemod 的核心正确性坑(比 P2.2 单文件内部拆分更复杂,因为这次是跨包搬迁)**:
+1. **相对 import 的解析基准点是"文件的旧位置",不是"新位置"**:orchestrator 内部文件(如 `coordinator.py`)的 `from ..paths import db_path_for` 这种相对 import,是相对它**搬家前**的包路径(`inference_optimizer.orchestrator`)写的,搬到 `hyperloom.orchestrator` 后,必须先按**旧**包路径把 `..` 解析成语义目标(`inference_optimizer.paths`),再决定"目标搬没搬、要不要保持相对"。如果直接用文件的**新**路径去解析相对 import 的 dots,会算出完全错误的目标模块。
+2. **三条互斥重写规则**,缺一个都会漏改:R1(全库任何绝对 import 前缀替换 `inference_optimizer.orchestrator`→`hyperloom.orchestrator`)、R2(inference_optimizer 内部反向相对 import 进 orchestrator → 必须变绝对,因为 orchestrator 已经不是 inference_optimizer 的子包,不能再用相对 dots 够到它)、R3(orchestrator 内部对外相对 import → 必须变绝对 `inference_optimizer.X`,同理)。
+3. **`from . import X`(module=None 的相对 import)是隐藏坑**:AST 里 `ImportFrom.module` 为 `None` 时,`names[0]` 本身就是一个子模块引用(而非"从某模块导入的符号名"),必须单独判断并按"子模块级联"处理,否则会被当成普通符号导入完全放过不改写,产生 `ModuleNotFoundError`。
+
+**验收**: 全部 136 个 orchestrator 子模块 `import_module` 冒烟通过;`ruff check` 全绿(14 个残留错误逐一核实为迁移前就存在、与本次改动无关的历史 lint 债);全量非-e2e 门 `8498 passed, 3 skipped, 47 deselected`(与迁移前完全一致)。
+
+### 10.2 阶段 B:orchestrator 内部按 14 个领域子包重组(`loop/`、`phases/`、`policy/`、`actions/`(含 `executors/`)、`roles/`、`state/`、`bus/`、`knowledge/`、`specialists/`、`kernel/`、`framework/`、`scoring/`、`prompts/`、`trace/`)
+
+136 个文件按 tree-reform.MD §5.2 逐一分配到 14 个子包(纯文件级 move-map,无内容拆分),`git mv` 保留历史,再复用阶段 A 验证过的 LibCST codemod(在其基础上扩展:目标模块解析改成同时支持"旧位置解析 dots、按 MODMAP 查新位置、决定相对/绝对"的双向映射),批量重写内部相对 import + 全库绝对 import。
+
+**本阶段踩到的坑,全部是"P2.2/阶段A 已知坑的更大规模复现",再次印证"协作者/文件拆分的坑是可复用的机制类问题"**:
+
+1. **批量创建"新子包 `__init__.py` 占位文件"时,用无条件 `cat >` 覆盖了刚 `git mv` 过去、已经带真实内容的 `__init__.py`**(`backends/__init__.py` 13 行 re-export + `__all__`、`system_prompts/__init__.py` 的 `read_rules_fragment` 函数,两者都被我"顺手加个文档字符串占位"的脚本用一句 heredoc 全覆盖丢失)。**教训**:批量建目录骨架前,必须先跑 move-map 检查"这个目标路径是不是本次移动的落点";若是,只能追加/合并,绝不能无条件覆盖写入。本次靠"import 冒烟测试直接炸出 `ImportError: cannot import name 'read_rules_fragment'`"当场发现,证明**冒烟测试比只看 diff 更可靠**(diff 会显示这是"新增文件"而看不出丢了内容,因为丢失的旧内容本就在 git mv 后的"删除"那一侧)。
+
+2. **`_CoordinatorMeta.__getattr__` 的动态 import + `_COLLAB_MODULES` 字典**(阶段 A 已改过一次前缀)在阶段 B 又要再改一次——字典的模块名从裸文件名(`"_phase_machine"`)变成带子包路径(`"phases.machine"`)。**这类"编码在字符串里的模块路径"每次搬迁都要跟着手动同步,是 codemod 天生的盲区,必须建立一个专门的"人工修复清单"并在每个搬迁阶段后逐项复核**(本次清单:`_COLLAB_MODULES` 字典值、`intent_router.py` 的 `__import__` 字符串、`asset_system_prompts_dir()` 的路径拼接、SKILL.md/README 的 prose 路径)。
+
+3. **`from PKG import SUBMODULE` 形式(module 非 None,但 names[0] 是一个"逃逸"到别的子包的子模块)比 `from . import X` 更隐蔽**:例如 `from hyperloom.orchestrator import phase_state`(`module="hyperloom.orchestrator"`,`names[0]="phase_state"`)在阶段 B 时 `phase_state` 整体重命名+搬家为 `phases.machine_state`,原有的"absolute import 前缀替换"规则只检查 `module` 整体是否要换,不会去看"`module.name` 拼起来是否命中一个搬迁条目"。**必须额外加一条规则**:对每个 `from X import Y`(`level==0`),除了检查 `X` 本身要不要换,还要检查 `f"{X}.{Y}"` 是否整体命中 move-map,命中则连 `Y`(import 的名字)一起换,并**当名字本身改变时自动补一个 `as <原名>` 别名**,否则文件里所有引用原名字的地方(如 `phase_state.PHASE_PRELUDE`)全部找不到定义(`NameError`)。这条规则在 `from . import X` 场景(阶段 A 已修)和 `from PKG import X` 场景(阶段 B 新增)都要覆盖,是同一类坑的两种语法外壳。
+
+4. **正则/文本级"字符串字面量批量替换"极易产生"重复后缀"的幂等性 bug**:用一个不区分"代码 vs 字符串"的全文正则替换 `monkeypatch.setattr("旧模块路径...")` 这类字符串目标时,若该文件里**同时存在**一处已经被 AST-codemod 正确改写过的真实 import 语句(如 `from hyperloom.orchestrator.policy import gate as policy_module`),正则会**误命中**这行代码文本里的旧前缀子串(`hyperloom.orchestrator.policy`)并在其后拼接错误后缀,产出 `from hyperloom.orchestrator.policy.gate import gate as ...`(基于一个根本不存在的符号)。**根因**:全文正则不知道"这段文本是已经正确的代码,不是需要修的字符串字面量"。**正确做法**:①优先用 `tokenize` 只在 `STRING`/`COMMENT` token 范围内做替换(不触碰其余源码字节),对 `.py` 文件强制这样做;②即使做全文替换,也必须加"若匹配位置紧跟着一个已经是**新**路径前缀,则跳过"的幂等性保护(比较 match 起点是否也匹配 NEW-VALUES 前缀,谁更长优先谁);③**改完必须再跑一次"每条 `ImportFrom`/`Import` 的 module 是否是磁盘上真实存在的模块"的 AST 校验**(遍历所有 `.py`,收集 orchestrator 下所有真实模块的 dotted path 集合,反查每个 import 语句的 `module` 是否在集合里),这一校验本次以**零成本**(纯离线 AST 遍历,不需要真的 `import`)在测试全跑之前就抓出了 7 个文件的破坏。
+
+5. **验收顺序**:导入冒烟(147 模块全绿)→ `ruff check`(隔离历史债)→ **`pytest --collect-only`**(比直接跑全量测试快 30 倍,专门用来抓"import 层面的错误",本阶段连续 5 轮 `--collect-only` 迭代收敛,每轮只需 5–10 秒)→ 全量非-e2e 门。**`--collect-only` 是"批量 import 重写"类任务的最高性价比中间校验点**,应该在每次 codemod 应用后立即跑一次,而不是等全量测试跑完 5 分钟才发现还有 collection error。
+
+**验收**: 147 个 orchestrator 子模块导入冒烟全绿;AST 级"每条 import 的目标模块必须磁盘上真实存在"校验零命中;`ruff check` 保持与阶段 A 相同的 14 个历史遗留错误(0 新增);`pytest --collect-only` 从 46 个 collection error 收敛到 0;全量非-e2e 门 `8498 passed, 3 skipped, 47 deselected`(与阶段 A 完成时完全一致,证明两阶段合计的 P2.3 是纯文件布局迁移,无行为变化)。`manifest.json`/`state.json`/`storage/coordinator.db`/`session_breakdown.json`/四个 role 的 subprocess JSON 桥等磁盘/进程观测契约,通过对应的既有测试套件(`test_refactor_golden_breakdown.py`、`*_e2e_mock.py`、`*runtime_bridge*`、`*critic_agent_backend*`、`*robustness_agent*` 等)间接验证不变。
+
+**给后续步骤(P2.4 inference_optimizer 瘦身 / P2.5 agents 归一)的前瞻**:P2.3 验证了"侦察 7 类扫描 + LibCST 双向 move-map codemod + tokenize 级字符串修复 + `--collect-only` 快速迭代"这一整套方法论在**跨包物理搬迁**场景下是可靠、可重复的,已经处理了"包提升"(阶段 A)和"包内重组"(阶段 B)两种子问题,P2.4/P2.5 的物理搬迁在方法论上是同一件事的重复应用(新增风险点是 P2.5 的 5 种异构打包约定统一,需要额外处理 `pyproject.toml`/`setup.py` 的声明式打包差异,而非本次遇到的纯 import 重写问题)。

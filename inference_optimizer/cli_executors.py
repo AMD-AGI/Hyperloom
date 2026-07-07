@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from hyperloom.orchestrator.action_executors import (
+from hyperloom.orchestrator.actions.executors import (
     TargetAnalysisExecutor,
     baseline_executor,
     conc_sweep_executor,
@@ -26,16 +26,16 @@ from hyperloom.orchestrator.action_executors import (
     session_breakdown_executor,
     sweep_executor,
 )
-from hyperloom.orchestrator.action_executors.framework_agent import FrameworkAgentExecutor
-from hyperloom.orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
-from hyperloom.orchestrator.action_executors.profile import profile_executor
-from hyperloom.orchestrator.action_executors.roofline import make_roofline_executor
-from hyperloom.orchestrator.backends import ClaudeBackend
-from hyperloom.orchestrator.framework_paths import resolve_source_file_allowlist
+from hyperloom.orchestrator.actions.executors.framework_agent import FrameworkAgentExecutor
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+from hyperloom.orchestrator.actions.executors.profile import profile_executor
+from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
+from hyperloom.orchestrator.roles import ClaudeBackend
+from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from .protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
 log = logging.getLogger(__name__)
@@ -104,13 +104,13 @@ def _build_specialist_executor(
     """
     import shutil
 
-    from hyperloom.orchestrator.specialist_mcp_config import write_specialist_mcp_config
-    from hyperloom.orchestrator.specialist_runner import (
+    from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
+    from hyperloom.orchestrator.specialists.runner import (
         DEFAULT_SPECIALIST_TOOLS,
         SpecialistRunner,
     )
-    from hyperloom.orchestrator.specialist_domains import DEFAULT_SPECIALIST_MAX_TURNS
-    from hyperloom.orchestrator.specialist_subprocess import SpecialistSubprocessConfig
+    from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
+    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig
 
     claude_model = (getattr(args, "specialist_model", None) or args.claude_model).strip()
     max_turns = int(

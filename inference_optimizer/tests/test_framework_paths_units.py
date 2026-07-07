@@ -12,13 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator import framework_paths as fp
-from hyperloom.orchestrator.action_registry import ActionRegistry
-from hyperloom.orchestrator.framework_paths import (
+from hyperloom.orchestrator.framework import paths as fp
+from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.orchestrator.framework.paths import (
     probe_framework_source_roots_for_env,
     resolve_source_file_allowlist,
 )
-from hyperloom.orchestrator.system_prompts.prompt_builder import (
+from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
 )
@@ -344,8 +344,8 @@ class TestAtomPathPresentInAllThreeLocations:
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
-        from hyperloom.orchestrator import (
-            kernel_request_handlers as krh,
+        from hyperloom.orchestrator.kernel import (
+            request_handlers as krh,
         )
 
         assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
@@ -358,8 +358,8 @@ class TestAtomPathPresentInAllThreeLocations:
         text = ka_path.read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
             "kernel-agent/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
-            "is out of sync with src/hyperloom/orchestrator/"
-            "kernel_request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
+            "is out of sync with src/hyperloom/orchestrator/kernel/"
+            "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
@@ -367,8 +367,8 @@ class TestAtomPathPresentInAllThreeLocations:
         ka_path = Path(__file__).resolve().parents[2] / "kernel-agent" / "tools" / "tracelens_analysis.py"
         if not ka_path.is_file():
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
-        from hyperloom.orchestrator import (
-            kernel_request_handlers as krh,
+        from hyperloom.orchestrator.kernel import (
+            request_handlers as krh,
         )
 
         orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
@@ -452,7 +452,7 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     ws = tmp_path / "sgl-workspace" / "sglang"
     ws.mkdir(parents=True)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework_paths._DEFAULT_SOURCE_ROOTS",
+        "hyperloom.orchestrator.framework.paths._DEFAULT_SOURCE_ROOTS",
         (str(ws) + "/",),
     )
     out = probe_framework_source_roots_for_env()

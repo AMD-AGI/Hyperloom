@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hyperloom.orchestrator import pr_monitor as pm
+from hyperloom.orchestrator.knowledge import pr_monitor as pm
 
 
 class _FakeResp:
@@ -214,7 +214,7 @@ def test_pr_feed_warm_budget_exhausted(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
     monkeypatch.setattr(c, "_list_prs_raising", lambda *a, **k: [])
     # zero budget with monotonic always past the deadline
-    import hyperloom.orchestrator.pr_monitor as mod
+    import hyperloom.orchestrator.knowledge.pr_monitor as mod
 
     times = iter([100.0, 100.0, 200.0, 300.0])
     monkeypatch.setattr(mod, "_matches_keywords", pm._matches_keywords)

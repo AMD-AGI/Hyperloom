@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from hyperloom.orchestrator import phase_state
+from hyperloom.orchestrator.phases import machine_state as phase_state
 
 
 class _State:

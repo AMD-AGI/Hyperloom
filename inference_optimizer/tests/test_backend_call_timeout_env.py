@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from hyperloom.orchestrator.backends.base import parse_call_timeout_env
+from hyperloom.orchestrator.roles.base import parse_call_timeout_env
 
 
 CLAUDE_ENV = "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC"
@@ -92,7 +92,7 @@ class TestClaudeBackendHonoursEnv:
 class TestCodexBackendHonoursEnv:
     def test_default_when_env_unset(self, monkeypatch):
         monkeypatch.delenv(CODEX_ENV, raising=False)
-        from hyperloom.orchestrator.backends.codex import CodexBackend
+        from hyperloom.orchestrator.roles.codex import CodexBackend
 
         backend = CodexBackend(
             api_key_env="OPENAI_API_KEY_TEST",
@@ -103,7 +103,7 @@ class TestCodexBackendHonoursEnv:
 
     def test_env_override_picked_up_at_instantiation(self, monkeypatch):
         monkeypatch.setenv(CODEX_ENV, "240")
-        from hyperloom.orchestrator.backends.codex import CodexBackend
+        from hyperloom.orchestrator.roles.codex import CodexBackend
 
         backend = CodexBackend(
             api_key_env="OPENAI_API_KEY_TEST",
@@ -114,7 +114,7 @@ class TestCodexBackendHonoursEnv:
 
     def test_bad_env_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv(CODEX_ENV, "negative-one")
-        from hyperloom.orchestrator.backends.codex import CodexBackend
+        from hyperloom.orchestrator.roles.codex import CodexBackend
 
         backend = CodexBackend(
             api_key_env="OPENAI_API_KEY_TEST",
@@ -126,7 +126,7 @@ class TestCodexBackendHonoursEnv:
 
 def _new_claude_backend_with_seams():
     """Build a ClaudeBackend that skips real SDK import + MCP server."""
-    from hyperloom.orchestrator.backends.claude import ClaudeBackend
+    from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
     return ClaudeBackend(
         sdk_query_factory=lambda *a, **kw: iter(()),

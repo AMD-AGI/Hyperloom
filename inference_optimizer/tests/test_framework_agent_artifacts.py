@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator.framework_agent_artifacts import (
+from hyperloom.orchestrator.framework.artifacts import (
     candidate_slug,
     summarize_candidate_outcomes,
     write_decision_json,

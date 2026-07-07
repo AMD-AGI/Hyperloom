@@ -20,14 +20,14 @@ async def _build_coord_with_capacity(
     monkeypatch=None,
 ):
     """Build a minimal Coordinator with the requested research_lane capacity."""
-    from hyperloom.orchestrator.agent_role import default_role_registry
-    from hyperloom.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.coordinator import Coordinator
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     # Hermetic GPU-pool resolution: the Coordinator bakes the specialist GPU pool
     # at construction from gpu_specialist_capacity carved by the serving TP and
@@ -276,7 +276,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     # (the old ``max_turns × per_turn`` ceiling became ~1000×600 once the turn
     # cap was lifted). The iron law is kill ≤ gpu_lease TTL ≤ gpu_research_lane
     # TTL — neither max_turns nor per_turn drives the lease any more.
-    from hyperloom.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
+    from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "10")
     coord = await _build_coord_with_capacity(
@@ -324,7 +324,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     """The default ``--research-lane-capacity`` is the GPU-derived ceiling (2 × visible GPU)."""
     import inference_optimizer.cli as cli_mod
-    from hyperloom.orchestrator import policy as policy_mod
+    from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
@@ -353,7 +353,7 @@ def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
     import argparse
 
     from inference_optimizer.cli import _seed_shared_state
-    from hyperloom.orchestrator import policy as policy_mod
+    from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
 

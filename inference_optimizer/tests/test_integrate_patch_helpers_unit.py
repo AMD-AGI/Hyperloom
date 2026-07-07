@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.action_executors import _git as gitmod
-from hyperloom.orchestrator.action_executors import integrate_patch as ip
+from hyperloom.orchestrator.actions.executors import _git as gitmod
+from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 
 class _CP:

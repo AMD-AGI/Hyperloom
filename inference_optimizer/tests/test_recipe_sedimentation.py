@@ -6,13 +6,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.agent_role import default_role_registry
-from hyperloom.orchestrator.backends.mock_backend import (
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
 
 
@@ -203,7 +203,7 @@ def test_warm_recipe_proven_items_empty_without_recipe(tmp_path):
 
 
 def test_gap_provenance_round_trips_through_serialization(tmp_path):
-    from hyperloom.orchestrator.shared_state import SharedState
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     ss = SharedState(session_id="s", model_name="m")
     ss.upsert_gap(
@@ -219,7 +219,7 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
 
 # Cold-start prefers research hints over the domain-focus fallback (C9).
 def test_research_hints_suppress_cold_start():
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         _is_cold_start,
     )
@@ -233,7 +233,7 @@ def test_research_hints_suppress_cold_start():
 
 
 def test_kb_section_renders_research_hints_when_kb_empty():
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         _section_kb_subgraph,
     )
@@ -250,7 +250,7 @@ def test_kb_section_renders_research_hints_when_kb_empty():
 
 
 def test_bare_cold_start_still_uses_domain_focus_fallback():
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         _section_kb_subgraph,
     )
@@ -261,7 +261,7 @@ def test_bare_cold_start_still_uses_domain_focus_fallback():
 
 
 def test_scout_focus_lists_already_proven():
-    from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
         _focus_research_scout_specialist,
     )

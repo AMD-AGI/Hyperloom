@@ -21,8 +21,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hyperloom.orchestrator import phase_state
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.phases import machine_state as phase_state
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture(autouse=True)

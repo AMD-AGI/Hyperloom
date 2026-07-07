@@ -48,11 +48,11 @@ class _StubPRClient:
 # 1. KnowledgePlane.pr_feed_warm_all_domains
 def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
     """KB_gaps/Gap-02 — every known specialist domain appears in the result map."""
-    from hyperloom.orchestrator.knowledge_plane import (
+    from hyperloom.orchestrator.knowledge.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
     )
-    from hyperloom.orchestrator.specialist_domains import (
+    from hyperloom.orchestrator.specialists.domains import (
         SPECIALIST_DOMAIN_KEYS,
     )
 
@@ -70,7 +70,7 @@ def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
 
 def test_pr_feed_warm_all_domains_stashes_warnings():
     """Aggregated warnings land on ``last_warnings`` for one-pass surfacing."""
-    from hyperloom.orchestrator.knowledge_plane import (
+    from hyperloom.orchestrator.knowledge.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
     )
@@ -87,11 +87,11 @@ def test_pr_feed_warm_all_domains_stashes_warnings():
 
 def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
     """A failure on one domain must NOT abort the rest of the batch (KB_design §3.14 R-03)."""
-    from hyperloom.orchestrator.knowledge_plane import (
+    from hyperloom.orchestrator.knowledge.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
     )
-    from hyperloom.orchestrator.specialist_domains import (
+    from hyperloom.orchestrator.specialists.domains import (
         SPECIALIST_DOMAIN_KEYS,
     )
 
@@ -161,7 +161,7 @@ def _make_bare_shared_state():
 @pytest.mark.asyncio
 async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
     """The EXPLORE-entry hook calls ``pr_feed_warm_all_domains`` exactly once."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     plane = _FakePlane()
@@ -175,7 +175,7 @@ async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_on_enter_explore_graceful_when_plane_is_none(tmp_path: Path):
     """``--degraded-kb`` runs have plane=None; the hook must short-circuit."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = None
@@ -186,7 +186,7 @@ async def test_on_enter_explore_graceful_when_plane_is_none(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
     """A raising ``pr_feed_warm_all_domains`` must log + continue, not crash."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     class _BadPlane:
         pr_monitor_enabled = True
@@ -204,7 +204,7 @@ async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path):
     """PR-feed warmup fires on EXPLORE and only EXPLORE, never KERNEL/SWEEP/CLOSE."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
@@ -249,7 +249,7 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
 
     class _StubTaskRegistry:
         async def create_or_return_existing(self, **kwargs):
-            from hyperloom.orchestrator.task_registry import Task
+            from hyperloom.orchestrator.state.task_registry import Task
             import uuid as _uuid
 
             return Task(
@@ -261,7 +261,7 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
             ), False
 
         async def get(self, task_id):
-            from hyperloom.orchestrator.task_registry import Task
+            from hyperloom.orchestrator.state.task_registry import Task
 
             return Task(
                 task_id=task_id,
@@ -321,7 +321,7 @@ def test_bootstrap_marker_records_ir3_auto_degrade(
     """IR-3 auto-degrade: marker shows ``enabled=False`` + ``ir3_auto`` in status_text."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
     from inference_optimizer.session_paths import pr_monitor_status_json
-    from hyperloom.orchestrator import pr_monitor as pr_mod
+    from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     class _Stub:
         def __init__(self, url: str, enabled: bool):
@@ -614,7 +614,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
 ):
     """KB_gaps/Gap-16 — argparse ``args`` values propagate into the KnowledgePlane."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
-    from hyperloom.orchestrator import pr_monitor as pr_mod
+    from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     constructed_urls: list[str] = []
 

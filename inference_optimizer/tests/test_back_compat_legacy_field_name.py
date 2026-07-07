@@ -15,10 +15,10 @@ from inference_optimizer.compat.payload_aliases import (
     LEGACY_KEY,
     read_extra_server_args,
 )
-from hyperloom.orchestrator.action_executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
 )
-from hyperloom.orchestrator.shared_state import (
+from hyperloom.orchestrator.state.shared_state import (
     SharedState,
     _migrate_legacy_extra_sglang_args_keys,
 )

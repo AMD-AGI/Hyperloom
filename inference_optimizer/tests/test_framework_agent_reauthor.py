@@ -16,12 +16,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator, PendingProposal
+from hyperloom.orchestrator.loop.coordinator import Coordinator, PendingProposal
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 

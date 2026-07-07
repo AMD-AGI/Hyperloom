@@ -39,13 +39,13 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 

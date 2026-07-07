@@ -11,13 +11,13 @@ import time
 
 import pytest
 
-from hyperloom.orchestrator.backends import (
+from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.task_registry import Task
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -300,7 +300,7 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 @pytest.mark.asyncio
 async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phases.machine_state import (
         ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     )
 
@@ -313,7 +313,7 @@ async def test_escalate_extend_explore_budget(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_escalate_extend_kernel_budget(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phase_state import (
+    from hyperloom.orchestrator.phases.machine_state import (
         ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     )
 
@@ -379,7 +379,7 @@ async def test_scan_stale_specialists_empty(coord: Coordinator) -> None:
 # -- _maybe_autosubmit_specialist_patches ----------------------------------
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="spec-1", kind="specialist", state="running", params={}, idempotency_key="k1")
     await coord._maybe_autosubmit_specialist_patches(
@@ -390,7 +390,7 @@ async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="spec-2", kind="specialist", state="running", params={}, idempotency_key="k2")
     await coord._maybe_autosubmit_specialist_patches(
@@ -401,7 +401,7 @@ async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None
 
 @pytest.mark.asyncio
 async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
     from inference_optimizer.session_paths import runs_dir
 
     sid = "spec-3"
@@ -423,7 +423,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
 
 # -- _record_fact_per_task -------------------------------------------------
 def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="t-fact", kind="explore", state="succeeded", params={}, idempotency_key="kf")
     coord._record_fact_per_task(
@@ -445,10 +445,10 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
     """Regression for the "fake KEEP" bug: a reverted integrate_patch reaches the
     fact hook with kept=True (``status != failed`` is promotable), yet the
     journal must record REVERT with the REAL measured delta (from delta_pct)."""
-    from hyperloom.orchestrator.optimization_journal import (
+    from hyperloom.orchestrator.state.optimization_journal import (
         OUTCOME_REVERT,
     )
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(
         task_id="t-revert-fake-keep",
@@ -477,8 +477,8 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
 
 
 def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.optimization_journal import OUTCOME_KEEP
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+    from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(
         task_id="t-real-keep",
@@ -572,7 +572,7 @@ def test_context_analysis_reader_fallback_path(coord: Coordinator, tmp_path) -> 
 
 # -- advisory blocks enabled paths -----------------------------------------
 def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator import research_hints as rh
+    from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: {"name": "comp"})
     monkeypatch.setattr(rh, "gap_analysis", lambda *a, **k: {"primary_gap": "throughput"})
@@ -586,7 +586,7 @@ def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
 
 
 def test_target_gap_advisory_no_target(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator import research_hints as rh
+    from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: None)
     coord.shared_state.target_advisory_enabled = True
@@ -621,7 +621,7 @@ def test_promote_warm_replay_reproduced_no_params(coord: Coordinator) -> None:
 
 
 def test_promote_warm_replay_reproduced_with_params(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     coord.shared_state.baseline_tput = 800.0
     task = Task(
@@ -640,13 +640,13 @@ def test_promote_warm_replay_reproduced_with_params(coord: Coordinator) -> None:
 
 # -- _maybe_auto_retry_specialist ------------------------------------------
 def _spec_task(**params):
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     return Task(task_id="spec-r", kind="specialist", state="running", params=params, idempotency_key="spec-r-key")
 
 
 def _result(state="failed", result=None, error=None):
-    from hyperloom.orchestrator.sub_agent_runner import SubAgentResult
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
     return SubAgentResult(task_id="spec-r", state=state, result=result or {}, error=error)
 
@@ -725,7 +725,7 @@ def test_cortex_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
 
 # -- _record_fact_per_variant ----------------------------------------------
 def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="t-var", kind="explore", state="succeeded", params={}, idempotency_key="kv")
     # SKIPPED_DEDUP -> early return (no journal row)

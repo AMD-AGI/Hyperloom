@@ -19,17 +19,17 @@ from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     PolicyDenied,
     PolicyGate,
 )
-from hyperloom.orchestrator.shared_state import (
+from hyperloom.orchestrator.state.shared_state import (
     SharedState,
     _GAPS_ATTEMPTS_HISTORY,
     _GAPS_MAX_ENTRIES,
 )
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
 # 1. Field surface
@@ -248,7 +248,7 @@ class _StubTask:
 @pytest.fixture
 def coord(tmp_path: Path):
     """Coordinator stand-in via ``Coordinator.__new__`` (skips the full constructor)."""
-    from hyperloom.orchestrator.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path

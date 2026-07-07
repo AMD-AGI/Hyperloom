@@ -27,7 +27,7 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _clear_kernel_request_handler_caches():
     """Clear ``lru_cache`` state on env-bound helpers between tests."""
-    from hyperloom.orchestrator import kernel_request_handlers as krh
+    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     krh._default_geak_budget_minutes.cache_clear()
     krh._default_kernel_batch_parallel.cache_clear()

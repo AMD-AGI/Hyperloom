@@ -8,15 +8,15 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from hyperloom.orchestrator.action_registry import (
+from hyperloom.orchestrator.actions.registry import (
     ActionMetadata,
     ActionRegistry,
     ActionRegistryError,
     VALID_FAMILIES,
 )
-from hyperloom.orchestrator.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 
 
 # ActionMetadata schema

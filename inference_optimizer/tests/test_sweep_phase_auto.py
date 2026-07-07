@@ -16,14 +16,14 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.agent_role import default_role_registry
-from hyperloom.orchestrator.backends.mock_backend import (
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.coordinator import Coordinator
-from hyperloom.orchestrator.shared_state import SharedState
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # Fixtures
@@ -66,7 +66,7 @@ class _StubTaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ):
-        from hyperloom.orchestrator.task_registry import Task
+        from hyperloom.orchestrator.state.task_registry import Task
 
         existing = self._tasks.get(idempotency_key)
         if existing is not None:
@@ -135,7 +135,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
         return None
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel_request_handlers.integrate_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
@@ -209,9 +209,9 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
     """Stub apply/revert/bench so the real stack-validation decision path runs."""
-    import hyperloom.orchestrator.kernel_request_handlers as krh
-    import hyperloom.orchestrator.action_executors.baseline as baseline_mod
-    import hyperloom.orchestrator.action_executors.benchmark_result as br
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
     def _fake_apply(payload, *, session_dir, kernel_id):
         return {"status": "ok", "kernel_id": kernel_id, "manifest_path": None}
@@ -582,7 +582,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
         return None
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel_request_handlers.integrate_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
         _fake_integrate_handler,
     )
     c.phase_kernel._maybe_enqueue_watermark_roofline = _noop_roofline
@@ -596,7 +596,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
 
 def test_build_sweep_params_defaults_when_no_recipe():
     """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
-    from hyperloom.orchestrator.action_executors.sweep import (
+    from hyperloom.orchestrator.actions.executors.sweep import (
         DEFAULT_CONC_VALUES,
         DEFAULT_ISL_OSL,
         DEFAULT_NUM_PROMPTS_FACTOR,
@@ -630,7 +630,7 @@ def test_build_sweep_params_full_recipe_override():
 
 def test_build_sweep_params_partial_recipe_per_field_fallback():
     """Recipe overriding only conc_values → that field from recipe, the rest from defaults, source=cortex_recipe."""
-    from hyperloom.orchestrator.action_executors.sweep import (
+    from hyperloom.orchestrator.actions.executors.sweep import (
         DEFAULT_ISL_OSL,
         DEFAULT_NUM_PROMPTS_FACTOR,
     )
@@ -664,7 +664,7 @@ def test_build_sweep_params_accepts_isl_osl_as_pair_lists():
 def test_build_sweep_params_rejects_malformed_conc_values(bad):
     """conc_values must be a non-empty list of int-coercible values;
     anything else → fallback to default."""
-    from hyperloom.orchestrator.action_executors.sweep import (
+    from hyperloom.orchestrator.actions.executors.sweep import (
         DEFAULT_CONC_VALUES,
     )
 
@@ -680,7 +680,7 @@ def test_build_sweep_params_rejects_malformed_conc_values(bad):
 )
 def test_build_sweep_params_rejects_malformed_isl_osl(bad):
     """Non-list / wrong-shape isl_osl_configs → default fallback."""
-    from hyperloom.orchestrator.action_executors.sweep import (
+    from hyperloom.orchestrator.actions.executors.sweep import (
         DEFAULT_ISL_OSL,
     )
 
@@ -697,7 +697,7 @@ def test_build_sweep_params_rejects_malformed_isl_osl(bad):
 def test_build_sweep_params_rejects_non_positive_num_prompts_factor(bad):
     """num_prompts_factor must be a positive int; zero / negative / non-int
     → default fallback."""
-    from hyperloom.orchestrator.action_executors.sweep import (
+    from hyperloom.orchestrator.actions.executors.sweep import (
         DEFAULT_NUM_PROMPTS_FACTOR,
     )
 
@@ -1013,10 +1013,10 @@ def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
 
 def _make_policy_gate(*, shared_state):
     """Plain PolicyGate wired to the role registry + the test's SharedState double."""
-    from hyperloom.orchestrator.agent_role import (
+    from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
-    from hyperloom.orchestrator.policy import PolicyGate
+    from hyperloom.orchestrator.policy.gate import PolicyGate
 
     return PolicyGate(
         role_registry=default_role_registry(),
@@ -1026,7 +1026,7 @@ def _make_policy_gate(*, shared_state):
 
 def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
     """Once the SWEEP row carries ``evidence.auto_sweep_task_id``, an LLM ``delegate{action='sweep'}`` is denied via ``sweep_phase_singleton``."""
-    from hyperloom.orchestrator.policy import PolicyDenied
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc123")],
@@ -1045,7 +1045,7 @@ def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
 
 def test_sweep_singleton_denies_propose_action_after_auto_enqueue_stamped():
     """Same shape on the propose_action channel — defense in depth."""
-    from hyperloom.orchestrator.policy import PolicyDenied
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-xyz")],
@@ -1103,10 +1103,10 @@ def test_sweep_singleton_inert_when_phase_history_empty():
 
 def test_sweep_singleton_inert_when_shared_state_is_none():
     """PolicyGate without a SharedState reference self-defends with an early return."""
-    from hyperloom.orchestrator.agent_role import (
+    from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
-    from hyperloom.orchestrator.policy import PolicyGate
+    from hyperloom.orchestrator.policy.gate import PolicyGate
 
     gate = PolicyGate(role_registry=default_role_registry())
     assert gate.shared_state is None
@@ -1164,7 +1164,7 @@ def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
         Intent,
         IntentType,
     )
-    from hyperloom.orchestrator.policy import PolicyDenied
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
@@ -1189,7 +1189,7 @@ def test_validate_intent_denies_llm_sweep_propose_in_active_sweep_phase():
         Intent,
         IntentType,
     )
-    from hyperloom.orchestrator.policy import PolicyDenied
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],

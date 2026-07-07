@@ -25,17 +25,17 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.action_executors.roofline import (
+from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
 )
-from hyperloom.orchestrator.backends import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.coordinator import (
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     _lifecycle_paths,
 )
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.task_registry import Task
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.task_registry import Task
 from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import reports_dir
 from inference_optimizer.protocol.intent import Intent, IntentType
@@ -179,7 +179,7 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
 async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_path):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         candidates_path = tmp_path / "kernel_candidates.json"
         candidates_path.write_text("{}", encoding="utf-8")
@@ -238,7 +238,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
     # operator can reach analysis.md and the roofline/summary sidecars.
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         report_fields = {
             "candidates_path": str(tmp_path / "kernel_candidates.json"),
@@ -279,7 +279,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
 async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import kernel_request_handlers
+        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
         async def boom_handler(payload, *, session_dir):
             raise RuntimeError("kaboom")
@@ -331,11 +331,11 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
         return {"status": "ok", "candidates_path": "/tmp/kc.json", "trace_report_path": str(md), "hot_kernels": []}
 
     p1 = patch(
-        "hyperloom.orchestrator.action_executors.profile.profile_executor",
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     )
     p2 = patch(
-        "hyperloom.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
         new=fake_ta,
     )
     executor = RooflineExecutor(shared_state=state)
@@ -445,7 +445,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        from hyperloom.orchestrator import phase_state as _ps
+        from hyperloom.orchestrator.phases import machine_state as _ps
 
         c.shared_state.phase = _ps.PHASE_PRELUDE
         # Force a single PRELUDE -> KERNEL transition.

@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.specialist_domains import (
+from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
     SPECIALIST_DOMAINS_M5,
     get_domain,
 )
-from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     _DOMAIN_FOCUS_TEMPLATES,
     SpecialistPromptInputs,
     build_specialist_prompts,
@@ -283,15 +283,15 @@ def test_static_recon_existing_markers_unaffected_by_shared_expert_change():
 @pytest.mark.asyncio
 async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     """When the M5 active set covers a domain, the runner must NOT add a generic-template note."""
-    from hyperloom.orchestrator.backends.mock_backend import (
+    from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
         MockTurn,
         ScriptedPlan,
     )
     from inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.specialist_runner import SpecialistRunner
-    from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-    from hyperloom.orchestrator.task_registry import Task
+    from hyperloom.orchestrator.specialists.runner import SpecialistRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+    from hyperloom.orchestrator.state.task_registry import Task
 
     done = {
         "gap_canonical_id": "gap.x",
@@ -344,7 +344,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.backends.mock_backend import (
+from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
@@ -355,33 +355,33 @@ from inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
-from hyperloom.orchestrator.agent_role import default_role_registry
-from hyperloom.orchestrator.policy import (
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
     SPECIALIST_ACTION_NAME,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
-from hyperloom.orchestrator.resource_lock import (
+from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
 )
-from hyperloom.orchestrator.shared_state import SharedState
-from hyperloom.orchestrator.specialist_domains import (
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     SPECIALIST_DOMAINS_M5,
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
     get_domain,
 )
-from hyperloom.orchestrator.specialist_runner import (
+from hyperloom.orchestrator.specialists.runner import (
     DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
     build_empty_specialist_done,
 )
-from hyperloom.orchestrator.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.system_prompts.specialist_prompt_builder import (
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
     build_specialist_prompts_for_domain,
@@ -607,7 +607,7 @@ def test_R2_max_turns_negative_denied(gate):
 def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
     """The synthetic ``specialist`` action_name bypasses the ActionRegistry lookup that would deny it as ``unknown_action``."""
     # Even with an ActionRegistry wired, the specialist branch is checked before the unknown_action gate.
-    from hyperloom.orchestrator.action_registry import ActionRegistry
+    from hyperloom.orchestrator.actions.registry import ActionRegistry
 
     gate_with_registry = PolicyGate(
         role_registry=default_role_registry(),
@@ -902,7 +902,7 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
 
 @pytest.mark.asyncio
 async def test_specialist_runner_backend_error_synthesises_empty_done(tmp_path):
-    from hyperloom.orchestrator.backends.base import BackendError
+    from hyperloom.orchestrator.roles.base import BackendError
 
     plan = ScriptedPlan(
         turns=[
@@ -988,7 +988,7 @@ def test_shared_state_specialist_rounds_default_empty():
 
 # 8b. Per-anchor coverage counters (point 1)
 def test_domain_round_counters_tick_all_anchors():
-    from hyperloom.orchestrator.specialist_domains import (
+    from hyperloom.orchestrator.specialists.domains import (
         KNOWLEDGE_DOMAIN_TAGS,
     )
 
@@ -1112,7 +1112,7 @@ def test_update_last_specialist_snapshot():
 
 def test_research_lane_capacity_is_core_state_field():
     """LLM cannot raise research_lane_capacity mid-flight."""
-    from hyperloom.orchestrator.policy import CORE_STATE_FIELDS
+    from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 
     assert "research_lane_capacity" in CORE_STATE_FIELDS
     assert "gpu_specialist_capacity" in CORE_STATE_FIELDS

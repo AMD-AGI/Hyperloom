@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from hyperloom.orchestrator.action_executors import _magpie_patcher as mp
+from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
 
 _LEGACY_SRC = (

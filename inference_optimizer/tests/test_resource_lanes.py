@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.gpu_pool import SpecialistGpuPool
-from hyperloom.orchestrator.resource_lock import (
+from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
     LaneBusy,

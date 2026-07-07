@@ -6,7 +6,7 @@ The shapes mirror Primus-Claw's ``getToolSchemas`` so the LLM sees the
 same surface regardless of whether it talks to Brain or directly to
 critic-agent. Descriptions are kept terse — the long-form usage guidance
 lives in the system prompt (see ``src/hyperloom/orchestrator/
-system_prompts/critic.md``).
+prompts/critic.md``).
 """
 
 from __future__ import annotations
