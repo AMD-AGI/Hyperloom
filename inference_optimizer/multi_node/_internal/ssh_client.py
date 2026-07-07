@@ -13,11 +13,12 @@ No paramiko: we shell out to the system ``ssh`` / ``ssh-keygen`` (present in
 the sandbox) to avoid a new transitive dependency on the optimizer image.
 
 Keys are session-scoped and ephemeral:
-T
+
 * :func:`generate_session_keypair` makes an ed25519 pair under the session dir.
 * The public key is injected into the workload body as ``MN_SSH_AUTHORIZED_KEY``
   (``mn-sshd-init.sh`` writes it to the pod's ``authorized_keys`` at start).
 * The private key stays in the sandbox and is passed to :func:`ssh_run`.
+* Host keys are recorded under ``known_hosts`` beside the keypair (P1-1).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .env_safety import assert_env_key_shapes, assert_forward_env_keys
 from .log import info, warn
 
 # Default sshd port baked into the image's mn-sshd-init.sh. Not 22: the SaFE
@@ -34,27 +36,36 @@ from .log import info, warn
 # hostNetwork, where :22 collides with the node's own sshd.
 DEFAULT_SSH_PORT = 2222
 
-# ssh options for ephemeral, key-only, non-interactive automation against
-# short-lived pod IPs. Host keys change per pod recreate, so we deliberately
-# skip known_hosts (StrictHostKeyChecking=no + UserKnownHostsFile=/dev/null).
-_SSH_COMMON_OPTS = [
-    "-o",
-    "StrictHostKeyChecking=no",
-    "-o",
-    "UserKnownHostsFile=/dev/null",
-    "-o",
-    "PasswordAuthentication=no",
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=15",
-    "-o",
-    "ServerAliveInterval=30",
-    "-o",
-    "ServerAliveCountMax=3",
-    "-o",
-    "LogLevel=ERROR",
-]
+
+def _ssh_common_opts(known_hosts: Path) -> list[str]:
+    """Build hardened non-interactive SSH options using a session known_hosts file.
+
+    Args:
+        known_hosts: Path to the session-scoped known_hosts file.
+
+    Returns:
+        list[str]: OpenSSH CLI option tokens.
+    """
+    return [
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "UpdateHostKeys=no",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "LogLevel=ERROR",
+    ]
 
 
 def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
@@ -74,6 +85,10 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
         RuntimeError: If ``ssh-keygen`` exits non-zero.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_dir.chmod(0o700)
+    except OSError as exc:
+        warn(f"could not chmod SSH key dir {dest_dir} to 0700: {exc}")
     priv = dest_dir / "mn_id_ed25519"
     pub = dest_dir / "mn_id_ed25519.pub"
     if priv.is_file() and pub.is_file():
@@ -114,6 +129,7 @@ def ssh_run(
     command: str,
     *,
     key_path: Path | str,
+    known_hosts: Path,
     port: int = DEFAULT_SSH_PORT,
     user: str = "root",
     timeout: int = 120,
@@ -128,6 +144,7 @@ def ssh_run(
         host: The target host/IP.
         command: The shell command to run remotely.
         key_path: Path to the private SSH key.
+        known_hosts: Session known_hosts file for host-key verification.
         port: The remote sshd port.
         user: The remote login user.
         timeout: Subprocess timeout in seconds.
@@ -137,7 +154,7 @@ def ssh_run(
     """
     argv = [
         "ssh",
-        *_SSH_COMMON_OPTS,
+        *_ssh_common_opts(known_hosts),
         "-i",
         str(key_path),
         "-p",
@@ -157,6 +174,7 @@ def ssh_run_script(
     script_args: str,
     *,
     key_path: Path | str,
+    known_hosts: Path,
     port: int = DEFAULT_SSH_PORT,
     user: str = "root",
     timeout: int = 600,
@@ -182,6 +200,7 @@ def ssh_run_script(
         interpreter: Interpreter used to run the script (e.g. ``python3``).
         script_args: Arguments appended verbatim after the script path.
         key_path: Path to the private SSH key.
+        known_hosts: Session known_hosts file for host-key verification.
         port: The remote sshd port.
         user: The remote login user.
         timeout: Subprocess timeout in seconds.
@@ -194,6 +213,7 @@ def ssh_run_script(
     enc = base64.b64encode(script_text.encode("utf-8")).decode("ascii")
     env_prefix = ""
     if env:
+        assert_forward_env_keys(env)
         env_prefix = "".join(f"{k}={shlex.quote(str(v))} " for k, v in env.items())
     remote_cmd = (
         f"echo {enc} | base64 -d > {shlex.quote(remote_path)} && "
@@ -203,6 +223,7 @@ def ssh_run_script(
         host,
         remote_cmd,
         key_path=key_path,
+        known_hosts=known_hosts,
         port=port,
         user=user,
         timeout=timeout,
@@ -215,6 +236,7 @@ def ssh_run_bash_with_env(
     env: dict[str, str] | None,
     *,
     key_path: Path | str,
+    known_hosts: Path,
     port: int = DEFAULT_SSH_PORT,
     user: str = "root",
     timeout: int = 600,
@@ -231,6 +253,7 @@ def ssh_run_bash_with_env(
         script_text: The script body run via ``bash -s``.
         env: Environment variables exported before the script, or ``None``.
         key_path: Path to the private SSH key.
+        known_hosts: Session known_hosts file for host-key verification.
         port: The remote sshd port.
         user: The remote login user.
         timeout: Subprocess timeout in seconds.
@@ -238,11 +261,13 @@ def ssh_run_bash_with_env(
     Returns:
         The completed SSH subprocess.
     """
+    if env:
+        assert_env_key_shapes(env)
     prologue = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
     full = f"set -uo pipefail\n{prologue}\n{script_text}\n"
     argv = [
         "ssh",
-        *_SSH_COMMON_OPTS,
+        *_ssh_common_opts(known_hosts),
         "-i",
         str(key_path),
         "-p",
@@ -264,6 +289,7 @@ def probe_ssh(
     host: str,
     *,
     key_path: Path | str,
+    known_hosts: Path,
     port: int = DEFAULT_SSH_PORT,
     user: str = "root",
     timeout: int = 20,
@@ -273,6 +299,7 @@ def probe_ssh(
     Args:
         host: The target host/IP.
         key_path: Path to the private SSH key.
+        known_hosts: Session known_hosts file for host-key verification.
         port: The remote sshd port.
         user: The remote login user.
         timeout: Subprocess timeout in seconds.
@@ -282,7 +309,15 @@ def probe_ssh(
         accepted), ``False`` otherwise (including on timeout).
     """
     try:
-        cp = ssh_run(host, "echo mn_ssh_ok", key_path=key_path, port=port, user=user, timeout=timeout)
+        cp = ssh_run(
+            host,
+            "echo mn_ssh_ok",
+            key_path=key_path,
+            known_hosts=known_hosts,
+            port=port,
+            user=user,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         warn(f"ssh probe to {host}:{port} timed out")
         return False
