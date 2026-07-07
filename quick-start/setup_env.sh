@@ -28,4 +28,5 @@ fi
 USER_DATA_PATH=${USER_DATA_PATH:-"/workspace/hyperloom"}
 sed -i "s|USER_DATA_PATH=.*|USER_DATA_PATH=${USER_DATA_PATH}|g" /opt/Hyperloom/.env
 
+
 tail -f /dev/null
