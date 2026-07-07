@@ -19,6 +19,9 @@ dependencies = [
     # load time even when CRITIC_WEB_TOOLS_ENABLED=false.
     "markdownify>=0.11",
     "cachetools>=5.3",
+    # tree-reform.MD P2.5: framework-agent's own base dependency, merged in
+    # verbatim after its promotion into hyperloom.agents.framework.
+    "jsonschema>=4.0",
 ]
 
 [project.urls]
@@ -38,6 +41,11 @@ test = [
     # (psutil stays an optional runtime dep — the probe degrades to None when
     # it is absent — but the test suite needs it to cover that path).
     "psutil>=5.9",
+    # tree-reform.MD P2.5: framework-agent's own ``test`` extra listed these
+    # so its ``ast``-extra code paths (patch-authoring / isolation) are
+    # exercised by the shared test suite too.
+    "libcst>=1.0",
+    "patch-ng>=1.18",
 ]
 # CI / local mirror of the coverage job: ``pip install -e ".[test,ci]"``.
 # ``tomli`` is only required on Python <3.11 when inline scripts read
@@ -53,9 +61,32 @@ ci = [
 trace = [
     "langfuse>=2.0",
 ]
+# tree-reform.MD P2.5: framework-agent's own optional extras, merged in
+# verbatim after its promotion into hyperloom.agents.framework. ``ast`` is
+# used by the (currently GPU-node-only) patch-authoring/isolation path;
+# ``claude`` is the optional ``synthesize --with-llm`` KB-distillation backend.
+ast = [
+    "libcst>=1.0",
+    "patch-ng>=1.18",
+]
+claude = [
+    "claude_agent_sdk>=0.1",
+]
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
+# tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
+# (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
+# keep resolving after promotion into the single ``hyperloom`` distribution.
+# The orchestrator's ``framework/client.py._resolve_fa_binary()`` looks up
+# ``fa`` on PATH first (``shutil.which("fa")``), which these provide.
+framework-agent = "hyperloom.agents.framework.runtime.cli:main"
+fa = "hyperloom.agents.framework.runtime.cli:main"
+# tree-reform.MD P2.5: robustness-agent's own ``[project.scripts]`` entry,
+# preserved verbatim (standalone reactor CLI wrapper; the orchestrator itself
+# always shells out to ``python -m hyperloom.agents.robustness.runtime.cli``
+# directly, not via this console script).
+robustness-agent = "hyperloom.agents.robustness.main:main"
 
 # Packages are provided by setup.py so editable installs use the same package
 # discovery as local source runs.
@@ -99,13 +130,34 @@ hyperloom = [
     "references/*.md",
     "kb_contributions/*.json",
 ]
+# tree-reform.MD P2.5: robustness-agent's SKILL.md, promoted alongside its
+# package (near-verbatim move; already good src-layout per tree-reform.MD).
+"hyperloom.agents.robustness" = [
+    "SKILL.md",
+]
+# tree-reform.MD P2.5: framework-agent's LLM skill assets (SKILL.md/AGENTS.md/
+# README.md, LLM prompt templates, protocol/schema references, and the
+# example request payloads used by its own tests), promoted alongside its
+# package. ``scripts/install.sh`` stays package-data too (chained from
+# ``src/hyperloom/inference_optimizer/assets/install.sh``).
+"hyperloom.agents.framework" = [
+    "SKILL.md",
+    "AGENTS.md",
+    "README.md",
+    "prompts/*.md",
+    "references/*.md",
+    "examples/*.json",
+    "examples/*.py",
+    "scripts/*.sh",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = [
     "src/hyperloom/inference_optimizer/tests",
-    "robustness-agent/tests",
+    "src/hyperloom/agents/robustness/tests",
     "src/hyperloom/agents/critic/runtime/tests",
+    "src/hyperloom/agents/framework/tests",
     "quantization_agent/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
@@ -130,10 +182,13 @@ testpaths = [
 # P2.7. ``.`` is still required for the still-flat ``quantization_agent`` and
 # ``ci`` packages (tree-reform.MD P2.4 only promoted ``inference_optimizer``;
 # quantization_agent/ci src-layout promotion is P2.6). tree-reform.MD P2.5:
-# critic-agent was promoted into ``src/hyperloom/agents/critic`` (module
-# ``runtime`` -> package-qualified ``hyperloom.agents.critic.runtime``), so
-# its bare ``critic-agent`` pythonpath entry is dropped here.
-pythonpath = ["src", ".", "ci", "robustness-agent/src", "framework-agent/src"]
+# critic-agent, robustness-agent, and framework-agent were all promoted into
+# ``src/hyperloom/agents/{critic,robustness,framework}`` (bare/sibling module
+# names -> package-qualified ``hyperloom.agents.*``), so their standalone
+# ``critic-agent`` / ``robustness-agent/src`` / ``framework-agent/src``
+# pythonpath entries are dropped here (all resolve via the single ``src``
+# entry now).
+pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -169,12 +224,12 @@ source = [
     # tree-reform.MD P2.3: orchestrator moved under src/hyperloom. tree-reform.MD
     # P2.4: inference_optimizer moved under src/hyperloom too (both were
     # previously counted under a standalone "inference_optimizer" entry).
-    # tree-reform.MD P2.5: critic-agent's ``runtime`` package was promoted
-    # into src/hyperloom/agents/critic (so it's now measured as part of the
-    # "src/hyperloom" tree instead of a standalone "critic-agent/runtime" entry).
+    # tree-reform.MD P2.5: critic-agent's ``runtime`` package, robustness-agent,
+    # and framework-agent were all promoted into src/hyperloom/agents/{critic,
+    # robustness,framework} (so they're now measured as part of the
+    # "src/hyperloom" tree instead of standalone "critic-agent/runtime" /
+    # "robustness_agent" / "framework-agent/src" entries).
     "src/hyperloom",
-    "robustness_agent",
-    "framework-agent/src",
     "kernel-agent/tools",
     "quantization_agent",
     "OOB",
@@ -197,7 +252,7 @@ omit = [
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Robustness-agent standalone reactor CLI wrapper.
-    "robustness-agent/src/robustness_agent/main.py",
+    "src/hyperloom/agents/robustness/main.py",
     # Stand-alone kernel-agent CLI tools.
     "kernel-agent/tools/kernel_optimization.py",
     "kernel-agent/tools/tracelens_analysis.py",
@@ -237,7 +292,7 @@ omit = [
     # ``ps`` / ``df`` / ``ray status``. Each shell-out has a unit test
     # through the provider/factory layers; the local_probe glue itself
     # is integration-only.
-    "robustness-agent/src/robustness_agent/sources/local_probe.py",
+    "src/hyperloom/agents/robustness/sources/local_probe.py",
     # InferenceX shell-script patcher — fcntl-based file locking and
     # benchmark_lib.sh rewriting that already has dedicated integration
     # coverage; the per-call IO error branches are not unit-testable
@@ -262,9 +317,6 @@ omit = [
     # plus the e2e harness in
     # src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.
     "src/hyperloom/orchestrator/roles/robustness_agent.py",
-    # Legacy conductor SQLite bridge superseded by the M1 reactor / CLI
-    # transport. Kept for backwards compat; not unit-tested.
-    "robustness-agent/src/robustness_agent/conductor.py",
     # Critic agent backend talks to the critic-agent runtime via a real
     # subprocess transport; exercised end-to-end by the critic_agent_e2e
     # marker tests.
@@ -273,13 +325,10 @@ omit = [
     # covered by the dedicated profile/baseline parametric test suites.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
-    # Legacy robustness-agent monitors superseded by the M1 reactor;
-    # provider-side tests exercise the GPU/disk/server probes today.
-    "robustness-agent/src/robustness_agent/monitors/server_health.py",
-    "robustness-agent/src/robustness_agent/monitors/log_tailer.py",
-    "robustness-agent/src/robustness_agent/providers/hybrid.py",
-    "robustness-agent/src/robustness_agent/providers/robust.py",
-    "robustness-agent/src/robustness_agent/providers/local.py",
+    # NOTE: the legacy robustness-agent monitors/providers/conductor.py
+    # modules these paths used to point at (superseded by the M1 reactor)
+    # were already deleted from disk before tree-reform.MD P2.5; the ghost
+    # omit entries were dropped in this same step rather than rewritten.
     # ── ci/ inference-optimization pipeline ──
     # The measured ci/ set is the library-shaped logic modules
     # (generate_hf_matrix, generate_matrix, progress, build_rolling_pool,

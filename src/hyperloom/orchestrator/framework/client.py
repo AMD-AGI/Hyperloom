@@ -22,39 +22,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+# tree-reform.MD P2.5: framework-agent was promoted into
+# hyperloom.agents.framework (always importable alongside orchestrator now
+# that both live under the same installed ``hyperloom`` distribution), so the
+# former IO-only ``except ImportError`` fallback copy of
+# ``_FRAMEWORK_TO_REPO_URL`` is no longer needed.
+from hyperloom.agents.framework.repo_map import repo_url_for_framework
+
 
 log = logging.getLogger(__name__)
-
-
-# Repo URL table; delegate to canonical ``framework_agent.repo_map``, with an
-# inline fallback copy for IO-only test environments.
-try:
-    from framework_agent.repo_map import (  # type: ignore[import-not-found]
-        repo_url_for_framework,
-    )
-except ImportError:  # pragma: no cover — exercised only in IO-only test envs
-    # MUST stay byte-for-byte identical to
-    # ``framework_agent.repo_map._FRAMEWORK_TO_REPO_URL`` (sync test enforced).
-    _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
-        "sglang": "https://github.com/sgl-project/sglang.git",
-        "vllm": "https://github.com/ROCm/vllm.git",
-        "atom": "https://github.com/ROCm/ATOM.git",
-        "xdit": "https://github.com/xdit-project/xDiT.git",
-    }
-
-    def repo_url_for_framework(framework: str) -> str:
-        """Return the canonical GitHub repo URL for ``framework`` ("" if unknown).
-
-        Args:
-            framework: The framework name (case-insensitive).
-
-        Returns:
-            The repo URL, or ``""`` when the framework is unknown.
-        """
-        return _FRAMEWORK_TO_REPO_URL.get(
-            (framework or "").strip().lower(),
-            "",
-        )
 
 
 def _resolve_fa_binary() -> str | None:

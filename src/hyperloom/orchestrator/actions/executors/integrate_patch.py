@@ -1664,7 +1664,7 @@ class IntegratePatchExecutor:
         if params.get("enablement"):
             import math as _math
 
-            from framework_agent.enablement import (
+            from hyperloom.agents.framework.enablement import (
                 FailureSignature,
                 classify_failure,
                 enablement_made_progress,

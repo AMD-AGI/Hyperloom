@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""RobustnessAgentBackend — bridges the ``robustness-agent`` runtime into
-the Coordinator as a real Robustness Backend.
+"""RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness``
+runtime into the Coordinator as a real Robustness Backend.
 
 Mirrors :class:`CriticAgentBackend`'s subprocess transport, simplified
 because the robustness reactor is deterministic (no LLM, KB, or two-phase
@@ -38,10 +38,7 @@ ROBUSTNESS_AGENT_WORKDIR_KEEP_COUNT = 50
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
-    """Real implementation — runs ``python -m robustness_agent.runtime.cli tick``.
-
-    Sets ``PYTHONPATH=<root>/src`` + ``cwd=<root>`` so the package resolves
-    without a pip-install (matching the critic-agent convention).
+    """Real implementation — runs ``python -m hyperloom.agents.robustness.runtime.cli tick``.
 
     Args:
         call: The invocation descriptor with phase, request / output paths,
@@ -55,7 +52,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
         raise BackendError(f"RobustnessAgentBackend: unsupported runtime phase {call.phase!r} (expected 'tick')")
     invoke_runtime_cli(
         call,
-        module="robustness_agent.runtime.cli",
+        module="hyperloom.agents.robustness.runtime.cli",
         agent_label="robustness-agent",
         timeout_sec=ROBUSTNESS_AGENT_RUNTIME_TIMEOUT_SEC,
     )
@@ -69,8 +66,12 @@ class RobustnessAgentBackend:
     Parameters
     ----------
     robustness_agent_root:
-        Package root containing ``src/robustness_agent/runtime/cli.py``
-        (invoked with ``cwd=root`` + ``PYTHONPATH=<root>/src``).
+        Directory containing ``runtime/cli.py``
+        (``src/hyperloom/agents/robustness/``). The CLI is invoked as the
+        package-qualified ``python -m hyperloom.agents.robustness.runtime.cli``,
+        resolved via the normal installed ``hyperloom`` namespace;
+        ``cwd=robustness_agent_root`` is still set for parity with the other
+        sibling-agent backends.
     session_dir:
         Coordinator session directory; scopes per-turn workdirs and is
         forwarded into ``request.options.session_dir``.
@@ -97,8 +98,8 @@ class RobustnessAgentBackend:
         """Normalise paths, verify the CLI module, and select the runtime caller.
 
         Coerces ``robustness_agent_root`` and ``session_dir`` to :class:`Path`,
-        confirms ``src/robustness_agent/runtime/cli.py`` exists, wires up either
-        the test ``runtime_caller_factory`` or the real subprocess caller, and
+        confirms ``runtime/cli.py`` exists, wires up either the test
+        ``runtime_caller_factory`` or the real subprocess caller, and
         snapshots the forwarded ``options``.
 
         Raises:
@@ -107,10 +108,10 @@ class RobustnessAgentBackend:
         """
         self.robustness_agent_root = Path(self.robustness_agent_root)
         self.session_dir = Path(self.session_dir)
-        cli_module = self.robustness_agent_root / "src" / "robustness_agent" / "runtime" / "cli.py"
+        cli_module = self.robustness_agent_root / "runtime" / "cli.py"
         if not cli_module.is_file():
             raise BackendError(
-                f"RobustnessAgentBackend: src/robustness_agent/runtime/cli.py "
+                f"RobustnessAgentBackend: runtime/cli.py "
                 f"not found under {self.robustness_agent_root!s} — set "
                 f"ROBUSTNESS_AGENT_ROOT or check the install"
             )
@@ -292,20 +293,17 @@ class RobustnessAgentBackend:
 
 
     def _build_runtime_env(self) -> dict[str, str]:
-        """Build subprocess env with ``<root>/src`` prepended to PYTHONPATH
-        (preserving any existing value) so the CLI module resolves.
+        """Build the subprocess environment for ``runtime.cli`` invocations.
+
+        The module now resolves via the normal installed ``hyperloom``
+        namespace, so no ``PYTHONPATH`` prepending is needed (tree-reform.MD
+        P2.5 promoted robustness-agent into ``hyperloom.agents.robustness``).
 
         Returns:
-            A copy of the current environment with ``PYTHONPATH`` and the
-            robustness session-dir hint applied.
+            A copy of the current environment with the robustness
+            session-dir hint applied.
         """
         env = dict(os.environ)
-        src = str(self.robustness_agent_root / "src")
-        existing = env.get("PYTHONPATH", "").strip()
-        if existing:
-            env["PYTHONPATH"] = src + os.pathsep + existing
-        else:
-            env["PYTHONPATH"] = src
         env.setdefault("ROBUSTNESS_AGENT_SESSION_DIR", str(self.session_dir))
         return env
 

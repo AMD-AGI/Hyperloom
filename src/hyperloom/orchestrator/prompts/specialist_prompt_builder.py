@@ -570,8 +570,8 @@ def _focus_enablement_specialist(
     Returns:
         Prompt lines rendered from the enablement mandate.
     """
-    from framework_agent.enablement import EnablementRequest
-    from framework_agent.enablement_authoring import build_mandate
+    from hyperloom.agents.framework.enablement import EnablementRequest
+    from hyperloom.agents.framework.enablement_authoring import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
     req = EnablementRequest(

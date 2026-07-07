@@ -188,11 +188,15 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
-# Robustness-agent runtime location resolution; mirrors critic-agent helpers above.
+# Robustness-agent runtime location resolution; mirrors critic-agent helpers
+# above. tree-reform.MD P2.5: robustness-agent was promoted from a sibling
+# ``robustness-agent/`` checkout into the in-tree
+# ``src/hyperloom/agents/robustness/`` package (module ``robustness_agent``
+# -> package-qualified ``hyperloom.agents.robustness``).
 _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 def _resolve_robustness_agent_root() -> Path | None:
-    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``.
+    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else the in-tree package), or ``None``.
 
     Returns:
         Path | None: The validated robustness-agent root, or ``None`` when no
@@ -201,20 +205,18 @@ def _resolve_robustness_agent_root() -> Path | None:
     override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
-        return p if (p / "src" / "robustness_agent" / "runtime" / "cli.py").is_file() else None
+        return p if (p / "runtime" / "cli.py").is_file() else None
     from ..session.paths import PACKAGE_ROOT
 
-    candidate = PACKAGE_ROOT.parent / "robustness-agent"
-    cli_module = candidate / "src" / "robustness_agent" / "runtime" / "cli.py"
+    candidate = PACKAGE_ROOT.parent / "agents" / "robustness"
+    cli_module = candidate / "runtime" / "cli.py"
     return candidate if cli_module.is_file() else None
 
 def _validate_robustness_agent_runtime(root: Path) -> None:
-    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work.
+    """Fail fast if ``python -m hyperloom.agents.robustness.runtime.cli --help`` doesn't work.
 
-    Runs the runtime's ``--help`` with ``cwd=root`` and ``PYTHONPATH`` extended
-    by ``<root>/src`` so the subprocess resolves the module the same way the
-    real backend will. Any launch failure or non-zero exit prints an
-    operator-facing message and aborts.
+    Runs the runtime's ``--help`` with ``cwd=root``. Any launch failure or
+    non-zero exit prints an operator-facing message and aborts.
 
     Args:
         root (Path): The robustness-agent skill root to validate.
@@ -222,15 +224,11 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
     Raises:
         SystemExit: With code 2 when the runtime cannot start or exits non-zero.
     """
-    src = str(root / "src")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
-    cmd = [sys.executable, "-m", "robustness_agent.runtime.cli", "--help"]
+    cmd = [sys.executable, "-m", "hyperloom.agents.robustness.runtime.cli", "--help"]
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(root),
-            env=env,
             capture_output=True,
             text=True,
             timeout=30,
@@ -240,14 +238,15 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
             f"ERROR: robustness-agent runtime sanity check failed: {exc!r}\n"
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
-            f"Either fix ROBUSTNESS_AGENT_ROOT, install robustness-agent at "
-            f"$REPO_ROOT/robustness-agent, or pass --robustness-mock to bypass.",
+            f"Either fix ROBUSTNESS_AGENT_ROOT, check the "
+            f"src/hyperloom/agents/robustness/ install, or pass "
+            f"--robustness-mock to bypass.",
             file=sys.stderr,
         )
         sys.exit(2)
     if proc.returncode != 0:
         print(
-            f"ERROR: robustness-agent runtime.cli --help exited rc={proc.returncode}\n"
+            f"ERROR: hyperloom.agents.robustness.runtime.cli --help exited rc={proc.returncode}\n"
             f"  cwd={root}\n"
             f"  stderr={proc.stderr.strip()[:500]}",
             file=sys.stderr,

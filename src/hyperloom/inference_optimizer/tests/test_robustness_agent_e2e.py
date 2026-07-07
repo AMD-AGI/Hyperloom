@@ -34,12 +34,12 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture
 def robustness_agent_root() -> Path:
-    """Locate the real robustness-agent checkout. Skip gracefully if absent."""
+    """Locate the real robustness-agent package. Skip gracefully if absent."""
     root = _resolve_robustness_agent_root()
     if root is None:
         pytest.skip(
             "robustness-agent runtime not found — set ROBUSTNESS_AGENT_ROOT or "
-            "place robustness-agent/ next to src/hyperloom/inference_optimizer/"
+            "check the src/hyperloom/agents/robustness/ install"
         )
     return root
 

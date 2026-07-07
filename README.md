@@ -129,21 +129,23 @@ Hyperloom/
 │   │   ├── experiments/                  # A/B and roofline-audit scripts
 │   │   ├── assets/                       # Install scripts, baseline/profile configs
 │   │   └── tests/                        # Inference optimizer unit and regression tests
-│   └── orchestrator/                     # Coordinator + agent roles + action executors
-│       ├── loop/                         # Coordinator facade + collaborators
-│       ├── phases/                       # Phase state machine + per-phase handlers
-│       ├── policy/                       # PolicyGate + action surfaces
-│       ├── actions/                      # Action registry + executors/
-│       ├── roles/                        # Claude/Codex/Critic/Robustness backend adapters
-│       └── prompts/                      # Orchestration prompt construction
+│   ├── orchestrator/                     # Coordinator + agent roles + action executors
+│   │   ├── loop/                         # Coordinator facade + collaborators
+│   │   ├── phases/                       # Phase state machine + per-phase handlers
+│   │   ├── policy/                       # PolicyGate + action surfaces
+│   │   ├── actions/                      # Action registry + executors/
+│   │   ├── roles/                        # Claude/Codex/Critic/Robustness backend adapters
+│   │   └── prompts/                      # Orchestration prompt construction
+│   └── agents/                           # Sibling skills, promoted into the hyperloom namespace
+│       ├── critic/                       # Critic subprocess runtime (proposal review)
+│       ├── robustness/                   # Robustness subprocess runtime (health/RCA)
+│       └── framework/                    # Framework-agent (PR/ref discovery + enablement)
 ├── kernel-agent/                         # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
 │   ├── SKILL.md                          # Kernel-agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
 │   ├── scripts/                          # Runtime setup scripts: install.sh, etc.
 │   └── tests/                            # Kernel-agent tool tests
-├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
-├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
 ├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts

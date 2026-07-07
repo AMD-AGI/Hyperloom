@@ -63,7 +63,7 @@ ALLOWED_FILES: dict[str, str] = {
     "src/hyperloom/inference_optimizer/tests/test_optimization_journal.py": "journal tests cover stack entries carrying legacy args field",
     "src/hyperloom/inference_optimizer/tests/test_warm_replay.py": "warm-replay tests mirror RecipeKB best_config field names",
     "kernel-agent/tools/test_payload_aliases_shim.py": "kernel-agent shim test surface",
-    "robustness-agent/tests/test_payload_aliases_shim.py": "robustness-agent shim test surface",
+    "src/hyperloom/agents/robustness/tests/test_payload_aliases_shim.py": "robustness-agent shim test surface",
     # Readers that funnel external-envelope payloads through
     # ``read_extra_server_args`` mention the legacy key inline in the
     # surrounding code comment to document why the call goes through
@@ -113,7 +113,7 @@ ALLOWED_FILES: dict[str, str] = {
         "kernel-decision write-owner functions folded back from the former "
         "shared_state_kernel.py (phase 6C), carrying the same legacy "
         "extra_sglang_args read surface",
-    "robustness-agent/tests/test_signals_repeated_payload.py":
+    "src/hyperloom/agents/robustness/tests/test_signals_repeated_payload.py":
         "regression test that legacy + canonical envelopes hash to "
         "the same fingerprint",
 

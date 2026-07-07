@@ -3,8 +3,8 @@
 > **Scope.** This is the single authoritative reference for credentials and
 > environment configuration in Hyperloom. If any other document
 > (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
-> `robustness-agent/SKILL.md`) appears to contradict this page, this page
-> wins. Please open an issue against the contradicting file.
+> `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this page,
+> this page wins. Please open an issue against the contradicting file.
 
 Hyperloom needs at most three classes of configuration:
 

@@ -6,7 +6,7 @@ upstream SKILL file for the component you're touching:
 [`src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
 [`src/hyperloom/agents/critic/SKILL.md`](../src/hyperloom/agents/critic/SKILL.md),
-[`robustness-agent/SKILL.md`](../robustness-agent/SKILL.md).
+[`src/hyperloom/agents/robustness/SKILL.md`](../src/hyperloom/agents/robustness/SKILL.md).
 
 ---
 

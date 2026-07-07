@@ -28,7 +28,7 @@ def test_repo_url_for_framework_known():
 
 
 def test_repo_url_for_framework_atom():
-    """atom resolves to ROCm/ATOM whether or not ``framework_agent`` is importable."""
+    """atom resolves to ROCm/ATOM."""
     assert fac.repo_url_for_framework("atom") == ("https://github.com/ROCm/ATOM.git")
 
 
@@ -37,29 +37,21 @@ def test_repo_url_for_framework_unknown_returns_empty():
     assert fac.repo_url_for_framework("") == ""
 
 
-def test_fallback_dict_has_atom_entry():
-    """Introspect the ImportError-branch fallback dict via AST so its contract is pinned regardless of PYTHONPATH."""
-    import ast
-    import pathlib
-
-    src = pathlib.Path(fac.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    fallback: dict[str, str] | None = None
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "_FRAMEWORK_TO_REPO_URL"
-            and node.value is not None
-        ):
-            fallback = ast.literal_eval(node.value)
-            break
-    assert fallback is not None
-    assert fallback.get("atom") == "https://github.com/ROCm/ATOM.git", (
-        f"IO fallback dict missing atom entry: {fallback!r}"
+def test_fac_repo_url_for_framework_is_the_canonical_repo_map():
+    """tree-reform.MD P2.5: framework-agent is always importable alongside orchestrator now
+    (both live under the single installed ``hyperloom`` distribution), so ``client.py``'s
+    ``repo_url_for_framework`` is a direct re-export of the canonical
+    ``hyperloom.agents.framework.repo_map`` implementation -- no more IO-only ImportError
+    fallback dict to pin via AST introspection."""
+    from hyperloom.agents.framework.repo_map import (
+        _FRAMEWORK_TO_REPO_URL,
+        repo_url_for_framework,
     )
+
+    assert fac.repo_url_for_framework is repo_url_for_framework
+    assert _FRAMEWORK_TO_REPO_URL.get("atom") == "https://github.com/ROCm/ATOM.git"
     # Pin all keys so a future drift trips this guard.
-    assert set(fallback.keys()) == {"sglang", "vllm", "atom", "xdit"}
+    assert set(_FRAMEWORK_TO_REPO_URL.keys()) == {"sglang", "vllm", "atom", "xdit"}
 
 
 def test_resolve_fa_binary_prefers_env_var(tmp_path, monkeypatch):

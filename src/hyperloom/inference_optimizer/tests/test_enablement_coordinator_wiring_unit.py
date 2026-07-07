@@ -73,7 +73,7 @@ def _fake_self(**state_kw):
 
 def _stub_enumerate(monkeypatch, cands):
     """Patch ``sources.enumerate_candidates`` to return ``cands`` (or raise)."""
-    import framework_agent.sources as src
+    import hyperloom.agents.framework.sources as src
 
     def _fake_enum(_req):
         if isinstance(cands, Exception):
@@ -102,7 +102,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
 
 
 def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):
-    from framework_agent.models import Candidate
+    from hyperloom.agents.framework.models import Candidate
 
     cands = [
         Candidate(ref="PR:1", repo="r", title="minor perf tweak", html_url="http://x/1"),
@@ -260,7 +260,7 @@ async def test_enqueue_noop_when_run_deadline_passed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
-    from framework_agent.models import Candidate
+    from hyperloom.agents.framework.models import Candidate
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)

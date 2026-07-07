@@ -110,7 +110,13 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
+# tree-reform.MD P2.5: framework-agent was promoted from a sibling
+# ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
+# namespace (``src/hyperloom/agents/framework``); it no longer has its own
+# installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
+# package (still overridable) and the old chain_framework_agent() delegation
+# below is a no-op.
+FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/framework}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a *commit SHA* (not a branch name) so a fresh install is
 # deterministic and an upstream force-push / rebase cannot silently change
@@ -146,7 +152,6 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
-SKIP_FRAMEWORK_AGENT=0
 # Opt-in PerfSkills/GEAK-e2e optimizer install (forwarded to the chained
 # kernel-agent installer). Default off: the runtime default optimizer is
 # native, so native-only users skip the extra GEAK-e2e checkout + pip. Enable
@@ -169,12 +174,11 @@ Installs:
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
-  - Chains to framework-agent/scripts/install.sh for the `fa` CLI
-    used by the Coordinator-owned FRAMEWORK_AGENT phase at optimize-time
-    (candidate discovery via `fa phase-discover`).
-    framework-agent is fully standalone; the chain just makes the
-    `fa` binary available on PATH inside the same sandbox without
-    operators having to run a second installer.
+  - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
+    optimize-time, candidate discovery via `fa phase-discover`) is provided
+    by this same editable install (tree-reform.MD P2.5 promoted
+    framework-agent into src/hyperloom/agents/framework/, so it no longer
+    has its own separate installer/venv to chain to).
 
 Options:
   --check-only           Verify only, do not install
@@ -184,7 +188,6 @@ Options:
                          needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
                          Equivalent to INSTALL_PERFSKILLS=1.
   --skip-kernel-agent    Skip the chained kernel-agent installer
-  --skip-framework-agent Skip the chained framework-agent installer
   -h, --help             Show this help
 
 Env overrides:
@@ -211,7 +214,6 @@ while [ "$#" -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --with-perfskills) INSTALL_PERFSKILLS=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
-    --skip-framework-agent) SKIP_FRAMEWORK_AGENT=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -1152,35 +1154,6 @@ chain_kernel_agent() {
   bash "$script" "${args[@]}"
 }
 
-# --- 5. Chain to framework-agent ---
-# Mirrors chain_kernel_agent but for the `fa` CLI used by the
-# Coordinator-owned FRAMEWORK_AGENT phase. framework-agent's installer is
-# fully self-contained (zero shared state with kernel-agent), so we just
-# delegate. Failures here are non-fatal: the IO main path still
-# works without fa; only the FRAMEWORK_AGENT phase requires it.
-chain_framework_agent() {
-  if [ "$SKIP_FRAMEWORK_AGENT" -eq 1 ]; then
-    log "skipping framework-agent installer (--skip-framework-agent)"
-    return 0
-  fi
-  local script="${FRAMEWORK_AGENT_ROOT}/scripts/install.sh"
-  if [ ! -f "$script" ]; then
-    warn "framework-agent installer not found at $script; framework arm will be unavailable"
-    return 0
-  fi
-  log "delegating fa CLI install to ${script}"
-  # Pass through the resolved PYTHON so framework-agent's installer picks
-  # the same /opt/venv interpreter (avoids /usr/bin/pip 22.0.2 which fails
-  # the PEP 660 build_editable hook on our pyproject).
-  export REPO_ROOT FRAMEWORK_AGENT_ROOT
-  export VENV_PYTHON="${PYTHON}"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: bash '$script' (VENV_PYTHON=${VENV_PYTHON})"
-    return 0
-  fi
-  bash "$script" || warn "framework-agent install returned non-zero; framework arm will fail at runtime"
-}
-
 ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
@@ -1194,7 +1167,10 @@ ensure_bench_serving_deps
 ensure_xdit_quality_deps
 ensure_rocprof_compute
 chain_kernel_agent
-chain_framework_agent
+# tree-reform.MD P2.5: framework-agent was promoted into
+# src/hyperloom/agents/framework/ (single hyperloom distribution), so the
+# `fa` CLI is already installed by ensure_inference_optimizer() above; no
+# more separate chain_framework_agent() delegation to a standalone installer.
 
 _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
@@ -1238,55 +1214,6 @@ PY
 }
 
 _probe_framework_source_roots
-
-# ---------------------------------------------------------------------------
-# framework-agent (sibling skill — drives the standalone FRAMEWORK
-# phase via ``fa phase-discover`` for batch enumeration. The
-# Coordinator's executor handles the apply/bench loop directly, so
-# only ``phase-discover`` is wired/kept on the inference_optimizer
-# path). Owns its own python
-# deps and venv layout; we only need to invoke its installer.
-#
-# Install is ON by default to match the runtime default
-# (``SharedState.framework_agent_phase_enabled = True``). Opt out by
-# exporting ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` before install
-# (mirrors the runtime ``--no-framework-agent`` CLI flag).
-#
-# Back-compat: the legacy ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0``
-# knob is still honoured for one release with a deprecation warning so
-# operator scripts don't break. Remove on the next cleanup pass.
-# ---------------------------------------------------------------------------
-ensure_framework_agent() {
-  if [ -n "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-}" ]; then
-    warn "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED is deprecated; use INFERENCE_OPTIMIZER_NO_FRAMEWORK=1 to opt out"
-    if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED}" = "0" ]; then
-      log "framework-agent: skipped (legacy INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
-      return 0
-    fi
-  fi
-  if [ "${INFERENCE_OPTIMIZER_NO_FRAMEWORK:-0}" = "1" ]; then
-    log "framework-agent: skipped (INFERENCE_OPTIMIZER_NO_FRAMEWORK=1)"
-    return 0
-  fi
-  local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"
-  if [ ! -d "$fa_dir" ]; then
-    warn "framework-agent: directory missing at $fa_dir — skipping"
-    return 0
-  fi
-  if [ ! -f "$fa_dir/scripts/install.sh" ]; then
-    warn "framework-agent: $fa_dir/scripts/install.sh missing — skipping"
-    return 0
-  fi
-  log "framework-agent: installing from $fa_dir"
-  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
-    log "would run: bash '$fa_dir/scripts/install.sh'"
-    return 0
-  fi
-  bash "$fa_dir/scripts/install.sh"
-  log "framework-agent: install complete"
-}
-
-ensure_framework_agent
 
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"

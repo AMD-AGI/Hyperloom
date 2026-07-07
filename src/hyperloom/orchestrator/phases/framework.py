@@ -874,10 +874,10 @@ class FrameworkPhase(PhaseHandler):
         text = (launch_log or "").strip()
         if not text:
             return None
-        from framework_agent.enablement import EnablementRequest, classify_failure
-        from framework_agent.enablement_authoring import build_mandate
-        from framework_agent.enablement_discovery import build_search_plan
-        from framework_agent.repo_map import repo_url_for_framework
+        from hyperloom.agents.framework.enablement import EnablementRequest, classify_failure
+        from hyperloom.agents.framework.enablement_authoring import build_mandate
+        from hyperloom.agents.framework.enablement_discovery import build_search_plan
+        from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
         framework = (getattr(state, "framework", "") or "").strip().lower()
@@ -1201,9 +1201,9 @@ class FrameworkPhase(PhaseHandler):
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
-        from framework_agent.enablement_discovery import score_enablement_title
-        from framework_agent.models import Candidate, ExploreRequest
-        from framework_agent.sources import enumerate_candidates
+        from hyperloom.agents.framework.enablement_discovery import score_enablement_title
+        from hyperloom.agents.framework.models import Candidate, ExploreRequest
+        from hyperloom.agents.framework.sources import enumerate_candidates
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
         # Only search primus_cortex when its URL is configured.
@@ -1361,7 +1361,7 @@ class FrameworkPhase(PhaseHandler):
         if not text:
             return
 
-        from framework_agent.enablement import classify_failure
+        from hyperloom.agents.framework.enablement import classify_failure
 
         signature = classify_failure(text)
         if signature.is_actionable:

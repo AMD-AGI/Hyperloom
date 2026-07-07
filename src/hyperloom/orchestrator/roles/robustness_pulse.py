@@ -126,7 +126,7 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
-                "robustness_agent.runtime.cli",
+                "hyperloom.agents.robustness.runtime.cli",
                 "tick",
                 "--request",
                 req_path,

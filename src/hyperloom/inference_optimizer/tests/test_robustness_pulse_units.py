@@ -175,7 +175,7 @@ class TestPulse:
         assert await rp.pulse(tick_index=3) is True
         assert observed and observed[0].endswith(".json")
         cmd = proc.captured_args
-        assert cmd[1:5] == ("-m", "robustness_agent.runtime.cli", "tick", "--request")
+        assert cmd[1:5] == ("-m", "hyperloom.agents.robustness.runtime.cli", "tick", "--request")
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_returns_false(

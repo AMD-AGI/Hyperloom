@@ -302,9 +302,9 @@ class TestRegistryRepoUrlConsistency:
 
     def test_registry_urls_match_repo_map(self):
         try:
-            from framework_agent.repo_map import _FRAMEWORK_TO_REPO_URL
+            from hyperloom.agents.framework.repo_map import _FRAMEWORK_TO_REPO_URL
         except ImportError:
-            pytest.skip("framework_agent not installed")
+            pytest.skip("hyperloom.agents.framework not installed")
         for name, spec in fr.FRAMEWORKS.items():
             if spec.repo_url is not None:
                 assert spec.repo_url == _FRAMEWORK_TO_REPO_URL.get(name, ""), (
