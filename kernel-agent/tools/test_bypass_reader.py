@@ -173,6 +173,84 @@ def test_single_file_rank_provenance_is_none(tmp_path):
     assert out["rank_count"] == 1
 
 
+# ── sglang CUDA-graph capture fragments (capture_dir selection fix) ───────────
+
+
+def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -> Path:
+    # A sparse sglang CUDA-graph capture shard: a rank-tagged filename but only
+    # a couple of device kernels (the real workload is NOT captured here). These
+    # are large on disk (cpu_op/metadata heavy) yet device-kernel poor.
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {"cat": "kernel", "ph": "X", "name": "graph_capture_marker",
+         "ts": 0, "dur": 1, "args": {"correlation": 1}},
+    ]
+    p = capture_dir / f"bs_{batch_size}_rank{rank}.json.gz"
+    with gzip.open(p, "wb") as f:
+        f.write(json.dumps({"traceEvents": events}).encode("utf-8"))
+    return p
+
+
+def _write_main_tp_trace(d: Path, name: str = "1783387979.6664605-TP-0.trace.json.gz") -> Path:
+    # The content-rich main sglang profiler trace at the top of torch_trace/.
+    # It is NOT rank-tagged (``-TP-0`` does not match the rank regex).
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    with gzip.open(p, "wb") as f:
+        f.write(json.dumps({"traceEvents": list(_TRACE_EVENTS)}).encode("utf-8"))
+    return p
+
+
+def test_resolve_trace_file_ignores_sglang_capture_fragments(tmp_path):
+    # Real sglang layout: the content-rich main trace sits at the top of
+    # torch_trace/ as ``*-TP-0.trace.json.gz`` (NOT rank-tagged), while dozens of
+    # sparse CUDA-graph capture shards live under capture_traces/ named
+    # ``bs_<n>_rank0.json.gz`` (rank-tagged). The rank-tagged shards must NOT
+    # hijack selection away from the main trace (the P0 bypass defect).
+    d = tmp_path / "torch_trace"
+    main = _write_main_tp_trace(d)
+    cap = d / "capture_traces"
+    for bs in (512, 496, 480):
+        _write_capture_fragment(cap, bs)
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name == main.name
+
+
+def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
+    # End-to-end via analyze_trace: the selected trace must yield the main
+    # trace's real kernels, not the 1-kernel capture shard, and the many
+    # bs_*_rank0 shards must not be mistaken for real per-rank workload traces.
+    d = tmp_path / "torch_trace"
+    _write_main_tp_trace(d)
+    cap = d / "capture_traces"
+    for bs in (512, 496):
+        _write_capture_fragment(cap, bs)
+    out = reader.analyze_trace(d, top_k=0)
+    assert out["status"] == "ok"
+    assert {k["name"] for k in out["kernels"]} == {"Cijk_Alik_Bljk_HHS", "paged_attention_v1"}
+    assert out["rank_count"] == 1
+    assert out["analyzed_rank"] is None
+
+
+def test_resolve_trace_file_falls_back_when_only_capture_fragments(tmp_path):
+    # Degenerate: if ONLY capture shards exist, still resolve one (never None).
+    d = tmp_path / "torch_trace"
+    cap = d / "capture_traces"
+    _write_capture_fragment(cap, 512)
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name.startswith("bs_512_rank0")
+
+
+def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
+    # Even without the capture_traces/ subdir, the ``bs_<n>_rank<n>`` filename
+    # pattern marks a capture shard; a top-level main trace still wins.
+    d = tmp_path / "torch_trace"
+    main = _write_main_tp_trace(d)
+    _write_capture_fragment(d, 256)  # writes bs_256_rank0.json.gz at top level
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name == main.name
+
+
 def test_top_k_limits_returned_rows(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     out = reader.analyze_trace(tf, top_k=1)

@@ -71,16 +71,55 @@ def _trace_candidates(root: Path) -> list[Path]:
     return out
 
 
+# sglang emits CUDA-graph capture shards under a ``capture_traces/`` subdirectory
+# named ``bs_<batch>_rank<n>.json.gz``. Each shard holds only the couple of
+# device kernels captured for one graph batch size: it is rank-tagged yet
+# device-kernel sparse (megabytes of cpu_op/metadata, ~2 kernels). Such shards
+# must never be mistaken for the content-rich main profiler trace (the top-level
+# ``*-TP-<n>.trace.json.gz``); left unfiltered they hijack the lowest-rank
+# selection branch below because the main trace's ``-TP-0`` name is NOT
+# rank-tagged. Genuine xDiT per-rank traces (top-level ``rank_0..N``) are not
+# capture shards and stay eligible.
+_CAPTURE_DIR_NAME = "capture_traces"
+_CAPTURE_FRAGMENT_RE = re.compile(r"^bs_\d+_rank\d+", re.IGNORECASE)
+
+
+def _is_capture_fragment(path: str | Path) -> bool:
+    """True if ``path`` is a sglang CUDA-graph capture shard, not a main trace.
+
+    Detected by either the dedicated ``capture_traces/`` parent directory or the
+    ``bs_<batch>_rank<n>`` capture filename.
+    """
+    p = Path(path)
+    if _CAPTURE_DIR_NAME in p.parts:
+        return True
+    return _CAPTURE_FRAGMENT_RE.match(p.name) is not None
+
+
+def _main_trace_candidates(candidates: list[Path]) -> list[Path]:
+    """Drop CUDA-graph capture shards, keeping only main workload traces.
+
+    Falls back to the full list when every candidate is a capture shard, so a
+    trace is always resolvable (the selection pool is never emptied).
+    """
+    main = [c for c in candidates if not _is_capture_fragment(c)]
+    return main or candidates
+
+
 def _select_trace_file(candidates: list[Path]) -> Path:
     """Deterministically pick one trace file from candidates.
 
-    Order: a ``merged-*`` trace (largest, name tie-break) > the **lowest-index
-    rank** trace (``rank_0`` first; representative under sequence/tensor
-    parallel where every rank runs the same kernels on sharded data) > the
-    largest file. Ties always break by name so selection is reproducible across
-    runs (the previous ``max(..., key=size)`` was non-deterministic on equal
-    sizes, which is exactly the xDiT TP>1 case of N equal per-rank traces).
+    Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
+    content-rich main trace is never shadowed by a sparse ``bs_*_rank0`` shard.
+    Among the remaining main traces the order is: a ``merged-*`` trace (largest,
+    name tie-break) > the **lowest-index rank** trace (``rank_0`` first;
+    representative under sequence/tensor parallel where every rank runs the same
+    kernels on sharded data) > the largest file. Ties always break by name so
+    selection is reproducible across runs (the previous ``max(..., key=size)``
+    was non-deterministic on equal sizes, which is exactly the xDiT TP>1 case of
+    N equal per-rank traces).
     """
+    candidates = _main_trace_candidates(candidates)
     merged = [c for c in candidates if c.name.startswith("merged-")]
     if merged:
         return max(merged, key=lambda c: (_file_size(c), c.name))
@@ -94,8 +133,9 @@ def resolve_trace_file(trace_input: str | Path) -> Path | None:
     """Resolve a trace input (file or directory) to a single trace file.
 
     For a directory (e.g. a ``torch_trace/`` capture dir), selection is
-    deterministic and rank-aware (see :func:`_select_trace_file`): a merged
-    trace wins, else the lowest-index per-rank trace, else the largest file.
+    deterministic, rank-aware, and skips sglang CUDA-graph capture shards (see
+    :func:`_select_trace_file`): a merged trace wins, else the lowest-index
+    per-rank trace, else the largest file.
 
     Args:
         trace_input: A trace file path or a directory containing trace files.
@@ -120,13 +160,16 @@ def _trace_rank_count(trace_input: str | Path) -> int:
     Returns the number of distinct ``rank_N`` indices found in a directory
     (e.g. 8 for xDiT TP=8), or ``1`` when the input is a single file or has no
     rank-tagged traces. Used only for provenance / the multi-rank warning.
+    Capture shards are excluded so their ``rank0`` tag is not mistaken for a
+    real per-rank workload trace.
     """
     p = Path(trace_input)
     if p.is_file():
         return 1
     if not p.is_dir():
         return 0
-    ranks = {r for c in _trace_candidates(p) if (r := _rank_of(c)) is not None}
+    main = _main_trace_candidates(_trace_candidates(p))
+    ranks = {r for c in main if (r := _rank_of(c)) is not None}
     return len(ranks) if ranks else 1
 
 
