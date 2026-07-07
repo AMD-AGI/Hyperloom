@@ -305,6 +305,13 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 # not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
+# Optional build-time escape hatch: skip Ray daemon startup while still
+# installing Ray itself and all downstream dependencies (TraceLens/GEAK/OOB).
+# Useful in Docker image builds where launching background daemons is fragile.
+case "${SKIP_RAY_START:-0}" in
+  1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
+  *) SKIP_RAY_START=0 ;;
+esac
 # The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
 # session sets ``KERNEL_OPT_BACKEND_ORDER=perfskills``. The default runtime
 # optimizer is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
@@ -333,6 +340,8 @@ Options:
   -h, --help         Show this help
 
 Environment (optional):
+  SKIP_RAY_START=1                      Skip `ray start --head` during install (default 0).
+                                        Installs ray/click but defers daemon startup to runtime.
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
@@ -750,6 +759,10 @@ ensure_fd_limit_for_ray() {
 #      non-fatal in environments without ROCm
 ensure_ray_started() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$SKIP_RAY_START" -eq 1 ]; then
+    log "skipping ray head startup (SKIP_RAY_START=1)"
     return 0
   fi
   if ! command -v ray >/dev/null 2>&1; then
