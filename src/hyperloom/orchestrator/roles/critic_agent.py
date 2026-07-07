@@ -23,13 +23,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
+from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
-from .._json_io import extract_first_json_with_key
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, build_chat_messages

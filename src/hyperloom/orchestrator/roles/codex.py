@@ -20,12 +20,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .._json_io import extract_first_json_with_key
 from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 
 

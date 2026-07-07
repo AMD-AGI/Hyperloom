@@ -324,7 +324,7 @@ def _load_json(path: Path) -> dict[str, Any]:
         The parsed object, or ``{}`` when the file is missing, unreadable, or
         not a JSON object.
     """
-    from .._json_io import read_json
+    from hyperloom.common.jsonio import read_json
 
     return read_json(path, default={}, require_dict=True)
 

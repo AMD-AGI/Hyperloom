@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..._time import now_iso
+from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
 
 log = logging.getLogger(__name__)

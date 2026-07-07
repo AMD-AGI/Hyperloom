@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .._json_io import read_json
+from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
 

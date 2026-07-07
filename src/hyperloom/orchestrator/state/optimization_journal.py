@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .._time import now_iso
+from hyperloom.common.timeutil import now_iso
 
 
 log = logging.getLogger(__name__)

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .._json_io import extract_first_json_with_key
+from hyperloom.common.jsonio import extract_first_json_with_key
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
 from ..trace.conversation_trace import ConversationRecord, append_conversation

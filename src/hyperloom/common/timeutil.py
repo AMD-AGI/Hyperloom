@@ -2,8 +2,9 @@
 
 """Canonical UTC ISO-8601 timestamp helper (tree-reform.MD §7 — ``_time``).
 
-Relocated from ``hyperloom.orchestrator._time`` (which now re-exports
-from here). Replaces the ~14 ``_now_iso`` copies. Stdlib-only.
+Relocated from ``hyperloom.orchestrator._time`` (P2.1); that re-export shim
+was removed in P2.7 once all callers were updated to import directly from
+here. Replaces the ~14 ``_now_iso`` copies. Stdlib-only.
 """
 
 from __future__ import annotations

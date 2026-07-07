@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .._time import now_iso
+from hyperloom.common.timeutil import now_iso
 
 
 # Default checkpoint cadence. A checkpoint fires when ANY trigger crosses its

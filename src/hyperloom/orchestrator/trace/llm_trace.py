@@ -34,7 +34,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from .._time import now_iso
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import (
     coerce_optional_int as _coerce_optional_int,

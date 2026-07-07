@@ -17,10 +17,10 @@ import pytest
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.gain_math                                                       #
+# hyperloom.common.gain_math                                                   #
 # --------------------------------------------------------------------------- #
 def test_gain_math_branches() -> None:
-    from hyperloom.orchestrator import gain_math
+    from hyperloom.common import gain_math
 
     # gain_pct: non-positive new / non-positive base -> None.
     assert gain_math.gain_pct(0, 100.0) is None

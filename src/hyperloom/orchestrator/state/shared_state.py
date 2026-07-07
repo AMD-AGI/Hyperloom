@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .._time import now_iso
+from hyperloom.common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -2496,7 +2496,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             tput = float(new_tput or 0.0)
         except (TypeError, ValueError):
             tput = 0.0
-        from ..gain_math import gain_pct
+        from hyperloom.common.gain_math import gain_pct
 
         entry_gain_pct = gain_pct(tput, base)
         self.gain_per_stack_entry.append(entry_gain_pct)

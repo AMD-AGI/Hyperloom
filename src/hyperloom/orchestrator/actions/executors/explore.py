@@ -43,9 +43,9 @@ from typing import Any
 
 import yaml
 
-from ..._time import now_iso
+from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...gain_math import gain_pct
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
