@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import signal
 import subprocess
 import time
@@ -318,6 +319,193 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
         if v is not None:
             return v
     return None
+
+
+# Minimum over-baseline gain a same-harness revalidation must show for the
+# optimization to count as "engaged" (i.e. the tuned config actually took
+# effect). Only used to detect a collapse back to ~baseline (an un-optimized
+# relaunch), never to gate a specific optimization — kept general across all
+# winner kinds. Overridable via env for tuning.
+try:
+    _MIN_KERNEL_ENGAGED_GAIN_PCT: float = float(
+        os.environ.get("INFERENCE_OPTIMIZER_MIN_ENGAGED_GAIN_PCT", "").strip() or "2.0"
+    )
+except (TypeError, ValueError):
+    _MIN_KERNEL_ENGAGED_GAIN_PCT = 2.0
+
+# |measurement_divergence_pct| above this (GEAK vs orchestrator on the SAME
+# config) is logged as a measurement-mismatch warning at perfskills promote.
+# Reporting only — never gates scheduling. Overridable via env.
+try:
+    _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT: float = float(
+        os.environ.get("INFERENCE_OPTIMIZER_MEASUREMENT_DIVERGENCE_WARN_PCT", "").strip() or "3.0"
+    )
+except (TypeError, ValueError):
+    _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT = 3.0
+
+
+def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
+    """Split a bench-style config string into (env dict, flags string).
+
+    ``accepted_config.env`` (and any ``KEY=VAL KEY=VAL`` / ``--flag val`` blob)
+    is parsed so that every ``KEY=VAL`` token becomes a real environment
+    variable and every ``--flag`` (or ``--flag=val``) token is folded back into
+    a server-args string. Single source of truth for this parse so the promote
+    path, the resume-materialize path, and the revalidation path all agree.
+    General: no key/optimization is special-cased.
+
+    Args:
+        env_str: The raw config blob (may mix ``KEY=VAL`` and ``--flag`` tokens).
+
+    Returns:
+        ``(envs, flags)`` where ``envs`` is a ``dict[str, str]`` of real env
+        vars and ``flags`` is a space-joined server-args string ("" when none).
+    """
+    envs: dict[str, str] = {}
+    flag_tokens: list[str] = []
+    try:
+        tokens = shlex.split(str(env_str or ""))
+    except ValueError:
+        tokens = str(env_str or "").split()
+    for tok in tokens:
+        if tok.startswith("-"):
+            flag_tokens.append(tok)
+        elif "=" in tok:
+            k, v = tok.split("=", 1)
+            if k:
+                envs[k] = v
+    return envs, " ".join(flag_tokens).strip()
+
+
+def _perfskills_revalidation_decision(
+    *,
+    measured: Any,
+    baseline: Any,
+    got_hash: str,
+    expected_hash: str,
+    min_engaged_gain_pct: float,
+) -> str:
+    """Decide a perfskills same-harness (2b) rebench outcome.
+
+    Returns ``"validated"`` only when BOTH hold:
+      * config identity — the ran variant's fingerprint matches the expected
+        (skipped when no expected hash was pinned); catches an executor-side
+        drop/alter of the optimized config; and
+      * engagement — the measured throughput cleared baseline by at least
+        ``min_engaged_gain_pct`` (i.e. the optimization actually took effect and
+        did not collapse back to an un-optimized relaunch).
+    Otherwise returns ``"fallback"`` so the caller replays via the GEAK harness
+    (2a). General: the engagement floor only detects a baseline collapse, it is
+    not tied to any specific optimization's expected magnitude.
+
+    Args:
+        measured: Rebench output throughput (tok/s).
+        baseline: Orchestrator raw baseline throughput (same harness as measured).
+        got_hash: Fingerprint of the variant that actually ran.
+        expected_hash: Pinned expected fingerprint ("" => identity check skipped).
+        min_engaged_gain_pct: Minimum over-baseline gain to count as engaged.
+
+    Returns:
+        ``"validated"`` or ``"fallback"``.
+    """
+    measured_ok = isinstance(measured, (int, float)) and measured > 0
+    baseline_ok = isinstance(baseline, (int, float)) and baseline > 0
+    if not (measured_ok and baseline_ok):
+        return "fallback"
+    cfg_ok = (not expected_hash) or (str(got_hash or "") == str(expected_hash))
+    engaged = float(measured) >= float(baseline) * (1.0 + float(min_engaged_gain_pct) / 100.0)
+    return "validated" if (cfg_ok and engaged) else "fallback"
+
+
+def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
+    """Extract a CLI flag's value from a server-args string.
+
+    Handles both ``--flag value`` and ``--flag=value`` forms. Hyperloom keeps
+    serving-fidelity knobs (``--max-model-len``, ``--gpu-memory-utilization``)
+    as raw flags inside the baseline server-args string rather than as
+    structured fields, so the perfskills handoff must recover them from there.
+
+    Args:
+        server_args: The full server-args string (e.g. baseline EXTRA_VLLM_ARGS).
+        flag: The flag to look up, INCLUDING leading dashes (e.g. ``--max-model-len``).
+
+    Returns:
+        The flag's value as a string, or ``None`` when the flag is absent or
+        present without a value.
+    """
+    if not server_args or not flag:
+        return None
+    try:
+        toks = shlex.split(server_args)
+    except ValueError:
+        toks = server_args.split()
+    prefix = flag + "="
+    for i, tok in enumerate(toks):
+        if tok == flag:
+            return toks[i + 1] if i + 1 < len(toks) else None
+        if tok.startswith(prefix):
+            return tok[len(prefix):]
+    return None
+
+
+def _resolve_serving_fidelity(
+    *,
+    baseline_server_args: str,
+    state_max_model_len: int = 0,
+) -> dict[str, Any]:
+    """Resolve serving-fidelity knobs to forward in the perfskills handoff.
+
+    Returns a dict carrying ONLY the resolved keys (``max_model_len`` int and/or
+    ``mem_fraction`` float). Unresolved knobs are OMITTED so the GEAK vllm
+    adapter applies its own production-faithful defaults (no 0 sentinel to
+    disambiguate). Source precedence — robust to both the dedicated CLI arg and
+    the common case where fidelity knobs ride inside the baseline server-args
+    string (e.g. ``--max-model-len 2248 --gpu-memory-utilization 0.9``):
+
+      * ``max_model_len``: ``state.max_model_len`` > ``--max-model-len`` in the
+        baseline server-args > ``MAX_MODEL_LEN`` env.
+      * ``mem_fraction``: ``--gpu-memory-utilization`` in the baseline
+        server-args > ``GPU_MEMORY_UTILIZATION`` env. (There is no structured
+        ``state.mem_fraction``; Hyperloom keeps it as a raw flag.)
+
+    Args:
+        baseline_server_args: The baseline arm's runtime server-args string.
+        state_max_model_len: The dedicated ``state.max_model_len`` (0 when unset).
+
+    Returns:
+        A dict with the resolved subset of ``{"max_model_len", "mem_fraction"}``.
+    """
+    out: dict[str, Any] = {}
+
+    mml = int(state_max_model_len or 0)
+    if mml <= 0:
+        v = _parse_server_arg_value(baseline_server_args, "--max-model-len")
+        try:
+            mml = int(v) if v else 0
+        except (TypeError, ValueError):
+            mml = 0
+    if mml <= 0:
+        try:
+            mml = int(os.environ.get("MAX_MODEL_LEN", "0") or 0)
+        except (TypeError, ValueError):
+            mml = 0
+    if mml > 0:
+        out["max_model_len"] = mml
+
+    v = _parse_server_arg_value(baseline_server_args, "--gpu-memory-utilization")
+    try:
+        mem = float(v) if v else 0.0
+    except (TypeError, ValueError):
+        mem = 0.0
+    if mem <= 0:
+        try:
+            mem = float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)
+        except (TypeError, ValueError):
+            mem = 0.0
+    if mem > 0:
+        out["mem_fraction"] = mem
+
+    return out
 
 
 def _format_inbox_event(m: "Message") -> str:
@@ -1701,6 +1889,7 @@ class Coordinator:
         stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
         args = ""
         envs: dict[str, str] = {}
+        overlay = ""
         tput: float | None = None
         variant_name = ""
         action = "resume_reconstructed"
@@ -1711,7 +1900,26 @@ class Coordinator:
             args = _merge_cumulative_extra_sglang_args(args, candidate, full)
             raw_envs = entry.get("extra_envs") or {}
             if isinstance(raw_envs, Mapping):
-                envs.update({str(k): str(v) for k, v in raw_envs.items()})
+                for k, v in raw_envs.items():
+                    ks = str(k)
+                    # A flag mis-stored under extra_envs (e.g. a ``--compilation-config``
+                    # key from an integrate_patch entry) is a SERVER ARG, not an env
+                    # var — the grid runner would otherwise inject it verbatim as an
+                    # env the backend ignores, silently dropping it from the rebuilt
+                    # config. Route any ``-``-prefixed key back into extra_server_args
+                    # so the materialized stack reproduces the real launch. General:
+                    # keyed on the ``-`` prefix, never on a specific flag name.
+                    if ks.startswith("-"):
+                        tok = ks if v in ("", None) else f"{ks}={v}"
+                        args = _merge_cumulative_extra_sglang_args(args, "", tok)
+                    else:
+                        envs[ks] = str(v)
+            # Carry the authored-kernel overlay (PYTHONPATH prefix) so a native
+            # rebuild of an overlay winner actually loads the built kernels
+            # instead of measuring the un-optimized stack. Last non-empty wins.
+            entry_overlay = str(entry.get("final_overlay") or "").strip()
+            if entry_overlay:
+                overlay = entry_overlay
             if isinstance(entry.get("tput"), (int, float)) and float(entry["tput"]) > 0:
                 tput = float(entry["tput"])
             variant_name = str(entry.get("variant_name") or variant_name or "")
@@ -1722,6 +1930,7 @@ class Coordinator:
             "variant_name": variant_name,
             "extra_server_args": args,
             "extra_envs": envs,
+            "final_overlay": overlay,
             "tput": tput,
             "workspace": workspace,
             "optimization_stack": stack,
@@ -2195,9 +2404,62 @@ class Coordinator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
+        # 修改点7 (2b) — when the win is a PerfSkills e2e result, source the
+        # revalidation config from result.json (the SINGLE source of truth), NOT
+        # from stack materialization. This guarantees the same-harness rebench
+        # launches byte-for-byte the config GEAK optimized (flags + parsed env +
+        # authored overlay), independent of whether the optimization is a MoE
+        # tuned-config / kernel / flag winner — no case-by-case markers. The
+        # consumer (_promote_to_shared_state) asserts config identity + effect
+        # before stamping validated, and falls back to 2a (GEAK harness) on miss.
+        ps = self.shared_state.perfskills_result if isinstance(getattr(self.shared_state, "perfskills_result", None), dict) else {}
+        ps_cfg = ps.get("accepted_config") or {}
+        ps_overlay = str(ps.get("final_overlay") or "").strip()
+        if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+            from .action_executors._canonical_fingerprint import canonical_fingerprint
+
+            ps_flags = str(ps_cfg.get("flags") or "").strip()
+            ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
+            if _ps_extra_flags:
+                ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            if ps_flags or ps_envs or ps_overlay:
+                # Identity hash uses the SAME (args, envs) contract the grid
+                # executor fingerprints with (overlay is NOT part of the hash,
+                # matching _grid_runner.variant_fingerprint) so expected == the
+                # ran variant's fingerprint by construction, and any executor-side
+                # drop/alter of config is caught downstream.
+                expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
+                params_ps: dict[str, Any] = {
+                    "source": "resume_stack_revalidate",
+                    "reason": reason,
+                    "perfskills_fallback": True,
+                    "expected_cfg_hash": expected_cfg_hash,
+                    "grid": [
+                        {
+                            "name": "perfskills_revalidate",
+                            "extra_args": ps_flags,
+                            "extra_envs": dict(ps_envs),
+                            "overlay_pythonpath": ps_overlay,
+                            "provenance": "perfskills_revalidate",
+                            "note": "same-harness config-identity revalidation of the perfskills e2e win",
+                        }
+                    ],
+                    "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                    "enable_stack_rebench": False,
+                }
+                if self.shared_state.baseline_config_path:
+                    params_ps["config_path"] = self.shared_state.baseline_config_path
+                task, existing = await self.tasks.create_or_return_existing(
+                    kind="explore",
+                    params=params_ps,
+                    idempotency_key="perfskills-revalidate",
+                )
+                return {"task_id": task.task_id, "existing": bool(existing), "mode": "perfskills_2b"}
+
         rebuilt = self._materialize_stack_config_for_resume()
         args = str(rebuilt.get("extra_server_args") or "").strip()
         envs = rebuilt.get("extra_envs") or {}
+        overlay = str(rebuilt.get("final_overlay") or "").strip()
         if not (args or envs):
             return {"skipped": True, "reason": "empty_stack"}
         params: dict[str, Any] = {
@@ -2208,6 +2470,9 @@ class Coordinator:
                     "name": "resume_stack_revalidate",
                     "extra_args": args,
                     "extra_envs": dict(envs),
+                    # Carry the overlay so an authored-kernel native stack rebuild
+                    # loads the built kernels (inert when empty).
+                    "overlay_pythonpath": overlay,
                     "provenance": "resume_stack_revalidate",
                     "note": "post-resume full-stack end-to-end revalidation",
                 }
@@ -2223,6 +2488,90 @@ class Coordinator:
             idempotency_key="resume-stack-revalidate",
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
+
+    async def _validate_perfskills_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
+        """2a fallback — validate the perfskills win by REPLAYING it through
+        GEAK's own ``bench_e2e.sh`` (the harness that produced the headline
+        result), so the optimized config engages BY CONSTRUCTION regardless of
+        winner kind (tuned-config / kernel / overlay / flag). Because the replay
+        reproduces the optimized config from ``result.json`` directly, a
+        ``succeeded`` status is itself the engagement proof. The validated gain
+        is the SAME-harness A/B ``hot_geak_speedup`` (numerator + denominator
+        both measured by GEAK), which is harness-internal and clean — recorded
+        under a distinct provenance because it is a same-harness MARGINAL, not an
+        over-raw total. Used only when 2b (orchestrator harness) is inconclusive.
+
+        Args:
+            reason: Human-readable reason stamped in logs/return.
+
+        Returns:
+            A summary dict describing whether validation succeeded.
+        """
+        ps = self.shared_state.perfskills_result if isinstance(getattr(self.shared_state, "perfskills_result", None), dict) else {}
+        if str(ps.get("status") or "") != "ok":
+            return {"validated": False, "skipped": True, "reason": "no_perfskills_result"}
+        am = ps.get("alignment_metrics") or {}
+        # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
+        # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
+        # else the hot within-GEAK ratio; see run_e2e final-basis selection). This
+        # makes Hyperloom's same-harness validated gain EQUAL to GEAK's headline
+        # number — using the raw hot A/B instead would report a higher figure than
+        # GEAK itself claims and reopen the alignment gap this path exists to close.
+        # Falls back to the explicit within-GEAK ratios when throughput_speedup is
+        # missing (older result.json), preferring the promoted basis.
+        try:
+            geak_sp = float(ps.get("throughput_speedup") or 0.0)
+        except (TypeError, ValueError):
+            geak_sp = 0.0
+        if geak_sp <= 0:
+            basis = str(am.get("final_basis") or ps.get("final_throughput_basis") or "hot")
+            fallback_key = "cold_geak_speedup" if basis == "cold" else "hot_geak_speedup"
+            try:
+                geak_sp = float(am.get(fallback_key) or am.get("hot_geak_speedup") or 0.0)
+            except (TypeError, ValueError):
+                geak_sp = 0.0
+        regimes = ps.get("validated_regimes") or []
+        reg = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
+        try:
+            conc = int(reg.get("conc") or 64)
+            isl = int(reg.get("isl") or 1024)
+            osl = int(reg.get("osl") or 1024)
+        except (TypeError, ValueError):
+            conc, isl, osl = 64, 1024, 1024
+        from ..session_paths import runs_dir
+        from .action_executors._perfskills_sweep import sweep_via_perfskills
+
+        try:
+            timeout = int(os.environ.get("SWEEP_VARIANT_TIMEOUT_SEC", "").strip() or "2400")
+        except (TypeError, ValueError):
+            timeout = 2400
+        res = await sweep_via_perfskills(
+            result=ps,
+            conc_values=[conc],
+            isl_osl_configs=[f"{isl}:{osl}"],
+            output_root=runs_dir(self.session_dir, "sweep", "revalidate_perfskills"),
+            variant_timeout_sec=timeout,
+            repeats=3,
+            # Single-point validated replay pins the headline protocol (num_prompts
+            # etc.) so it is 口径-identical to the reported result (修改点8).
+            pin_num_prompts=True,
+        )
+        if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
+            self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
+            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+            self.shared_state.cumulative_gain_provenance = "perfskills_same_harness_geak"
+            self.shared_state.resume_pending_revalidation = False
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("perfskills 2a: SharedState.save failed")
+            return {"validated": True, "gain": (geak_sp - 1.0) * 100.0, "reason": reason}
+        log.warning(
+            "perfskills 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
+            res.get("status"), geak_sp, reason,
+        )
+        return {"validated": False, "status": res.get("status"), "reason": reason}
 
     @property
     def resumed_from(self) -> dict[str, Any]:
@@ -5291,6 +5640,25 @@ class Coordinator:
         bench_protocol = self._resolve_bench_protocol(
             str(getattr(state, "baseline_config_path", "") or "")
         )
+        # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
+        # Magpie's baseline served with, so GEAK/e2e launches the IDENTICAL vLLM
+        # engine and its own baseline matches raw_baseline_tput. Otherwise GEAK
+        # re-baselines on a slower stack default and kernel wins never translate
+        # e2e (see #805, gpt-oss-120b MXFP4). Hyperloom keeps these as raw flags
+        # inside the baseline server-args (NOT structured fields), so the resolver
+        # parses them from there (dedicated state.max_model_len wins; env last).
+        # Only resolved knobs are injected below (absent => GEAK adapter default).
+        try:
+            from .roofline_ceiling import read_baseline_server_args
+
+            _baseline_srv_args = read_baseline_server_args(state) or ""
+        except Exception:  # noqa: BLE001 — accessor is best-effort
+            _baseline_srv_args = ""
+        _serving_fidelity = _resolve_serving_fidelity(
+            baseline_server_args=_baseline_srv_args,
+            state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
+        )
+
         handoff = {
             "schema_version": 1,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
@@ -5302,6 +5670,15 @@ class Coordinator:
             "accepted_env": accepted_env,
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
             "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            # Orchestrator throughput of the SAME config GEAK seeds its baseline
+            # with (accepted_flags/accepted_env == current_best config). Lets
+            # run_e2e compute a PURE measurement divergence (GEAK-vs-orchestrator
+            # on identical config) separate from the explore/framework config
+            # gain that inflates raw_baseline-relative divergence. 0.0 => no
+            # accepted config yet (falls back to raw baseline downstream).
+            "orchestrator_best_tput_same_config": float(
+                (state.current_best or {}).get("tput") or 0.0
+            ) if isinstance(getattr(state, "current_best", None), dict) else 0.0,
             "exp_root": str(self.session_dir / "perfskills"),
             # Pin a stable, macro-cycle-scoped eval_dir so a resumed / re-entered
             # KERNEL reuses the SAME on-disk workflow artifacts (continue-from-disk)
@@ -5330,6 +5707,8 @@ class Coordinator:
         }
         if bench_protocol:
             handoff["bench_protocol"] = bench_protocol
+        # Only forward resolved fidelity knobs; absence => GEAK adapter default.
+        handoff.update(_serving_fidelity)
 
         out_dir = self.session_dir / "perfskills"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -5528,6 +5907,16 @@ class Coordinator:
 
         self._promote_perfskills_result(result)
         self._record_perfskills_kernel_journey(result)
+        # 修改点7 — the promote above records a PROVISIONAL cross-harness gain and
+        # sets resume_pending_revalidation; enqueue the same-harness config-identity
+        # rebench (2b, GEAK-harness 2a fallback) that turns it into a validated
+        # gain. Best-effort: a failure to enqueue leaves the provisional gain +
+        # pending flag, which reports surface honestly (never a false validated).
+        if str(result.get("status") or "") == "ok":
+            try:
+                await self._enqueue_internal_stack_rebench(reason="perfskills_e2e_win")
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("perfskills: enqueue same-harness revalidation failed")
         self._record_phase_entry_evidence(perfskills={
             "status": result.get("status"),
             "throughput_speedup": result.get("throughput_speedup"),
@@ -5582,16 +5971,38 @@ class Coordinator:
         base = float(self.shared_state.baseline_tput or 0.0)
         if new_tput <= 0:
             return
+        # The accepted config is recorded as {"flags": "<--a --b>", "env":
+        # "KEY=VAL KEY=VAL ..."} (bench_e2e.sh EXTRA_ENV format). Parse the env
+        # string into REAL env vars so downstream config-rebuild
+        # (_materialize_stack_config_for_resume / sweep / conc_sweep) reproduces
+        # the optimized server. Previously the whole string was stuffed under a
+        # single bogus key (``PERFSKILLS_ACCEPTED_ENV``), which vLLM ignores, so
+        # the win (e.g. VLLM_TUNED_CONFIG_FOLDER) never engaged on reuse. General:
+        # any KEY=VAL token becomes an env var; any --flag token folds into flags.
+        accepted_cfg = result.get("accepted_config") or {}
+        accepted_flags = str(accepted_cfg.get("flags") or "").strip()
+        parsed_envs, _extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
+        if _extra_flags:
+            accepted_flags = (accepted_flags + " " + _extra_flags).strip()
+
         cb = dict(self.shared_state.current_best or {})
+        cb_envs = dict(cb.get("extra_envs") or {}) if isinstance(cb.get("extra_envs"), Mapping) else {}
+        cb_envs.update(parsed_envs)
         cb.update({
             "action": "perfskills_e2e",
             "tput": new_tput,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
+            # Reproducible config: flags + parsed env, so any consumer that
+            # rebuilds a server from current_best relaunches the optimized stack.
+            "extra_server_args": accepted_flags,
+            "extra_envs": cb_envs,
             # Sweep-reuse handles: the optimized self-contained launch + bench scripts.
             "perfskills_launch_script": result.get("final_launch_script"),
             "perfskills_bench_script": result.get("bench_script"),
             "perfskills_eval_dir": result.get("eval_dir"),
+            # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag winners.
+            "final_overlay": result.get("final_overlay") or "",
             "workspace": result.get("eval_dir"),
         })
         self.shared_state.current_best = cb
@@ -5600,7 +6011,6 @@ class Coordinator:
         # breakdown's attribution / optimization_stack sections reflect it (the
         # native lanes do the same via append_stack_gain_entry).
         ts = datetime.now(timezone.utc).isoformat()
-        accepted_cfg = result.get("accepted_config") or {}
         already = any(
             isinstance(item, dict) and item.get("action") == "perfskills_e2e"
             for item in (self.shared_state.optimization_stack or [])
@@ -5610,11 +6020,9 @@ class Coordinator:
                 "action": "perfskills_e2e",
                 "variant_name": "perfskills_e2e",
                 "tput": new_tput,
-                "candidate_extra_server_args": str(accepted_cfg.get("flags") or ""),
-                "extra_envs": (
-                    {"PERFSKILLS_ACCEPTED_ENV": str(accepted_cfg.get("env"))}
-                    if accepted_cfg.get("env") else {}
-                ),
+                "candidate_extra_server_args": accepted_flags,
+                "extra_envs": dict(parsed_envs),
+                "final_overlay": result.get("final_overlay") or "",
                 "workspace": result.get("eval_dir"),
                 # Per-kernel / head evidence for the attribution + lifecycle view.
                 "accepted_kernels": result.get("accepted_kernels") or [],
@@ -5628,16 +6036,68 @@ class Coordinator:
                 action="perfskills_e2e",
                 variant_name="perfskills_e2e",
                 new_tput=new_tput,
-                extra_server_args=str(accepted_cfg.get("flags") or ""),
+                extra_server_args=accepted_flags,
                 ts=ts,
             )
         if base > 0:
+            # 修改点5 — the PROVISIONAL gain must stay internally consistent with
+            # the two persisted leaderboard anchors: current_best.tput (the
+            # promoted final, ``new_tput``) and baseline_tput (``base``). So it is
+            # exactly ``(current_best.tput / baseline) - 1`` — the codebase's
+            # absolute-throughput/baseline convention (see the native lane's
+            # ``total_gain = single_round_tput / baseline_tput - 1``), on the SAME
+            # (cold) basis as the baseline anchor. We deliberately do NOT
+            # substitute GEAK's HOT final here: a hot-numerator-over-cold-baseline
+            # ratio both overstates the win and contradicts current_best.tput
+            # (which a reader divides by baseline). GEAK's own within-harness
+            # speedups are recorded separately below for cross-check.
             gain = (new_tput - base) / base * 100.0
+            # 修改点4 — this ratio is GEAK-harness numerator / orchestrator-harness
+            # denominator (cross-harness), so it is PROVISIONAL only. Do NOT stamp
+            # cumulative_gain_validated here — validated may only be produced by a
+            # same-harness full-stack rebench (修改点7), consumed in
+            # _promote_to_shared_state. Native/codex lanes are unaffected (they
+            # never call this method; their validated gain is already same-harness).
             self.shared_state.cumulative_gain = gain
-            self.shared_state.cumulative_gain_validated = gain
-            self.shared_state.cumulative_gain_validated_ts = (
-                datetime.now(timezone.utc).isoformat()
+            self.shared_state.cumulative_gain_provenance = (
+                "perfskills_cross_harness_provisional"
             )
+            self.shared_state.resume_pending_revalidation = True
+
+            # Audit cross-check: stash GEAK's OWN within-harness speedups (clean
+            # A/B, harness-internal) + basis on current_best so the report can
+            # show them next to the cross-harness provisional. These never feed
+            # the leaderboard number; they let a reviewer compare GEAK's reported
+            # win (e.g. cold_geak_speedup) against Hyperloom's cross-harness one.
+            am = result.get("alignment_metrics") or {}
+            cb2 = self.shared_state.current_best
+            if isinstance(cb2, dict):
+                cb2["perfskills_alignment"] = {
+                    "hot_geak_speedup": am.get("hot_geak_speedup"),
+                    "cold_geak_speedup": am.get("cold_geak_speedup"),
+                    "hot_speedup": am.get("hot_speedup"),
+                    "cold_speedup": am.get("cold_speedup"),
+                    "final_basis": am.get("final_basis") or result.get("final_throughput_basis"),
+                    "geak_throughput_speedup": result.get("throughput_speedup"),
+                }
+
+            # 修改点6 — surface the PURE cross-harness measurement residue (GEAK vs
+            # orchestrator on the SAME accepted config) so a large value flags a
+            # measurement mismatch (not a real win). Reporting/audit only; the
+            # validated number is gated on the same-harness rebench regardless.
+            bb = result.get("baseline_basis") or {}
+            mdiv = bb.get("measurement_divergence_pct")
+            try:
+                mdiv_f = abs(float(mdiv)) if mdiv is not None else None
+            except (TypeError, ValueError):
+                mdiv_f = None
+            if mdiv_f is not None and mdiv_f > _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT:
+                log.warning(
+                    "perfskills promote: large cross-harness measurement "
+                    "divergence %.2f%% (|.|>%.1f%%) — provisional gain %.2f%% "
+                    "held until same-harness revalidation",
+                    float(mdiv), _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT, gain,
+                )
 
     def _record_perfskills_kernel_journey(self, result: dict[str, Any]) -> None:
         """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
@@ -14290,42 +14750,86 @@ class Coordinator:
             if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
-                if measured_ok and self.shared_state.baseline_tput > 0:
-                    self.shared_state.cumulative_gain_validated = (
-                        (float(measured) - self.shared_state.baseline_tput)
-                        / self.shared_state.baseline_tput
-                        * 100.0
+                # 修改点7 — a PerfSkills revalidation (2b) must not blindly stamp
+                # validated from the measured tput: assert the ran config's
+                # identity + that the optimization actually engaged, else replay
+                # via the GEAK harness (2a). Generic (native) revalidations keep
+                # the original unconditional watermark reconciliation below.
+                if bool((task.params or {}).get("perfskills_fallback")):
+                    got_hash = ""
+                    if isinstance(best_winner, dict):
+                        got_hash = str(best_winner.get("fingerprint") or "")
+                    if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
+                        got_hash = str(winners[0].get("fingerprint") or "")
+                    decision = _perfskills_revalidation_decision(
+                        measured=measured,
+                        baseline=self.shared_state.baseline_tput,
+                        got_hash=got_hash,
+                        expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
+                        min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
-                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                    recorded = cb_rec.get("tput")
-                    try:
-                        floor = float(
-                            os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
-                            or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                    if decision == "validated":
+                        self.shared_state.cumulative_gain_validated = (
+                            (float(measured) - self.shared_state.baseline_tput)
+                            / self.shared_state.baseline_tput
+                            * 100.0
                         )
-                    except (TypeError, ValueError):
-                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                    if (
-                        isinstance(recorded, (int, float))
-                        and recorded > 0
-                        and float(measured) < float(recorded) * floor / 100.0
-                    ):
-                        await self._record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "current_best_drift",
-                                "severity": "high",
-                                "measured_tput": float(measured),
-                                "recorded_tput": float(recorded),
-                                "floor_pct": floor,
-                            },
+                        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                        self.shared_state.cumulative_gain_provenance = "perfskills_orch_harness_validated"
+                        self.shared_state.resume_pending_revalidation = False
+                    else:
+                        # 2b inconclusive (config-identity or engagement) → GEAK
+                        # harness replay (2a). Leaves pending flag set; 2a clears
+                        # it on success. Best-effort so a fallback failure never
+                        # crashes the reactor (provisional gain + warning remain).
+                        log.warning(
+                            "perfskills 2b revalidation inconclusive "
+                            "(measured=%r got_hash=%r expected=%r) → GEAK-harness 2a fallback",
+                            measured, got_hash, (task.params or {}).get("expected_cfg_hash"),
                         )
-                if measured_ok:
-                    self.shared_state.resume_pending_revalidation = False
-                changed = True
+                        try:
+                            await self._validate_perfskills_via_geak_harness(reason="2b_inconclusive")
+                        except Exception:  # noqa: BLE001 — defensive
+                            log.exception("perfskills 2a GEAK-harness fallback failed")
+                    changed = True
+                else:
+                    if measured_ok and self.shared_state.baseline_tput > 0:
+                        self.shared_state.cumulative_gain_validated = (
+                            (float(measured) - self.shared_state.baseline_tput)
+                            / self.shared_state.baseline_tput
+                            * 100.0
+                        )
+                        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                        cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                        recorded = cb_rec.get("tput")
+                        try:
+                            floor = float(
+                                os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
+                                or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                            )
+                        except (TypeError, ValueError):
+                            floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        if (
+                            isinstance(recorded, (int, float))
+                            and recorded > 0
+                            and float(measured) < float(recorded) * floor / 100.0
+                        ):
+                            await self._record_observation(
+                                "coordinator",
+                                "observation",
+                                {
+                                    "kind": "current_best_drift",
+                                    "severity": "high",
+                                    "measured_tput": float(measured),
+                                    "recorded_tput": float(recorded),
+                                    "floor_pct": floor,
+                                },
+                            )
+                    if measured_ok:
+                        self.shared_state.resume_pending_revalidation = False
+                    changed = True
             if isinstance(winners, list) and winners:
                 for winner in winners:
                     if not isinstance(winner, dict):

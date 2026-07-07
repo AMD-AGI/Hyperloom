@@ -498,6 +498,11 @@ class SharedState:
     # Validated cumulative gain: re-baselined fresh server with every KEEP (per-round gains don't compose linearly); standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
+    # Provenance/basis of the currently-recorded gain so reports can tell a
+    # provisional cross-harness number (e.g. a perfskills e2e win divided by the
+    # orchestrator baseline) from a same-harness-validated one. Display/audit
+    # only; never gates scheduling. Empty on legacy/native sessions.
+    cumulative_gain_provenance: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a

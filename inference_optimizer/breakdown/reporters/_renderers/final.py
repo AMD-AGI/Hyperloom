@@ -43,6 +43,16 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     stack_changed = bool(f.get("stack_changed_after_validation"))
     extra_args = f.get("extra_server_args") or ""
     action_path = f.get("action_path") or []
+    gain_provenance = str(f.get("cumulative_gain_provenance") or "")
+    revalidation_pending = bool(f.get("revalidation_pending"))
+    # The gain is PROVISIONAL (not same-harness-validated) when its provenance
+    # says so, or a revalidation is pending and no positive validated number
+    # exists yet. In that case we must NOT present the (zeroed/absent) validated
+    # figure as authoritative — that reads like "the optimization did nothing".
+    # Show the provisional number, clearly labelled, plus a credibility warning.
+    is_provisional = ("provisional" in gain_provenance) or (
+        revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
+    )
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -53,20 +63,34 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if base_tput and final_tput:
         delta = float(final_tput) - float(base_tput)
         facts.append(f"Delta vs baseline: {delta:+.2f} tok/s/gpu.")
-    if gain_v is not None:
-        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
-        decisions.append(
-            Decision(
-                kind="kept" if (gain_v or 0) > 0 else "attempted",
-                subject="final",
-                metric_pct=float(gain_v),
-                rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
+    if is_provisional:
+        if gain_round is not None:
+            facts.append(
+                f"Provisional cumulative gain: {fmt_pct(gain_round, plus=True)} "
+                "— PENDING same-harness revalidation, NOT yet validated."
             )
+        warnings.append(
+            "Reported gain is PROVISIONAL and cross-harness "
+            f"(provenance={gain_provenance or 'unknown'}): the numerator was "
+            "measured by the delegated optimizer's harness and the denominator "
+            "is the orchestrator baseline. A same-harness full-stack rebench is "
+            "pending; the validated gain will replace this number once it lands."
         )
-    if gain_round is not None:
-        facts.append(
-            f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
-        )
+    else:
+        if gain_v is not None:
+            facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
+            decisions.append(
+                Decision(
+                    kind="kept" if (gain_v or 0) > 0 else "attempted",
+                    subject="final",
+                    metric_pct=float(gain_v),
+                    rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
+                )
+            )
+        if gain_round is not None:
+            facts.append(
+                f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
+            )
     if action_path:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
     if extra_args:
@@ -78,7 +102,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "cumulative_gain_pct_validated may be stale relative to the "
             "current best."
         )
-    if gain_v is None and (final_tput or base_tput):
+    if gain_v is None and not is_provisional and (final_tput or base_tput):
         warnings.append(
             "cumulative_gain_pct_validated is null while baseline/final "
             "throughput are set — validate_stack never ran or the snapshot "
@@ -90,6 +114,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("final_throughput_tok_s_per_gpu", final_tput),
             ("cumulative_gain_pct_validated", gain_v),
             ("cumulative_gain_pct_per_round_sum", gain_round),
+            ("cumulative_gain_provenance", gain_provenance or None),
+            ("revalidation_pending", revalidation_pending or None),
             ("validated_at_stack_len", val_stack_len),
             ("validated_ts", val_ts),
             ("stack_changed_after_validation", stack_changed),

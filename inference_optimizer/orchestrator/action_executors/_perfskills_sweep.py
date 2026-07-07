@@ -117,8 +117,19 @@ async def sweep_via_perfskills(
     output_root: Path,
     variant_timeout_sec: int,
     repeats: int = 3,
+    pin_num_prompts: bool = False,
 ) -> dict[str, Any]:
-    """Run a CONC × (ISL, OSL) sweep on the PerfSkills-optimized server."""
+    """Run a CONC × (ISL, OSL) sweep on the PerfSkills-optimized server.
+
+    Args:
+        pin_num_prompts: When True, also forward ``num_prompts`` from the
+            protocol onto every point (NUM_PROMPTS). Off by default because a
+            multi-conc sweep's prompt count is tied to each concurrency (a fixed
+            count would mis-size other concs); a SINGLE-point validated replay
+            (修改点7 2a) sets it True so the replay matches the headline result's
+            exact protocol (e.g. num_prompts=320) instead of bench_e2e.sh's
+            per-conc default (CONC*10).
+    """
     bench_script = result.get("bench_script") or result.get("perfskills_bench_script")
     overlay = result.get("final_overlay") or ""
     cfg = result.get("accepted_config") or {}
@@ -151,11 +162,16 @@ async def sweep_via_perfskills(
         _regimes = result.get("validated_regimes") or []
         _protocol = _regimes[0] if _regimes and isinstance(_regimes[0], dict) else {}
     protocol_env: dict[str, str] = {}
-    for _src, _dst in (
+    _protocol_map = [
         ("random_range_ratio", "RANDOM_RANGE_RATIO"),
         ("num_warmups", "NUM_WARMUPS"),
         ("seed", "SEED"),
-    ):
+    ]
+    # Single-point validated replay: also pin num_prompts so the replay matches
+    # the headline result's exact protocol (see pin_num_prompts docstring).
+    if pin_num_prompts:
+        _protocol_map.append(("num_prompts", "NUM_PROMPTS"))
+    for _src, _dst in _protocol_map:
         _val = _protocol.get(_src)
         if _val is not None:
             protocol_env[_dst] = str(_val)

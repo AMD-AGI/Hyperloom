@@ -1396,6 +1396,12 @@ def collect_final(
         "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
+        # Provenance/basis of the recorded gain so the renderer can tell a
+        # same-harness-validated number from a cross-harness PROVISIONAL one
+        # (e.g. a perfskills e2e win pending its same-harness rebench). Empty on
+        # native/legacy sessions (renders as validated, unchanged).
+        "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),
+        "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation": stack_len > val_stack_len > 0,
