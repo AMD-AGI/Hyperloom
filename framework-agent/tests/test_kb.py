@@ -43,6 +43,13 @@ class TestResolveKbRoot:
         monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "root"))
         assert kb._resolve_kb_root() == tmp_path / "root" / "kb"
 
+    def test_io_override_matches_writeback_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The fa reader honours IO's KB override so write/read paths match."""
+        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
+        monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
+        assert kb._resolve_kb_root() == tmp_path / "io-kb"
+
 
 class TestListAndMatch:
     """list_domains / get_domain_files / _match_domains."""
@@ -381,3 +388,48 @@ class TestContributeToKbForFramework:
         assert body.count("---") == 2
         assert "first" in body
         assert "second" in body
+
+
+class TestFrameworkPrLedger:
+    """Framework PR ledger helpers used by rating/prior ranking."""
+
+    def test_leaderboard_rejected_zero_gain_scores_zero(self) -> None:
+        """A failed historical apply should not get positive quality from association alone."""
+        board = kb.leaderboard_for_gap(
+            framework="vllm",
+            gap_canonical_id="g1",
+            gap_keywords=["moe"],
+            ledger=[
+                {
+                    "framework": "vllm",
+                    "pr_url": "https://example/pr/1",
+                    "gap_canonical_id": "g1",
+                    "gap_keywords": ["moe"],
+                    "outcome": "rejected_apply_fail",
+                    "tps_delta_pct": 0.0,
+                }
+            ],
+        )
+        assert board[0]["quality_score"] == 0.0
+        assert board[0]["apply_rate"] == 0.0
+
+    def test_leaderboard_tolerates_bad_numeric_fields(self) -> None:
+        """Malformed numeric ledger fields must not abort leaderboard creation."""
+        board = kb.leaderboard_for_gap(
+            framework="vllm",
+            gap_canonical_id="g1",
+            gap_keywords=["moe"],
+            ledger=[
+                {
+                    "framework": "vllm",
+                    "pr_url": "https://example/pr/2",
+                    "gap_canonical_id": "g1",
+                    "gap_keywords": ["moe"],
+                    "outcome": "integrated",
+                    "tps_delta_pct": "bad",
+                    "ts": "also-bad",
+                }
+            ],
+        )
+        assert board[0]["pr_url"] == "https://example/pr/2"
+        assert board[0]["quality_score"] > 0.0

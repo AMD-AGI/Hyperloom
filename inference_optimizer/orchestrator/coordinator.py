@@ -3291,10 +3291,26 @@ class Coordinator:
             from .framework_paths import resolve_source_file_allowlist
 
             roots = list(resolve_source_file_allowlist())
+            session_framework = str(getattr(state, "framework", "") or "").strip().lower()
+            cand_framework = str(candidate.get("framework") or "").strip().lower()
+            # #5-P1 wiring: a candidate discovered from a DIFFERENT framework's
+            # repo (LLM selector may pick one — see cross-framework acceptance
+            # note in the candidate-selection prompt) must be judged for
+            # portability into this session's own framework, not audited as
+            # if it were a same-framework patch. `framework` stays the
+            # candidate's own source framework so cross_framework_audit's
+            # src_framework/dst_framework split (design #5) is correct; when
+            # cand_framework is blank (the common same-framework case — most
+            # candidates discovered from this session's own repo never carry
+            # an explicit stamp) this resolves to session_framework exactly
+            # like before, so same-framework audit behaviour is unchanged.
+            is_cross_fw_candidate = bool(cand_framework) and cand_framework != session_framework
             audit = await _fa_client.phase_audit(
                 candidate=candidate,
-                framework=str(getattr(state, "framework", "") or ""),
+                framework=cand_framework or session_framework,
                 framework_source_roots=roots,
+                target_framework=session_framework if is_cross_fw_candidate else "",
+                target_framework_source_roots=roots if is_cross_fw_candidate else None,
                 session_dir=self.session_dir,
                 repo_url=str(candidate.get("repo") or ""),
                 diff_url=str(candidate.get("diff_url") or ""),
@@ -3427,6 +3443,12 @@ class Coordinator:
             try:
                 from .kb_writeback import OUTCOME_ALREADY_PRESENT, write_framework_record
 
+                gap_keywords = candidate.get("gap_keywords") or []
+                if isinstance(gap_keywords, str):
+                    gap_keywords = [gap_keywords]
+                changed_files = candidate.get("changed_files") or []
+                if isinstance(changed_files, str):
+                    changed_files = [changed_files]
                 await write_framework_record(
                     pr_url=str(candidate.get("pr_url") or ""),
                     pr_sha=str(candidate.get("head_sha") or ""),
@@ -3434,6 +3456,15 @@ class Coordinator:
                     outcome=OUTCOME_ALREADY_PRESENT,
                     tps_delta_pct=0.0,
                     session_id=str(getattr(state, "session_id", "") or ""),
+                    framework=str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
+                    gap_canonical_id=str(candidate.get("gap_canonical_id") or "").strip(),
+                    gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
+                    model_class=str(getattr(state, "model_class", "") or "").strip(),
+                    gpu_type=str(getattr(state, "gpu_type", "") or "").strip(),
+                    precision=str(getattr(state, "precision", "") or "").strip(),
+                    applicability=str((audit or {}).get("applicability") or "").strip(),
+                    provenance="phase_audit",
+                    changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
                 )
             except Exception:  # noqa: BLE001 — KB writeback is best-effort
                 log.debug("FRAMEWORK: audit-skip KB writeback failed", exc_info=True)
@@ -3495,6 +3526,51 @@ class Coordinator:
             f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
         ]
         notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
+        # #5-P2: cross-framework port. When the audit ran in cross_framework
+        # mode the upstream diff targets a different framework's layout/API and
+        # can never be git-applied; the specialist must REWRITE the equivalent
+        # logic against this session's (target) framework source.
+        is_cross_framework = isinstance(audit, dict) and str(audit.get("layer") or "") == "cross_framework"
+        cf_src_framework = ""
+        cf_dst_framework = ""
+        if is_cross_framework:
+            _cf_metrics = audit.get("metrics") if isinstance(audit.get("metrics"), dict) else {}
+            cf_src_framework = str(
+                _cf_metrics.get("src_framework") or candidate.get("framework") or ""
+            ).strip().lower()
+            cf_dst_framework = str(
+                _cf_metrics.get("dst_framework") or getattr(state, "framework", "") or ""
+            ).strip().lower()
+            cf_provenance = f"specialist:serving:framework:cross_framework:{cf_src_framework}->{cf_dst_framework}"
+            notes_lines.extend(
+                [
+                    "",
+                    "CROSS-FRAMEWORK PORT (rewrite, NOT git apply):",
+                    f"- source framework: {cf_src_framework or '(unknown)'}; "
+                    f"target (this session) framework: {cf_dst_framework or '(unknown)'}",
+                    "- The upstream diff targets a DIFFERENT framework's repo layout / API,",
+                    "  so it can NEVER be applied directly. Re-implement the equivalent",
+                    "  logic against the TARGET framework's live source in your worktree.",
+                ]
+            )
+            for hit in (audit.get("evidence") or [])[:8]:
+                if not isinstance(hit, dict):
+                    continue
+                notes_lines.append(
+                    f"  • target module candidate: {hit.get('dst_module') or '(none)'} "
+                    f"(from {hit.get('src_path') or '?'}; feature={hit.get('feature') or '?'})"
+                )
+            notes_lines.extend(
+                [
+                    "- Deliverable MUST be a unified-diff source patch in your worktree",
+                    "  (``patches_written``) against the target framework source; a pure",
+                    "  config-lever proposal is NOT sufficient for a cross-framework port.",
+                    f"- In your proposal, set provenance exactly to: {cf_provenance}",
+                    f"- Echo source_framework={cf_src_framework!r} and "
+                    f"target_framework={cf_dst_framework!r} in the proposal so the KB",
+                    "  ledger records the cross-framework outcome.",
+                ]
+            )
         notes_lines.extend(
             [
                 "",
@@ -3532,7 +3608,12 @@ class Coordinator:
             notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
-            "domain": "serving_specialist",
+            # #5-P2 Option A: cross-framework ports route to a dedicated
+            # rewrite domain (isolated system prompt / PolicyGate / provenance
+            # observability). Guarded by is_cross_framework so same-framework
+            # authoring is byte-for-byte unchanged. KB writeback is unaffected
+            # (it keys off the umbrella provenance prefix, not the domain).
+            "domain": ("cross_framework_rewrite_specialist" if is_cross_framework else "serving_specialist"),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
@@ -3548,6 +3629,12 @@ class Coordinator:
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
         }
+        if is_cross_framework:
+            # #5-P2: thread cross-framework provenance so the specialist->
+            # integrate_patch->ledger path records source/target framework.
+            params["cross_framework"] = True
+            params["source_framework"] = cf_src_framework
+            params["target_framework"] = cf_dst_framework
         try:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
@@ -4910,6 +4997,40 @@ class Coordinator:
             _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
+    @staticmethod
+    def _framework_agent_repo_url_origin_framework(repo_url: str) -> str:
+        """Reverse-lookup: which known serving framework (if any) owns ``repo_url``.
+
+        Design #5-P1/discovery-wiring: ``_framework_agent_discover_repo_urls``
+        already queries the ``pr_intel_specialist`` cross-repo set (e.g. a
+        sglang session's discovery batch already includes ``ROCm/vllm``), but
+        candidates returned by ``fa phase-discover`` never carry a
+        ``framework`` tag reflecting which repo they actually came from — so
+        ``_audit_framework_agent_candidate``'s cross-framework detection had
+        no signal to act on even though cross-repo candidates were already
+        flowing through the pump. Only the four ``repo_map`` frameworks are
+        resolvable (kernel-level repos like aiter/triton/rccl aren't a
+        "framework" in the audit sense and correctly resolve to "").
+
+        Args:
+            repo_url: A repo URL as returned by
+                :meth:`_framework_agent_discover_repo_urls`.
+
+        Returns:
+            The lowercase framework name, or ``""`` when ``repo_url`` doesn't
+            match any known framework's canonical repo.
+        """
+        from . import framework_agent_client as _fa_client
+
+        normalized = (repo_url or "").strip().rstrip("/").lower()
+        if not normalized:
+            return ""
+        for fw in ("sglang", "vllm", "atom", "xdit"):
+            fw_url = (_fa_client.repo_url_for_framework(fw) or "").strip().rstrip("/").lower()
+            if fw_url and fw_url == normalized:
+                return fw
+        return ""
+
     def _write_prs_tested_from_framework_agent(
         self, *, task: "Task", result: Any, kept: bool,
     ) -> None:
@@ -5224,7 +5345,33 @@ class Coordinator:
                 batch_id = str((repo_payload or {}).get("batch_id") or "")
             repo_cands = (repo_payload or {}).get("candidates") or []
             if isinstance(repo_cands, list):
-                merged_candidates.extend(c for c in repo_cands if isinstance(c, dict))
+                # #5-P2 mesh-coordinator discovery lane (default ON; kill switch:
+                # FRAMEWORK_AGENT_CROSS_DISCOVER_TAG=0). This repo_url loop already
+                # discovers from OTHER serving frameworks' repos (pr_intel_specialist
+                # cross-repo set — e.g. a sglang session already queries ROCm/vllm),
+                # but fa phase-discover never tags candidates with which repo they came
+                # from. Untagged, a cross-repo candidate was audited/applied as if it
+                # were same-framework — unsafe, since a vllm diff can never be git-
+                # applied onto sglang. Stamp candidates from a DIFFERENT framework's
+                # own repo with that origin framework so _audit_framework_agent_candidate
+                # routes them through the cross-framework PORT (specialist rewrite, never
+                # raw apply). Same-framework candidates (incl. kernel-level pr_intel
+                # repos with no framework mapping) are untouched, so same-framework audit
+                # behaviour is unchanged. Set the env to 0/false/no/off to fully revert.
+                origin_fw = ""
+                if os.environ.get("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "1").strip().lower() not in (
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                ):
+                    origin_fw = self._framework_agent_repo_url_origin_framework(repo_url)
+                for c in repo_cands:
+                    if not isinstance(c, dict):
+                        continue
+                    if origin_fw and origin_fw != framework and not c.get("framework"):
+                        c["framework"] = origin_fw
+                    merged_candidates.append(c)
         if not any_call_ok:
             failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
             state.framework_agent_discover_failures = failures
