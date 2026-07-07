@@ -13084,11 +13084,67 @@ class Coordinator:
         except Exception:  # noqa: BLE001 -- defensive
             log.exception("framework_config: save after lane finish failed")
 
+    def _framework_config_generation_context_lines(
+        self,
+        *,
+        framework: str,
+        direction: str,
+        direction_pct: float,
+    ) -> list[str]:
+        """Build bottleneck + discovered-flag advisory lines for the config
+        generation specialist notes (context enrichment).
+
+        Names the live top bottleneck (and dominant roofline direction) plus the
+        server/param flags already discovered for ``framework`` so the specialist
+        proposes higher-signal, non-redundant variants. All best-effort; returns
+        an empty list when no context is available.
+
+        Args:
+            framework: The normalized framework key (e.g. ``"sglang"``).
+            direction: The dominant roofline direction ("" when unknown).
+            direction_pct: The saturation percent for ``direction``.
+
+        Returns:
+            A list of advisory note lines (possibly empty).
+        """
+        state = self.shared_state
+        lines: list[str] = []
+        try:
+            bottleneck = str(state.current_top_bottleneck() or "").strip()
+        except Exception:  # noqa: BLE001 -- advisory only; never block dispatch
+            bottleneck = ""
+        if bottleneck or direction:
+            detail = bottleneck or "unknown"
+            if direction:
+                detail += f" (dominant roofline direction: {direction} {float(direction_pct):.0f}% saturated)"
+            lines += [
+                "",
+                f"CURRENT BOTTLENECK: {detail}.",
+                "Prioritise variants that directly relieve THIS bottleneck.",
+            ]
+        discovered = getattr(state, "discovered_flags", None)
+        entry = discovered.get(framework) if isinstance(discovered, dict) else None
+        if isinstance(entry, dict):
+            flag_names = [
+                str(f)
+                for f in (
+                    list(entry.get("backend_flags") or [])
+                    + list(entry.get("param_flags") or [])
+                )
+                if str(f).strip()
+            ][:15]
+            if flag_names:
+                lines.append(
+                    "ALREADY-DISCOVERED FLAGS for this framework (build on these, "
+                    "avoid re-proposing): " + ", ".join(flag_names)
+                )
+        return lines
+
     async def _dispatch_framework_config_generation_specialist(
         self,
         round_no: int,
     ) -> str:
-        """Dispatch a read-only serving specialist that PROPOSES config variants.
+        """Dispatch a read-only, bottleneck-matched specialist that PROPOSES config variants.
 
         The specialist emits a ``proposal_set`` of ``extra_args`` / ``extra_envs``
         variants (NOT source patches); the config subphase harvests it into a
@@ -13104,6 +13160,23 @@ class Coordinator:
         state = self.shared_state
         framework = str(getattr(state, "framework", "") or "").strip().lower()
         gap_cid = f"gap.framework_config.round{int(round_no)}"
+        # Increment 1 -- bottleneck-driven domain: mirror EXPLORE's specialist
+        # routing so the config-generation specialist matches the current
+        # dominant roofline direction (comm/systems/kernel/serving). Falls back
+        # to the serving specialist when no roofline snapshot exists yet.
+        direction, direction_pct = self._dominant_roofline_direction()
+        from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
+        _hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
+        domain = _hint[0] if _hint else "serving_specialist"
+        # Increment 2 -- context enrichment: name the live bottleneck + the
+        # flags already discovered for this framework so the specialist
+        # proposes higher-signal, non-redundant variants.
+        context_lines = self._framework_config_generation_context_lines(
+            framework=framework,
+            direction=direction,
+            direction_pct=direction_pct,
+        )
         notes = "\n".join(
             [
                 "FRAMEWORK CONFIG-EXPLORATION TASK.",
@@ -13120,10 +13193,11 @@ class Coordinator:
                 "  - reason: one line on why it may help.",
                 "The Coordinator benchmarks each variant and decides KEEP/REVERT;",
                 "you do not benchmark. Prefer high-signal, distinct variants.",
+                *context_lines,
             ]
         )
         params: dict[str, Any] = {
-            "domain": "serving_specialist",
+            "domain": domain,
             "gap_canonical_id": gap_cid,
             "gap_symptom": (
                 "Propose runtime config variants (server args / env) for a throughput grid"

@@ -77,6 +77,8 @@ def _fake_self(**state_overrides):
         explore_search={},
         save=lambda *a, **k: None,
         record_lifecycle_event=lambda **k: None,
+        discovered_flags={},
+        current_top_bottleneck=lambda: "",
     )
     for k, v in state_overrides.items():
         setattr(state, k, v)
@@ -88,6 +90,7 @@ def _fake_self(**state_overrides):
         session_dir=Path("/tmp"),
         _inject_explore_runtime_params=lambda params: None,
         _cycle_idem_suffix=lambda: "",
+        _dominant_roofline_direction=lambda: ("", 0.0),
         # Safe async defaults; individual tests override to exercise branches.
         _framework_config_generation_inflight=_async_return(False),
         _framework_config_exploration_inflight=_async_return(False),
@@ -103,6 +106,7 @@ def _fake_self(**state_overrides):
         "_framework_config_grid_from_proposals",
         "_ingest_framework_config_generation",
         "_start_framework_config_generation",
+        "_framework_config_generation_context_lines",
     ):
         setattr(s, name, types.MethodType(getattr(Coordinator, name), s))
     return s
@@ -725,3 +729,91 @@ def test_record_survives_lifecycle_error():
         s, task=task, result={"per_variant_outcomes": []}
     )
     assert len(s.shared_state.framework_config_exploration_results) == 1
+
+
+def test_dispatch_generation_specialist_bottleneck_domain():
+    s = _dispatch_deps(
+        _fake_self(framework="sglang", current_top_bottleneck=lambda: "comm")
+    )
+    s._dominant_roofline_direction = lambda: ("comm", 91.0)
+    tid = asyncio.run(
+        Coordinator._dispatch_framework_config_generation_specialist(s, 1)
+    )
+    assert tid == "framework-config-explore-1"
+    p = s.tasks.calls[0]["params"]
+    assert p["domain"] == "comm_specialist"
+    assert "CURRENT BOTTLENECK" in p["notes"]
+    assert "comm" in p["notes"]
+
+
+def test_dispatch_generation_specialist_compute_maps_kernel_switch():
+    s = _dispatch_deps(_fake_self())
+    s._dominant_roofline_direction = lambda: ("compute", 88.0)
+    asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1))
+    assert s.tasks.calls[0]["params"]["domain"] == "kernel_switch_specialist"
+
+
+def test_dispatch_generation_specialist_defaults_serving_without_roofline():
+    s = _dispatch_deps(_fake_self())
+    asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1))
+    assert s.tasks.calls[0]["params"]["domain"] == "serving_specialist"
+
+
+def test_context_lines_includes_bottleneck_and_flags():
+    s = _fake_self(
+        framework="sglang",
+        current_top_bottleneck=lambda: "memory",
+        discovered_flags={
+            "sglang": {
+                "backend_flags": ["--enable-torch-compile"],
+                "param_flags": ["--chunked-prefill-size"],
+            }
+        },
+    )
+    lines = s._framework_config_generation_context_lines(
+        framework="sglang", direction="memory", direction_pct=95.0
+    )
+    text = "\n".join(lines)
+    assert "CURRENT BOTTLENECK: memory" in text
+    assert "95% saturated" in text
+    assert "--enable-torch-compile" in text
+    assert "--chunked-prefill-size" in text
+
+
+def test_context_lines_bottleneck_without_direction():
+    s = _fake_self(current_top_bottleneck=lambda: "idle")
+    lines = s._framework_config_generation_context_lines(
+        framework="sglang", direction="", direction_pct=0.0
+    )
+    text = "\n".join(lines)
+    assert "CURRENT BOTTLENECK: idle." in text
+    assert "roofline direction" not in text
+
+
+def test_context_lines_empty_without_context():
+    s = _fake_self()
+    lines = s._framework_config_generation_context_lines(
+        framework="sglang", direction="", direction_pct=0.0
+    )
+    assert lines == []
+
+
+def test_context_lines_entry_present_but_no_flags():
+    s = _fake_self(discovered_flags={"sglang": {}})
+    lines = s._framework_config_generation_context_lines(
+        framework="sglang", direction="", direction_pct=0.0
+    )
+    assert lines == []
+
+
+def test_context_lines_swallows_bottleneck_exception():
+    def _boom():
+        raise RuntimeError("no snapshot")
+
+    s = _fake_self(current_top_bottleneck=_boom)
+    lines = s._framework_config_generation_context_lines(
+        framework="sglang", direction="comm", direction_pct=80.0
+    )
+    text = "\n".join(lines)
+    assert "CURRENT BOTTLENECK: unknown" in text
+    assert "comm" in text
