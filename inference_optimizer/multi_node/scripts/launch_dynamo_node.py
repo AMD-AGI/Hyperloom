@@ -50,15 +50,42 @@ _RAY_GCS_PORT = 6379
 # unreachable. Pods have distinct IPs so every worker can share one port.
 _DEFAULT_DYN_SYSTEM_PORT = 9090
 
+# Keep in sync with multi_node/_internal/server_args_safety.py
 _DENIED_SERVER_FLAGS = frozenset(
     {
+        "--adapter-model-path",
+        "--adapter-path",
         "--allowed-local-media-path",
-        "--download-dir",
-        "--revision",
+        "--chat-template",
         "--code-revision",
+        "--config",
+        "--download-dir",
+        "--hf-overrides",
+        "--lora-dirs",
+        "--lora-modules",
+        "--lora-path",
+        "--lora-paths",
+        "--model",
+        "--model-id",
+        "--model-path",
+        "--quantization-param-path",
+        "--revision",
+        "--tokenizer",
         "--tokenizer-path",
+        "--tokenizer-revision",
     }
 )
+_DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
+
+
+def _is_denied_server_flag(flag: str) -> bool:
+    """Return whether a single ``--flag`` token is denied at the pod boundary."""
+    name = (flag or "").strip()
+    if not name.startswith("--"):
+        return False
+    if name in _DENIED_SERVER_FLAGS:
+        return True
+    return any(name.endswith(suffix) for suffix in _DENIED_SERVER_FLAG_SUFFIXES)
 
 
 def _denied_extra_args(raw: str) -> list[str]:
@@ -80,7 +107,7 @@ def _denied_extra_args(raw: str) -> list[str]:
     out: list[str] = []
     for tok in tokens:
         flag = tok.split("=", 1)[0]
-        if flag in _DENIED_SERVER_FLAGS and flag not in out:
+        if _is_denied_server_flag(flag) and flag not in out:
             out.append(flag)
     return out
 

@@ -587,7 +587,11 @@ def _dynamo_ssh_run_script(
     cp = _run(known_hosts)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
         warn(f"dynamo ssh {ip}: host key mismatch; refreshing known_hosts and retrying once")
-        known_hosts = _refresh_dynamo_known_hosts([ip], port, state=state)
+        try:
+            known_hosts = _refresh_dynamo_known_hosts([ip], port, state=state)
+        except RuntimeError as exc:
+            warn(f"dynamo ssh {ip}: known_hosts refresh failed: {exc}")
+            return cp
         _save_state(state)
         cp = _run(known_hosts)
     return cp
@@ -631,7 +635,11 @@ def _dynamo_ssh_bash_with_env(
     cp = _run(known_hosts)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
         warn(f"dynamo ssh {ip}: host key mismatch; refreshing known_hosts and retrying once")
-        known_hosts = _refresh_dynamo_known_hosts([ip], port, state=state)
+        try:
+            known_hosts = _refresh_dynamo_known_hosts([ip], port, state=state)
+        except RuntimeError as exc:
+            warn(f"dynamo ssh {ip}: known_hosts refresh failed: {exc}")
+            return cp
         _save_state(state)
         cp = _run(known_hosts)
     return cp
