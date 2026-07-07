@@ -268,6 +268,9 @@ fi
 # propagates Environment block vars from the prompt into sandbox env, so
 # operators can flip this per-task without editing this script).
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
+# Explicit alias for operators who want to skip the final model/index load
+# step during install (e.g. Docker builds without visible GPUs).
+KERNEL_AGENT_SKIP_MODEL_LOAD_VAL="${KERNEL_AGENT_SKIP_MODEL_LOAD:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -337,6 +340,7 @@ Options:
   --dry-run          Print actions without running installs
   --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
                      (only needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
+  --skip-model-load  Skip the final GEAK RAG model/index build step.
   -h, --help         Show this help
 
 Environment (optional):
@@ -345,6 +349,8 @@ Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
+                                        Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
   INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
                                         Equivalent to --with-perfskills. Default native users skip it.
 EOF
@@ -355,6 +361,7 @@ while [ "$#" -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --with-perfskills) INSTALL_PERFSKILLS=1 ;;
+    --skip-model-load) KERNEL_AGENT_SKIP_MODEL_LOAD_VAL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -1300,6 +1307,12 @@ PY
 }
 
 ensure_rag_index() {
+  case "$KERNEL_AGENT_SKIP_MODEL_LOAD_VAL" in
+    1|true|TRUE|yes|YES|on|ON)
+      log "skipping GEAK model/index load step (KERNEL_AGENT_SKIP_MODEL_LOAD=$KERNEL_AGENT_SKIP_MODEL_LOAD_VAL)"
+      return 0
+      ;;
+  esac
   case "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL" in
     0|false|FALSE|no|NO|off|OFF)
       log "skipping GEAK RAG index build (KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL)"
