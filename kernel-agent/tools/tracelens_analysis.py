@@ -71,6 +71,13 @@ from _idle_gate import (
     resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
 )
 
+# Canonical roofline_source provenance enum, shared with the bypass route so both
+# emit the field from one vocabulary (see _roofline_source for the value ladder).
+from _roofline_source import (
+    ANALYTICAL as _RL_ANALYTICAL,
+    PLACEHOLDER as _RL_PLACEHOLDER,
+)
+
 
 # ---------------------------------------------------------------------------
 # Kernel-candidate pool size (issue #667).
@@ -5040,6 +5047,21 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
         "rocprof_roofline": candidate.get("rocprof_roofline"),
+        # Contract alignment (F6): emit the shared roofline_source provenance enum
+        # so both routes carry it. TraceLens rows come from its per-op perf model
+        # (analytical) when that model produced numbers, else placeholder.
+        "roofline_source": _RL_ANALYTICAL
+        if any(
+            candidate.get(k) is not None
+            for k in (
+                "arithmetic_intensity",
+                "flops_per_byte",
+                "efficiency_percent",
+                "compute_utilization_pct",
+                "bandwidth_utilization_pct",
+            )
+        )
+        else _RL_PLACEHOLDER,
     }
 
 

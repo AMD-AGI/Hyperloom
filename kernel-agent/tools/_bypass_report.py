@@ -31,6 +31,7 @@ from _bypass_classify import classify_kernel
 from _bypass_fusion import analyze_fusion
 from _bypass_roofline import compute_roofline
 from _bypass_source_resolver import editable_trace_source, resolve_source
+from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
 _ACTION_BY_CATEGORY: dict[str, str] = {
@@ -349,7 +350,7 @@ def build_candidates(
             # measured time, below) -> "rocprof" (opt-in measured, sets
             # roofline_measured=True). Lets downstream/LLM distinguish them.
             "roofline_measured": False,
-            "roofline_source": "placeholder",
+            "roofline_source": _RL_PLACEHOLDER,
             "library": "",
             "backend": framework,
             "framework": framework,
@@ -984,7 +985,7 @@ def build_kernel_roofline(
                 # False = not hardware-measured; roofline_source is how the bound
                 # was derived (placeholder / analytical / rocprof).
                 "roofline_measured": c.get("roofline_measured", False),
-                "roofline_source": c.get("roofline_source", "placeholder"),
+                "roofline_source": c.get("roofline_source", _RL_PLACEHOLDER),
             }
         )
     return {

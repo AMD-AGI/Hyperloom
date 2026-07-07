@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from _roofline_source import ANALYTICAL as _RL_ANALYTICAL
+
 # Compact AMD MAX-ACHIEVABLE (sustained) peak specs — the SAME convention as
 # inference_optimizer roofline_ceiling.HW_SPECS_ACHIEVABLE (from TraceLens arch
 # JSON), so per-kernel efficiency% shares ONE peak convention with the session
@@ -260,7 +262,7 @@ def compute_roofline(
         "bound_type": bound_type,
         "arithmetic_intensity": round(ai, 4),
         "flops_per_byte": round(ai, 4),
-        "roofline_source": "analytical",
+        "roofline_source": _RL_ANALYTICAL,
         **est_meta,
     }
     # Per-call achieved throughput from the real measured time -> efficiency.
