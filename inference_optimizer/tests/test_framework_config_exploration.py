@@ -96,6 +96,7 @@ def _fake_self(**state_overrides):
         _framework_config_exploration_inflight=_async_return(False),
         _dispatch_framework_config_generation_specialist=_async_return("gen-default"),
         _run_framework_config_exploration=_async_return("run-default"),
+        _dispatch_paused_for_phase_budget=lambda: False,
     )
     for name in (
         "_build_framework_config_grid",
@@ -827,3 +828,70 @@ def test_context_lines_uses_unknown_key_when_framework_blank():
         framework="", direction="", direction_pct=0.0
     )
     assert any("--foo" in ln for ln in lines)
+
+
+# --------------------------------------------------------------------------
+# Regression: bugbot findings (empty-harvest seed fallback + budget deadlock)
+# --------------------------------------------------------------------------
+def test_hold_generating_empty_harvest_finishes_not_seeds(monkeypatch):
+    # BUG1: an EMPTY harvested proposal_set (pending=[]) must finish the lane as
+    # generation_empty, NOT silently fall back to the default seed grid.
+    from inference_optimizer.orchestrator.action_executors import explore as _exp
+
+    gv = SimpleNamespace(
+        name="seed1", extra_server_args="--s", extra_envs={"E": "1"}, note="n"
+    )
+    monkeypatch.setattr(
+        _exp, "_default_grid_for_framework", lambda framework, *, model_class: [gv]
+    )
+    s = _fake_self(
+        framework="atom",
+        framework_config_exploration_enabled=True,
+        framework_config_lane_state="generating",
+        framework_config_pending_grid=[],
+    )
+    s._framework_config_generation_inflight = _async_return(False)
+
+    async def _no_run(**kwargs):
+        raise AssertionError("must not run explore for an empty harvest")
+
+    s._run_framework_config_exploration = _no_run
+    assert _hold(s) is False
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_hold_running_finishes_when_phase_budget_exhausted():
+    # BUG2: when the FRAMEWORK phase budget is spent the dispatcher stops
+    # spawning the queued explore round while the inflight check counts queued
+    # tasks, so the lane must yield instead of holding forever.
+    s = _fake_self(
+        framework_config_exploration_enabled=True,
+        framework_config_lane_state="running",
+        framework_config_lane_round=1,
+    )
+    s._framework_config_exploration_inflight = _async_return(True)
+    s._dispatch_paused_for_phase_budget = lambda: True
+    assert _hold(s) is False
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_hold_start_yields_when_phase_budget_exhausted():
+    # BUG2: do not even start a lane whose phase budget is already spent.
+    s = _fake_self(framework_config_exploration_enabled=True)
+    s._dispatch_paused_for_phase_budget = lambda: True
+    s._dispatch_framework_config_generation_specialist = _async_return("must-not-run")
+    assert _hold(s) is False
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_hold_running_holds_when_budget_ok_and_inflight():
+    # Guard: budget NOT exhausted must keep the normal hold-while-inflight path.
+    s = _fake_self(
+        framework_config_exploration_enabled=True,
+        framework_config_lane_state="running",
+        framework_config_lane_round=1,
+    )
+    s._framework_config_exploration_inflight = _async_return(True)
+    s._dispatch_paused_for_phase_budget = lambda: False
+    assert _hold(s) is True
+    assert s.shared_state.framework_config_lane_state == "running"

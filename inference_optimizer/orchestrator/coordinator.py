@@ -12850,7 +12850,9 @@ class Coordinator:
                 str(raw.get("note") or raw.get("provenance") or ""),
             )
 
-        if not explicit_grid and len(grid) < self._FRAMEWORK_CONFIG_GRID_CAP:
+        # ``explicit_grid=[]`` means the caller harvested an empty set --
+        # honour it (no seed fallback); only ``None`` (no grid supplied) seeds.
+        if explicit_grid is None and len(grid) < self._FRAMEWORK_CONFIG_GRID_CAP:
             try:
                 from .action_executors.explore import _default_grid_for_framework
 
@@ -13438,6 +13440,13 @@ class Coordinator:
             return False
         lane = str(getattr(state, "framework_config_lane_state", "") or "")
         if lane == "done":
+            return False
+        # Phase budget spent: the dispatcher stops spawning new phase-scoped
+        # variants (incl. our queued explore round) while the inflight check
+        # counts queued tasks, so holding here would livelock the phase past
+        # its budget. Yield so the phase-budget-exhausted exit can advance.
+        if self._dispatch_paused_for_phase_budget():
+            self._finish_framework_config_lane(reason="phase_budget_exhausted")
             return False
         if lane == "":
             return await self._start_framework_config_generation(round_no=0)
