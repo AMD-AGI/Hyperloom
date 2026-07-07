@@ -6,6 +6,14 @@ Appends structured records as JSON-Lines under
 ``framework-agent/kb/framework_optimization/lessons.jsonl`` (the ``fa`` CLI
 reads them to skip already-integrated PRs). :data:`KB_ROOT` is
 monkeypatchable in tests.
+
+Design §16 (gbrain outcomes write-back, revised): Hyperloom's role is
+LOCAL-ONLY — it never talks to gbrain directly. ``lessons.jsonl`` is a
+fixed, shared (not session-scoped) append-only file that a separate
+``Primus-Claw/knowledge/pr`` worker task tails and mirrors into gbrain's
+``pr-kb-outcomes/`` pages (see that repo's ``pr_kb/outcomes_sync.py`` — the
+sole owner of the gbrain write path for this data). This module's only job
+is to keep appending here reliably.
 """
 
 from __future__ import annotations
@@ -59,6 +67,11 @@ ALLOWED_OUTCOMES: frozenset[str] = frozenset(
 )
 
 
+def _str_list(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalize an optional string list for JSONL storage."""
+    return [str(v).strip() for v in (values or []) if str(v).strip()]
+
+
 def _record(
     *,
     pr_url: str,
@@ -67,6 +80,18 @@ def _record(
     outcome: str,
     tps_delta_pct: float,
     session_id: str,
+    framework: str = "",
+    gap_canonical_id: str = "",
+    gap_keywords: list[str] | None = None,
+    model_class: str = "",
+    gpu_type: str = "",
+    precision: str = "",
+    applicability: str = "",
+    provenance: str = "",
+    accuracy_delta_pct: float = 0.0,
+    changed_files: list[str] | None = None,
+    source_framework: str = "",
+    target_framework: str = "",
 ) -> dict:
     """Build the canonical framework-PR outcome record dict.
 
@@ -80,6 +105,18 @@ def _record(
         tps_delta_pct (float): %-throughput delta vs. the pre-integrate
             baseline.
         session_id (str): Orchestrator session id (audit hook).
+        framework (str): Source framework of the PR (rating prior signal).
+        gap_canonical_id (str): Canonical gap id (rating prior exact match key).
+        gap_keywords (list[str] | None): Gap keywords for fuzzy association.
+        model_class (str): Model class or family for parameter-PR association.
+        gpu_type (str): GPU type for workload-aware ranking.
+        precision (str): Precision mode for workload-aware ranking.
+        applicability (str): Audit/apply route classification.
+        provenance (str): Source path of the record.
+        accuracy_delta_pct (float): Accuracy delta when available.
+        changed_files (list[str] | None): PR changed files used for ranking.
+        source_framework (str): Cross-framework source framework, when known.
+        target_framework (str): Cross-framework target framework, when known.
 
     Returns:
         dict: The record with a ``ts`` timestamp plus the stringified /
@@ -93,6 +130,18 @@ def _record(
         "patch_path": str(patch_path or ""),
         "outcome": str(outcome or ""),
         "tps_delta_pct": float(tps_delta_pct or 0.0),
+        "framework": str(framework or ""),
+        "gap_canonical_id": str(gap_canonical_id or ""),
+        "gap_keywords": _str_list(gap_keywords),
+        "model_class": str(model_class or ""),
+        "gpu_type": str(gpu_type or ""),
+        "precision": str(precision or ""),
+        "applicability": str(applicability or ""),
+        "provenance": str(provenance or ""),
+        "accuracy_delta_pct": float(accuracy_delta_pct or 0.0),
+        "changed_files": _str_list(changed_files),
+        "source_framework": str(source_framework or ""),
+        "target_framework": str(target_framework or ""),
     }
 
 
@@ -123,6 +172,18 @@ async def write_framework_record(
     outcome: str,
     tps_delta_pct: float,
     session_id: str,
+    framework: str = "",
+    gap_canonical_id: str = "",
+    gap_keywords: list[str] | None = None,
+    model_class: str = "",
+    gpu_type: str = "",
+    precision: str = "",
+    applicability: str = "",
+    provenance: str = "",
+    accuracy_delta_pct: float = 0.0,
+    changed_files: list[str] | None = None,
+    source_framework: str = "",
+    target_framework: str = "",
 ) -> Path:
     """Append a framework-PR outcome record to ``lessons.jsonl``.
 
@@ -133,6 +194,14 @@ async def write_framework_record(
     * ``outcome`` — must be one of :data:`ALLOWED_OUTCOMES`.
     * ``tps_delta_pct`` — %-throughput delta vs. pre-integrate baseline.
     * ``session_id`` — orchestrator session id.
+    * ``framework`` — source framework of the PR (rating prior signal).
+    * ``gap_canonical_id`` — canonical gap id (rating prior exact match key).
+    * ``gap_keywords`` — gap keywords (rating prior fuzzy Jaccard match).
+    * ``model_class`` / ``gpu_type`` / ``precision`` — workload parameters.
+    * ``applicability`` / ``provenance`` — apply route and source context.
+    * ``accuracy_delta_pct`` — optional accuracy delta.
+    * ``changed_files`` — PR file paths used for fuzzy association.
+    * ``source_framework`` / ``target_framework`` — cross-framework context.
     """
     if outcome not in ALLOWED_OUTCOMES:
         raise ValueError(f"write_framework_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
@@ -143,6 +212,18 @@ async def write_framework_record(
         outcome=outcome,
         tps_delta_pct=tps_delta_pct,
         session_id=session_id,
+        framework=framework,
+        gap_canonical_id=gap_canonical_id,
+        gap_keywords=gap_keywords,
+        model_class=model_class,
+        gpu_type=gpu_type,
+        precision=precision,
+        applicability=applicability,
+        provenance=provenance,
+        accuracy_delta_pct=accuracy_delta_pct,
+        changed_files=changed_files,
+        source_framework=source_framework,
+        target_framework=target_framework,
     )
     return await asyncio.to_thread(_append_record_sync, record)
 
