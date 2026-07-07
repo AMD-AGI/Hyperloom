@@ -1076,6 +1076,51 @@ def _read_diffusion_num_steps(state: Any) -> int:
     return _env_int(envs, "XDIT_NUM_STEPS")
 
 
+def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
+    """Read the image resolution (``XDIT_HEIGHT``/``XDIT_WIDTH``) from the baseline yaml.
+
+    Needed for models (e.g. FLUX, SD3) whose transformer config carries no
+    ``sample_size`` -- the DiT sequence length is set by the runtime resolution.
+
+    Args:
+        state: Shared run state carrying the materialized baseline yaml.
+
+    Returns:
+        ``(height, width)`` in pixels; ``(0, 0)`` when unavailable.
+    """
+    try:
+        envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
+        return _env_int(envs, "XDIT_HEIGHT"), _env_int(envs, "XDIT_WIDTH")
+    except (AttributeError, TypeError, ValueError):
+        return 0, 0
+
+
+def _read_vae_geometry(model_path: str) -> tuple[int, int]:
+    """Read ``(vae_scale_factor, latent_channels)`` from ``<model>/vae/config.json``.
+
+    The VAE spatial downscale is ``2 ** (len(block_out_channels) - 1)`` (one
+    stride-2 stage per extra block); ``latent_channels`` is the VAE latent depth.
+    Both feed the DiT sequence-length derivation for sample_size-less configs.
+
+    Args:
+        model_path: Local diffusers model directory.
+
+    Returns:
+        ``(vae_scale_factor, latent_channels)``; ``vae_scale_factor`` defaults to
+        8 (the standard SD/FLUX VAE) and ``latent_channels`` to 0 when unreadable.
+    """
+    try:
+        cfg = json.loads((Path(model_path) / "vae" / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return 8, 0
+    if not isinstance(cfg, dict):
+        return 8, 0
+    boc = cfg.get("block_out_channels")
+    vae_scale = 2 ** (len(boc) - 1) if isinstance(boc, list) and boc else 8
+    latent_channels = int(cfg.get("latent_channels") or 0)
+    return vae_scale, latent_channels
+
+
 def compute_diffusion_mem_img_per_sec(
     *, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int
 ) -> float:
@@ -1109,23 +1154,36 @@ def compute_diffusion_mem_img_per_sec(
     return 1.0 / total_s if total_s > 0 else 0.0
 
 
-def _read_diffusion_dit_meta(model_path: str) -> tuple[int, int, int, int] | None:
+def _read_diffusion_dit_meta(
+    model_path: str, *, height: int = 0, width: int = 0
+) -> tuple[int, int, int, int] | None:
     """DiT transformer shape from ``<model>/transformer/config.json`` for the
     compute-bound diffusion ceiling.
 
-    Estimates DiT-ONLY params (``~12 * L * H**2`` — the standard transformer
-    per-layer count: 4H^2 attention + 8H^2 MLP), NOT the total ``weight_bytes``
-    (which also holds the text encoder + VAE that do NOT run per denoising step;
-    using the total would over-count and produce an invalid, too-low ceiling).
-    Latent token count is ``(sample_size / patch_size)**2``.
+    Estimates DiT-ONLY params, NOT the total ``weight_bytes`` (which also holds
+    the text encoder + VAE that do NOT run per denoising step). Per standard
+    transformer block the count is ``12 * H**2`` (4H^2 attention + 8H^2 MLP);
+    FLUX-style dual-stream blocks (``num_layers``) run separate image+text
+    projections and are counted ``2x``, single-stream blocks (``num_single_layers``)
+    ``1x`` -- so ``params = 12 * H**2 * (2 * num_layers + num_single_layers)``.
+
+    Latent token count (the DiT sequence length):
+      - ``sample_size`` present (Sana/PixArt/DiT): ``(sample_size / patch_size)**2``.
+      - else (FLUX/SD3): from the runtime resolution -- one token per
+        ``vae_scale_factor * transformer_pack`` pixels a side, where the pack is
+        inferred from ``in_channels / vae_latent_channels`` (FLUX folds a 2x2
+        patch into channels), all read from the VAE + transformer configs.
 
     Args:
         model_path: Local diffusers model directory.
+        height: Image height in pixels (used only when ``sample_size`` is absent).
+        width: Image width in pixels (used only when ``sample_size`` is absent).
 
     Returns:
-        ``(dit_params, latent_tokens, num_layers, hidden_size)``, or ``None`` when
-        the transformer config is unreadable / missing fields (caller degrades to
-        the memory-only ceiling).
+        ``(dit_params, latent_tokens, num_layers, hidden_size)`` where
+        ``num_layers`` is the TOTAL block count (dual + single stream, for the
+        attention term), or ``None`` when the config is unreadable / missing
+        fields / no way to size the latent grid (caller degrades to memory-only).
     """
     try:
         cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
@@ -1134,6 +1192,7 @@ def _read_diffusion_dit_meta(model_path: str) -> tuple[int, int, int, int] | Non
     if not isinstance(cfg, dict):
         return None
     num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
+    num_single_layers = int(cfg.get("num_single_layers") or 0)
     hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
     if hidden <= 0:
         heads = int(cfg.get("num_attention_heads") or 0)
@@ -1141,13 +1200,57 @@ def _read_diffusion_dit_meta(model_path: str) -> tuple[int, int, int, int] | Non
         hidden = heads * head_dim
     patch = int(cfg.get("patch_size") or 1) or 1
     sample = int(cfg.get("sample_size") or 0)
-    if num_layers <= 0 or hidden <= 0 or sample <= 0:
+    if num_layers <= 0 or hidden <= 0:
         return None
-    latent_tokens = (sample // patch) ** 2
-    dit_params = 12 * num_layers * hidden * hidden
-    if latent_tokens <= 0 or dit_params <= 0:
+
+    if sample > 0:
+        latent_tokens = (sample // patch) ** 2
+    else:
+        latent_tokens = _diffusion_latent_tokens_from_resolution(model_path, cfg, height, width)
+    if latent_tokens <= 0:
         return None
-    return dit_params, latent_tokens, num_layers, hidden
+
+    total_layers = num_layers + num_single_layers
+    param_layer_units = 2 * num_layers + num_single_layers if num_single_layers > 0 else num_layers
+    dit_params = 12 * param_layer_units * hidden * hidden
+    if dit_params <= 0:
+        return None
+    return dit_params, latent_tokens, total_layers, hidden
+
+
+def _diffusion_latent_tokens_from_resolution(
+    model_path: str, transformer_cfg: dict[str, Any], height: int, width: int
+) -> int:
+    """Latent-grid token count for a sample_size-less DiT from the runtime resolution.
+
+    ``tokens = (H / downscale) * (W / downscale)`` where ``downscale =
+    vae_scale_factor * transformer_pack``. The transformer pack is inferred from
+    ``in_channels / vae_latent_channels`` (FLUX packs a 2x2 patch into channels),
+    defaulting to 2 (the FLUX/SD3 convention) when it cannot be derived.
+
+    Args:
+        model_path: Local diffusers model directory (for the VAE geometry).
+        transformer_cfg: Parsed transformer ``config.json``.
+        height: Image height in pixels.
+        width: Image width in pixels.
+
+    Returns:
+        The latent token count, or ``0`` when the resolution is unavailable.
+    """
+    if height <= 0 or width <= 0:
+        return 0
+    vae_scale, latent_channels = _read_vae_geometry(model_path)
+    in_ch = int(transformer_cfg.get("in_channels") or 0)
+    pack = 2
+    if in_ch > 0 and latent_channels > 0 and in_ch % latent_channels == 0:
+        ratio = in_ch // latent_channels
+        root = int(round(ratio ** 0.5))
+        if root >= 1 and root * root == ratio:
+            pack = root
+    downscale = max(vae_scale, 1) * max(pack, 1)
+    if downscale <= 0:
+        return 0
+    return (height // downscale) * (width // downscale)
 
 
 def compute_diffusion_compute_img_per_sec(
@@ -1221,19 +1324,23 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     num_steps = _read_diffusion_num_steps(state)
     if num_steps <= 0:
         return _EMPTY_BREAKDOWN
-    mem_img_s = compute_diffusion_mem_img_per_sec(
-        gpu_type=runtime.gpu_type,
-        num_gpus=runtime.tp,
-        weight_bytes=meta.weight_bytes,
-        num_steps=num_steps,
-    )
-    # Compute-bound side from a config-analytical DiT FLOP model (route-independent
-    # -- the memory-only ceiling was too loose since diffusion is usually
-    # compute-bound). Degrades to 0.0 (memory-only) when the config is unreadable.
+    # DiT geometry drives BOTH sides: the compute FLOP model AND the per-step
+    # memory IO. Read the runtime resolution so sample_size-less configs (FLUX)
+    # can still size their latent grid.
+    height, width = _read_diffusion_resolution(state)
+    dit = _read_diffusion_dit_meta(runtime.model_path, height=height, width=width)
+
+    # Per denoising step only the DiT runs; the text encoder + VAE are one-time,
+    # so per-step memory IO is the DiT-ONLY weight bytes (dit_params x dtype),
+    # consistent with the DiT-only compute FLOPs. Fall back to the full checkpoint
+    # only when the DiT geometry is unavailable (also the memory-only degrade).
     cmp_img_s = 0.0
-    dit = _read_diffusion_dit_meta(runtime.model_path)
+    mem_bytes = int(meta.weight_bytes)
     if dit is not None:
         dit_params, latent_tokens, num_layers, hidden = dit
+        dit_weight_bytes = int(dit_params * _resolve_dtype_bytes(runtime.precision or "bf16"))
+        if dit_weight_bytes > 0:
+            mem_bytes = dit_weight_bytes
         cmp_img_s = compute_diffusion_compute_img_per_sec(
             gpu_type=runtime.gpu_type,
             num_gpus=runtime.tp,
@@ -1244,6 +1351,12 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
             hidden_size=hidden,
             num_steps=num_steps,
         )
+    mem_img_s = compute_diffusion_mem_img_per_sec(
+        gpu_type=runtime.gpu_type,
+        num_gpus=runtime.tp,
+        weight_bytes=mem_bytes,
+        num_steps=num_steps,
+    )
     if mem_img_s <= 0 and cmp_img_s <= 0:
         return _EMPTY_BREAKDOWN
     peak, bound = select_peak_and_bound(mem_img_s, cmp_img_s)

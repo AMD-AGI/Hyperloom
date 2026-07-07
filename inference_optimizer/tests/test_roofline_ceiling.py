@@ -1011,7 +1011,7 @@ class TestDiffusionComputeCeiling:
         import inference_optimizer.orchestrator.roofline_ceiling as rc
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=3_200_000_000))
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
-        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp: (12 * 20 * 2240 ** 2, 1024, 20, 2240))
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: (12 * 20 * 2240 ** 2, 1024, 20, 2240))
         bd = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
         assert bd.cmp_tok_per_sec > 0
         assert bd.mem_tok_per_sec > bd.cmp_tok_per_sec  # memory ceiling is looser
@@ -1023,11 +1023,100 @@ class TestDiffusionComputeCeiling:
         import inference_optimizer.orchestrator.roofline_ceiling as rc
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=3_200_000_000))
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
-        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp: None)
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: None)
         bd = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
         assert bd.cmp_tok_per_sec == 0.0
         assert bd.bound_kind == "memory"
         assert bd.peak_tok_per_sec == pytest.approx(bd.mem_tok_per_sec, rel=1e-9)
+
+    # ── Finding 1: FLUX has no sample_size; latent tokens come from the runtime
+    #    resolution (config-derived vae_scale x transformer packing). ──────────
+    def _write_flux_configs(self, tmp_path):
+        import json as _json
+        td = tmp_path / "transformer"
+        td.mkdir()
+        (td / "config.json").write_text(_json.dumps({
+            "num_layers": 19, "num_single_layers": 38,
+            "num_attention_heads": 24, "attention_head_dim": 128,
+            "patch_size": 1, "in_channels": 64,  # 16 latent ch x 2x2 pack
+        }))
+        vd = tmp_path / "vae"
+        vd.mkdir()
+        (vd / "config.json").write_text(_json.dumps({
+            "block_out_channels": [128, 256, 512, 512],  # 4 stages -> vae_scale 8
+            "latent_channels": 16,
+        }))
+
+    def test_read_dit_meta_flux_no_sample_size_uses_resolution(self, tmp_path):
+        self._write_flux_configs(tmp_path)
+        dit = _read_diffusion_dit_meta(str(tmp_path), height=1024, width=1024)
+        assert dit is not None  # current code returns None (no sample_size)
+        dit_params, latent_tokens, num_layers, hidden = dit
+        assert hidden == 24 * 128  # 3072
+        # (1024 / (vae_scale 8 * pack 2))^2 = 64^2
+        assert latent_tokens == 4096
+        # attention term spans every block (double + single stream)
+        assert num_layers == 19 + 38
+        # weighted params: double-stream blocks count 2x, single-stream 1x
+        assert dit_params == 12 * (2 * 19 + 38) * 3072 * 3072
+
+    def test_read_dit_meta_flux_without_resolution_is_none(self, tmp_path):
+        self._write_flux_configs(tmp_path)
+        # no sample_size AND no resolution -> degrade to memory-only (None)
+        assert _read_diffusion_dit_meta(str(tmp_path)) is None
+
+    def test_read_dit_meta_sana_unchanged(self, tmp_path):
+        import json as _json
+        td = tmp_path / "transformer"
+        td.mkdir()
+        (td / "config.json").write_text(_json.dumps({
+            "num_layers": 20, "num_attention_heads": 70, "attention_head_dim": 32,
+            "patch_size": 1, "sample_size": 32,
+        }))
+        dit = _read_diffusion_dit_meta(str(tmp_path), height=1024, width=1024)
+        assert dit is not None
+        dit_params, latent_tokens, num_layers, hidden = dit
+        # sample_size present -> latent tokens from it (resolution ignored); no
+        # single-stream blocks -> params unchanged from the original estimate.
+        assert latent_tokens == 1024 and num_layers == 20 and hidden == 2240
+        assert dit_params == 12 * 20 * 2240 * 2240
+
+    def test_breakdown_flux_gets_compute_ceiling(self, tmp_path, monkeypatch):
+        import types
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+        self._write_flux_configs(tmp_path)
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=24_000_000_000))
+        monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 28)
+        monkeypatch.setattr(rc, "_read_diffusion_resolution", lambda state: (1024, 1024))
+        rt = RuntimeWorkload(
+            model_path=str(tmp_path), gpu_type="mi325x", precision="bf16",
+            framework="xdit", tp=1, concurrency=1, isl=0, osl=0, server_args="",
+        )
+        bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
+        # current code: FLUX -> _read_diffusion_dit_meta None -> cmp == 0 (memory-only)
+        assert bd.cmp_tok_per_sec > 0
+
+    # ── Finding 2: per denoising step only the DiT runs; memory ceiling uses
+    #    DiT-only weight bytes, not the full checkpoint (encoder + VAE). ───────
+    def test_breakdown_memory_uses_dit_only_bytes(self, monkeypatch):
+        import types
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+        dit_params = 12 * 20 * 2240 ** 2
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=20_000_000_000))
+        monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
+        monkeypatch.setattr(rc, "_read_diffusion_resolution", lambda state: (0, 0))
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: (dit_params, 1024, 20, 2240))
+        rt = RuntimeWorkload(
+            model_path="/x", gpu_type="mi325x", precision="bf16",
+            framework="xdit", tp=1, concurrency=1, isl=0, osl=0, server_args="",
+        )
+        bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
+        dit_bytes = int(dit_params * 2)  # bf16
+        expected = rc.compute_diffusion_mem_img_per_sec(gpu_type="mi325x", num_gpus=1, weight_bytes=dit_bytes, num_steps=20)
+        full = rc.compute_diffusion_mem_img_per_sec(gpu_type="mi325x", num_gpus=1, weight_bytes=20_000_000_000, num_steps=20)
+        # current code feeds the full 20GB checkpoint -> too-low memory ceiling
+        assert bd.mem_tok_per_sec == pytest.approx(expected, rel=1e-9)
+        assert bd.mem_tok_per_sec > full
 
 
 class TestComputeBoundCeiling:
