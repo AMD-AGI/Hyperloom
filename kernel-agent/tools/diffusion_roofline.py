@@ -35,6 +35,10 @@ from typing import Any
 UNIFIED_CSV = "unified_perf_summary.csv"
 GPU_TIMELINE_CSV = "gpu_timeline.csv"
 
+# torch.compile fuses ops into single kernels with very long generated names,
+# which can exceed csv's default 128 KiB field limit; lift it to the platform max.
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+
 # Column names as emitted by generate_perf_report_pytorch's unified summary.
 COL_KERNEL_TIME_SUM = "Kernel Time (\u00b5s)_sum"
 COL_ROOFLINE_TIME = "Roofline Time (\u00b5s)_first"

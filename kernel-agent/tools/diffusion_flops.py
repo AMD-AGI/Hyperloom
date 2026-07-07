@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -224,6 +226,106 @@ def _resolve_intermediate(cfg: dict[str, Any], hidden: int) -> int:
     return int(4 * hidden)
 
 
+def _safetensors_header(path: Path) -> dict[str, Any] | None:
+    try:
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            return json.loads(f.read(n))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _find_denoiser_safetensors(model_dir: Path) -> Path | None:
+    """Locate the main denoiser weight file in a non-diffusers checkpoint.
+
+    Handles bare single-file DiTs (e.g. ``diffusion_pytorch_model.safetensors``)
+    and original ``dit/`` layouts, skipping fp8 / scale / refiner sidecars.
+    """
+    cands: list[Path] = list(model_dir.glob("diffusion_pytorch_model*.safetensors"))
+    for sub in ("dit", "transformer"):
+        cands += list((model_dir / sub).glob("*.safetensors"))
+
+    def _is_main(p: Path) -> bool:
+        n = p.name.lower()
+        return not any(t in n for t in ("fp8", "scale", "refiner", "distilled", "index"))
+
+    mains = [p for p in cands if _is_main(p)] or cands
+    if not mains:
+        return None
+    return max(mains, key=lambda p: p.stat().st_size if p.exists() else 0)
+
+
+def _infer_geometry_from_safetensors(model_dir: Path) -> DenoiserGeometry | None:
+    """Fallback for checkpoints without a resolvable transformer config.
+
+    Infers a FLUX-style dual + single-stream geometry from the safetensors
+    tensor-name index (block counts + hidden size), then maps the naming
+    convention onto a known ``_class_name`` so the per-class defaults apply.
+    """
+    st = _find_denoiser_safetensors(model_dir)
+    if st is None:
+        return None
+    hdr = _safetensors_header(st)
+    if not hdr:
+        return None
+    keys = [k for k in hdr if k != "__metadata__"]
+
+    double: set[int] = set()
+    single: set[int] = set()
+    for k in keys:
+        m = re.search(
+            r"(single_transformer_blocks|transformer_blocks|single_blocks|double_blocks)\.(\d+)\.",
+            k,
+        )
+        if not m:
+            continue
+        (single if m.group(1).startswith("single") else double).add(int(m.group(2)))
+    if not double and not single:
+        return None
+
+    hidden = 0
+    for k in keys:
+        shp = hdr[k].get("shape") or []
+        if k.endswith("attn.to_q.weight") and len(shp) == 2:
+            hidden = int(shp[0])
+            break
+        if k.endswith("img_attn_qkv.weight") and len(shp) == 2:
+            hidden = int(shp[1])
+            break
+    if not hidden:
+        return None
+
+    diffusers_naming = any(
+        k.startswith(("transformer_blocks.", "single_transformer_blocks."))
+        for k in keys
+    )
+    model_class = (
+        "FluxTransformer2DModel" if diffusers_naming else "HunyuanImageTransformer2DModel"
+    )
+    defaults = dict(_CLASS_DEFAULTS.get(model_class, {}))
+    basename = model_dir.name.lower()
+    for hint_key, hint in _BASENAME_HINTS.items():
+        if hint_key in basename:
+            defaults.update(hint)
+
+    return DenoiserGeometry(
+        model_class=model_class,
+        family="flux",
+        hidden=hidden,
+        num_double_layers=len(double),
+        num_single_layers=len(single),
+        head_dim=128,
+        intermediate=4 * hidden,
+        gated_ffn=False,
+        vae_spatial=int(defaults.get("vae_spatial", 8)),
+        patch=2,
+        text_tokens=int(defaults.get("text_tokens", 256)),
+        default_steps=int(defaults.get("default_steps", 28)),
+        default_cfg_batch=int(defaults.get("default_cfg_batch", 2)),
+        notes=f"{basename} (inferred from {st.name})",
+    )
+
+
 def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
     """Read a local diffusers model dir and resolve its denoiser geometry.
 
@@ -237,11 +339,11 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
     d = Path(model_dir).expanduser()
     cfg, _sub = _denoiser_config(d)
     if not cfg:
-        return None
+        return _infer_geometry_from_safetensors(d)
     model_class = str(cfg.get("_class_name") or "")
     family = _CLASS_FAMILY.get(model_class)
     if family is None:
-        return None
+        return _infer_geometry_from_safetensors(d)
 
     hidden = _resolve_hidden(cfg)
     head_dim = _resolve_head_dim(cfg, hidden)
