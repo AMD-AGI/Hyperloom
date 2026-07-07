@@ -34,7 +34,7 @@ import re
 import sys
 from typing import Any, Mapping
 
-from ..compat.payload_aliases import (
+from ..compat import (
     CANONICAL_KEY,
     LEGACY_KEY,
     read_extra_server_args,

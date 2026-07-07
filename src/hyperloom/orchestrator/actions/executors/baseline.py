@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
+from hyperloom.inference_optimizer.compat import read_extra_server_args
 from hyperloom.inference_optimizer.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle

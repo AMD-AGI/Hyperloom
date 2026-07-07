@@ -16,7 +16,7 @@ AMDGCN_USE_BUFFER_OPS=1     # +0.29% (marginal, directionally correct)
 ```
 
 ### Required Code Patches (xDiT bugs — fix before any optimization)
-See recipe `skills/kb/recipes/flux2-dev-bf16_mi355x.json` for detailed patch descriptions.
+See recipe `skills/data/recipes/flux2-dev-bf16_mi355x.json` for detailed patch descriptions.
 
 1. **`runner_models/flux.py`**: Add `_compile_model()` override with `reduce-overhead` mode
 2. **`transformer_flux2.py`**: Add `combine_qkv_a2a=True` to `USP()` in dual-stream processors

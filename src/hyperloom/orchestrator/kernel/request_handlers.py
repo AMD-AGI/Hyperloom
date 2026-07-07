@@ -4807,7 +4807,7 @@ async def integrate_handler(
         }
 
     # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
-    from hyperloom.inference_optimizer.compat.payload_aliases import read_extra_server_args
+    from hyperloom.inference_optimizer.compat import read_extra_server_args
 
     env_only_validation = (
         str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"}

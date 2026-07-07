@@ -20,10 +20,10 @@ ALLOWED_FILES: dict[str, str] = {
     # the legacy key now lives in hyperloom.common; the compat + sub-agent
     # shims re-export it and no longer carry the literal themselves.
     "src/hyperloom/common/payload_aliases.py": "canonical payload-aliases compat helper (tree-reform.MD §7)",
-    # Compat helper modules (docstrings naming both keys; re-export the
-    # canonical helper above).
-    "src/hyperloom/inference_optimizer/compat/__init__.py": "compat package docstring naming the rename",
-    "src/hyperloom/inference_optimizer/compat/payload_aliases.py": "compat re-export shim docstring names the rename",
+    # Compat helper module (docstring naming both keys; re-exports the
+    # canonical helper above). tree-reform.MD P2.4: flattened from the
+    # compat/ package (__init__.py + payload_aliases.py) into compat.py.
+    "src/hyperloom/inference_optimizer/compat.py": "compat re-export shim docstring names the rename",
     # Sub-agent reader site (kernel-agent) that falls back to the legacy key.
     "kernel-agent/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
     # Back-compat injection points in production code (renamed kwarg

@@ -41,7 +41,7 @@ import urllib.request
 from typing import Any, Mapping
 
 from .. import recipe_snapshot_constants as C
-from ..compat.payload_aliases import CANONICAL_KEY
+from ..compat import CANONICAL_KEY
 from .canonical_id import recipe_canonical_id
 from .remote_client import RemoteRecipeClientError
 

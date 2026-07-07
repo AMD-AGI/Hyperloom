@@ -7,7 +7,9 @@ shim that was independently copied into the kernel-agent and robustness-agent
 sub-packages. The legacy sglang-era name is a read-only alias for the
 framework-neutral canonical key.
 
-Contract (identical to the historical ``hyperloom.inference_optimizer.compat.payload_aliases``):
+Contract (identical to the historical ``hyperloom.inference_optimizer.compat.payload_aliases``,
+now re-exported from ``hyperloom.inference_optimizer.compat`` after the
+tree-reform.MD P2.4 ``compat/`` -> ``compat.py`` flattening):
 
 * **Read-only on legacy**. Writers always emit the canonical name; the alias
   only flows in the read direction.

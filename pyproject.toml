@@ -80,8 +80,8 @@ hyperloom = [
     "benches/README.md",
     "scripts/*",
     "scripts/configs/*.yaml",
-    "kb/framework/*.md",
-    "kb/recipes/*.json",
+    "data/framework/*.md",
+    "data/recipes/*.json",
 ]
 
 [tool.pytest.ini_options]
@@ -121,7 +121,10 @@ markers = [
     "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
 ]
 filterwarnings = [
-    "ignore::DeprecationWarning:hyperloom.inference_optimizer.compat.payload_aliases",
+    # tree-reform.MD P2.4: compat/payload_aliases.py flattened into compat.py,
+    # which re-exports (not re-wraps) hyperloom.common.payload_aliases -- the
+    # warning is actually raised from that canonical module.
+    "ignore::DeprecationWarning:hyperloom.common.payload_aliases",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
