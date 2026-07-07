@@ -160,14 +160,17 @@ class TestQualityGate:
             gate = {"passed": True, "skipped": True, "reason": reason}
             assert ag.quality_gate_passed(gate, require=True) is False, reason
 
-    def test_quality_gate_passed_skipped_passes_when_no_ref_configured(self, monkeypatch):
-        # No reference configured: the gate is intentionally disabled, so a skip
-        # stays non-blocking (preserves the default no-reference behavior).
+    def test_quality_gate_passed_skipped_fails_closed_regardless_of_env(self, monkeypatch):
+        # _workload_envs auto-defaults a per-session reference for every
+        # scriptable variant, so a comparison is ALWAYS expected. A
+        # non-established skip is unverifiable and fails closed even when the
+        # orchestrator process env carries no XDIT_QUALITY_REF (the reference is
+        # injected via benchmark.envs for the wrapper subprocess, not the
+        # process env, so the old env probe fail-opened here).
         monkeypatch.delenv("XDIT_QUALITY_REF", raising=False)
         gate = {"passed": True, "skipped": True, "reason": "no_reference_or_image"}
-        assert ag.quality_gate_passed(gate, require=True) is True
+        assert ag.quality_gate_passed(gate, require=True) is False
         # Serving (require=False) never fails closed on a skip.
-        monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         assert ag.quality_gate_passed(gate, require=False) is True
 
     def test_quality_gate_passed_thresholds(self):
