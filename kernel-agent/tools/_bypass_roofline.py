@@ -89,11 +89,56 @@ def _numel(dims: tuple[int, ...]) -> int:
     return n
 
 
-def _estimate_flops_bytes(category: str, operands: list[tuple[tuple[int, ...], str]], dbytes: float) -> tuple[float, float] | None:
-    """Estimate (flops, bytes) for one representative call, or ``None``.
+def _sdpa_flops_bytes(
+    four_d: list[tuple[int, ...]], dbytes: float
+) -> tuple[float, float, dict[str, Any]]:
+    """Attention FLOPs/bytes with operand-layout inference.
+
+    Two matmuls (QK^T, A·V) each cost ``B*H*Sq*Skv*D`` mul-adds -> total
+    ``4*B*H*Sq*Skv*D``. B (first) and D (last) dims of Q are layout-invariant.
+    The head count H is the value shared by Q's and K's two middle dims, which
+    resolves the (B,S,H,D) vs (B,H,S,D) ambiguity AND cross-attention exactly
+    (Sq != Skv). When Q/K middle dims coincide (self-attention -> ambiguous),
+    prefer an explicit score/attn operand (B,H,Sq,Skv); else fall back to a
+    heuristic (heads = the smaller middle dim, since num_heads <= seq_len in
+    practice) and flag ``roofline_layout_inferred`` so the estimate is honest.
+    """
+    q = four_d[0]
+    k = four_d[1] if len(four_d) >= 2 else q
+    b, d = q[0], q[-1]
+    qmid = (q[1], q[2])
+    kmid = (k[1], k[2])
+    meta: dict[str, Any] = {}
+    common = set(qmid) & set(kmid)
+    if len(common) == 1:
+        h = next(iter(common))
+        sq = qmid[1] if qmid[0] == h else qmid[0]
+        skv = kmid[1] if kmid[0] == h else kmid[0]
+    else:
+        # Ambiguous self-attention (Q/K middle dims coincide). Prefer an explicit
+        # score/attn tensor (B,H,Sq,Skv): a 4D operand past Q/K/V whose last dim
+        # is not the head dim D.
+        score = next((t for t in four_d[3:] if t[0] == b and t[-1] != d), None)
+        if score is not None:
+            h, sq, skv = score[1], score[2], score[3]
+        else:
+            h, sq = min(qmid), max(qmid)
+            skv = sq
+            meta["roofline_layout_inferred"] = True
+    flops = 2.0 * (2.0 * b * h * sq * skv * d)  # QK^T + A·V
+    nbytes = dbytes * sum(_numel(x) for x in four_d[:3])
+    return flops, nbytes, meta
+
+
+def _estimate_flops_bytes(
+    category: str, operands: list[tuple[tuple[int, ...], str]], dbytes: float
+) -> tuple[float, float, dict[str, Any]] | None:
+    """Estimate ``(flops, bytes, meta)`` for one representative call, or ``None``.
 
     Category-specific closed forms from operand shapes. Returns ``None`` when the
     operands do not support a trustworthy estimate (caller leaves it unknown).
+    ``meta`` carries optional provenance flags (e.g. ``roofline_layout_inferred``)
+    merged into the roofline output.
     """
     if not operands:
         return None
@@ -112,12 +157,12 @@ def _estimate_flops_bytes(category: str, operands: list[tuple[tuple[int, ...], s
         batch = _numel(a[:-2]) or 1
         flops = 2.0 * batch * m * n * k
         nbytes = dbytes * (batch * m * k + batch * k * n + batch * m * n)
-        return flops, nbytes
+        return flops, nbytes, {}
 
     if cat == "convolution":
-        # input (N,C,H,W), weight (K,C,R,S). Assume stride 1 / same spatial
-        # (output HxW ~= input HxW) — a documented approximation (stride/padding
-        # are not in Input Dims). Good enough for a bound classification.
+        # input (N,C,H,W), weight (Cout, Cin/groups, R, S). Assume stride 1 / same
+        # spatial (output HxW ~= input HxW) — a documented approximation
+        # (stride/padding are not in Input Dims). Good enough for a bound class.
         four_d = [d for d, _ in operands if len(d) == 4]
         if len(four_d) < 2:
             return None
@@ -125,20 +170,20 @@ def _estimate_flops_bytes(category: str, operands: list[tuple[tuple[int, ...], s
         n, c, h, w = inp
         kk, wc, r, s = wt
         out_hw = h * w
-        flops = 2.0 * n * kk * out_hw * c * r * s
+        # Per output element: wc (= Cin/groups) * R * S mul-adds. Using the
+        # weight's channel dim wc is correct for dense (wc==Cin), grouped, and
+        # depthwise (wc==1) convs; the input channel count c would overcount
+        # grouped/depthwise by the group count (e.g. 11200x for a Cin=11200
+        # depthwise conv).
+        flops = 2.0 * n * kk * out_hw * wc * r * s
         nbytes = dbytes * (_numel(inp) + _numel(wt) + n * kk * out_hw)
-        return flops, nbytes
+        return flops, nbytes, {}
 
-    if cat in ("sdpa",):
-        # Attention: Q/K/V ~ (B,H,S,D) (or (B,S,H,D)); 2 matmuls (QK^T, AV).
+    if cat == "sdpa":
         four_d = [d for d, _ in operands if len(d) == 4]
         if not four_d:
             return None
-        q = four_d[0]
-        b, h, s, d = q[0], q[1], q[2], q[3]
-        flops = 2.0 * (2.0 * b * h * s * s * d)  # QK^T + A·V
-        nbytes = dbytes * sum(_numel(x) for x in four_d[:3])
-        return flops, nbytes
+        return _sdpa_flops_bytes(four_d, dbytes)
 
     if cat in ("elementwise", "normalization", "quantization", "kvcachestore", "memcpy"):
         # Memory-bound: ~1 flop/element, read all operands + write the largest.
@@ -146,7 +191,7 @@ def _estimate_flops_bytes(category: str, operands: list[tuple[tuple[int, ...], s
         out = max(_numel(d) for d, _ in operands)
         flops = float(total)
         nbytes = dbytes * (total + out)
-        return flops, nbytes
+        return flops, nbytes, {}
 
     return None
 
@@ -183,7 +228,7 @@ def compute_roofline(
     est = _estimate_flops_bytes(category, operands, dbytes)
     if est is None:
         return None
-    flops, nbytes = est
+    flops, nbytes, est_meta = est
     if flops <= 0 or nbytes <= 0:
         return None
 
@@ -201,6 +246,7 @@ def compute_roofline(
         "arithmetic_intensity": round(ai, 4),
         "flops_per_byte": round(ai, 4),
         "roofline_source": "analytical",
+        **est_meta,
     }
     # Per-call achieved throughput from the real measured time -> efficiency.
     # ``roofline_estimate_capped`` flags when a util exceeds 100% (the FLOP/byte

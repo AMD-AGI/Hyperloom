@@ -111,6 +111,14 @@ _OP_RULES: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# High-level primitives that vendor libraries (MIOpen/cuDNN) lower onto a
+# Tensile GEMM (Cijk_) device kernel. When the device name classifies as GEMM
+# but the launching op is one of these, the op name is the true primitive and
+# overrides the GEMM implementation detail (so the roofline uses the right FLOP
+# model). Reusability stays device-name based (Cijk_ -> vendor), unchanged.
+_GEMM_LOWERED_OPS = frozenset({"Convolution", "SDPA"})
+
+
 def _classify_by_op(op_name: str) -> str:
     """Return a category from a launching op name, or ``""`` on no match.
 
@@ -162,10 +170,17 @@ def classify_kernel(name: str, *, gpu_cat: str = "", op_name: str = "") -> Kerne
         if prio > best_prio and pat.search(n):
             category, best_prio = cat, prio
 
-    # Op-name fallback: only when the device name was unclassifiable. The op name
-    # generalizes across backend kernel-name variants (aten/framework symbols).
-    if category == "Others" and op_name:
-        category = _classify_by_op(op_name) or "Others"
+    # Op-name category signal. Primarily a fallback when the device name is
+    # unclassifiable (``Others``); additionally, a Convolution/SDPA op overrides
+    # a GEMM device classification, because vendor libraries lower conv/attention
+    # onto a Tensile GEMM (Cijk_) kernel — the op name is the true primitive and
+    # a correct roofline needs the conv/attention FLOP model, not GEMM's.
+    if op_name:
+        op_cat = _classify_by_op(op_name)
+        if category == "Others":
+            category = op_cat or "Others"
+        elif category == "GEMM" and op_cat in _GEMM_LOWERED_OPS:
+            category = op_cat
 
     if category == "MemCpy":
         return KernelClass("MemCpy", False, "device memcpy/memset (not a rewritable kernel)")

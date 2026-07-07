@@ -115,3 +115,77 @@ def test_gpu_and_dtype_change_peak():
     fp8 = compute_roofline(**{**common, "dtype": "fp8"})
     assert bf16 and fp8
     assert fp8["efficiency_percent"] < bf16["efficiency_percent"]
+
+
+# ── conv FLOPs use the weight channel dim (Cin/groups), not input channels ────
+
+
+def test_depthwise_conv_uses_group_channels_not_input_channels():
+    # Real Sana k004: input (2,11200,32,32), weight (Cout=11200, Cin/groups=1, 3, 3).
+    # FLOPs must use wc=1 (depthwise), NOT the 11200 input channels -> the dense
+    # formula overcounts by groups=Cin=11200x, faking a compute-bound eff=100%.
+    B, C, HW, Cout, wc, R, S = 2, 11200, 32, 11200, 1, 3, 3
+    r = compute_roofline(
+        category="Convolution",
+        shape_str=f"({B},{C},{HW},{HW}) bf16<br>({Cout},{wc},{R},{S}) bf16",
+        gpu_time_us=2862.0, call_count=20, gpu_type="mi325x",
+    )
+    assert r is not None
+    out_hw = HW * HW
+    flops = 2.0 * B * Cout * out_hw * wc * R * S
+    dbytes = 2.0
+    nbytes = dbytes * (B * C * out_hw + Cout * wc * R * S + B * Cout * out_hw)
+    assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
+    # low AI -> memory-bound (the dense-formula bug made it compute-bound eff=100%).
+    assert r["bound_type"] == "memory_bound"
+
+
+def test_dense_conv_flops_unchanged_by_wc_fix():
+    # Guard: a dense conv has wc == Cin, so switching c -> wc must NOT change it.
+    B, Cin, HW, Cout, R, S = 2, 320, 64, 320, 3, 3
+    r = compute_roofline(
+        category="Convolution",
+        shape_str=f"({B},{Cin},{HW},{HW}) bf16<br>({Cout},{Cin},{R},{S}) bf16",
+        gpu_time_us=800.0, call_count=1, gpu_type="mi300x",
+    )
+    assert r is not None
+    out_hw = HW * HW
+    flops = 2.0 * B * Cout * out_hw * Cin * R * S  # wc == Cin for a dense conv
+    dbytes = 2.0
+    nbytes = dbytes * (B * Cin * out_hw + Cout * Cin * R * S + B * Cout * out_hw)
+    assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
+
+
+# ── SDPA layout inference (B,S,H,D vs B,H,S,D; Sq != Skv) ─────────────────────
+
+
+def test_sdpa_cross_attention_infers_bshd_layout():
+    # Real Sana k006 cross-attn: Q(B,Sq,H,D), K/V(B,Skv,H,D), score(B,H,Sq,Skv).
+    # The head dim is shared between Q/K middle dims -> layout is resolved exactly
+    # (not the hardcoded B,H,S,D), and FLOPs use Sq*Skv (Skv=300 != Sq=1024).
+    B, Sq, H, D, Skv = 2, 1024, 20, 112, 300
+    shp = (f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>"
+           f"({B},{Skv},{H},{D}) bf16<br>({B},{H},{Sq},{Skv}) bf16")
+    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1, gpu_type="mi300x")
+    assert r is not None
+    flops = 4.0 * B * H * Sq * Skv * D
+    dbytes = 2.0
+    nbytes = dbytes * (B * Sq * H * D + B * Skv * H * D + B * Skv * H * D)
+    assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
+    assert "roofline_layout_inferred" not in r  # exact (shared head dim)
+
+
+def test_sdpa_self_attention_ambiguous_layout_is_marked_inferred():
+    # Self-attn Q=K=V=(B,H,S,D) with no score tensor: Q/K middle dims are
+    # identical so H vs S can't be resolved from shapes -> heuristic (H=smaller)
+    # AND the row is flagged roofline_layout_inferred so the estimate is honest.
+    B, H, S, D = 2, 8, 1024, 64
+    shp = f"({B},{H},{S},{D}) bf16<br>({B},{H},{S},{D}) bf16<br>({B},{H},{S},{D}) bf16"
+    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
+    assert r is not None
+    # heuristic picks H=min(8,1024)=8, Sq=Skv=1024 -> classic 4*B*H*S*S*D.
+    flops = 4.0 * B * H * S * S * D
+    dbytes = 2.0
+    nbytes = dbytes * (3 * B * H * S * D)
+    assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
+    assert r.get("roofline_layout_inferred") is True

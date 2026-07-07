@@ -147,9 +147,12 @@ def test_op_name_fallback_rules():
 
 
 def test_op_fallback_only_on_others_and_needs_op():
-    # A device name that already classifies is NOT overridden by the op name.
+    # A specific device category is NOT overridden by an unrelated op name.
     assert classify_kernel("paged_attention_v1", op_name="aten::mm").category == "SDPA"
-    assert classify_kernel("Cijk_gemm", op_name="aten::conv2d").category == "GEMM"
+    # Exception: a GEMM device IS overridden by a conv/attention op (vendor libs
+    # lower those onto a Tensile GEMM); a non-lowered op leaves GEMM unchanged.
+    assert classify_kernel("Cijk_gemm", op_name="aten::conv2d").category == "Convolution"
+    assert classify_kernel("Cijk_gemm", op_name="aten::mul").category == "GEMM"
     # No op name -> unclassifiable device name stays Others.
     assert classify_kernel("totally_unknown_kernel_xyz").category == "Others"
     # An unrecognized op name -> stays Others.
@@ -198,3 +201,39 @@ def test_dit_rules_do_not_regress_text_gen_norm():
     assert classify_kernel("rms_norm_kernel").category == "Normalization"
     assert classify_kernel("Cijk_Alik_Bljk_HHS").category == "GEMM"
     assert classify_kernel("paged_attention_v1").category == "SDPA"
+
+
+# ── op-name overrides a GEMM-lowered device kernel (roofline correctness) ─────
+
+
+def test_conv_op_overrides_gemm_lowered_device_name():
+    # MIOpen lowers a 1x1 conv onto a Tensile GEMM (Cijk_) device kernel. The
+    # device name alone classifies it GEMM; the launching op carries the true
+    # primitive, so the category must be Convolution (for a correct conv
+    # roofline) while reusability stays vendor (Cijk_ is a precompiled binary).
+    kc = classify_kernel(
+        "Cijk_Ailk_Bljk_BBS_BH_MT64x256x32_MI16x16x16x1", op_name="aten::miopen_convolution"
+    )
+    assert kc.category == "Convolution"
+    assert kc.reusable is False
+    assert "vendor" in kc.skip_reason
+
+
+def test_attention_op_overrides_gemm_lowered_device_name():
+    # An attention op lowered onto a GEMM device kernel -> SDPA (same principle).
+    kc = classify_kernel("Cijk_Ailk_Bljk_foo", op_name="aten::_efficient_attention_forward")
+    assert kc.category == "SDPA"
+
+
+def test_genuine_gemm_op_is_not_overridden():
+    # A real GEMM (op aten::mm) on a Cijk_ device kernel must STAY GEMM: the
+    # override only applies to conv/attention primitives vendors lower to GEMM.
+    assert classify_kernel("Cijk_Alik_Bljk_HHS", op_name="aten::mm").category == "GEMM"
+    assert classify_kernel("Cijk_Alik_Bljk_HHS", op_name="aten::addmm").category == "GEMM"
+
+
+def test_gemm_override_only_applies_to_gemm_device_category():
+    # A conv op on an already-Convolution device name stays Convolution (no-op),
+    # and a conv op does not upgrade a non-GEMM device category (e.g. Elementwise).
+    assert classify_kernel("naive_conv_fwd", op_name="aten::miopen_convolution").category == "Convolution"
+    assert classify_kernel("silu_kernel", op_name="aten::miopen_convolution").category == "Elementwise"
