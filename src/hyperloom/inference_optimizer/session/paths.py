@@ -274,12 +274,18 @@ def asset_root() -> Path:
 
 
 def asset_scripts_dir() -> Path:
-    """Return the directory of shipped shell scripts.
+    """Return the directory of shipped release-contract shell scripts
+    (installers + baseline/profile configs).
+
+    tree-reform.MD P2.4: ``scripts/`` was split three ways (``assets/`` for
+    installers/configs, ``tools/`` for operator CLIs, ``experiments/`` for
+    A/B scripts); this helper follows the ``assets/`` successor since that is
+    the shell-installer counterpart of the former single ``scripts/`` dir.
 
     Returns:
-        Path: ``<asset_root>/scripts``.
+        Path: ``<asset_root>/assets``.
     """
-    return asset_root() / "scripts"
+    return asset_root() / "assets"
 
 
 def asset_actions_dir() -> Path:

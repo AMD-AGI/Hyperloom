@@ -274,7 +274,7 @@ and requires a separate `crsr_...` key.
 * If you do have a Cursor account:
   ```bash
   export CURSOR_API_KEY=crsr_...
-  bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"   # picks up the new key
+  bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"   # picks up the new key
   ```
 
 See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §3 for the Cursor key
@@ -386,7 +386,7 @@ Three commands give you a fast situation report:
 
 ```bash
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.scripts.event_counts
+python -m hyperloom.inference_optimizer.tools.event_counts
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SESSION_DIR/state.json"

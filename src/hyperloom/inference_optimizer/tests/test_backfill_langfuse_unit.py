@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.inference_optimizer.scripts import backfill_langfuse as bf
+from hyperloom.inference_optimizer.tools import backfill_langfuse as bf
 from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
 

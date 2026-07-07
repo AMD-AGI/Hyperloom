@@ -143,7 +143,7 @@ Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
 `/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
-with defaults; auto-probed by `src/hyperloom/inference_optimizer/scripts/install.sh`).
+with defaults; auto-probed by `src/hyperloom/inference_optimizer/assets/install.sh`).
 
 Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 **session dir** over guessing from terminal logs.
@@ -170,7 +170,7 @@ pollution after the fact.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
-Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"` and
+Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and
 source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
@@ -195,7 +195,7 @@ Any failure → treat as fresh launch and re-run `install.sh`.
 `_preflight()` invokes:
 
 ```
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/preflight_kb.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/preflight_kb.sh"
 ```
 
 Exit codes (soft degrade — IR-3 never aborts launch):
@@ -321,11 +321,11 @@ after Step 1). `install.sh` and the CLI's `_preflight()` read them from
 
 ```bash
 export REPO_ROOT="$(pwd)"   # repo root containing kernel-agent/ + src/hyperloom/inference_optimizer/ + .env
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
-`src/hyperloom/inference_optimizer/scripts/install.sh` is the only install entrypoint for
+`src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
 first, then chains to `kernel-agent/scripts/install.sh` for the kernel
 optimization environment. `kernel-agent/scripts/install.sh` remains valid for
@@ -338,7 +338,7 @@ kernel-agent / TraceLens / GEAK / OOB CLI auth; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
 `install.sh` installs everything in one shot (no `--with-*` flags to
-remember). Direct steps in `src/hyperloom/inference_optimizer/scripts/install.sh`:
+remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`:
 
 | Component | Provided by |
 |---|---|
@@ -376,7 +376,7 @@ does not consume these.
 | Prompt field | Env name | Consumer |
 |---|---|---|
 | `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
-| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/scripts/install.sh:ensure_inferencex` |
+| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
 | `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (public) |
 | `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
@@ -535,7 +535,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 "$PYTHON" -m hyperloom.inference_optimizer.cli --help
 ```
@@ -575,8 +575,8 @@ If `_preflight()` itself fails, run install in `--check-only` mode to see
 which piece is missing, then re-run full install:
 
 ```bash
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh" --check-only
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
 If install repeatedly fails while building GEAK / `mini-swe-agent` with
@@ -640,10 +640,10 @@ PY
 Default configs live here:
 
 ```bash
-src/hyperloom/inference_optimizer/scripts/configs/baseline_sglang.yaml
-src/hyperloom/inference_optimizer/scripts/configs/baseline_vllm.yaml
-src/hyperloom/inference_optimizer/scripts/configs/profile_sglang.yaml
-src/hyperloom/inference_optimizer/scripts/configs/profile_vllm.yaml
+src/hyperloom/inference_optimizer/assets/configs/baseline_sglang.yaml
+src/hyperloom/inference_optimizer/assets/configs/baseline_vllm.yaml
+src/hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml
+src/hyperloom/inference_optimizer/assets/configs/profile_vllm.yaml
 ```
 
 Two fields in each YAML are **fallback only** — the optimizer overrides
@@ -856,7 +856,7 @@ root** (parent of per-session dirs). The CLI creates
 `$USER_DATA_PATH/<model_basename>/<UTC_ts>/` via `make_session_dir`.
 Launcher stdout / PID files go under that session's `optimizer_runs/`.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
-copy `src/hyperloom/inference_optimizer/scripts/setup_env.sh.example` to a
+copy `src/hyperloom/inference_optimizer/assets/setup_env.sh.example` to a
 **session-scoped** path:
 `$USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$(date +%s)}.sh`,
 fill in the workload block, and `.` it each call.
@@ -957,7 +957,7 @@ mkdir -p "$RUN_DIR"
 # $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
 # launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
-cp "$REPO_ROOT/src/hyperloom/inference_optimizer/launcher/robustness_monitor.sh.example" \
+cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
 setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
@@ -992,7 +992,7 @@ PY
 Recent action counts from SQLite (last 500 events grouped by category):
 
 ```bash
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/event_counts.py" "$SESSION"
+python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
 ```
 
 ## Expected Flow

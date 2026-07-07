@@ -412,7 +412,7 @@ TypedDict shapes.)
 * **Offline / historical:** see
   [`OPERATOR_SCRIPTS.md`](OPERATOR_SCRIPTS.md):
   ```bash
-  python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
+  python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
       --session-dir /path/to/session \
       [--output /tmp/breakdown.json]
   ```

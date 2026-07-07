@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.scripts import (
+from hyperloom.inference_optimizer.experiments import (
     audit_roofline_decisions,
     verify_roofline_v2,
 )

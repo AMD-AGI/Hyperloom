@@ -4866,7 +4866,7 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
 
     Keep this temp-clone+pin+atomic-rename in lockstep with the twin
     implementations: kernel-agent/scripts/install.sh (ensure_tracelens) and
-    src/hyperloom/inference_optimizer/scripts/local_setup.sh (clone_or_update "atomic").
+    src/hyperloom/inference_optimizer/assets/local_setup.sh (clone_or_update "atomic").
     """
     tl_root = Path(tl_root)
     if _tracelens_checkout_complete(tl_root):

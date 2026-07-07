@@ -15,7 +15,7 @@ Hyperloom needs at most three classes of configuration:
 2. The **Cursor SDK** key (`CURSOR_API_KEY`) — optional, only needed if
    you want the OOB `cursor` kernel-opt backend.
 3. **Path / workspace layout** — for local mode, run
-   `src/hyperloom/inference_optimizer/scripts/local_setup.sh` once (credentials + Hyperloom
+   `src/hyperloom/inference_optimizer/assets/local_setup.sh` once (credentials + Hyperloom
    checkout are enough). It clones missing dependency repos under
    `HYPERLOOM_OPEN_SOURCE_ROOT` (default `/opt/hyperloom/open-source-repos`),
    writes `$USER_DATA_PATH/runtime/local-setup.env.sh`, and exports
@@ -201,7 +201,7 @@ set `USER_DATA_PATH` if you want a non-default workspace):
 
 ```bash
 export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-bash src/hyperloom/inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 ```
 

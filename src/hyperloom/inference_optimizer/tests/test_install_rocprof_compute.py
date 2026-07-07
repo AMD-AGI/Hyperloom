@@ -26,7 +26,7 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "scripts" / "install.sh"
+IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 
 APT_MARKER = "apt-get-called"
 

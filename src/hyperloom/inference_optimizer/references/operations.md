@@ -12,7 +12,7 @@ Credentials must already be in the shell environment: `SAFE_API_KEY` and
 
 ```bash
 export REPO_ROOT="$(pwd)"
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 ```
 
@@ -61,7 +61,7 @@ export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 Then run the outer launcher preflight (IR-1):
 
 ```bash
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/launcher/preflight_optimizer.py" "$MODEL_PATH"
+"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH"
 ```
 
 Do not manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
@@ -72,7 +72,7 @@ Do not manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
 
 Set `$USER_DATA_PATH` to the workspace root, not the session dir. For sandboxes
 that do not persist exports across shell calls, copy
-`src/hyperloom/inference_optimizer/scripts/setup_env.sh.example` to a **session-scoped** path:
+`src/hyperloom/inference_optimizer/assets/setup_env.sh.example` to a **session-scoped** path:
 `$USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$(date +%s)}.sh`,
 fill in the workload block, and source it on each call.
 
@@ -162,7 +162,7 @@ fresh run or auto-pick the latest session.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 mkdir -p "$RUN_DIR"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
-cp "$REPO_ROOT/src/hyperloom/inference_optimizer/launcher/robustness_monitor.sh.example" \
+cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
 setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
@@ -177,8 +177,8 @@ Poll every 300s unless debugging startup failure.
 ```bash
 export SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE")"
 test -n "$SESSION_DIR"
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/launcher/read_optimizer_state.py" "$SESSION_DIR"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/event_counts.py" "$SESSION_DIR"
+"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION_DIR"
+python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION_DIR"
 ```
 
 Surface lifecycle lines from `read_optimizer_state.py` in chat verbatim. For

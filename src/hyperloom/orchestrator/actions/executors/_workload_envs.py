@@ -260,7 +260,7 @@ def default_baseline_config() -> Path:
         name = "baseline_xdit.yaml"
     else:
         name = "baseline_sglang.yaml"
-    return asset_root() / "scripts" / "configs" / name
+    return asset_root() / "assets" / "configs" / name
 
 
 def materialize_config_with_envs(

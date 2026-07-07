@@ -12,10 +12,10 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-SCRIPT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "scripts" / "local_setup.sh"
-IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "scripts" / "install.sh"
+SCRIPT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "local_setup.sh"
+IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 KA_INSTALL = REPO_ROOT / "kernel-agent" / "scripts" / "install.sh"
-PREFLIGHT_KB = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "scripts" / "preflight_kb.sh"
+PREFLIGHT_KB = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "preflight_kb.sh"
 
 # The default that all installers fall back to when USER_DATA_PATH is unset.
 _DEFAULT_USER_DATA_PATH = "/workspace/hyperloom"

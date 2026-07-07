@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``launcher/robustness_monitor.sh.example`` session-dir resolution.
+"""Tests for ``tools/robustness_monitor.sh.example`` session-dir resolution.
 
 The monitor resolves the session dir from an explicit env var or the
 ``$LAUNCH_INFO_FILE`` ``.session_dir`` field (polling a bounded window if not
@@ -19,7 +19,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-MONITOR = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "launcher" / "robustness_monitor.sh.example"
+MONITOR = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "tools" / "robustness_monitor.sh.example"
 
 # Vars the monitor consumes; stripped from the inherited env so each test is hermetic.
 _MONITOR_VARS = (

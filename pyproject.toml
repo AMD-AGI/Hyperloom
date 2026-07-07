@@ -78,8 +78,14 @@ hyperloom = [
     "actions/_meta/*.yaml",
     "benches/*.sh",
     "benches/README.md",
-    "scripts/*",
-    "scripts/configs/*.yaml",
+    # tree-reform.MD P2.4: scripts/ split three ways -- assets/ (release-
+    # contract shell installers + configs), tools/ (operator CLIs, .py so not
+    # package-data), experiments/ (A/B scripts, likewise not package-data).
+    "assets/*.sh",
+    "assets/*.example",
+    "assets/configs/*.yaml",
+    "references/*.md",
+    "tools/*.sh.example",
     "data/framework/*.md",
     "data/recipes/*.json",
 ]
@@ -231,7 +237,11 @@ omit = [
     # marginal value.
     "src/hyperloom/inference_optimizer/breakdown/collectors.py",
     # Verification scripts — operator scripts, not library code.
-    "src/hyperloom/inference_optimizer/scripts/*",
+    # tree-reform.MD P2.4: scripts/ split three ways: tools/ (operator CLIs),
+    # experiments/ (A/B scripts), assets/ (shell installers + configs, not
+    # Python so not coverage-relevant anyway).
+    "src/hyperloom/inference_optimizer/tools/*",
+    "src/hyperloom/inference_optimizer/experiments/*",
     # Subprocess transport for the robustness-agent runtime CLI; the
     # in-process role contract is covered by the role/runtime/cli tests
     # plus the e2e harness in

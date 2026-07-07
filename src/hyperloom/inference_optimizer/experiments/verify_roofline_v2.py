@@ -10,7 +10,7 @@ cache-and-decision quality criteria.
 
 Usage::
 
-    python -m hyperloom.inference_optimizer.scripts.verify_roofline_v2 \\
+    python -m hyperloom.inference_optimizer.experiments.verify_roofline_v2 \\
         --baseline /tmp/roofline-v2/qwen3-baseline \\
         --exp      /tmp/roofline-v2/qwen3-exp
 
@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.scripts._roofline_audit_common import (
+from hyperloom.inference_optimizer.experiments._roofline_audit_common import (
     ANALYSIS_MD_KEYWORDS,
     cache_hit_rate,
     count_analysis_md_references,

@@ -446,7 +446,7 @@ def _validate_trace_structure(
 
 # Constant pointing at the sglang profile yaml, used by tests/fixtures.
 # Runtime sglang/vllm selection goes through `_default_profile_config()`.
-PROFILE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
+PROFILE_DEFAULT_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
 
 
@@ -566,7 +566,7 @@ def _default_profile_config() -> Path:
         name = "profile_xdit.yaml"
     else:
         name = "profile_sglang.yaml"
-    return asset_root() / "scripts" / "configs" / name
+    return asset_root() / "assets" / "configs" / name
 
 
 class ProfileExecutor(BaselineExecutor):

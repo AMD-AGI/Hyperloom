@@ -29,7 +29,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
 cp .env.template .env          # then edit credentials (SAFE_API_KEY, OPENAI_BASE_URL)
 export USER_DATA_PATH=/path/to/hyperloom-run
-bash src/hyperloom/inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
 
 When `local_setup.sh` finishes it prints the workspace path to open in Cursor,
@@ -42,7 +42,7 @@ start `inference_optimizer optimize`:
 
 ```bash
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-bash src/hyperloom/inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/assets/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
@@ -71,7 +71,7 @@ Optimize inference for this workload:
 
 Before launch, run exactly:
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
-bash src/hyperloom/inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/assets/install.sh
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
 

@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.scripts._roofline_audit_common import (
+from hyperloom.inference_optimizer.experiments._roofline_audit_common import (
     ANALYSIS_MD_KEYWORDS,
     cache_hit_rate,
     count_analysis_md_references,

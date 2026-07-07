@@ -62,7 +62,7 @@ export OPENAI_API_KEY="YOUR_KEY"
 ```
 
 ```{note}
-Hyperloom installs GEAK for you. `src/hyperloom/inference_optimizer/scripts/install.sh`
+Hyperloom installs GEAK for you. `src/hyperloom/inference_optimizer/assets/install.sh`
 chains into `kernel-agent/scripts/install.sh`, whose `ensure_geak()` step clones
 GEAK under the pod-local open-source checkout root by default
 (`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`)

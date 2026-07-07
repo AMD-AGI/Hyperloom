@@ -10,7 +10,7 @@ from unittest import mock
 
 import pytest
 
-from hyperloom.inference_optimizer.scripts import roofline_sweep as rs
+from hyperloom.inference_optimizer.experiments import roofline_sweep as rs
 
 
 # extract_templates: both empty -> raise; optimized populated -> two templates

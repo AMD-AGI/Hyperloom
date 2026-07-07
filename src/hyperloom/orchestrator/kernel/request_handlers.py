@@ -422,7 +422,7 @@ def _kernel_agent_root_error() -> str | None:
     if root is None:
         return (
             f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
-            "src/hyperloom/inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
+            "src/hyperloom/inference_optimizer/assets/install.sh and source $KERNEL_AGENT_ENV "
             "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
     if not root.is_dir():

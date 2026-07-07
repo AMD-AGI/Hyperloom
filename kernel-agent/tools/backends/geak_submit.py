@@ -53,7 +53,7 @@ def _resolve_geak_config() -> Path:
     geak_config = os.environ.get("GEAK_CONFIG", "").strip()
     if not geak_config:
         raise ValueError(
-            "GEAK_CONFIG is required; run src/hyperloom/inference_optimizer/scripts/install.sh "
+            "GEAK_CONFIG is required; run src/hyperloom/inference_optimizer/assets/install.sh "
             "and source $KERNEL_AGENT_ENV "
             "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
@@ -224,7 +224,7 @@ def run_via_ray(
                 "returncode": 2,
                 "stdout_tail": "",
                 "stderr_tail": (
-                    "GEAK_CONFIG is required; run src/hyperloom/inference_optimizer/scripts/install.sh "
+                    "GEAK_CONFIG is required; run src/hyperloom/inference_optimizer/assets/install.sh "
                     "and source $KERNEL_AGENT_ENV "
                     "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
                 ),

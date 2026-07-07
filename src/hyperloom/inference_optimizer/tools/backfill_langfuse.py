@@ -41,14 +41,14 @@ Usage
 ::
 
     # Dry run: parse + print the plan, no SDK / no network needed.
-    python -m hyperloom.inference_optimizer.scripts.backfill_langfuse \\
+    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
         --session-dir <SD> --dry-run
 
     # Real backfill (needs the langfuse SDK + env keys).
     export LANGFUSE_HOST=https://langfuse.<your-domain>
     export LANGFUSE_PUBLIC_KEY=pk-...
     export LANGFUSE_SECRET_KEY=sk-...
-    python -m hyperloom.inference_optimizer.scripts.backfill_langfuse --session-dir <SD>
+    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
 
 Notes
 -----

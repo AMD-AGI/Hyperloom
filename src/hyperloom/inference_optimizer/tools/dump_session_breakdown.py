@@ -16,20 +16,20 @@ Examples
 ::
 
     # Live session in this sandbox (USER_DATA_PATH or /workspace/hyperloom)
-    python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown
+    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
     # Historical session on WekaFS
-    python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \\
+    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
         --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
 
     # Override output path (don't touch session_dir)
-    python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \\
+    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
         --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
     # Bulk historical
     for d in /wekafs/users/*/inference_optimizer-sessions/*; do
         [ -d "$d" ] || continue
-        python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \\
+        python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
             --session-dir "$d" > /dev/null
     done
 """

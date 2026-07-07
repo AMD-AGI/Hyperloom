@@ -87,7 +87,7 @@ Earlier launchers may have waited for the Coordinator to emit a
 # launcher.sh
 - inference_optimizer optimize ... # expects setup as first action
 + . "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh"
-+ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
++ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 + inference_optimizer optimize ...
@@ -165,7 +165,7 @@ training-mode build:
 For any minor / patch upgrade:
 
 1. Pull the new Hyperloom revision into `$REPO_ROOT`.
-2. Re-run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"`. The
+2. Re-run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
    refreshes the auth-proxy, and regenerates `kernel-agent.env.sh`.
 3. Re-source the env file:

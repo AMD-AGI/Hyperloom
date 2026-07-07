@@ -13,7 +13,7 @@ hardware roof.
 
 Usage::
 
-    python -m hyperloom.inference_optimizer.scripts.roofline_sweep \\
+    python -m hyperloom.inference_optimizer.experiments.roofline_sweep \\
         --session-dir /shared_nfs/.../Qwen-Qwen3-30B-A3B-Base/20260528T134736Z \\
         --concs 1,2,4,8,16,32,64,128 \\
         --isl 1024 --osl 1024 --tp 1 --gpu-type mi355x \\

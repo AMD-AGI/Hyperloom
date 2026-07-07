@@ -96,7 +96,7 @@ Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
 `/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned with
-defaults; auto-probed by `src/hyperloom/inference_optimizer/scripts/install.sh`).
+defaults; auto-probed by `src/hyperloom/inference_optimizer/assets/install.sh`).
 
 Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 **session dir** over guessing from terminal logs.

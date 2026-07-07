@@ -63,7 +63,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 export SAFE_API_KEY=ak-your-safe-apikey            # <-- paste your gateway key
 export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1  # <-- set to your gateway base URL (Primus-SaFE example)
 export USER_DATA_PATH=/workspace/hyperloom && mkdir -p "$USER_DATA_PATH"
-bash src/hyperloom/inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
 > **Tip:** Instead of exporting these variables each session, you can persist credentials in a `.env` file. See [Appendix — Environment configuration (.env)](#appendix-environment-configuration-env) for the basic recipe, or [Auth & Environment Guide](ENV_AND_AUTH.md) for the full reference.
 

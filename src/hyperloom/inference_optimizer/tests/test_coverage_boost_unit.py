@@ -357,7 +357,7 @@ def test_paths_helpers(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path))
     assert paths.asset_root() == tmp_path
     # Derived asset dirs (lines 277, 304).
-    assert paths.asset_scripts_dir() == tmp_path / "scripts"
+    assert paths.asset_scripts_dir() == tmp_path / "assets"
     assert paths.asset_kernel_opt_dir() == tmp_path / "kernel_opt"
 
     # find_latest returns None when workspace root is not a dir (line 179).

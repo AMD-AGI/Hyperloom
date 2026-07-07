@@ -49,7 +49,7 @@ python -m pytest tests/ -v
 ```{note}
 Hyperloom resolves the public checkout via `TRACELENS_ROOT`. `local_setup.sh`
 can clone or update the checkout and write it into `local-setup.env.sh`; the
-runtime installation is performed by `src/hyperloom/inference_optimizer/scripts/install.sh`,
+runtime installation is performed by `src/hyperloom/inference_optimizer/assets/install.sh`,
 which chains into `kernel-agent/scripts/install.sh` and editable-installs the
 checkout. When `TRACELENS_ROOT` is unset, the installer clones the public repo
 under the pod-local open-source checkout root

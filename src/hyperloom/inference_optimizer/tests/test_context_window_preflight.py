@@ -178,7 +178,7 @@ def test_monitor_offline_vocab_includes_context_window():
     import hyperloom.inference_optimizer
 
     package_root = Path(hyperloom.inference_optimizer.__file__).resolve().parent
-    monitor = package_root / "launcher" / "robustness_monitor.sh.example"
+    monitor = package_root / "tools" / "robustness_monitor.sh.example"
     text = monitor.read_text(encoding="utf-8")
     assert "model_context_window_too_small" in text
 

@@ -6,7 +6,7 @@ The trace subsystem persists three local JSONL streams under
 ``reports/trace/`` (``llm_calls.jsonl`` token ledger, ``conversations.jsonl``
 full text, ``decision_trace.jsonl`` KEEP/REVERT journal). Both the *live*
 emitter (:mod:`.langfuse_emitter`) and the *offline* backfill
-(``hyperloom.inference_optimizer.scripts.backfill_langfuse``) project those rows onto
+(``hyperloom.inference_optimizer.tools.backfill_langfuse``) project those rows onto
 the same Langfuse object model:
 
 * session            -> Trace      (``trace_id`` derived from ``session_id``)

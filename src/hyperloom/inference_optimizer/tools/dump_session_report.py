@@ -6,7 +6,7 @@
 Usage::
 
     # Deterministic only (no LLM):
-    python -m hyperloom.inference_optimizer.scripts.dump_session_report \\
+    python -m hyperloom.inference_optimizer.tools.dump_session_report \\
         --input  /wekafs/.../session_breakdown.json \\
         --output /wekafs/.../session_report.md
 
@@ -14,7 +14,7 @@ Usage::
     HYPERLOOM_REPORT_LLM_BACKEND=openai \\
     OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1 \\
     OPENAI_API_KEY=... \\
-    python -m hyperloom.inference_optimizer.scripts.dump_session_report \\
+    python -m hyperloom.inference_optimizer.tools.dump_session_report \\
         --input  /wekafs/.../session_breakdown.json \\
         --output /wekafs/.../session_report.md
 

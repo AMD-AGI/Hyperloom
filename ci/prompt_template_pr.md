@@ -15,7 +15,7 @@ export REPO_ROOT="$(pwd)"
 echo "[pr-ci] REPO_ROOT=$REPO_ROOT"
 echo "[pr-ci] HEAD=$(git rev-parse HEAD)"
 test "$(git rev-parse HEAD)" = "{git_ref}" || {{ echo "[pr-ci] ERROR: HEAD != {git_ref}"; exit 2; }}
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
 If step 0 fails (network, token, install.sh broken on PR head, …) **stop and exit non-zero** — do NOT silently fall back to `/wekafs/HyperloomV2`, the comparison would be meaningless.

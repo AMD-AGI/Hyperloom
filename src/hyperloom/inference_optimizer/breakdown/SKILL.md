@@ -97,14 +97,14 @@ out_path = write_breakdown_json("/workspace/hyperloom")
 
 ```bash
 # Live session in this sandbox
-python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown
+python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
 # Historical session on WekaFS
-python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
+python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
     --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
 
 # Override output path (e.g. write to a staging area)
-python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
+python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
     --session-dir <SD> --output /tmp/breakdown.json
 ```
 
@@ -113,7 +113,7 @@ python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
 ```bash
 for d in /wekafs/users/*/inference_optimizer-sessions/*; do
     [ -d "$d" ] || continue
-    python -m hyperloom.inference_optimizer.scripts.dump_session_breakdown \
+    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
         --session-dir "$d" > /dev/null
 done
 ```

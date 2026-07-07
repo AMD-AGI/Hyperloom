@@ -221,7 +221,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     #    live emitter already ran for this session).
     if args.backfill_trace:
         try:
-            from .scripts.backfill_langfuse import build_plan, ingest
+            from .tools.backfill_langfuse import build_plan, ingest
 
             rc = ingest(build_plan(session_dir))
             print(f"  trace backfill    : rc={rc}")

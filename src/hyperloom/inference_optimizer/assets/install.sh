@@ -159,7 +159,7 @@ esac
 
 usage() {
   cat <<'EOF'
-Usage: src/hyperloom/inference_optimizer/scripts/install.sh [options]
+Usage: src/hyperloom/inference_optimizer/assets/install.sh [options]
 
 Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])

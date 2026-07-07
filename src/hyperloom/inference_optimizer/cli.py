@@ -826,7 +826,7 @@ def _load_kernel_agent_env_fallback() -> None:
             "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
             "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
             "resolve kernel-agent.env.sh. Run "
-            "src/hyperloom/inference_optimizer/scripts/install.sh and export "
+            "src/hyperloom/inference_optimizer/assets/install.sh and export "
             "USER_DATA_PATH=/path/to/sessions first.",
             file=sys.stderr,
         )
@@ -838,7 +838,7 @@ def _load_kernel_agent_env_fallback() -> None:
             f"{env_path}. USER_DATA_PATH must be the workspace root "
             f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
             f"is workspace-shared, not per-session. Either "
-            f"(a) re-run src/hyperloom/inference_optimizer/scripts/install.sh under "
+            f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh under "
             f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, "
             f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
             f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
@@ -866,7 +866,7 @@ def _load_kernel_agent_env_fallback() -> None:
         print(
             f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
             f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
-            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/scripts/"
+            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/assets/"
             f"install.sh to regenerate it.",
             file=sys.stderr,
         )
@@ -1021,11 +1021,11 @@ def _check_tracelens_cli() -> None:
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
         f"kernel-agent/scripts/install.sh (chained from "
-        f"src/hyperloom/inference_optimizer/scripts/install.sh) and do NOT persist "
+        f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
         f"before every launch (carve-out applies only to --resume in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
-        f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh\n"
+        f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
         f"then retry `inference_optimizer optimize`. Refusing to start.",
         file=sys.stderr,
@@ -1046,7 +1046,7 @@ def _check_tracelens_root_exists() -> None:
     print(
         f"ERROR: TRACELENS_ROOT={override} does not point at an existing "
         f"TraceLens checkout. It was likely inherited from a stale shell or an "
-        f"unedited .env template. Re-run src/hyperloom/inference_optimizer/scripts/install.sh "
+        f"unedited .env template. Re-run src/hyperloom/inference_optimizer/assets/install.sh "
         f"and source $KERNEL_AGENT_ENV, point TRACELENS_ROOT at a real checkout, "
         f"or unset it to use the pod-local default. Refusing to start.",
         file=sys.stderr,
@@ -1530,7 +1530,7 @@ def _smoke_test_codex_model(
 
 
 # InferenceX clone defaults — kept in sync with
-# src/hyperloom/inference_optimizer/scripts/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
+# src/hyperloom/inference_optimizer/assets/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 _INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
 
@@ -1809,7 +1809,7 @@ def _preflight(
                 "Preflight: ERROR — InferenceX checkout missing and clone "
                 "failed. baseline cannot run without it. Set INFERENCEX_PATH "
                 "to a writable checkout or re-run "
-                "src/hyperloom/inference_optimizer/scripts/install.sh.",
+                "src/hyperloom/inference_optimizer/assets/install.sh.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1892,7 +1892,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 
     user_data = _workspace_root_resolve()
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
-    script = Path(__file__).resolve().parent / "scripts" / "preflight_kb.sh"
+    script = Path(__file__).resolve().parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
     # Inject --cortex-kb-url into env so the probe script sees it; empty URL means skip the KB branch.
     cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()

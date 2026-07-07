@@ -15,8 +15,8 @@ If `_preflight()` itself fails, run install in `--check-only` mode to see which
 piece is missing, then re-run full install:
 
 ```bash
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh" --check-only
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
 If install repeatedly fails while building GEAK / `mini-swe-agent` with missing

@@ -3,10 +3,10 @@
 Default configs live here:
 
 ```bash
-src/hyperloom/inference_optimizer/scripts/configs/baseline_sglang.yaml
-src/hyperloom/inference_optimizer/scripts/configs/baseline_vllm.yaml
-src/hyperloom/inference_optimizer/scripts/configs/profile_sglang.yaml
-src/hyperloom/inference_optimizer/scripts/configs/profile_vllm.yaml
+src/hyperloom/inference_optimizer/assets/configs/baseline_sglang.yaml
+src/hyperloom/inference_optimizer/assets/configs/baseline_vllm.yaml
+src/hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml
+src/hyperloom/inference_optimizer/assets/configs/profile_vllm.yaml
 ```
 
 Two fields in each YAML are **fallback only** — the optimizer overrides them at

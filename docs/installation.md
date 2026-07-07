@@ -39,7 +39,7 @@ to it. Complete the three steps in order:
    cd Hyperloom
    cp .env.template .env   # then edit credentials
    export USER_DATA_PATH=/path/to/hyperloom-run
-   bash src/hyperloom/inference_optimizer/scripts/local_setup.sh
+   bash src/hyperloom/inference_optimizer/assets/local_setup.sh
    ```
 
 4. **Before launching an optimization**, source the generated local setup,
@@ -48,7 +48,7 @@ to it. Complete the three steps in order:
 
    ```bash
    source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-   bash src/hyperloom/inference_optimizer/scripts/install.sh
+   bash src/hyperloom/inference_optimizer/assets/install.sh
    source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
    ```
 
