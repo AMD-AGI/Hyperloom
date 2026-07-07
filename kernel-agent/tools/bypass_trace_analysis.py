@@ -234,7 +234,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--split-osl", default="")
     p.add_argument("--split-r", default="")
     p.add_argument("--capture-folder", default="")
-    p.add_argument("--steady-state-mode", default="")
+    p.add_argument(
+        "--steady-state-mode",
+        default="",
+        help="Steady-state windowing mode. Any non-off value enables windowing, "
+        "including the TraceLens splitter chunk types the coordinator forwards "
+        "(mixed / decode_only / prefilldecode); off values: '', 0, false, off, none.",
+    )
     p.add_argument("--roofline-output-name", default="kernel_roofline.json")
     # Denoise-step count for scriptable/diffusion workloads (forwarded by the
     # coordinator). Consumed for per-step diffusion roofline + step-count
@@ -242,6 +248,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-denoise-steps", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     return p
+
+
+#: ``--steady-state-mode`` values that mean "do NOT window" (analyze the full trace).
+_STEADY_OFF_VALUES = frozenset({"", "0", "false", "off", "no", "none"})
+
+
+def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady: bool) -> bool:
+    """Whether to run steady-state windowing for this trace analysis.
+
+    On for: the env opt-in; xDiT (homogeneous denoise steps -> one representative
+    step); OR any non-off ``--steady-state-mode``. The last clause covers the
+    TraceLens splitter chunk types the coordinator forwards (``mixed`` /
+    ``decode_only`` / ``prefilldecode``) plus the legacy opt-in aliases, so a
+    text-gen bypass run windows the requested steady chunk instead of silently
+    aggregating the full trace (parity with the TraceLens route). bypass's
+    repeat-based windowing then anchors a representative step, or degrades to
+    full-trace (with the existing warning) when no window is found.
+    """
+    mode = (steady_state_mode or "").strip().lower()
+    return (
+        bool(env_steady)
+        or (framework or "").lower() == "xdit"
+        or mode not in _STEADY_OFF_VALUES
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -268,12 +298,11 @@ def main(argv: list[str] | None = None) -> int:
     # Steady-state windowing: opt-in via --steady-state-mode / env, and always
     # on for xDiT (homogeneous diffusion steps -> profile one representative
     # step). Falls back to full-trace shares when no repeating window is found.
-    steady_mode = (args.steady_state_mode or "").strip().lower()
     env_steady = os.environ.get("HYPERLOOM_BYPASS_STEADY_STATE", "").strip().lower() in {"1", "true", "yes", "on"}
-    enable_steady = (
-        env_steady
-        or steady_mode in {"1", "true", "on", "auto", "annotation", "steady"}
-        or framework_l == "xdit"
+    enable_steady = _should_enable_steady(
+        steady_state_mode=args.steady_state_mode or "",
+        framework=args.framework or "",
+        env_steady=env_steady,
     )
     # ``estimated`` is decided after the scope is known (below): xDiT is estimated
     # only when it could NOT anchor to a real per-step denoising window.

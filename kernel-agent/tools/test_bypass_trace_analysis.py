@@ -263,6 +263,28 @@ def test_non_xdit_omits_diffusion_roofline(tmp_path, capsys, monkeypatch):
     assert "diffusion_roofline_path" not in result
 
 
+# ── steady-state mode coverage (Finding 3) ───────────────────────────────────
+
+
+def test_should_enable_steady_recognizes_tracelens_modes():
+    # Finding 3: the coordinator forwards TraceLens splitter chunk types; bypass
+    # must window them (not silently full-trace) to match the TraceLens route.
+    for m in ("mixed", "decode_only", "prefilldecode"):
+        assert bta._should_enable_steady(steady_state_mode=m, framework="vllm", env_steady=False) is True
+
+
+def test_should_enable_steady_off_values_stay_full_trace():
+    for m in ("", "0", "false", "off", "none"):
+        assert bta._should_enable_steady(steady_state_mode=m, framework="vllm", env_steady=False) is False
+
+
+def test_should_enable_steady_legacy_and_xdit_and_env():
+    for m in ("1", "true", "on", "auto", "annotation", "steady"):
+        assert bta._should_enable_steady(steady_state_mode=m, framework="vllm", env_steady=False) is True
+    assert bta._should_enable_steady(steady_state_mode="", framework="xdit", env_steady=False) is True
+    assert bta._should_enable_steady(steady_state_mode="", framework="vllm", env_steady=True) is True
+
+
 # ── boundary inputs end-to-end (P0-3) ────────────────────────────────────────
 
 
