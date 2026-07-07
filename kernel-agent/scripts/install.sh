@@ -98,16 +98,20 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
 TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"
-_tracelens_root_was_set="${TRACELENS_ROOT:+1}"
-TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
-TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
-# Writable mirror when the optional internal extension is on a read-only mount.
-TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
 # is missing from env, source $REPO_ROOT/.env (resolved above from this
 # script's parent dir) but protect any keys already set in env from being
 # overwritten by .env.
+#
+# NOTE: `set -a; . .env` sources EVERY assignment in .env, not just the three
+# credentials — including path vars like TRACELENS_ROOT. The shipped
+# .env.template sets `TRACELENS_ROOT=` (empty) as an opt-in override slot, so
+# sourcing it clobbers any value with an empty string. We therefore resolve all
+# path defaults (TRACELENS_ROOT, mirror, etc.) AFTER this block, using `:-` so
+# an empty-from-.env value falls back to the pod-local default. Resolving them
+# before the load (the previous behaviour) produced an empty TRACELENS_ROOT and
+# `git clone ... ""` -> "could not create work tree dir ''".
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR_API_KEY:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
@@ -125,6 +129,16 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
+
+# Resolve TraceLens paths AFTER the .env load so an empty `TRACELENS_ROOT=` in
+# .env (the template default) does not clobber the pod-local default. An
+# explicit non-empty TRACELENS_ROOT (env or .env) is still honoured verbatim and
+# treated as an operator-supplied checkout (_tracelens_root_was_set).
+_tracelens_root_was_set="${TRACELENS_ROOT:+1}"
+TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
+TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
+# Writable mirror when the optional internal extension is on a read-only mount.
+TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 # Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
