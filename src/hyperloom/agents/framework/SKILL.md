@@ -9,26 +9,32 @@
 
 ## Layout
 
+tree-reform.MD P2.5 promoted this skill from a sibling `framework-agent/`
+checkout into the `hyperloom` src-layout distribution (module
+`framework_agent` → `hyperloom.agents.framework`):
+
 ```
-framework-agent/
-├── src/framework_agent/        # python package
-│   ├── runtime/cli.py          # fa schema / candidates / explore / phase-discover / kb
-│   ├── runtime/tools_api.py    # library API behind the CLI verbs
-│   ├── explorer.py             # explore loop (libcst-free)
-│   ├── isolation.py            # per-candidate worktree + venv
-│   ├── decision.py             # 3-gate winner decision
-│   ├── kb.py                   # knowledge-base operations
-│   ├── repo_map.py             # framework -> canonical repo URL
-│   ├── keywords.py / models.py # request models + keyword helpers
-│   ├── logging_setup.py        # shared: structured logging
-│   └── sources/                # primus_cortex + github discovery
-├── kb/
-│   └── framework_optimization/ # KB partition (empirical_kb.md / lessons, written at runtime)
-├── scripts/install.sh          # idempotent installer
-├── scripts/env.sh              # env loader
-├── pyproject.toml
+src/hyperloom/agents/framework/     # hyperloom.agents.framework
+├── runtime/cli.py                 # fa schema / candidates / explore / phase-discover / kb
+├── runtime/tools_api.py           # library API behind the CLI verbs
+├── explorer.py                    # explore loop (libcst-free)
+├── isolation.py                   # per-candidate worktree + venv
+├── decision.py                    # 3-gate winner decision
+├── kb.py                          # knowledge-base operations
+├── repo_map.py                    # framework -> canonical repo URL
+├── keywords.py / models.py        # request models + keyword helpers
+├── logging_setup.py               # shared: structured logging
+├── sources/                       # primus_cortex + github discovery
+├── scripts/install.sh             # idempotent installer (chained from
+│                                  # src/hyperloom/inference_optimizer/assets/install.sh)
+├── scripts/env.sh                 # env loader
 └── tests/
 ```
+
+`FRAMEWORK_AGENT_KB_DIR` (the KB partition written at runtime, e.g.
+`framework_optimization/`) still defaults relative to `FRAMEWORK_AGENT_ROOT`,
+which now resolves to this in-tree package by default rather than a sibling
+checkout — see `AGENTS.md`'s Required environment table.
 
 ## Subcommands
 

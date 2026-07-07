@@ -18,7 +18,7 @@ specialist prompt should include:
     """
     You have access to the framework-agent toolkit:
 
-    from framework_agent.runtime.tools_api import (
+    from hyperloom.agents.framework.runtime.tools_api import (
         find_relevant_prs_smart,
         fetch_pr_audit_material,
         evaluate_candidate_outcome,
@@ -44,7 +44,7 @@ implemented in current scope.
 | Variable | Purpose | Default |
 |---|---|---|
 | `WORKSPACE_PATH` | Root for the skill files | `/workspace` |
-| `FRAMEWORK_AGENT_ROOT` | Root of this skill | `${WORKSPACE_PATH}/framework-agent` |
+| `FRAMEWORK_AGENT_ROOT` | Root of this skill | `${WORKSPACE_PATH}/src/hyperloom/agents/framework` (tree-reform.MD P2.5 promoted this from a sibling `framework-agent/` checkout) |
 | `FRAMEWORK_AGENT_KB_DIR` | KB write target | `${FRAMEWORK_AGENT_ROOT}/kb` |
 | `PRIMUS_CORTEX_PR_API` | Primus Cortex base URL fallback | unset (CLI flag wins) |
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitHub auth | unset (anonymous fallback) |
@@ -73,17 +73,17 @@ The package serves two distinct objectives, gated differently:
   worktree authoring) and is gated on **runnability** (server boots + minimal
   correctness), not throughput. Pure, GPU-free building blocks live in this
   package:
-  - `framework_agent.enablement` — failure-signature classifier
+  - `hyperloom.agents.framework.enablement` — failure-signature classifier
     (`classify_failure`) + `EnablementRequest` + the `runnable_decision` gate.
-  - `framework_agent.enablement_discovery` — bridging-repo selection
+  - `hyperloom.agents.framework.enablement_discovery` — bridging-repo selection
     (framework + ROCm/HIP/aiter via `repo_map.bridge_repo_urls`) and
     enablement-intent ranking.
-  - `framework_agent.enablement_authoring` — the authoring `EnablementMandate`
-    (allowed source roots + task description + patch invariants) handed to the
-    specialist runner.
+  - `hyperloom.agents.framework.enablement_authoring` — the authoring
+    `EnablementMandate` (allowed source roots + task description + patch
+    invariants) handed to the specialist runner.
 
   Editing ROCm/HIP source (`/opt/rocm`) is a first-class, **default-on** part
-  of the enablement path: `orchestrator/framework_paths.resolve_rocm_hip_source_roots`
+  of the enablement path: `hyperloom.orchestrator.framework.paths.resolve_rocm_hip_source_roots`
   is always merged into the IO-side allowlist (alongside the always-allowed
   `aiter`). Authored patches must still pass `git apply --check` grounding and
   the forbidden-numeric-claim guard.

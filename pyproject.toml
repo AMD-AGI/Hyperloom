@@ -111,8 +111,6 @@ hyperloom = [
     "README.md",
     "actions/*.md",
     "actions/_meta/*.yaml",
-    "benches/*.sh",
-    "benches/README.md",
     # tree-reform.MD P2.4: scripts/ split three ways -- assets/ (release-
     # contract shell installers + configs), tools/ (operator CLIs, .py so not
     # package-data), experiments/ (A/B scripts, likewise not package-data).
@@ -177,26 +175,23 @@ hyperloom = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# tree-reform.MD P2.7: the six "src/hyperloom/**/tests" entries that used to
+# be listed individually here (inference_optimizer/tests,
+# agents/{robustness,critic/runtime,framework,quantization,kernel}/tests)
+# are collapsed into one recursive glob (pytest supports ``**`` glob
+# expansion in testpaths); ``ci`` stays a separate entry since it is not
+# under src/hyperloom (P2.6 "ci/ 拆库" has not been done). Collecting all of
+# kernel-agent's 40 test files here was itself a real fix landed in P2.5:
+# previously only 7 of the 33 files co-located with their source under
+# tools/ were explicitly listed, so 26 were "orphaned" and only ran when
+# pytest was pointed directly at them. ci/'s genuine unit tests
+# (test_submit_body.py + the test_ci_*.py suites) were never collected
+# before ci/ was added here; the two live smoke scripts (test_claw_flow.py /
+# test_tool4.py) define only a module-level main()/run_test() and no
+# ``test_`` functions, so pytest collects zero items from them and never
+# hits their network calls.
 testpaths = [
-    "src/hyperloom/inference_optimizer/tests",
-    "src/hyperloom/agents/robustness/tests",
-    "src/hyperloom/agents/critic/runtime/tests",
-    "src/hyperloom/agents/framework/tests",
-    "src/hyperloom/agents/quantization/tests",
-    # tree-reform.MD P2.5: kernel-agent's tools/ tests were previously
-    # "orphaned" outside testpaths (only 7 of 33 same-directory test_*.py
-    # files were explicitly listed; the rest were only collected when
-    # pytest was pointed directly at them). Promoted into
-    # src/hyperloom/agents/kernel/tests/ (all 33 tools/ tests + the 1
-    # backends/ test + the 6 already-standalone kernel-agent/tests/ tests
-    # = 40 files), this single entry now collects all of them.
-    "src/hyperloom/agents/kernel/tests",
-    # ci/ inference-optimization pipeline: the genuine unit tests
-    # (test_submit_body.py + the new test_ci_*.py suites) were never
-    # collected before because ci/ was absent from testpaths. The two
-    # live smoke scripts (test_claw_flow.py / test_tool4.py) define only a
-    # module-level main()/run_test() and no ``test_`` functions, so pytest
-    # collects zero items from them and never hits their network calls.
+    "src/hyperloom/**/tests",
     "ci",
 ]
 # ``ci`` is on the import path and is now both collected for tests (see
@@ -226,9 +221,12 @@ markers = [
     "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
 ]
 filterwarnings = [
-    # tree-reform.MD P2.4: compat/payload_aliases.py flattened into compat.py,
-    # which re-exports (not re-wraps) hyperloom.common.payload_aliases -- the
-    # warning is actually raised from that canonical module.
+    # The DeprecationWarning for the extra_sglang_args -> extra_server_args
+    # rename is raised from this canonical module (tree-reform.MD P2.4
+    # flattened compat/payload_aliases.py into compat.py, which re-exported
+    # -- not re-wrapped -- hyperloom.common.payload_aliases; P2.7 then
+    # removed that transition shim entirely once every call site was updated
+    # to import hyperloom.common.payload_aliases directly).
     "ignore::DeprecationWarning:hyperloom.common.payload_aliases",
 ]
 
@@ -263,7 +261,7 @@ source = [
     # "robustness_agent" / "framework-agent/src" / "quantization_agent" /
     # "kernel-agent/tools" entries).
     "src/hyperloom",
-    "OOB",
+    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
     "ci",
 ]
 omit = [
@@ -314,6 +312,9 @@ omit = [
     # tools/agent_tools, tools/benchmark_tools, task_manager) stays measured
     # and is covered by
     # ``src/hyperloom/inference_optimizer/tests/test_oob_units.py``.
+    # OOB is an optional component (not always present in a clone -- see
+    # CLAUDE.md); coverage silently ignores omit entries under a missing
+    # source tree, so these are harmless no-ops when OOB/ is absent.
     "OOB/cli.py",
     "OOB/server.py",
     "OOB/scheduler.py",
@@ -332,11 +333,11 @@ omit = [
     # TraceLens server patcher — large subprocess pipeline (`git apply`
     # / `patch --fuzz=2` fallback) covered by integration tests.
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
-    # breakdown/collectors.py is a 6k-line data-collection module
-    # exercised end-to-end by the breakdown reporter tests. Direct
-    # unit-testing every leaf path doubles the test surface for
-    # marginal value.
-    "src/hyperloom/inference_optimizer/breakdown/collectors.py",
+    # breakdown/collectors/ (P2.2 split the former 6k-line collectors.py
+    # into this subpackage) is exercised end-to-end by the breakdown
+    # reporter tests. Direct unit-testing every leaf path doubles the
+    # test surface for marginal value.
+    "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Verification scripts — operator scripts, not library code.
     # tree-reform.MD P2.4: scripts/ split three ways: tools/ (operator CLIs),
     # experiments/ (A/B scripts), assets/ (shell installers + configs, not
@@ -372,7 +373,6 @@ omit = [
     "ci/optimize_submit.py",
     "ci/tiny_submit.py",
     "ci/orchestrator.py",
-    "ci/pipeline_run.py",
     "ci/import_session_breakdown.py",
     "ci/claw_client.py",
     "ci/post_perf_runs.py",
@@ -380,8 +380,6 @@ omit = [
     "ci/send_webhook.py",
     "ci/publish_results.py",
     "ci/publish_artifacts.py",
-    "ci/download_ab_stitched_session_logs.py",
-    "ci/run_llm_batch.py",
     "ci/build_candidates.py",
     "ci/build_production_hf_pool.py",
     # In-tree CLI test scripts / live smoke scripts (treated as test files).
