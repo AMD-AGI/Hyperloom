@@ -48,6 +48,10 @@ FROM $BASE_IMAGE
 # Override with --build-arg MAGPIE_REF=<sha> for reproducible builds.
 ARG MAGPIE_REF=main
 
+# Hyperloom branch to clone for the build-time dep install. Defaults to the
+# dev branch which carries the Docker tooling + kernel-agent .env fixes.
+ARG HYPERLOOM_BRANCH=feat/vl-model-support-dev
+
 ENV HYPERLOOM_PATH=/workspace/Hyperloom \
     USER_DATA_PATH=/workspace/hyperloom
 
@@ -87,7 +91,7 @@ RUN --mount=type=ssh \
     mkdir -p -m 0700 ~/.ssh \
     && ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts \
     && git clone --depth 1 \
-        --branch feat/vl-model-support \
+        --branch "${HYPERLOOM_BRANCH}" \
         git@github.com:AMD-AGI/Hyperloom.git \
         /opt/hyperloom-build \
     && MAGPIE_REF="${MAGPIE_REF}" \
