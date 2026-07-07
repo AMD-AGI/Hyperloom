@@ -116,6 +116,11 @@ def _do_apply(a: argparse.Namespace) -> int:
     """
     host = socket.gethostname()
     target = Path(a.target_path)
+    try:
+        assert_target_path_allowed(target, must_exist=True)
+        assert_backup_dir_allowed(Path(a.backup_dir))
+    except ValueError as exc:
+        return _emit({"status": "failed", "host": host, "error": str(exc)})
     if not target.is_file():
         return _emit({"status": "failed", "host": host, "error": f"target_path does not exist: {target}"})
     bdir = Path(a.backup_dir)
@@ -167,6 +172,10 @@ def _do_revert(a: argparse.Namespace) -> int:
         return _emit(
             {"status": "noop_missing_backup", "host": host, "target_path": str(target), "backup_path": str(backup)}
         )
+    try:
+        assert_revert_paths_allowed(target, backup)
+    except ValueError as exc:
+        return _emit({"status": "failed", "host": host, "error": str(exc)})
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, target)
     return _emit({"status": "restored", "host": host, "target_path": str(target), "backup_path": str(backup)})
