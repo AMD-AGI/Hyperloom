@@ -27,8 +27,6 @@ import subprocess
 import time
 from pathlib import Path
 
-HANDOFF_SCHEMA_VERSION = 1
-
 
 def _resolve_runner() -> str:
     """Resolve run_e2e.py from $PERFSKILLS_E2E_RUNNER / $PERFSKILLS_ROOT (GEAK@GEAK_v4)."""
@@ -46,68 +44,12 @@ def _resolve_runner() -> str:
     )
 
 
-def build_handoff(
-    *,
-    model_path: str,
-    framework: str,
-    gpu_type: str,
-    tp: int,
-    workload: dict,
-    accepted_flags: str = "",
-    accepted_env: str = "",
-    launch_recipe: str = "",
-    raw_baseline_tput: float = 0.0,
-    exp_root: str,
-    gpu_ids: str = "",
-    bench_client: str = "auto",
-    inferencex_path: str = "",
-    bench_protocol: dict | None = None,
-) -> dict:
-    """Assemble the stable handoff.json payload (Hyperloom -> PerfSkills).
-
-    ``bench_protocol`` (optional) forwards Hyperloom's measurement 口径
-    (``random_range_ratio`` / ``num_prompts`` / ``num_warmups`` / ``seed``) so
-    PerfSkills' internal e2e bench measures identically. Omit it (or omit any
-    key) to leave PerfSkills on its own standalone defaults.
-    """
-    h = {
-        "schema_version": HANDOFF_SCHEMA_VERSION,
-        "model_path": model_path,
-        "framework": framework or "sglang",
-        "gpu_type": gpu_type or "",
-        "tp": int(tp or 1),
-        "workload": {
-            "isl": int(workload.get("isl", 1024)),
-            "osl": int(workload.get("osl", 1024)),
-            "conc": int(workload.get("conc", 64)),
-        },
-        "accepted_flags": accepted_flags or "",
-        "accepted_env": accepted_env or "",
-        "raw_baseline_tput": float(raw_baseline_tput or 0.0),
-        "exp_root": exp_root,
-        # Use the SAME bench client as Hyperloom (InferenceX benchmark_serving.py)
-        # so PerfSkills numbers are cross-harness comparable. "auto" lets the
-        # runner pick inferencex when an InferenceX checkout is discoverable.
-        "bench_client": bench_client or "auto",
-        "inferencex_path": inferencex_path or os.environ.get("INFERENCEX_PATH", ""),
-    }
-    if launch_recipe:
-        h["launch_recipe"] = launch_recipe
-    if gpu_ids:
-        h["gpu_ids"] = gpu_ids
-    if bench_protocol:
-        # Drop empty/None values so only resolved knobs are forwarded.
-        h["bench_protocol"] = {k: v for k, v in dict(bench_protocol).items()
-                               if v is not None and str(v).strip() != ""}
-    return h
-
-
 def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
                     python_bin: str = "") -> dict:
     """Run PerfSkills e2e once and return the parsed result.json (+ run metadata).
 
     Args:
-        handoff: handoff payload (see :func:`build_handoff`).
+        handoff: handoff.json payload (Hyperloom best config + workload).
         output_dir: where handoff.json / result.json are written.
         timeout_s: subprocess timeout (default 12h).
         python_bin: python interpreter for the runner (default the current one).

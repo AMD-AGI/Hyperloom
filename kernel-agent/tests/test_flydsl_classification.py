@@ -396,10 +396,6 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
     """PR #668 pseudo_op names must be classified as FlyDSL (matched by name prefix; no on-disk source)."""
 
@@ -418,13 +414,6 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
     def test_generic_pseudo_op_flydsl_recognised(self) -> None:
         self.assertEqual(
             source_type_for("pseudo_op::flydsl_custom_kernel", ""),
-            "flydsl",
-        )
-
-    def test_pseudo_op_marker_wins_over_empty_source(self) -> None:
-        """Empty source_file must not block the name-based match."""
-        self.assertEqual(
-            source_type_for("pseudo_op::moe_flydsl_stage1", ""),
             "flydsl",
         )
 
@@ -466,3 +455,7 @@ class TestPseudoOpSourceFallback(unittest.TestCase):
         cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
         out = self.mod._resolve_source_file("/no/such/file.py", cand, "k004")
         self.assertEqual(out, "aiter/fused_moe.py(986): fused_moe_2stages")
+
+
+if __name__ == "__main__":
+    unittest.main()

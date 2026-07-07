@@ -461,12 +461,47 @@ class SharedState:
     baseline_arg_error_streak: int = 0
     # Combined backstop: ANY baseline failure (regardless of error_class) counts
     # here. Mixed classes split the per-class streaks above so neither hits its
-    # threshold; this total catches that and fast-fails (P5 anti time-exhaustion).
+    # threshold; this total catches that and fast-fails (anti time-exhaustion).
     baseline_total_failures: int = 0
     # One-shot: cuda-graph capture failure asks the next baseline to retry
     # by disabling cuda-graph capture (framework-correct flag injected by the
     # BaselineExecutor). Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Enablement path (framework-agent) state.
+    # ``enablement_launch_log``: captured launch/traceback text when baseline
+    #   cannot launch.
+    # ``enablement_dispatched``: in-flight guard that an authoring attempt is
+    #   queued/running; cleared when the attempt REVERTs.
+    # ``enablement_attempts``: number of dispatches (drives candidate rotation
+    #   and idempotency).
+    # ``enablement_succeeded``: terminal KEEP guard.
+    enablement_launch_log: str = ""
+    enablement_dispatched: bool = False
+    enablement_attempts: int = 0
+    enablement_succeeded: bool = False
+    # ``enablement_kept_patches``: ordered, deduped list of patch file paths
+    #   from prior enablement rounds that made *forward progress* (cleared the
+    #   previous crash but revealed a new, deeper gap). These are re-applied as
+    #   a base before the next round's patch so serial gaps stack instead of
+    #   being reverted and re-derived. See ``_maybe_rearm_enablement``.
+    enablement_kept_patches: list = field(default_factory=list)
+    # ``enablement_setup_commands``: ordered, deduped list of allowlisted
+    #   environment-setup shell commands (e.g. ``pip install transformers>=5.12``,
+    #   ``apt-get install -y gh``) that prior enablement rounds ran to make the
+    #   combo buildable/runnable. Re-run (idempotently) by integrate_patch before
+    #   applying patches + booting, so an install a specialist relied on is
+    #   durable and reproducible across re-bench / pod restarts rather than an
+    #   ephemeral side effect of one specialist session. Stacked like
+    #   ``enablement_kept_patches``.
+    enablement_setup_commands: list = field(default_factory=list)
+    # ``enablement_stall_streak``: consecutive enablement rounds that neither
+    #   became runnable nor advanced to a new failure signature. When it reaches
+    #   ``_ENABLEMENT_MAX_STALL`` the loop stops with stop_reason
+    #   ``enablement_stalled`` instead of spinning on the same gap forever.
+    enablement_stall_streak: int = 0
+    # Launch-log hashes already recorded as needs_human_review (UNKNOWN /
+    # non-actionable failures); at most one review record per distinct log.
+    enablement_human_review_logged: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
@@ -567,6 +602,11 @@ class SharedState:
     framework_agent_phase_done: bool = False
     # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_agent_discover_failures: int = 0
+    # Consecutive empty-but-valid ``fa phase-discover`` batches within the current
+    # FRAMEWORK phase; tolerate up to DISCOVER_FAILURE_RETRY_LIMIT before exiting so a
+    # transient upstream blip (cortex/PR-Monitor/GitHub) doesn't skip the phase.
+    # Reset to 0 on any non-empty batch.
+    framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates
     # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
     # reset whenever a phase completes having tested >=1 candidate.
@@ -590,6 +630,14 @@ class SharedState:
     )
     # Re-author rounds per candidate id (capped); needs_review verdicts increment.
     specialist_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
+    # P0-4 backstop: per-candidate-key count of Critic-review submissions. If a
+    # candidate is submitted for review more than the abort threshold (a
+    # terminal-row leak somewhere let it be re-selected), the pump force-stamps
+    # ``repeated_review_abort`` and stops re-selecting it, so no single candidate
+    # can burn the whole phase budget even if a new path forgets its terminal row.
+    framework_agent_review_counts: dict[str, int] = field(
         default_factory=dict,
     )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
@@ -1390,6 +1438,35 @@ class SharedState:
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = _now_iso()
         return hint
+
+    def enablement_close_guard_active(self) -> bool:
+        """True while a not-yet-enabled run must be protected from premature close.
+
+        Until a baseline can be *established*, the entire optimization loop is
+        blocked on it — you cannot run EXPLORE/KERNEL/SWEEP without a baseline.
+        So a ``skip_to_close`` (whether the Orchestration LLM or Robustness emits
+        it) is *premature* here: giving up before the model even runs is not a
+        legitimate finish. While this guard is active the ``skip_to_close`` hint
+        is dropped; the only ways a not-yet-enabled run may terminate are the
+        *honest* ones that do not route through ``skip_to_close``:
+
+        * ``enablement_stalled`` — the enablement loop's own stall cap
+          (:data:`_ENABLEMENT_MAX_STALL` consecutive no-progress rounds),
+        * ``prelude_baseline_failed`` — repeated baseline failures with no
+          enablement engaged,
+        * the wall-clock deadline / time-exhausted exits,
+        * hard aborts (crash threshold, signal, emergency, user stop).
+
+        Returns:
+            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
+            has never gone positive and enablement has not yet succeeded.
+        """
+        phase = (self.phase or "").strip().upper()
+        return (
+            phase in ("PRELUDE", "FRAMEWORK_AGENT")
+            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
+            and not bool(getattr(self, "enablement_succeeded", False))
+        )
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(

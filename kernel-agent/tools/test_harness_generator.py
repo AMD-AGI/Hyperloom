@@ -179,20 +179,6 @@ def test_get_test_function_toplevel_caller():
     assert tf.name == "bench_runner"
 
 
-def test_extract_tensor_creation():
-    a = hg.BenchmarkAnalyzer(BENCH_SRC)
-    dec = a.get_decorated_functions()
-    tensors = a.extract_tensor_creation(dec["torch_ref"])
-    assert tensors[0].var_name == "y"
-    assert tensors[0].dtype_expr == "torch.bfloat16"
-
-
-def test_extract_tensor_creation_syntax_error():
-    a = hg.BenchmarkAnalyzer("x = 1")
-    bad = hg.FuncInfo(name="f", params=[], source="def f(:\n  pass", decorator="", lineno=1)
-    assert a.extract_tensor_creation(bad) == []
-
-
 def test_extract_call_to():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
     dec = a.get_decorated_functions()
@@ -238,7 +224,7 @@ def test_dim_names():
 
 
 def test_default_configs():
-    all_c, unpack, cfg_str = hg._default_configs()
+    all_c, unpack, _ = hg._default_configs()
     assert "torch.bfloat16" in all_c
     assert unpack == "M, N, dtype = cfg"
 
@@ -254,7 +240,7 @@ def test_build_configs_from_shapes():
             {"call_num": 2, "shape": "(512, 128) fp16"},
         ]
     }
-    all_c, unpack, cfg_str = hg._build_configs(candidate)
+    all_c, unpack, _ = hg._build_configs(candidate)
     assert "torch.bfloat16" in all_c
     assert "M, N, dtype = cfg" == unpack
     # Scaling expands to >= 6 configs.

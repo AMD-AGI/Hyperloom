@@ -142,6 +142,14 @@ class ActionRegistryError(RuntimeError):
     """Raised on schema or filesystem problems while loading actions."""
 
 
+def _require_vocab(action_name: str, field: str, value: Any, allowed: frozenset[str]) -> None:
+    """Raise :class:`ActionRegistryError` unless ``value`` is in ``allowed``."""
+    if value not in allowed:
+        raise ActionRegistryError(
+            f"action {action_name!r}: {field}={value!r} not in {sorted(allowed)!r}"
+        )
+
+
 @dataclass(frozen=True)
 class ActionMetadata:
     """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2).
@@ -199,10 +207,7 @@ class ActionMetadata:
             raise ActionRegistryError(
                 f"action filename stem {expected_name!r} does not match yaml field name={data['name']!r}"
             )
-        if data["family"] not in VALID_FAMILIES:
-            raise ActionRegistryError(
-                f"action {expected_name!r}: family {data['family']!r} not in {sorted(VALID_FAMILIES)!r}"
-            )
+        _require_vocab(expected_name, "family", data["family"], VALID_FAMILIES)
         gain = data["expected_gain_pct"]
         if not (isinstance(gain, (list, tuple)) and len(gain) == 2):
             raise ActionRegistryError(f"action {expected_name!r}: expected_gain_pct must be [low, high]")
@@ -211,18 +216,12 @@ class ActionMetadata:
             if not (0.0 <= v <= 1.0):
                 raise ActionRegistryError(f"action {expected_name!r}: {ratio_field}={v} not in 0..1")
         backend = str(data.get("preferred_backend", "claude"))
-        if backend not in VALID_BACKENDS:
-            raise ActionRegistryError(
-                f"action {expected_name!r}: preferred_backend={backend!r} not in {sorted(VALID_BACKENDS)!r}"
-            )
+        _require_vocab(expected_name, "preferred_backend", backend, VALID_BACKENDS)
         # prompt-builder fields — all optional with safe defaults.
         cost_p50 = float(data["cost_minutes_p50"])
         description = str(data.get("description", "")).strip()
         pipeline_phase = str(data.get("pipeline_phase", "explore")).strip() or "explore"
-        if pipeline_phase not in VALID_PIPELINE_PHASES:
-            raise ActionRegistryError(
-                f"action {expected_name!r}: pipeline_phase={pipeline_phase!r} not in {sorted(VALID_PIPELINE_PHASES)!r}"
-            )
+        _require_vocab(expected_name, "pipeline_phase", pipeline_phase, VALID_PIPELINE_PHASES)
         typical_runtime_min_raw = data.get("typical_runtime_min")
         try:
             typical_runtime_min = float(typical_runtime_min_raw) if typical_runtime_min_raw is not None else cost_p50
@@ -244,10 +243,7 @@ class ActionMetadata:
         )
         if not verdict_class:
             verdict_class = default_verdict_class_for(expected_name)
-        if verdict_class not in VALID_VERDICT_CLASSES:
-            raise ActionRegistryError(
-                f"action {expected_name!r}: verdict_class={verdict_class!r} not in {sorted(VALID_VERDICT_CLASSES)!r}"
-            )
+        _require_vocab(expected_name, "verdict_class", verdict_class, VALID_VERDICT_CLASSES)
         return cls(
             name=str(data["name"]),
             family=str(data["family"]),

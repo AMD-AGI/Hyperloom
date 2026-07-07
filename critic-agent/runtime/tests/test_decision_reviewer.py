@@ -10,7 +10,22 @@ from runtime.decision_reviewer import DecisionReviewer
 from runtime.errors import ReviewValidationError
 from runtime.in_memory_kb_client import InMemoryKBClient
 from runtime.kb_writer import KBWriter
+from runtime.request_models import Proposal
 from runtime.session_memory import SessionMemory
+
+
+def test_topic_for_proposal_prefers_action_then_payload_then_fallback(reviewer):
+    rev, _, _ = reviewer
+    assert rev._topic_for_proposal(Proposal(msg_id="m1", from_agent="o", action_name="explore")) == "explore"
+    assert (
+        rev._topic_for_proposal(Proposal(msg_id="m2", from_agent="o", payload={"topic": "  tune gemm  "}))
+        == "tune gemm"
+    )
+    assert (
+        rev._topic_for_proposal(Proposal(msg_id="m3", from_agent="o", payload={"summary": "raise conc"}))
+        == "raise conc"
+    )
+    assert rev._topic_for_proposal(Proposal(msg_id="m4", from_agent="o", payload={})) == "proposal-m4"
 
 
 @pytest.fixture()
@@ -429,6 +444,49 @@ def test_commit_review_invalid_verdict_raises(reviewer):
             _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_d"),
             {"review_verdicts": [{"target_proposal_msg_id": "aaa1", "verdict": "lgtm"}]},
         )
+
+
+def test_commit_review_kb_draft_request_writes_drafts(reviewer):
+    rev, kb, sm = reviewer
+    request = {
+        "kind": "kb_draft_request",
+        "session_id": "sess_kbd",
+        "context": {
+            "model": "qwen3-14b",
+            "framework": "sglang",
+            "model_family": "qwen",
+            "workload": "decode",
+            "precision": "fp8",
+        },
+    }
+    review = {
+        "kb_drafts": [
+            {
+                "category": "kernel_optimization",
+                "action": "Patched the active dispatch path.",
+                "lesson": "Active dispatch path must be kept in sync.",
+                "tags": ["dispatch"],
+                "result": {"status": "KEEP", "gain_pct": 4.2},
+                "confidence": 0.9,
+            }
+        ]
+    }
+    outcome = rev.commit_review(request, review)
+    assert outcome.kind == "kb_draft_request"
+    assert outcome.kb_writes and outcome.kb_writes[0]["trigger"] == "kb_draft"
+    assert outcome.decision_review["kind"] == "critic_kb_draft"
+    assert outcome.decision_review["kb_drafts_attempted"] == 1
+
+
+def test_commit_review_kb_draft_non_list_raises(reviewer):
+    rev, kb, sm = reviewer
+    request = {
+        "kind": "kb_draft_request",
+        "session_id": "sess_kbd2",
+        "context": {"model": "qwen3-14b", "framework": "sglang"},
+    }
+    with pytest.raises(ReviewValidationError, match="kb_drafts list"):
+        rev.commit_review(request, {"kb_drafts": {"not": "a list"}})
 
 
 def test_commit_review_no_proposals_emits_heartbeat(reviewer):

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-2 full action catalogue tests."""
+"""Full action catalogue tests."""
 
 from __future__ import annotations
 
