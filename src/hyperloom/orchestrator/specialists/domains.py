@@ -312,11 +312,6 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
-# Active set — domains with fully-wired prompt templates. Matches the
-# full catalogue, so Orchestration never falls through to the generic template.
-SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
-
-
 def get_domain(key: str) -> SpecialistDomain | None:
     """Return the catalogue entry for ``key`` or None when unknown.
 
@@ -372,7 +367,6 @@ __all__ = [
     "KNOWLEDGE_DOMAIN_TAGS",
     "KNOWLEDGE_DOMAIN_TAG_SET",
     "SPECIALIST_DOMAINS",
-    "SPECIALIST_DOMAINS_M5",
     "SPECIALIST_DOMAIN_KEYS",
     "SPECIALIST_MAX_TURNS_HARD_CAP",
     "SpecialistDomain",

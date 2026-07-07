@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
-from .._time import now_iso
 from ..roles.base import BackendError
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..trace.conversation_trace import ConversationRecord, append_conversation
@@ -33,7 +33,7 @@ from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
-    SPECIALIST_DOMAINS_M5,
+    SPECIALIST_DOMAIN_KEYS,
     SpecialistDomain,
     domain_for_tag,
     normalize_dispatch_tags,
@@ -492,7 +492,7 @@ class SpecialistRunner:
 
         # Post-M5 domains still dispatch but use the generic prompt template.
         notes: list[str] = []
-        if domain.key not in SPECIALIST_DOMAINS_M5:
+        if domain.key not in SPECIALIST_DOMAIN_KEYS:
             notes.append(
                 f"domain={domain.key!r} is post-M5 (available_in="
                 f"{domain.available_in!r}); using generic prompt template"

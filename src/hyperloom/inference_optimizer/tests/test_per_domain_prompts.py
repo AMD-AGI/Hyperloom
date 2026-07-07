@@ -13,7 +13,6 @@ import pytest
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
-    SPECIALIST_DOMAINS_M5,
     get_domain,
 )
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
@@ -45,11 +44,16 @@ def test_every_domain_has_focus_template():
         assert domain.key in _DOMAIN_FOCUS_TEMPLATES, f"missing per-domain template for {domain.key!r}"
 
 
-def test_specialist_domains_m5_covers_all_active_domains():
-    """The M5 active set covers the full catalogue (nine entries: seven legacy
-    domains + static_recon_specialist + enablement_specialist)."""
-    assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 9
+def test_specialist_domain_keys_covers_all_active_domains():
+    """The active set covers the full catalogue (nine entries: seven legacy
+    domains + static_recon_specialist + enablement_specialist).
+
+    tree-reform.MD P2.7: ``SPECIALIST_DOMAINS_M5`` was a misleading alias that
+    had become byte-for-byte identical to ``SPECIALIST_DOMAIN_KEYS`` (the
+    catalogue had grown to fully cover the once-narrower M5 active set), so it
+    was removed and every reference switched to the canonical constant.
+    """
+    assert len(SPECIALIST_DOMAIN_KEYS) == 9
 
 
 # 2. Per-domain content checks — each template mentions its signature
@@ -330,7 +334,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     result = await runner.run(ctx)
     for note in result.notes or []:
         assert "generic prompt template" not in note, (
-            f"PR-A6 should have widened SPECIALIST_DOMAINS_M5 to cover kernel_switch_specialist; got note={note!r}"
+            f"PR-A6 should have widened SPECIALIST_DOMAIN_KEYS to cover kernel_switch_specialist; got note={note!r}"
         )
 
 
@@ -369,7 +373,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
-    SPECIALIST_DOMAINS_M5,
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
     get_domain,
@@ -433,10 +436,8 @@ def test_specialist_domains_catalogue_has_nine_entries():
 
 
 def test_serving_specialist_is_M5_active():
-    """PR-A6 widened ``SPECIALIST_DOMAINS_M5`` to the full catalogue (every domain now has a focus template)."""
-    assert "serving_specialist" in SPECIALIST_DOMAINS_M5
-    # PR-A6: M5 active set now equals the full catalogue.
-    assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
+    """PR-A6 widened the M5 active set to the full catalogue (every domain now has a focus template)."""
+    assert "serving_specialist" in SPECIALIST_DOMAIN_KEYS
 
 
 def test_get_domain_returns_none_for_unknown():
