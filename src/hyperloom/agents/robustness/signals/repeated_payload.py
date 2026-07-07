@@ -21,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from .._payload_aliases import (
+from hyperloom.common.payload_aliases import (
     CANONICAL_KEY as _EXTRA_SERVER_ARGS_CANONICAL,
     LEGACY_KEY as _EXTRA_SERVER_ARGS_LEGACY,
     read_extra_server_args as _read_extra_server_args,

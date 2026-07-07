@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
-from hyperloom.inference_optimizer.compat import read_extra_server_args
+from hyperloom.common.payload_aliases import read_extra_server_args
 from hyperloom.inference_optimizer.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state

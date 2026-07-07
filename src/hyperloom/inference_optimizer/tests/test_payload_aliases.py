@@ -1,14 +1,20 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the read-only ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias in ``compat``."""
+"""Tests for the read-only ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias.
+
+tree-reform.MD P2.7: ``hyperloom.inference_optimizer.compat`` (the P2.1-era
+re-export shim for these helpers) has been removed; all call sites now import
+the canonical implementation directly from ``hyperloom.common.payload_aliases``,
+which is what this test exercises.
+"""
 
 from __future__ import annotations
 
 import warnings
 
 
-from hyperloom.inference_optimizer import compat as pa
-from hyperloom.inference_optimizer.compat import (
+from hyperloom.common import payload_aliases as pa
+from hyperloom.common.payload_aliases import (
     CANONICAL_KEY,
     LEGACY_KEY,
     migrate_legacy_key_in_place,
@@ -182,9 +188,9 @@ def test_public_api_exports_match_all():
     assert set(pa.__all__) == expected
 
 
-def test_compat_module_importable():
-    """End-to-end import smoke: the compat helpers resolve and are callable."""
-    from hyperloom.inference_optimizer import compat as imported
+def test_payload_aliases_module_importable():
+    """End-to-end import smoke: the payload-alias helpers resolve and are callable."""
+    from hyperloom.common import payload_aliases as imported
 
     assert callable(imported.read_extra_server_args)
     assert callable(imported.migrate_legacy_key_in_place)

@@ -7,7 +7,7 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any
-from hyperloom.inference_optimizer.compat import read_extra_server_args
+from hyperloom.common.payload_aliases import read_extra_server_args
 from ..state.optimization_journal import (
     Journal,
     classify_change_kind,

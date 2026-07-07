@@ -152,7 +152,7 @@ def _resolve_kernel_patch_identity(
         or ""
     )
     # External envelope; route through compat helper so legacy ``extra_sglang_args`` still resolves.
-    from hyperloom.inference_optimizer.compat import read_extra_server_args
+    from hyperloom.common.payload_aliases import read_extra_server_args
     extra_args = read_extra_server_args(payload).strip()
     return kernel_id, patch_path, target_file, extra_args
 

@@ -17,13 +17,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 # Allowlist: repo-relative POSIX path -> justification. Meant to shrink, not grow.
 ALLOWED_FILES: dict[str, str] = {
     # Canonical compat helper (tree-reform.MD §7/P2.1): the single reader of
-    # the legacy key now lives in hyperloom.common; the compat + sub-agent
-    # shims re-export it and no longer carry the literal themselves.
+    # the legacy key now lives in hyperloom.common; the sub-agent shims that
+    # still need to (kernel-agent's tools/ can't import hyperloom.common, see
+    # below) re-export it and no longer carry the literal themselves.
+    # tree-reform.MD P2.7: hyperloom.inference_optimizer.compat (the P2.1-era
+    # transition shim for this helper) has been removed -- all call sites now
+    # import hyperloom.common.payload_aliases directly.
     "src/hyperloom/common/payload_aliases.py": "canonical payload-aliases compat helper (tree-reform.MD §7)",
-    # Compat helper module (docstring naming both keys; re-exports the
-    # canonical helper above). tree-reform.MD P2.4: flattened from the
-    # compat/ package (__init__.py + payload_aliases.py) into compat.py.
-    "src/hyperloom/inference_optimizer/compat.py": "compat re-export shim docstring names the rename",
     # Sub-agent reader site (kernel-agent) that falls back to the legacy key.
     "src/hyperloom/agents/kernel/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
     # Back-compat injection points in production code (renamed kwarg
@@ -36,12 +36,6 @@ ALLOWED_FILES: dict[str, str] = {
     "reads the legacy extra_sglang_args key alongside the canonical "
     "extra_server_args so pre-rename variant dicts still match",
     "src/hyperloom/orchestrator/state/optimization_journal.py": "journal classification reads existing stack/variant args fields",
-    # legacy v0.6 breakdown reader walks raw optimization_stack which can
-    # carry the pre-rename candidate_extra_sglang_args field; the emitted
-    # key is the canonical extra_server_args.
-    "src/hyperloom/inference_optimizer/breakdown/legacy_collectors.py": "legacy v0.6 reader: raw optimization_stack carries pre-rename "
-    "candidate_extra_sglang_args (breakdown loads state without the "
-    "SharedState key migration)",
     # CI transform reads legacy-keyed session_breakdown.json artefacts.
     "ci/transform_to_session_summary_v2.py": "legacy session-breakdown JSON reader (operator-side back-compat)",
     "ci/test_ci_transform_v2.py": "unit tests assert the ci legacy reader migrates extra_sglang_args "

@@ -1,6 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Smoke tests for the payload-aliases compat shim: pin its behaviour against drift from ``hyperloom.inference_optimizer.compat`` (the shim is a duplicated copy by design)."""
+"""Smoke tests pinning the payload-aliases helper's behaviour as used by
+``hyperloom.agents.robustness.signals.repeated_payload``.
+
+tree-reform.MD P2.7: this package's own ``_payload_aliases.py`` re-export shim
+(a P2.1-era duplicate) has been removed; ``repeated_payload.py`` now imports
+the canonical helper directly from ``hyperloom.common.payload_aliases``,
+which is what this test exercises.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,7 @@ import warnings
 
 import pytest
 
-from hyperloom.agents.robustness._payload_aliases import (
+from hyperloom.common.payload_aliases import (
     CANONICAL_KEY,
     LEGACY_KEY,
     read_extra_server_args,

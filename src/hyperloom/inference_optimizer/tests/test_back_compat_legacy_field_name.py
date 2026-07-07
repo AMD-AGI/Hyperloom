@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.compat import (
+from hyperloom.common.payload_aliases import (
     CANONICAL_KEY,
     LEGACY_KEY,
     read_extra_server_args,
