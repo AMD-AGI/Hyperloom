@@ -59,6 +59,18 @@ def test_build_candidates_routing():
     assert cands["skipped_kernels"] and cands["skipped_kernels"][0]["name"] == "aten::mm"
 
 
+def test_build_candidates_exposes_routable_subset():
+    # Contract alignment (P0): hot_kernels stays the FULL ranked set; the reusable
+    # dispatch subset is exposed separately as routable_kernels.
+    cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
+    hot = cands["hot_kernels"]
+    routable = cands["routable_kernels"]
+    assert len(hot) == 2  # full (routable + non-routable)
+    assert len(routable) <= len(hot)
+    assert all(c.get("reusable_native_kernel") and c.get("source_file") for c in routable)
+    assert not any(c["name"] == "aten::mm" for c in routable)  # non-reusable never routable
+
+
 def test_build_summary_counts():
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     summ = report.build_summary(cands, framework="vllm", target_platform="MI300X", generated_at="2026-01-01T00:00:00")

@@ -512,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
         "target_platform": args.target_platform,
         "hot_kernels": hot_kernels,
         "hot_kernels_top15": hot_kernels[:15],
+        "routable_kernels": candidates.get("routable_kernels", []),
         "skipped_kernels": candidates.get("skipped_kernels", []),
         "task_groups": candidates.get("task_groups", []),
         "candidates_path": str(candidates_path),

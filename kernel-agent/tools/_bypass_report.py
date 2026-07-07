@@ -421,12 +421,20 @@ def build_candidates(
     for rank, c in enumerate(sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1):
         c["priority_rank"] = rank
 
+    # Routable subset (contract alignment): ``hot_kernels`` stays the FULL ranked
+    # hotspot set; ``routable_kernels`` is the reusable-with-resolved-source subset
+    # dispatchable to kernel-opt, exposed separately so downstream never conflates
+    # "all hotspots" with the "optimizable subset" (the P0 hot_kernels semantics).
+    routable_kernels = [
+        c for c in hot_kernels if c.get("reusable_native_kernel") and c.get("source_file")
+    ]
     return {
         "source": "bypass",
         "framework": framework,
         "target_platform": target_platform,
         "aggregation_scope": analyze_out.get("aggregation_scope", "full_trace"),
         "hot_kernels": hot_kernels,
+        "routable_kernels": routable_kernels,
         "skipped_kernels": skipped_kernels,
         "task_groups": task_groups,
     }

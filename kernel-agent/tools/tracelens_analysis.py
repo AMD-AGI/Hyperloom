@@ -5655,15 +5655,19 @@ def write_reports(
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
     kernel_candidates_path = run_dir / "kernel_candidates.json"
-    # Hyperloom#314: hot_kernels is the dispatch payload (routable only); skipped_kernels keeps
-    # full dicts so direct lookups can still resolve non-routable kernels. Full list stays in tracelens_report.json.
+    # Contract alignment (P0): ``hot_kernels`` is ALWAYS the full ranked hotspot
+    # set (same semantics as the bypass route); the reusable dispatch subset is
+    # exposed separately as ``routable_kernels``, and ``skipped_kernels`` keeps the
+    # non-routable dicts for direct lookups. The kernel-opt dispatch filters by
+    # ``reusable_native_kernel`` itself, so a full hot_kernels stays dispatch-safe.
     routable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
     skipped_kernels = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is not True]
     atomic_write_json(
         kernel_candidates_path,
         {
             **report,
-            "hot_kernels": routable_candidates,
+            "hot_kernels": candidates,
+            "routable_kernels": routable_candidates,
             "skipped_kernels": skipped_kernels,
             "task_groups": task_groups,
         },
