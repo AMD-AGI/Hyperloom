@@ -14,6 +14,7 @@ from inference_optimizer.orchestrator import roofline_ceiling as _rc
 from inference_optimizer.orchestrator.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
+    _resolve_achievable_tflops,
     _resolve_dtype_bytes,
     _resolve_peak_tflops,
     apply_runtime_dtype,
@@ -930,7 +931,9 @@ class TestComputeBoundCeiling:
     """T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1); the divisor is the B=1 active weight (per-token compute is batch-invariant)."""
 
     def test_matches_hand_calculation_mi355x_bf16_a3b_like(self):
-        # A3B: 2516.6 TFLOPS * 2 bytes / (2 * 6.7 GB) ≈ 375 600 tok/s.
+        # A3B: max-achievable 1686.0 TFLOPS * 2 bytes / (2 * 6.7 GB) ≈ 251 642 tok/s.
+        # (uses the sustained/achievable peak, unified with the PerfModel path,
+        # NOT the vendor dense 2516.6 which would give ~375 612.)
         cmp = compute_compute_bound_ceiling_tok_per_sec(
             gpu_type="mi355x",
             num_gpus=1,
@@ -939,7 +942,24 @@ class TestComputeBoundCeiling:
             weight_bytes=61_000_000_000,
             weight_dtype_bytes=2.0,
         )
-        assert cmp == pytest.approx(375_611.94, rel=1e-3)
+        assert cmp == pytest.approx(251_641.79, rel=1e-3)
+
+    def test_uses_achievable_not_vendor_peak_no_fallback_jump(self):
+        # The top-down compute ceiling must use max-achievable TFLOPS (708 bf16
+        # mi300x), the SAME convention as the bottom-up PerfModel path, NOT the
+        # vendor dense peak (1307.4) — otherwise within%/gap jump ~1.85x when the
+        # run falls back to this path on an incomplete config.
+        ach = _resolve_achievable_tflops("mi300x", "bf16")
+        vendor = _resolve_peak_tflops("mi300x", "bf16")
+        assert 0 < ach < vendor  # distinct conventions (708 < 1307.4)
+        kwargs = dict(
+            gpu_type="mi300x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=2_000_000_000, weight_bytes=2_000_000_000, weight_dtype_bytes=2.0,
+        )
+        cmp = compute_compute_bound_ceiling_tok_per_sec(**kwargs)
+        flops_per_token = 2.0 * 2_000_000_000 / 2.0
+        assert cmp == pytest.approx((ach * 1e12) / flops_per_token, rel=1e-6)
+        assert cmp != pytest.approx((vendor * 1e12) / flops_per_token, rel=1e-3)
 
     def test_scales_linearly_with_num_gpus(self):
         common = dict(

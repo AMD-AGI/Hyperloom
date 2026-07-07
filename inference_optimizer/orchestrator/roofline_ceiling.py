@@ -945,6 +945,12 @@ def compute_compute_bound_ceiling_tok_per_sec(
 
     Divisor uses ``active_weight_bytes`` at B=1 (NOT batch-saturated). Returns 0.0 on missing input (degrade to T_mem).
 
+    ``F_peak`` is the **max-achievable (sustained) TFLOPS** — the SAME convention
+    as the bottom-up PerfModel path (:func:`compute_roofline_from_perfmodel`), so
+    within%/gap don't jump ~1.85x when this top-down fallback is used on an
+    incomplete config. The vendor dense peak is used only as a coverage-gap
+    fallback when the achievable table lacks the (gpu, precision).
+
     Args:
         gpu_type: GPU type key for the peak TFLOPS lookup.
         num_gpus: Number of GPUs (tensor-parallel degree).
@@ -957,7 +963,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
         The compute-bound decode throughput ceiling, or ``0.0`` on missing
         input.
     """
-    peak_tflops = _resolve_peak_tflops(gpu_type, precision_tag)
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes only when active is missing/0 (never a batch-saturated weight here).
