@@ -397,3 +397,19 @@ P2.7 的执行分两条并行轨道同时推进(本次由两个独立 agent sess
 2. **死代码判定不能只看"计划文档怎么说",必须验证"生产代码实际怎么用"**:`legacy_collectors.py` 的教训是模块自己的 docstring 断言的"调用契约"可能从未被真正实现过。
 3. **pyproject.toml 的 ghost entry 只能靠主动核对磁盘存在性发现**,因为 `coverage`/`setuptools.package-data` 的 glob 对不存在路径是静默无操作,不会在任何测试运行中报错或警告。
 4. **两个 agent session 并行处理同一任务时**,只要各自的改动集合是"文件级不重叠或语义完全一致"(比如两边都独立发现并修复了同一个 ghost entry,写出的修复内容字节级相同),`git status`/`git diff` 汇合后不会有冲突,可以放心地在汇合点做一次全量测试门验证后统一提交——不需要互相阻塞等待。
+
+## 14. P2.8 收尾(一个提交,门绿)= tree-reform.MD 全部 Phase 2 步骤完成
+
+P2.8 是 tree-reform.MD 计划的最后一步,范围明确且风险最低:删 `setup.py`(改声明式打包)、更新 `README.md`/`CLAUDE.md`/`docs/` 里可能残留的旧布局引用。
+
+**`setup.py` → 声明式打包**:`setup.py` 从 P2.4 起就只剩两行实质内容——`find_packages(where="src")` + `package_dir={"hyperloom": "src/hyperloom"}`。这两行在标准 src-layout 下有完全等价的 `pyproject.toml` 声明式写法:`[tool.setuptools.packages.find]` + `where = ["src"]`(`package_dir` 不需要显式声明,因为 src-layout 下 setuptools 的自动发现本身就会把 `src/hyperloom/` 解析成顶层 `hyperloom` 包)。删除前的关键验证步骤:(a) 全仓库 grep `setup\.py`,确认没有 workflow 直接调用 `python setup.py`(所有 CI 步骤走 `pip install -e .`,这个命令在有无 `setup.py` 的情况下行为一致,因为它读的是 `pyproject.toml` 的 build-backend);(b) **必须做一次干净的 `pip install -e . --no-deps` 重装**(不能只信任已装好的 editable install 还在工作——旧的 `.egg-info` 缓存可能掩盖打包配置的问题),然后逐项核对新生成的 `.dist-info/entry_points.txt` 里 5 个 console_scripts 是否都存在、`hyperloom.agents.*` 各子包是否都能 import、`pytest --collect-only` 的收集总数是否不变。这次验证发现现代 pip/setuptools 的 editable install 已经不再用 `.egg-info` + 显式文件列表,而是简单的 `.pth` 文件把 `src/` 整体插入 `sys.path`——这与本仓库 P2.0 起就维护的"`pythonpath = ["src", ...]`"双可导入设计是同构的,所以迁移毫无阻力。
+- 顺手清理了 `[tool.coverage.run].omit` 里引用 `setup.py` 自身的一条 now-dead entry。
+
+**README.md / CLAUDE.md / docs/ 审计结论**:专门起了一个侦察 agent 逐字对比这三处的路径引用与实际磁盘布局。结果:
+- `CLAUDE.md` 的 "Repository layout" 章节**从 P2.5 起就已经完全准确**(每次搬迁阶段的收尾都同步更新了它),本次审计确认零改动需求——这是"每个阶段收尾都同步更新一次核心文档"这个习惯的直接收益,避免了文档漂移累积到最后一次性补课的大工程。
+- `README.md` 有两处历史遗留的小疏漏:(a) 一处裸的 `inference_optimizer/` 路径引用(没带 `src/hyperloom/` 前缀,大概是 P2.4 提升阶段漏改的一处);(b) Repo Structure 的 ASCII 树在 P2.5 加 `agents/quantization/` 时漏加了一行,且 orchestrator 子包列表从一开始就是"节选 6 个"而不是 P2.3 完整拆出的 14 个——这两处都是纯文档性内容,不受任何自动化测试保护,只能靠人工/agent 逐字核对发现。
+- `docs/` 目录下所有 `kernel-agent/` 字面量命中都是**运行时会话目录路径**(`$SESSION_DIR/kernel-agent/runs/...`),这是磁盘观测契约的一部分而非 Python 包路径,tree-reform.MD 全程都强调"磁盘/进程观测契约不变"——审计时必须先判断"这个路径是源码包路径还是运行时/会话目录路径",再决定是否需要跟随源码搬迁而改写;混淆两者会导致误改一个本不该动的稳定契约。
+
+**验收**:`pytest --collect-only` 0 错误、9444 个测试(与 P2.7 收尾时一致,P2.8 不改动任何测试文件);全量非-e2e 门 `9363 passed, 4 skipped, 47 deselected, 12 subtests passed` + 17 个 kernel-agent 预存 failed + 15 个预存 error(与 P2.7 收尾时的数字完全一致,零回归)。
+
+**tree-reform.MD 全部 Phase 2 步骤(P2.0 → P2.8)至此完整收尾**:仓库从"根目录散落 6 个独立打包单元(`inference_optimizer/`、`orchestrator/`(曾嵌在 `inference_optimizer/` 内)、`critic-agent/`、`robustness-agent/`、`framework-agent/`、`quantization_agent/`、`kernel-agent/`,外加过渡期堆积的 re-export shim 与死代码)"收敛成"单一 src-layout 的 `hyperloom` distribution + 声明式打包 + 收敛后的测试/覆盖率契约",全程未改变任何磁盘/进程观测契约(`manifest.json`/`state.json`/`storage/coordinator.db`/`session_breakdown.json` 等)。`ci/`(P2.6,库/脚本拆分 + `ci/orchestrator.py` 改名)仍是唯一保留在 `src/hyperloom/` 之外的扁平包,是明确排除在本次执行范围之外的独立后续任务。
