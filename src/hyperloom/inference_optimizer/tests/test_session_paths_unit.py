@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer import session_paths as sp
+from hyperloom.inference_optimizer.session import session_paths as sp
 
 
 SD = Path("/tmp/sess")

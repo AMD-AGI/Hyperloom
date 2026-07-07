@@ -268,7 +268,7 @@ def test_kernel_opt_body_references_v08_decision_signals():
 
 def test_orchestration_md_has_no_score_view():
     """The ``orchestration.md`` fragment should be free of score-view directives."""
-    from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     fragment = (asset_system_prompts_dir() / "orchestration.md").read_text(encoding="utf-8")
     forbidden = (

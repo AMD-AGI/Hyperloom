@@ -117,7 +117,7 @@ def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     import json
 
     from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
-    from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
     cli_kb._attach_recipe_audit_hook(kb, tmp_path)
@@ -235,7 +235,7 @@ class _MarkerPath:
 
 def test_bootstrap_knowledge_plane_marker_write_failure(tmp_path, monkeypatch) -> None:
     """An OSError writing the pr_monitor status marker is swallowed (L290-291)."""
-    from hyperloom.inference_optimizer import session_paths as sp
+    from hyperloom.inference_optimizer.session import session_paths as sp
 
     monkeypatch.setattr(sp, "pr_monitor_status_json", lambda _sd: _MarkerPath())
     plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=True), session_dir=tmp_path)
@@ -257,7 +257,7 @@ def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
 def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch) -> None:
     """A write failure inside the hook is swallowed, not raised (L90-91)."""
     from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
-    from hyperloom.inference_optimizer import session_paths as sp
+    from hyperloom.inference_optimizer.session import session_paths as sp
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
 

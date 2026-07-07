@@ -170,7 +170,7 @@ def _persist(
         tuple[Path, Path]: The ``(json_path, md_path)`` of the written
             JSON and Markdown report files.
     """
-    from ..session_paths import (
+    from ..session.session_paths import (
         target_analysis_dir,
         target_analysis_report_md,
         target_baseline_json,

@@ -562,7 +562,7 @@ class ProposalsCollaborator:
             return
         try:
             from ..trace.llm_trace import _now_iso
-            from hyperloom.inference_optimizer.session_paths import proposal_task_map_path
+            from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
             path = proposal_task_map_path(self.session_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
             row = {

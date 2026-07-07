@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer import manifest as mf
+from hyperloom.inference_optimizer.session import manifest as mf
 
 
 class _Proc:
@@ -188,7 +188,7 @@ def test_detect_image_marker(monkeypatch, tmp_path):
     marker.write_text("frommarker:1\n", encoding="utf-8")
     monkeypatch.setattr(mf, "Path", Path)  # keep real Path
     # Point the marker scan at our temp file via monkeypatching the tuple
-    import hyperloom.inference_optimizer.manifest as mod
+    import hyperloom.inference_optimizer.session.manifest as mod
 
     real_path = mod.Path
 
@@ -204,7 +204,7 @@ def test_detect_image_marker(monkeypatch, tmp_path):
 def test_detect_image_cgroup(monkeypatch):
     for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         monkeypatch.delenv(v, raising=False)
-    import hyperloom.inference_optimizer.manifest as mod
+    import hyperloom.inference_optimizer.session.manifest as mod
 
     cgroup_text = "12:devices:/docker/0123456789abcdef0123\n7:cpu:/other\n"
 
@@ -231,7 +231,7 @@ def test_detect_image_cgroup(monkeypatch):
 def test_detect_image_marker_oserror(monkeypatch):
     for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         monkeypatch.delenv(v, raising=False)
-    import hyperloom.inference_optimizer.manifest as mod
+    import hyperloom.inference_optimizer.session.manifest as mod
 
     class _BadMarker:
         def exists(self):
@@ -256,7 +256,7 @@ def test_detect_image_marker_oserror(monkeypatch):
 def test_detect_image_none(monkeypatch):
     for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         monkeypatch.delenv(v, raising=False)
-    import hyperloom.inference_optimizer.manifest as mod
+    import hyperloom.inference_optimizer.session.manifest as mod
 
     real_path = mod.Path
 

@@ -32,7 +32,7 @@ from typing import Any
 import yaml
 
 from hyperloom.inference_optimizer.compat import read_extra_server_args
-from hyperloom.inference_optimizer.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
     ensure_benchmark_serving_patched,

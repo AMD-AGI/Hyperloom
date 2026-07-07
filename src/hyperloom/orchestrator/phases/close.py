@@ -185,7 +185,7 @@ class ClosePhase(PhaseHandler):
                 # Surface the final report location in the lifecycle
                 # log. report_executor writes final.{json,md} under
                 # reports_dir(session_dir); advertise whichever exist.
-                from hyperloom.inference_optimizer.session_paths import reports_dir as _reports_dir
+                from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
                 _rd = _reports_dir(self.session_dir)
                 _artifacts = {

@@ -750,7 +750,7 @@ class TestCriticPromptBuilder:
 
     @staticmethod
     def _rules_path():
-        from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+        from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
         return asset_system_prompts_dir() / "critic.md"
 
@@ -1122,7 +1122,7 @@ class TestN38ActionVerdictClass:
         assert "promotion" in captured_bundle["user_prompt"]
 
     def test_critic_md_mentions_action_verdict_policy_lookup(self):
-        from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+        from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
         p = asset_system_prompts_dir() / "critic.md"
         text = p.read_text(encoding="utf-8")

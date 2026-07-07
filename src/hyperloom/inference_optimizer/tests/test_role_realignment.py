@@ -18,7 +18,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 # fixtures
@@ -123,7 +123,7 @@ def test_critic_prompt_includes_phase_review_contract(registry):
 
 def test_role_md_files_carry_phase_awareness():
     """Static rules fragments + Robustness markdown carry phase awareness."""
-    from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     root = asset_system_prompts_dir()
     for name in ("orchestration", "kernel_agent", "critic", "robustness"):

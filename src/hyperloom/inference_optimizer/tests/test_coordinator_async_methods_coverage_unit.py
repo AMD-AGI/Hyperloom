@@ -402,7 +402,7 @@ async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None
 @pytest.mark.asyncio
 async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
-    from hyperloom.inference_optimizer.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     sid = "spec-3"
     spec_root = runs_dir(coord.session_dir, "specialist", sid)

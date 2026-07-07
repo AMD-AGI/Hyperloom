@@ -43,7 +43,7 @@ class TestResolveSessionDir:
         monkeypatch,
     ):
         monkeypatch.setattr(
-            "hyperloom.inference_optimizer.paths.session_dir",
+            "hyperloom.inference_optimizer.session.paths.session_dir",
             lambda: session_dir,
         )
         ctx = _ctx()
@@ -55,7 +55,7 @@ class TestResolveSessionDir:
         monkeypatch,
     ):
         monkeypatch.setattr(
-            "hyperloom.inference_optimizer.paths.session_dir",
+            "hyperloom.inference_optimizer.session.paths.session_dir",
             lambda: tmp_path,
         )
         ctx = _ctx()
@@ -67,7 +67,7 @@ class TestExecutor:
     @pytest.mark.asyncio
     async def test_failed_when_no_session_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "hyperloom.inference_optimizer.paths.session_dir",
+            "hyperloom.inference_optimizer.session.paths.session_dir",
             lambda: tmp_path,
         )
         result = await sb.SessionBreakdownExecutor()(_ctx())

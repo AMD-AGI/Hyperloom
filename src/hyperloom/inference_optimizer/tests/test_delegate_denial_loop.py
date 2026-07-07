@@ -11,7 +11,7 @@ import pytest
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 def _silent_coordinator(session_dir) -> Coordinator:
@@ -360,7 +360,7 @@ def test_mission_summary_surfaces_resume_pending_revalidation():
 
 def test_dead_c_robustness_md_prune_branch_family_list():
     """KB_gaps/Dead-C — the Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
-    from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     fragment = (asset_system_prompts_dir() / "robustness.md").read_text(encoding="utf-8")
     prune_rows = [ln for ln in fragment.splitlines() if ln.strip().startswith("| `prune_branch")]

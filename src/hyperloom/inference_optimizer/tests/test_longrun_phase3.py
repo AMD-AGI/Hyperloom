@@ -112,7 +112,7 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     # Don't let the soft restart's /proc server sweep run against the real host
     # during unit tests; the kill path is covered separately via monkeypatch.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "1")
-    from hyperloom.inference_optimizer.paths import make_session_dir as _msd
+    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,

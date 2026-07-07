@@ -180,7 +180,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
 def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
     """Regression: ``manifest.json`` ``model_name`` must honor the pinned
     display name from the quantize prelude, not the collapsed path basename."""
-    from hyperloom.inference_optimizer import manifest as m
+    from hyperloom.inference_optimizer.session import manifest as m
 
     args = _args(
         model="/root/quantization/google-gemma-4-26B-A4B-it/quantized",

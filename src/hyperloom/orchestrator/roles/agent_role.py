@@ -37,7 +37,7 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 
-from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.inference_optimizer.protocol.intent import IntentType
 
 

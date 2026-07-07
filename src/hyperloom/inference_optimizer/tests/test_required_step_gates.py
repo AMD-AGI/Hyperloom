@@ -21,8 +21,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.paths import make_session_dir
-from hyperloom.inference_optimizer.session_paths import target_baseline_json
+from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
 
 # Fixtures

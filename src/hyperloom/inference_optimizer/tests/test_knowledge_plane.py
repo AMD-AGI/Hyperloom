@@ -299,7 +299,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
     """``--degraded-pr``: marker declares enabled=False for ``pr_monitor:disabled``."""
     from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
-    from hyperloom.inference_optimizer.session_paths import pr_monitor_status_json
+    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     args = _build_args(pr_monitor_enabled=False)
     _bootstrap_knowledge_plane(
@@ -320,7 +320,7 @@ def test_bootstrap_marker_records_ir3_auto_degrade(
 ):
     """IR-3 auto-degrade: marker shows ``enabled=False`` + ``ir3_auto`` in status_text."""
     from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
-    from hyperloom.inference_optimizer.session_paths import pr_monitor_status_json
+    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     class _Stub:
@@ -366,7 +366,7 @@ def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(
 ):
     """The breakdown collector emits ``pr_monitor:disabled`` when the marker says so."""
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session_paths import pr_monitor_status_json
+    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -397,7 +397,7 @@ def test_collect_kb_provenance_surfaces_pr_monitor_unreachable_warning(
     tmp_path: Path,
 ):
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session_paths import pr_monitor_status_json
+    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -429,7 +429,7 @@ def test_collect_kb_provenance_no_warning_when_plane_healthy(
 ):
     """Happy path: marker says enabled + reachable → no warning."""
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session_paths import pr_monitor_status_json
+    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -479,7 +479,7 @@ def test_collect_kb_provenance_summarises_recipe_snapshot_reads(
 ):
     """The recipe-snapshot read audit is summarised into kb_provenance."""
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
     audit = recipe_snapshot_audit_jsonl(tmp_path)
     audit.parent.mkdir(parents=True, exist_ok=True)
@@ -520,7 +520,7 @@ def test_collect_kb_provenance_attributes_recipe_reads_per_source(
 ):
     """Composite per-path provenance is aggregated into by_source / best_config_by_source."""
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
     audit = recipe_snapshot_audit_jsonl(tmp_path)
     audit.parent.mkdir(parents=True, exist_ok=True)

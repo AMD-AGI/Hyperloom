@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.state.shared_state import SharedState
-from .paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
-from .session_paths import agent_prompt_snapshot
+from .session.paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
+from .session.session_paths import agent_prompt_snapshot
 from .cli_model_gate import _load_model_arch, _load_model_config_tags
 from .model_config_utils import summarize_model_config
 
@@ -419,7 +419,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
 
     # 2) reports/final.json — patch the single field in place if present.
     try:
-        from .session_paths import reports_dir
+        from .session.session_paths import reports_dir
         final_json = reports_dir(session_dir) / "final.json"
         if final_json.exists():
             data = json.loads(final_json.read_text(encoding="utf-8"))
@@ -524,7 +524,7 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
     root cause in the end-of-run summary on ``baseline_failed`` (#465).
     """
     try:
-        from .session_paths import reports_dir
+        from .session.session_paths import reports_dir
         final_json = reports_dir(session_dir) / "final.json"
         data = json.loads(final_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):

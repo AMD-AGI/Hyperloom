@@ -106,7 +106,7 @@ class SessionBreakdownExecutor:
         params = ctx.task.params or {}
         if params.get("session_dir"):
             return Path(params["session_dir"])
-        from hyperloom.inference_optimizer.paths import session_dir as _sd
+        from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
         candidate = _sd()
         # manifest.json (not state.json) so a fresh session yields a partial

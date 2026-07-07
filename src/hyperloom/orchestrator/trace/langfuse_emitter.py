@@ -34,7 +34,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.session_paths import (
+from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
     forge_steps_path,
     gemm_tuning_steps_path,

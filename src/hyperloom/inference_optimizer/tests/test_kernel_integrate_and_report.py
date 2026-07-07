@@ -31,7 +31,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.storage import SqliteConnection
 
 

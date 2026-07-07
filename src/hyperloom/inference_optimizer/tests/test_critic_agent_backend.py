@@ -485,7 +485,7 @@ async def test_single_proposal_yields_matching_verdict(
     # Item 2: the critic's token row records the reviewed proposal msg_id(s)
     # so the collector can attribute the review cost to that decision.
     import json as _json
-    from hyperloom.inference_optimizer.session_paths import llm_calls_path
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
     token_rows = [
         _json.loads(line)
         for line in llm_calls_path(fake_session_dir)

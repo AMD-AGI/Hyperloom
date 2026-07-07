@@ -24,7 +24,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 def _heartbeat() -> Intent:
@@ -342,14 +342,14 @@ class TestN23ResumePerSession:
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         monkeypatch.setenv(_paths.ENV_USER_DATA_PATH, str(tmp_path))
         monkeypatch.delenv(_paths.ENV_CURRENT_SESSION_DIR, raising=False)
         monkeypatch.delenv(_paths.ENV_SESSION_LAYOUT, raising=False)
 
     def test_resume_picks_latest_subdir_after_two_launches(self, tmp_path):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         sd1 = _paths.make_session_dir(model_name="DeepSeek-R1-0528")
         assert _paths.find_latest_per_session_dir() == sd1
@@ -363,7 +363,7 @@ class TestN23ResumePerSession:
         assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd2
 
     def test_resume_does_not_mutate_user_data_path(self, tmp_path):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         sd = _paths.make_session_dir(model_name="Qwen3-32B")
         import os as _os
@@ -374,7 +374,7 @@ class TestN23ResumePerSession:
         assert tmp_path in sd.parents
 
     def test_resume_falls_back_to_flat_when_no_per_session_subdir(self, tmp_path):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         assert _paths.find_latest_per_session_dir() is None
 
@@ -383,7 +383,7 @@ class TestN23ResumePerSession:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         sd = _paths.make_session_dir(model_name="Qwen3-32B")
         assert tmp_path.resolve() in sd.resolve().parents
@@ -397,7 +397,7 @@ class TestN23ResumePerSession:
             pass
 
     def test_latest_picks_across_models_when_model_name_omitted(self, tmp_path):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         (tmp_path / "ModelA").mkdir()
         (tmp_path / "ModelA" / "20260101T000000Z").mkdir()
@@ -412,7 +412,7 @@ class TestN23ResumePerSession:
         assert picked.name == "20260520T000000Z"
 
     def test_workspace_shared_dirs_never_picked_as_session(self, tmp_path):
-        from hyperloom.inference_optimizer import paths as _paths
+        from hyperloom.inference_optimizer.session import paths as _paths
 
         (tmp_path / "runtime").mkdir()
         (tmp_path / "runtime" / "20990101T000000Z").mkdir()

@@ -114,7 +114,7 @@ from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _snapshot_system_prompts,
     resolve_model_display_name,
 )
-from .paths import (
+from .session.paths import (
     mn_profile_trace_root,
     session_dir as _session_dir_resolve,
 )

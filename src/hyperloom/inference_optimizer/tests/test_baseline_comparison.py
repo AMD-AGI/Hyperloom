@@ -364,7 +364,7 @@ def test_analyze_sourceless_target_dropped(tmp_path):
     from hyperloom.orchestrator.knowledge import research_hints
 
     # Emulate a hand-edited file with a sourceless row to exercise load-time filter.
-    from hyperloom.inference_optimizer import session_paths
+    from hyperloom.inference_optimizer.session import session_paths
 
     path = session_paths.competitor_target_json(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -476,7 +476,7 @@ def test_report_section_renders_fetch_error_with_warning():
 
 
 def test_session_paths_helpers_under_target_analysis(tmp_path):
-    from hyperloom.inference_optimizer.session_paths import (
+    from hyperloom.inference_optimizer.session.session_paths import (
         target_analysis_dir,
         target_analysis_report_md,
         target_baseline_json,

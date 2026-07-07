@@ -92,7 +92,7 @@ def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv(CYCLIC_ENV, "1")
-    from hyperloom.inference_optimizer.paths import make_session_dir as _msd
+    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,

@@ -30,7 +30,7 @@ def parts_dir(session_dir: Path | str) -> Path:
     Returns:
         Path: the breakdown parts (spool) directory under the session.
     """
-    from ...session_paths import breakdown_parts_dir  # local: avoid import cycle
+    from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     return breakdown_parts_dir(Path(session_dir))
 

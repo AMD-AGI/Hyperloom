@@ -60,7 +60,7 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
 from ..state.optimization_journal import Journal
-from hyperloom.inference_optimizer.paths import db_path_for
+from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 from ..actions.registry import ActionRegistry
 from ..roles.agent_role import AgentRole, default_role_registry

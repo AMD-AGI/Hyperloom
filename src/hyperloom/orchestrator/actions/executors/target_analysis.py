@@ -114,7 +114,7 @@ class TargetAnalysisExecutor:
         if self.session_dir is not None:
             return self.session_dir
         try:
-            from hyperloom.inference_optimizer.paths import session_dir as _sd
+            from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
             sd = _sd()
             return sd if sd.exists() else None
@@ -219,7 +219,7 @@ class TargetAnalysisExecutor:
             The bus-friendly result dict with status, pointers, and best-point
             metrics when available.
         """
-        from hyperloom.inference_optimizer.session_paths import target_analysis_report_md, target_baseline_json
+        from hyperloom.inference_optimizer.session.session_paths import target_analysis_report_md, target_baseline_json
 
         json_path = target_baseline_json(session_dir)
         md_path = target_analysis_report_md(session_dir)

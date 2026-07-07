@@ -432,7 +432,7 @@ from hyperloom.orchestrator.state.shared_state import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
     _KEY_METRIC_MAP,
 )
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 @pytest.fixture

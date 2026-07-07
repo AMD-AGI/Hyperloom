@@ -58,7 +58,7 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
-# Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.paths; see _paths.py).
+# Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
 
 
@@ -4814,7 +4814,7 @@ _TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
 
 def _default_tracelens_root() -> Path:
     """Installer-managed default checkout path (mirrors install.sh /
-    hyperloom.inference_optimizer.paths.open_source_root)."""
+    hyperloom.inference_optimizer.session.paths.open_source_root)."""
     base = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT") or "/opt/hyperloom/open-source-repos"
     return Path(base) / "TraceLens"
 

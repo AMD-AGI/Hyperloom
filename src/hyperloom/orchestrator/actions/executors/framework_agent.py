@@ -64,7 +64,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._accuracy_gate import (
     accuracy_keep_block,
     accuracy_passed,

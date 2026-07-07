@@ -219,14 +219,14 @@ def _resolve_probe_python() -> str:
 def _resolve_session_dir() -> Path:
     """Resolve the active session_dir for executors that need an output root.
 
-    Reads :func:`hyperloom.inference_optimizer.paths.session_dir` (honors
+    Reads :func:`hyperloom.inference_optimizer.session.paths.session_dir` (honors
     ``$USER_DATA_PATH``, else ``/workspace/hyperloom``). Used by fallback
     paths when ``ctx.extra["workspace"]`` was not pre-mkdir'd.
 
     Returns:
         Path: The resolved active session directory.
     """
-    from hyperloom.inference_optimizer.paths import session_dir as _sd
+    from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
     return _sd()
 

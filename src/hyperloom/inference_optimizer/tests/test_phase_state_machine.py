@@ -17,7 +17,7 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 # fixtures

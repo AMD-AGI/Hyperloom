@@ -28,7 +28,7 @@ from pathlib import Path
 from hyperloom.orchestrator.kernel.request_handlers import (
     _trace_kernel_attempt_usage,
 )
-from hyperloom.inference_optimizer.session_paths import llm_calls_path
+from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 
 
 def _read_rows(session_dir: Path) -> list[dict]:
@@ -157,7 +157,7 @@ def test_forge_steps_written_to_audit(tmp_path: Path) -> None:
     from hyperloom.orchestrator.kernel.request_handlers import (
         _trace_kernel_attempt_steps,
     )
-    from hyperloom.inference_optimizer.session_paths import forge_steps_path
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
 
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
@@ -193,7 +193,7 @@ def test_forge_steps_noop_without_marker(tmp_path: Path) -> None:
     from hyperloom.orchestrator.kernel.request_handlers import (
         _trace_kernel_attempt_steps,
     )
-    from hyperloom.inference_optimizer.session_paths import forge_steps_path
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
 
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()

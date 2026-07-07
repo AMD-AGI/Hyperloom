@@ -77,7 +77,7 @@ from hyperloom.orchestrator.trace.langfuse_emitter import (
     _set_trace_attrs,
     _start_obs,
 )
-from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
 log = logging.getLogger("backfill_langfuse")
 

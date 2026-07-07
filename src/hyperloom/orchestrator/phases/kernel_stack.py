@@ -406,7 +406,7 @@ class KernelStackPhase(PhaseHandler):
             _maybe_revert_kernel_patch,
         )
         from ..loop.sub_agent_runner import RunnerContext
-        from hyperloom.inference_optimizer.session_paths import runs_dir
+        from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
         kernel_ids = [str(e.get("kernel_id") or "") for e in entries]
         stack_id = "+".join(kernel_ids)

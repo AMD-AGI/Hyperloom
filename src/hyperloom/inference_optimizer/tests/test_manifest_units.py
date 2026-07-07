@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``hyperloom.inference_optimizer.manifest`` helpers (objective summary, dependency provenance, image detection)."""
+"""Unit tests for ``hyperloom.inference_optimizer.session.manifest`` helpers (objective summary, dependency provenance, image detection)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer import manifest as mf
+from hyperloom.inference_optimizer.session import manifest as mf
 
 
 # small helpers

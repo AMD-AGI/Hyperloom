@@ -23,7 +23,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
     build_orchestration_prompt,
 )
-from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 @pytest.fixture

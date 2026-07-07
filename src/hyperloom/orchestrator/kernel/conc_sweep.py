@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.session_paths import reports_dir, runs_root
+from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,

@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.inference_optimizer.paths import asset_root
+from hyperloom.inference_optimizer.session.paths import asset_root
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,

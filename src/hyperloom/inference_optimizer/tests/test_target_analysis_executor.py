@@ -297,7 +297,7 @@ class TestResolveSessionDir:
     def test_falls_back_to_paths_session_dir(self, tmp_path, monkeypatch):
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
         monkeypatch.setattr(
-            "hyperloom.inference_optimizer.paths.session_dir",
+            "hyperloom.inference_optimizer.session.paths.session_dir",
             lambda: tmp_path,
         )
         ctx = _unit_ctx()
@@ -310,7 +310,7 @@ class TestResolveSessionDir:
             raise RuntimeError("no session")
 
         monkeypatch.setattr(
-            "hyperloom.inference_optimizer.paths.session_dir",
+            "hyperloom.inference_optimizer.session.paths.session_dir",
             boom,
         )
         assert ex._resolve_session_dir(_unit_ctx()) is None

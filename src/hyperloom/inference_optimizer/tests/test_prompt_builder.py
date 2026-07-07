@@ -20,7 +20,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 @pytest.fixture

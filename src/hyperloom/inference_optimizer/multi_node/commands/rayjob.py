@@ -24,7 +24,7 @@ import os
 import time
 from typing import Any
 
-from ...paths import mn_profile_trace_root
+from ...session.paths import mn_profile_trace_root
 from .._internal import safe_client, ray_dashboard, workload_spec
 from .._internal.log import info, warn
 

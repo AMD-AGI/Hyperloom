@@ -288,7 +288,7 @@ def test_framework_gap_compose() -> None:
 # manifest                                                                     #
 # --------------------------------------------------------------------------- #
 def test_gpu_specialist_capacity_coercions() -> None:
-    from hyperloom.inference_optimizer import manifest
+    from hyperloom.inference_optimizer.session import manifest
 
     assert manifest._gpu_specialist_capacity_from_args(argparse.Namespace(gpu_specialist_capacity=4)) == 4
     # Non-int coerces through the except branch (lines 370-371) then detects.
@@ -347,7 +347,7 @@ def test_validate_envelope_happy_path() -> None:
 # paths                                                                        #
 # --------------------------------------------------------------------------- #
 def test_paths_helpers(monkeypatch, tmp_path) -> None:
-    from hyperloom.inference_optimizer import paths
+    from hyperloom.inference_optimizer.session import paths
 
     # _sanitize_model_basename empty -> "session" (line 139).
     assert paths._sanitize_model_basename("   ") == "session"
@@ -365,12 +365,11 @@ def test_paths_helpers(monkeypatch, tmp_path) -> None:
     assert paths.find_latest_per_session_dir() is None
 
     sd = tmp_path / "sd"
-    assert paths.kernel_agent_runs_root(sd) == sd / "kernel-agent"  # line 383
-    assert paths.optimizer_runs_dir(sd) == sd / "optimizer_runs"  # line 396
+    assert paths.kernel_agent_root(sd) == sd / "kernel-agent"  # line 383
 
 
 def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.inference_optimizer import paths
+    from hyperloom.inference_optimizer.session import paths
 
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path / "nope"))
     with pytest.raises(paths.AssetRootNotFound):

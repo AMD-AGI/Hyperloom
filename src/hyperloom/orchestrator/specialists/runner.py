@@ -24,7 +24,7 @@ from typing import Any
 
 from hyperloom.common import io as _common_io
 
-from hyperloom.inference_optimizer.session_paths import runs_dir, specialist_intel_path
+from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
 from .._time import now_iso
 from ..roles.base import BackendError
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType

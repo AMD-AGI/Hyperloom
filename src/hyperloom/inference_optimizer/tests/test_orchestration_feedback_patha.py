@@ -19,7 +19,7 @@ from hyperloom.orchestrator.loop.coordinator import (
 )
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 # A1 — structured inbox formatter

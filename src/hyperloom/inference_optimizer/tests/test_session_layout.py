@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer import paths
-from hyperloom.inference_optimizer.manifest import (
+from hyperloom.inference_optimizer.session import paths
+from hyperloom.inference_optimizer.session.manifest import (
     SCHEMA_VERSION,
     build_session_id,
     load_manifest,
@@ -26,7 +26,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.inference_optimizer.session_paths import (
+from hyperloom.inference_optimizer.session.session_paths import (
     agent_prompt_snapshot,
     kernel_workspace,
     manifest_path,
@@ -363,12 +363,12 @@ def test_manifest_pod_local_dependency_warning_matches_default_policy(
     monkeypatch,
     caplog,
 ):
-    from hyperloom.inference_optimizer import manifest
+    from hyperloom.inference_optimizer.session import manifest
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
     monkeypatch.setenv("MAGPIE_PATH", "/workspace/hyperloom_runtime_smoke/Magpie")
 
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.manifest"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.manifest"):
         manifest._describe_dep("MAGPIE_PATH")
 
     messages = [r.message for r in caplog.records if "MAGPIE_PATH" in r.message]

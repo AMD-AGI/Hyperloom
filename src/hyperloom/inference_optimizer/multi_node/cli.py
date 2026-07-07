@@ -28,7 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..paths import mn_profile_trace_root
+from ..session.paths import mn_profile_trace_root
 from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client
 from ._internal.log import info, warn, err

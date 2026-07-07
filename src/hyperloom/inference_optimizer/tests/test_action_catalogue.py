@@ -222,7 +222,7 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
 # Drift guards: keep action metadata, session paths, and CLI executor wiring aligned.
 def test_runs_actions_match_pipeline_phases(registry):
     """``_runs_actions()`` must follow registry pipeline phases."""
-    from hyperloom.inference_optimizer.session_paths import (
+    from hyperloom.inference_optimizer.session.session_paths import (
         _RUNS_WORKSPACE_PHASES,
         _runs_actions,
     )
@@ -238,14 +238,14 @@ def test_runs_actions_match_pipeline_phases(registry):
 
 def test_explore_in_runs_actions():
     """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the per-action runs/<kind>/ owner."""
-    from hyperloom.inference_optimizer.session_paths import _runs_actions
+    from hyperloom.inference_optimizer.session.session_paths import _runs_actions
 
     assert "explore" in _runs_actions()
 
 
 def test_runs_actions_fallback_matches_registry(registry):
     """``_RUNS_ACTIONS_FALLBACK`` must stay aligned with the registry-derived set."""
-    from hyperloom.inference_optimizer.session_paths import (
+    from hyperloom.inference_optimizer.session.session_paths import (
         _RUNS_ACTIONS_FALLBACK,
         _RUNS_WORKSPACE_PHASES,
     )
@@ -262,7 +262,7 @@ def test_cli_real_executors_consistent_with_runs_actions():
     """Every real-executor action must be in ``_runs_actions()`` or be a
     special session-root writer (``report``, ``session_breakdown``)."""
     from hyperloom.inference_optimizer.cli import _REAL_EXECUTORS_FULL
-    from hyperloom.inference_optimizer.session_paths import _runs_actions
+    from hyperloom.inference_optimizer.session.session_paths import _runs_actions
 
     SESSION_ROOT_WRITERS = {"report", "session_breakdown"}
     runs = _runs_actions()

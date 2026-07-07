@@ -29,7 +29,7 @@ from typing import Any
 import yaml
 
 from hyperloom.inference_optimizer.compat import read_extra_server_args
-from hyperloom.inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
 from ._file_lock import best_effort_file_lock
@@ -328,7 +328,7 @@ def _resolve_reference_base(
         # instead of the live session dir whose state.json carries the
         # reference_* fields. Prefer the live pin when present; otherwise honor
         # the caller-supplied path (direct-instantiation tests, explicit calls).
-        from hyperloom.inference_optimizer.paths import ENV_CURRENT_SESSION_DIR
+        from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
         _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
         if _pinned:
             session_dir = Path(_pinned)

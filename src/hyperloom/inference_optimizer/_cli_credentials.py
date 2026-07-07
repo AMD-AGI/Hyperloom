@@ -140,7 +140,7 @@ def _resolve_critic_agent_root() -> Path | None:
     if override:
         p = Path(override).expanduser()
         return p if (p / "runtime" / "cli.py").is_file() else None
-    from .paths import PACKAGE_ROOT
+    from .session.paths import PACKAGE_ROOT
 
     candidate = PACKAGE_ROOT.parent / "critic-agent"
     return candidate if (candidate / "runtime" / "cli.py").is_file() else None
@@ -198,7 +198,7 @@ def _resolve_robustness_agent_root() -> Path | None:
     if override:
         p = Path(override).expanduser()
         return p if (p / "src" / "robustness_agent" / "runtime" / "cli.py").is_file() else None
-    from .paths import PACKAGE_ROOT
+    from .session.paths import PACKAGE_ROOT
 
     candidate = PACKAGE_ROOT.parent / "robustness-agent"
     cli_module = candidate / "src" / "robustness_agent" / "runtime" / "cli.py"

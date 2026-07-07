@@ -40,15 +40,15 @@ directory is **platform isolation** (one Claw job). The optimizer then creates
 
 ## Path resolution (do not guess)
 
-`paths.py` is the single authority for Hyperloom paths. The launching agent
-does not need to recreate that logic in shell; it only needs to run
+`session/paths.py` is the single authority for Hyperloom paths. The launching
+agent does not need to recreate that logic in shell; it only needs to run
 `install.sh`, source the generated `runtime/kernel-agent.env.sh`, and read the
 session dir printed by the CLI.
 
 | Concept | Env / helper | Meaning |
 |---|---|---|
-| Workspace root | `$USER_DATA_PATH` → `paths.workspace_root()` | Shared `runtime/` + `logs/` and parent of all sessions |
-| Session dir | `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` → `paths.session_dir()` | Per-run directory containing `manifest.json` / `state.json` / `storage/coordinator.db` |
+| Workspace root | `$USER_DATA_PATH` → `session.paths.workspace_root()` | Shared `runtime/` + `logs/` and parent of all sessions |
+| Session dir | `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` → `session.paths.session_dir()` | Per-run directory containing `manifest.json` / `state.json` / `storage/coordinator.db` |
 
 Open-source dependencies are cloned pod-local, not under `runtime/`:
 `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/`

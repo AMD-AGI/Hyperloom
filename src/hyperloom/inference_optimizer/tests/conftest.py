@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +48,7 @@ _bootstrap_kernel_agent_env()
 
 def seed_target_analysis_marker(session_dir: Path) -> Path:
     """Write a ``no_target_gpu_configured`` marker JSON at the session dir."""
-    from hyperloom.inference_optimizer.session_paths import target_baseline_json
+    from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)

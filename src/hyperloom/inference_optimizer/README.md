@@ -57,8 +57,11 @@ Cursor and Claw.
 src/hyperloom/inference_optimizer/
 ├── SKILL.md                   # Agent instructions (Cursor / Claw entry point)
 ├── cli.py                     # `inference_optimizer optimize` entry point
-├── manifest.py                # Session manifest writer
-├── paths.py                   # USER_DATA_PATH-rooted path helpers
+├── session/                   # Session paths, manifest writer, single-optimizer lock
+│   ├── manifest.py            # Session manifest writer
+│   ├── paths.py               # USER_DATA_PATH-rooted path helpers
+│   ├── session_paths.py       # Per-session artifact path helpers
+│   └── lock.py                # Single-optimizer session lock
 ├── orchestrator/              # Coordinator + agent roles + action executors
 │   ├── action_executors/      # baseline / roofline / explore / sweep / report …
 │   ├── backends/              # Critic / Robustness subprocess adapters

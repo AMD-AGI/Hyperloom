@@ -989,7 +989,7 @@ class TestRunGemmTuningHandler:
     def test_handler_writes_gemm_tuning_audit_row(self, tmp_path, monkeypatch):
         """run_gemm_tuning_handler appends a source-attribution audit row that
         the Langfuse emitter backfills as a ``gemm_tuning:<engine>`` span."""
-        from hyperloom.inference_optimizer.session_paths import gemm_tuning_steps_path
+        from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(

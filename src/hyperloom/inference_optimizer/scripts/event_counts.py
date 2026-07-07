@@ -57,9 +57,9 @@ def main() -> int:
     if args.session_dir is not None:
         session_dir = pathlib.Path(args.session_dir)
     else:
-        # Defer to hyperloom.inference_optimizer.paths so resolution rules
+        # Defer to hyperloom.inference_optimizer.session.paths so resolution rules
         # (env > default) stay in one place.
-        from hyperloom.inference_optimizer.paths import session_dir as _resolve_sd
+        from hyperloom.inference_optimizer.session.paths import session_dir as _resolve_sd
 
         session_dir = _resolve_sd()
     db = pathlib.Path(session_dir) / "storage" / "coordinator.db"

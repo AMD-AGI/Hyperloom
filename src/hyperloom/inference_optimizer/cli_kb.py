@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
-from .paths import workspace_root as _workspace_root_resolve
+from .session.paths import workspace_root as _workspace_root_resolve
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
@@ -69,7 +69,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 
     from datetime import datetime, timezone
 
-    from .session_paths import recipe_snapshot_audit_jsonl
+    from .session.session_paths import recipe_snapshot_audit_jsonl
 
     audit_path = recipe_snapshot_audit_jsonl(Path(session_dir))
 
@@ -268,8 +268,8 @@ def _bootstrap_knowledge_plane(
     # without scraping logs (best-effort).
     if session_dir is not None:
         try:
-            from .session_paths import pr_monitor_status_json
-            from .paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
+            from .session.session_paths import pr_monitor_status_json
+            from .session.paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
 
             marker = pr_monitor_status_json(session_dir)
             marker.parent.mkdir(parents=True, exist_ok=True)

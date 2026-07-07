@@ -20,7 +20,7 @@ from hyperloom.orchestrator.scoring.proposal_scorer import (
     _extract_scores_json,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
-from hyperloom.inference_optimizer.session_paths import (
+from hyperloom.inference_optimizer.session.session_paths import (
     conversations_path,
     llm_calls_path,
 )

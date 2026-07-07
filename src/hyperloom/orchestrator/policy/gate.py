@@ -483,7 +483,7 @@ def _trace_path_allowlist() -> tuple[str, ...]:
             trace root with a trailing ``/`` so prefix ``startswith`` checks are
             path-boundary safe.
     """
-    from hyperloom.inference_optimizer.paths import mn_profile_trace_root
+    from hyperloom.inference_optimizer.session.paths import mn_profile_trace_root
 
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)

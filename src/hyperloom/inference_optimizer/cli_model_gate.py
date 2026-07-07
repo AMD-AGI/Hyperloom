@@ -1592,7 +1592,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             _build_summary_dict,
             _format_md,
         )
-        from .session_paths import reports_dir
+        from .session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
@@ -1673,7 +1673,7 @@ def _preflight_model_config_compat(
             _build_summary_dict,
             _format_md,
         )
-        from .session_paths import reports_dir
+        from .session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
         state.set_stop_reason("model_config_incompatible")
@@ -1792,7 +1792,7 @@ def _preflight_unsupported_model_arch(
             _build_summary_dict,
             _format_md,
         )
-        from .session_paths import reports_dir
+        from .session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).

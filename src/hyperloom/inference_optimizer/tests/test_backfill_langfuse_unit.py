@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 from hyperloom.inference_optimizer.scripts import backfill_langfuse as bf
-from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
 
 def _seed(session_dir: Path) -> None:

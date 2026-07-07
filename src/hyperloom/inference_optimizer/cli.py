@@ -210,7 +210,7 @@ __all__ = [
     "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
 ]
 from . import framework_registry
-from .manifest import load_manifest, write_manifest
+from .session.manifest import load_manifest, write_manifest
 from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
@@ -221,8 +221,8 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from .session_lock import SessionAlreadyRunning, SessionLock
-from .paths import (
+from .session.lock import SessionAlreadyRunning, SessionLock
+from .session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
@@ -1114,7 +1114,7 @@ def _emit_preflight_diagnostics(
         BASELINE_DEFAULT_TIMEOUT_SEC,
         _probe_aiter_jit_cache,
     )
-    from .paths import asset_root
+    from .session.paths import asset_root
 
     probe = _probe_aiter_jit_cache()
     cold_cap = os.environ.get(
@@ -1195,7 +1195,7 @@ def _print_cortex_kb_queue_status() -> None:
         Side-effecting: writes the queue status summary to stdout and returns
         nothing.
     """
-    from .session_paths import (
+    from .session.session_paths import (
         cortex_dead_letter_ndjson,
         cortex_flushed_ndjson,
         cortex_pending_ndjson,
@@ -1741,7 +1741,7 @@ def _preflight(
         if magpie_env:
             magpie_dir = Path(magpie_env)
         else:
-            from .paths import magpie_dir as _magpie_default
+            from .session.paths import magpie_dir as _magpie_default
 
             magpie_dir = _magpie_default(_session_dir_resolve())
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1772,7 +1772,7 @@ def _preflight(
     # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
-        from .paths import (
+        from .session.paths import (
             magpie_dir as _magpie_default,
             open_source_root as _open_source_default,
         )
@@ -1799,7 +1799,7 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .paths import open_source_root as _open_source_default
+        from .session.paths import open_source_root as _open_source_default
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
@@ -2390,7 +2390,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Resume mode: USER_DATA_PATH stays at workspace level; pick the per-session subdir via --resume-from
         # or auto-pick the latest under <model>/<ts>/ (legacy flat layout fallback). Pin
         # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR so paths/subprocesses resolve consistently.
-        from .paths import (
+        from .session.paths import (
             ENV_CURRENT_SESSION_DIR,
             find_latest_per_session_dir,
             workspace_root,
@@ -2432,7 +2432,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
         os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
         # Ensure per-session skeleton exists (idempotent mkdir -p).
-        for sub in __import__("hyperloom.inference_optimizer.paths", fromlist=["_SESSION_SKELETON"])._SESSION_SKELETON:
+        for sub in __import__(
+            "hyperloom.inference_optimizer.session.paths", fromlist=["_SESSION_SKELETON"]
+        )._SESSION_SKELETON:
             (session_dir / sub).mkdir(parents=True, exist_ok=True)
 
         # Single-optimizer guard (issue #592): take the session lock before any

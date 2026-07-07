@@ -321,7 +321,7 @@ def test_prelude_skipped_on_resume(monkeypatch):
 
 
 def test_prelude_rewrites_model_on_success(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.paths as paths
+    import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
 
@@ -353,7 +353,7 @@ def test_prelude_noop_when_scheme_none(monkeypatch):
 
 
 def test_prelude_uses_scheme_enum_when_no_freetext(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.paths as paths
+    import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     seen = {}
@@ -396,7 +396,7 @@ def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
 
 
 def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.paths as paths
+    import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     monkeypatch.delenv("GPU_TYPE", raising=False)
@@ -414,7 +414,7 @@ def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):
 
 
 def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.paths as paths
+    import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     seen = {}
@@ -437,7 +437,7 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
     ``<root>/quantized/<ts>`` and the report only shows ``Model: quantized``,
     losing the real model name and colliding across models.
     """
-    import hyperloom.inference_optimizer.paths as paths
+    import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
 

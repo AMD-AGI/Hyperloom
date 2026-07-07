@@ -793,7 +793,7 @@ def test_flush_backfills_recipe_snapshot_audit(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
     audit = recipe_snapshot_audit_jsonl(sd)
     audit.parent.mkdir(parents=True, exist_ok=True)
@@ -835,7 +835,7 @@ def test_flush_recipe_audit_idempotent(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    from hyperloom.inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
     audit = recipe_snapshot_audit_jsonl(sd)
     audit.parent.mkdir(parents=True, exist_ok=True)
@@ -865,7 +865,7 @@ def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    from hyperloom.inference_optimizer.session_paths import specialist_intel_path
+    from hyperloom.inference_optimizer.session.session_paths import specialist_intel_path
     intel = specialist_intel_path(sd)
     intel.parent.mkdir(parents=True, exist_ok=True)
     intel.write_text("\n".join(json.dumps(r) for r in [
@@ -888,7 +888,7 @@ def test_flush_backfills_forge_steps(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    from hyperloom.inference_optimizer.session_paths import forge_steps_path
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
     steps = forge_steps_path(sd)
     steps.parent.mkdir(parents=True, exist_ok=True)
     steps.write_text("\n".join(json.dumps(r) for r in [
@@ -914,7 +914,7 @@ def test_flush_backfills_gemm_tuning(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    from hyperloom.inference_optimizer.session_paths import gemm_tuning_steps_path
+    from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
     steps = gemm_tuning_steps_path(sd)
     steps.parent.mkdir(parents=True, exist_ok=True)
     steps.write_text("\n".join(json.dumps(r) for r in [

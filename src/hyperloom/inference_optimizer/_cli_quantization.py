@@ -216,7 +216,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         )
         return
 
-    from .paths import workspace_root
+    from .session.paths import workspace_root
 
     source_model = str(args.model)
     workspace = workspace_root() / "quantization" / Path(source_model).name

@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
-from hyperloom.inference_optimizer.session_paths import allocate_turn_workdir, manifest_path
+from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from .._json_io import extract_first_json_with_key
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call

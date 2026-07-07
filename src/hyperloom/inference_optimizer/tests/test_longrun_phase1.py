@@ -21,7 +21,7 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
@@ -202,7 +202,7 @@ def test_budget_minutes_ignores_cycle_window_for_short_run():
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv(CYCLIC_ENV, "1")
-    from hyperloom.inference_optimizer.paths import make_session_dir as _msd
+    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,

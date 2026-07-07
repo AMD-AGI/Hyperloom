@@ -354,7 +354,7 @@ def test_retry_policy_from_env(monkeypatch):
 async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS", "10")
-    from hyperloom.inference_optimizer.paths import make_session_dir
+    from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,

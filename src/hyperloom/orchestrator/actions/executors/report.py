@@ -24,7 +24,7 @@ from hyperloom.common import io as _common_io
 
 from ...bus.message_bus import MessageBus
 from ...state.shared_state import SharedState
-from hyperloom.inference_optimizer.paths import db_path_for
+from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 
 
@@ -888,7 +888,7 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
         unreadable.
     """
     try:
-        from hyperloom.inference_optimizer.session_paths import target_baseline_json
+        from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
         path = target_baseline_json(session_dir)
         if not path.exists():
@@ -962,7 +962,7 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
         A compact pointer dict for ``final.json``, or ``None`` when no
         conc-sweep summary exists or it is unreadable.
     """
-    from hyperloom.inference_optimizer.session_paths import reports_dir as _reports_dir
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     if not json_path.exists():
@@ -1088,7 +1088,7 @@ class ReportExecutor:
             return {"status": "failed", "error": "report_executor: could not resolve session_dir"}
 
         params = ctx.task.params or {}
-        from hyperloom.inference_optimizer.session_paths import reports_dir
+        from hyperloom.inference_optimizer.session.session_paths import reports_dir
 
         output_dir = Path(params.get("output_dir") or reports_dir(session_dir))
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1196,7 +1196,7 @@ class ReportExecutor:
         params = ctx.task.params or {}
         if params.get("session_dir"):
             return Path(params["session_dir"])
-        from hyperloom.inference_optimizer.paths import session_dir as _sd
+        from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
         candidate = _sd()
         if candidate.exists() and (candidate / "state.json").exists():

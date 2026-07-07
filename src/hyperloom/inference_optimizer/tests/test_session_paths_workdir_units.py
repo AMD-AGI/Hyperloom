@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for lesser-covered helpers in :mod:`hyperloom.inference_optimizer.session_paths`.
+"""Unit tests for lesser-covered helpers in :mod:`hyperloom.inference_optimizer.session.session_paths`.
 
 Covers the per-turn workdir allocator + its stale-dir pruner, the ext-trace
 shard path fallback, and the ``_runs_actions`` import-failure fallback.
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.inference_optimizer import session_paths
+from hyperloom.inference_optimizer.session import session_paths
 
 
 def test_ext_trace_path_blank_component_falls_back_to_unknown(tmp_path):
@@ -67,7 +67,7 @@ def test_prune_old_workdirs_noop_when_under_keep(tmp_path):
 
 
 def test_runs_actions_fallback_on_import_failure(monkeypatch):
-    import hyperloom.inference_optimizer.session_paths as sp
+    import hyperloom.inference_optimizer.session.session_paths as sp
 
     # Force the registry construction path to raise so the fallback is used.
     import hyperloom.orchestrator.actions.registry as ar

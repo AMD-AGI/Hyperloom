@@ -424,7 +424,7 @@ write_local_env() {
     write_export HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
     write_export HYPERLOOM_DEPS_ROOT "$HYPERLOOM_DEPS_ROOT"
     # Also export the canonical open-source-root key so install.sh /
-    # hyperloom.inference_optimizer.paths / the handler / the tool resolve the SAME
+    # hyperloom.inference_optimizer.session.paths / the handler / the tool resolve the SAME
     # default TraceLens path when this env file is sourced. Without it, a
     # --deps-root / HYPERLOOM_DEPS_ROOT override would leave those consumers on
     # /opt/hyperloom/open-source-repos and mis-classify managed vs override (#722).

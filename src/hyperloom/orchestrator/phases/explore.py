@@ -1423,7 +1423,7 @@ class ExplorePhase(PhaseHandler):
         if not sid:
             return
         # Resolve patches_written against worktree + workspace; submit only when >=1 real file exists.
-        from hyperloom.inference_optimizer.session_paths import runs_dir as _runs_dir
+        from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
 
         resolve_bases: list[Path] = []
         if self.session_dir is not None:

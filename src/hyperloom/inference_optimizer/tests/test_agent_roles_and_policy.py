@@ -32,7 +32,7 @@ from hyperloom.orchestrator.policy.gate import (
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 # agent_role

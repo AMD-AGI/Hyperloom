@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 
 from ..breakdown import BREAKDOWN_FILENAME, build, write_breakdown_json
-from ..paths import session_dir as default_session_dir
+from ..session.paths import session_dir as default_session_dir
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -26,7 +26,7 @@ from hyperloom.orchestrator.trace.conversation_trace import (
 from hyperloom.orchestrator.trace.parse_usage import (
     parse_claude_stream_json_response,
 )
-from hyperloom.inference_optimizer.session_paths import conversations_path
+from hyperloom.inference_optimizer.session.session_paths import conversations_path
 
 
 # ---------------------------------------------------------------------------

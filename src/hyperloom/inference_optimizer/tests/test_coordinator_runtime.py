@@ -35,7 +35,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.inference_optimizer.session_paths import target_baseline_json
+from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.inference_optimizer.storage import SqliteConnection
 
 
@@ -1297,7 +1297,7 @@ async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
 
 
 def test_critic_md_carves_out_archival_actions():
-    from hyperloom.inference_optimizer.paths import asset_system_prompts_dir
+    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     path = asset_system_prompts_dir() / "critic.md"
     text = path.read_text(encoding="utf-8")

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer import paths
+from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.cli import _resolve_local_kb_root
 
 _DEFAULT = "/workspace/hyperloom"
@@ -69,7 +69,7 @@ def test_no_warning_emitted_when_set(
 ) -> None:
     """The loud warning fires ONLY on misconfiguration; a correctly configured run stays quiet."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.paths"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.paths"):
         paths.workspace_root()
     assert not [r for r in caplog.records if paths.ENV_USER_DATA_PATH in r.message]
 
@@ -79,7 +79,7 @@ def test_workspace_root_falls_back_and_warns_when_unset(
     clean_env: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.paths"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.paths"):
         result = paths.workspace_root()
     assert result == paths.DEFAULT_SESSION_DIR == Path(_DEFAULT)
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and paths.ENV_USER_DATA_PATH in r.message]
@@ -97,7 +97,7 @@ def test_unset_warning_is_emitted_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Hot-path guard: the warning fires at most once per process so it doesn't drown logs."""
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.paths"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.paths"):
         paths.workspace_root()
         paths.workspace_root()
         paths.workspace_root()
@@ -113,7 +113,7 @@ def test_manifest_warns_when_dependency_is_pod_local(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A dependency override into a pod-local /workspace path must warn loudly."""
-    from hyperloom.inference_optimizer import manifest
+    from hyperloom.inference_optimizer.session import manifest
 
     user_data = tmp_path / "user_data"
     # The dir need not exist; the escape guard runs before the is_dir gate.
@@ -121,7 +121,7 @@ def test_manifest_warns_when_dependency_is_pod_local(
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
     monkeypatch.setenv("MAGPIE_PATH", pod_local)
 
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.manifest"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.manifest"):
         manifest._describe_dep("MAGPIE_PATH")
 
     assert any("MAGPIE_PATH" in r.message and "pod-local" in r.message for r in caplog.records), (
@@ -136,7 +136,7 @@ def test_manifest_does_not_warn_for_persistent_shared_checkout(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A persistent shared checkout outside USER_DATA_PATH (e.g. a WekaFS mirror) is legitimate and must NOT warn."""
-    from hyperloom.inference_optimizer import manifest
+    from hyperloom.inference_optimizer.session import manifest
 
     user_data = tmp_path / "user_data"
     user_data.mkdir(parents=True)
@@ -145,7 +145,7 @@ def test_manifest_does_not_warn_for_persistent_shared_checkout(
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
     monkeypatch.setenv("INFERENCEX_PATH", shared)
 
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.manifest"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.manifest"):
         dep = manifest._describe_dep("INFERENCEX_PATH")
 
     assert dep["path"] == shared
@@ -158,7 +158,7 @@ def test_manifest_does_not_warn_when_dependency_under_user_data(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from hyperloom.inference_optimizer import manifest
+    from hyperloom.inference_optimizer.session import manifest
 
     user_data = tmp_path / "user_data"
     magpie = user_data / "runtime" / "Magpie"
@@ -166,7 +166,7 @@ def test_manifest_does_not_warn_when_dependency_under_user_data(
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
     monkeypatch.setenv("MAGPIE_PATH", str(magpie))
 
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.manifest"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.manifest"):
         dep = manifest._describe_dep("MAGPIE_PATH")
 
     assert dep["path"] == str(magpie)

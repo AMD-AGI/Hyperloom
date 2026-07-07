@@ -241,7 +241,7 @@ def get_recorder(session_dir: Path | str, *, producer: str) -> Recorder:
         The process-cached :class:`Recorder` for the
         ``(session_dir, producer)`` pair.
     """
-    from ...session_paths import breakdown_parts_dir  # local: avoid import cycle
+    from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     pd = breakdown_parts_dir(Path(session_dir))
     cache_key = (str(pd), _slug(producer))

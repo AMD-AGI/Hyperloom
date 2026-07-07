@@ -16,8 +16,9 @@ import sys
 
 import pytest
 
-from hyperloom.inference_optimizer import session_lock, session_paths
-from hyperloom.inference_optimizer.session_lock import (
+from hyperloom.inference_optimizer.session import lock as session_lock
+from hyperloom.inference_optimizer.session import session_paths
+from hyperloom.inference_optimizer.session.lock import (
     SessionAlreadyRunning,
     SessionLock,
 )
@@ -133,7 +134,7 @@ def test_pid_fallback_takes_over_dead_owner(tmp_path, monkeypatch):
 
 def test_pid_alive_edge_cases(monkeypatch):
     """_pid_alive covers None/non-positive, ProcessLookup, Permission, OSError."""
-    from hyperloom.inference_optimizer.session_lock import _pid_alive
+    from hyperloom.inference_optimizer.session.lock import _pid_alive
 
     assert _pid_alive(None) is False
     assert _pid_alive(0) is False

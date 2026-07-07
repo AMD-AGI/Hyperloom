@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.paths import asset_actions_dir
+from hyperloom.inference_optimizer.session.paths import asset_actions_dir
 
 
 # ``family`` is a prompt grouping label only; no runtime scheduler uses it.

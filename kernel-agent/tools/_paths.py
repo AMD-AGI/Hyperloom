@@ -2,7 +2,7 @@
 
 """Workspace-root resolver for the standalone kernel-agent tools.
 
-Stdlib-only mirror of ``hyperloom.inference_optimizer.paths.workspace_root``.
+Stdlib-only mirror of ``hyperloom.inference_optimizer.session.paths.workspace_root``.
 """
 
 from __future__ import annotations

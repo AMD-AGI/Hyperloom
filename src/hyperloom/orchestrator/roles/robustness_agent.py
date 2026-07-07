@@ -25,7 +25,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
-from hyperloom.inference_optimizer.session_paths import allocate_turn_workdir
+from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 from .base import BackendError, BackendTurnResult
 

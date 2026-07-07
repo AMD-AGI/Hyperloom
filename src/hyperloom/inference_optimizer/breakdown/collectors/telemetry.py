@@ -407,7 +407,7 @@ def collect_kb_provenance(
         dict[str, Any]: The KB-provenance section (warm-start fields, queue
         counts, audit-status tail, recipe-snapshot reads, and flusher status).
     """
-    from ...session_paths import (
+    from ...session.session_paths import (
         cortex_audit_jsonl as _audit_path,
         cortex_dead_letter_ndjson as _dl_path,
         cortex_flushed_ndjson as _flushed_path,

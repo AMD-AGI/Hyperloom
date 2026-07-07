@@ -21,7 +21,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.inference_optimizer.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 def _heartbeat() -> Intent:
@@ -1828,7 +1828,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
 
 # -- _maybe_autosubmit_specialist_patches early returns ---------------------
 def _make_real_patch(coord: Coordinator, sid: str) -> None:
-    from hyperloom.inference_optimizer.session_paths import runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     wt = runs_dir(coord.session_dir, "specialist", sid) / "worktree"
     wt.mkdir(parents=True, exist_ok=True)

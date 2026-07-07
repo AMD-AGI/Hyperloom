@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer
-from hyperloom.inference_optimizer import paths
+from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.storage import (
     SCHEMA_VERSION,
     SqliteConnection,

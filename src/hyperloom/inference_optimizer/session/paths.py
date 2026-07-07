@@ -28,7 +28,12 @@ ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
+# tree-reform.MD P2.4: this module lives one level deeper than before (moved
+# from ``inference_optimizer/paths.py`` into ``inference_optimizer/session/
+# paths.py``), but the shipped read-only asset dirs it resolves
+# (``scripts/``, ``actions/``, ``kernel_opt/``) still live directly under
+# ``inference_optimizer/`` — hence ``.parent.parent``, not ``.parent``.
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 # One-shot guard so the "USER_DATA_PATH unset" fallback warning fires at most
 # once per process (workspace_root() is on a hot path).
@@ -400,10 +405,15 @@ def tracelens_root() -> Path:
     return open_source_root() / "TraceLens"
 
 
-def kernel_agent_runs_root(session_dir: Path) -> Path:
+def kernel_agent_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/`` — kernel-agent CLI tool output root (one
     ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
     ``<sd>/kernel-agent-workspace/``.
+
+    tree-reform.MD §2.4/P2.4: renamed from ``kernel_agent_runs_root`` (which
+    collided with the unrelated ``session_paths.kernel_agent_runs_root`` —
+    that one returns the ``runs/`` subdirectory *one level below* this
+    root) to remove the same-name-different-meaning ambiguity.
 
     Args:
         session_dir: The session directory root.
@@ -412,19 +422,6 @@ def kernel_agent_runs_root(session_dir: Path) -> Path:
         ``<session_dir>/kernel-agent``.
     """
     return Path(session_dir) / "kernel-agent"
-
-
-def optimizer_runs_dir(session_dir: Path) -> Path:
-    """``<sd>/optimizer_runs/`` — launcher stdout / PID / robustness monitor
-    logs.
-
-    Args:
-        session_dir: The session directory root.
-
-    Returns:
-        ``<session_dir>/optimizer_runs``.
-    """
-    return Path(session_dir) / "optimizer_runs"
 
 
 def mn_profile_trace_root() -> Path:
@@ -454,12 +451,11 @@ __all__ = [
     "asset_scripts_dir",
     "asset_system_prompts_dir",
     "db_path_for",
-    "kernel_agent_runs_root",
+    "kernel_agent_root",
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
     "open_source_root",
-    "optimizer_runs_dir",
     "runtime_dir",
     "session_dir",
     "find_latest_per_session_dir",

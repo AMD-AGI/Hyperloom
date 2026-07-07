@@ -11,7 +11,7 @@ from hyperloom.orchestrator.knowledge import research_hints
 
 
 def _write(session_dir: Path, payload: dict) -> None:
-    from hyperloom.inference_optimizer import session_paths
+    from hyperloom.inference_optimizer.session import session_paths
 
     path = session_paths.competitor_target_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)

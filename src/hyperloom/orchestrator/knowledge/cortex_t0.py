@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 
 from hyperloom.inference_optimizer.recipe_kb import RecipeKB, recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
-from hyperloom.inference_optimizer.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
+from hyperloom.inference_optimizer.session.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
 
 log = logging.getLogger(__name__)

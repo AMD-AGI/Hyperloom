@@ -195,8 +195,13 @@ def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation
     kernel-agent run dirs (keyed by tool-invocation session id beneath it).
 
-    Note: distinct from ``paths.kernel_agent_runs_root`` which returns the
-    kernel-agent *root* (one level above ``runs/``).
+    Note: distinct from ``paths.kernel_agent_root`` which returns the
+    kernel-agent *root* (one level above ``runs/``). tree-reform.MD
+    §2.4/P2.4: ``paths.py`` used to also define a ``kernel_agent_runs_root``
+    that returned that different (root, not runs/) path; it was renamed to
+    ``kernel_agent_root`` to remove the same-name-different-meaning
+    ambiguity. This function's name is unchanged — it already describes the
+    ``runs/`` directory it returns.
 
     Args:
         session_dir: The session root directory.

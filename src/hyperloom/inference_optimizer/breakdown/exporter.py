@@ -830,7 +830,7 @@ def write_minimal_final_report(
         The path of the (existing or newly written) ``final.md`` file.
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
-    from ..session_paths import reports_dir
+    from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.md"
@@ -973,7 +973,7 @@ def write_minimal_final_json(
     from datetime import datetime, timezone
 
     from hyperloom.orchestrator.state.shared_state import SharedState
-    from ..session_paths import reports_dir
+    from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"

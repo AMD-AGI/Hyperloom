@@ -75,7 +75,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.session_paths import runs_dir
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..._time import now_iso
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
