@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer import cli_bootstrap as cb
+from hyperloom.inference_optimizer.cli import bootstrap as cb
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

@@ -297,7 +297,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     )
 
     # Monkey-patch ClaudeBackend so the cli factory doesn't reach the real SDK.
-    import hyperloom.inference_optimizer.cli_executors as cli_mod
+    import hyperloom.inference_optimizer.cli.executors as cli_mod
 
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(
@@ -372,7 +372,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
         loop_last=True,
     )
 
-    import hyperloom.inference_optimizer.cli_executors as cli_mod
+    import hyperloom.inference_optimizer.cli.executors as cli_mod
 
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-stale")

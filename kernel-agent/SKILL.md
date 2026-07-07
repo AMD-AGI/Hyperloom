@@ -628,7 +628,7 @@ kernel-agent flow adapts transparently:
   measure pre-patch behaviour and integrate decisions become noise.
 * RayJob recreate — when a fresh RayJob is provisioned (after OOM /
   manual recreate), `_replay_kernel_patches_for_multi_node` in
-  `src/hyperloom/inference_optimizer/cli.py` scans the session's kernel-agent
+  `src/hyperloom/inference_optimizer/cli/__init__.py` scans the session's kernel-agent
   workspace for applied manifests and replays each via `apply-patch`
   so the new pods start in the post-stack state.
 

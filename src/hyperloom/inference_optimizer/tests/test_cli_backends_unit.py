@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer import cli_backends as clib
+from hyperloom.inference_optimizer.cli import backends as clib
 
 
 @pytest.fixture(autouse=True)

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for :mod:`hyperloom.inference_optimizer.cli_executors`.
+"""Unit tests for :mod:`hyperloom.inference_optimizer.cli.executors`.
 
 Cover the specialist-executor factory (both the subprocess and in-process
 branches) and the ``_register_executors`` wiring / ``_noop_prep`` stub without
@@ -20,8 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import hyperloom.inference_optimizer.cli_executors as cli_executors
-from hyperloom.inference_optimizer.cli_executors import (
+import hyperloom.inference_optimizer.cli.executors as cli_executors
+from hyperloom.inference_optimizer.cli.executors import (
     _build_specialist_executor,
     _noop_prep,
     _register_executors,

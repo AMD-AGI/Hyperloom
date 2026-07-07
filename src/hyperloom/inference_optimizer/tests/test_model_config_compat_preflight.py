@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer import cli
-from hyperloom.inference_optimizer import cli_model_gate
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 
 
 def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:

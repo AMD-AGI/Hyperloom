@@ -171,7 +171,7 @@ omit = [
     "*/__main__.py",
     "setup.py",
     # CLI driver scripts (subprocess plumbing dominated).
-    "src/hyperloom/inference_optimizer/cli.py",
+    "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",
     "src/hyperloom/inference_optimizer/multi_node/scripts/*",
     "src/hyperloom/inference_optimizer/multi_node/_internal/*",

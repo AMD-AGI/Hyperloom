@@ -55,23 +55,30 @@ Cursor and Claw.
 
 ```
 src/hyperloom/inference_optimizer/
-├── SKILL.md                   # Agent instructions (Cursor / Claw entry point)
-├── cli.py                     # `inference_optimizer optimize` entry point
-├── session/                   # Session paths, manifest writer, single-optimizer lock
-│   ├── manifest.py            # Session manifest writer
-│   ├── paths.py               # USER_DATA_PATH-rooted path helpers
-│   ├── session_paths.py       # Per-session artifact path helpers
-│   └── lock.py                # Single-optimizer session lock
-├── orchestrator/              # Coordinator + agent roles + action executors
-│   ├── action_executors/      # baseline / roofline / explore / sweep / report …
-│   ├── backends/              # Critic / Robustness subprocess adapters
-│   └── system_prompts/        # Orchestration prompt construction
-├── baseline_comparison/       # InferenceX reference fetching & target analysis
-├── breakdown/                 # session_breakdown.json producer (downstream contract)
-├── actions/                   # Per-action markdown specs + scheduling metadata
-├── scripts/                   # install.sh, dump scripts, baseline/profile configs
-└── tests/                     # Unit + regression tests
+├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
+├── references/                 # SKILL reference chapters (benchmark/cache/critic/…)
+├── cli/                        # `inference_optimizer optimize` entry point
+│   ├── __init__.py             # main()/_build_parser()/_preflight()/_run_optimize()
+│   ├── backends/bootstrap/executors/kb/model_gate/model_config_utils.py
+│   └── credentials/multi_node/quantization/recover.py
+├── session/                    # Session paths, manifest writer, single-optimizer lock
+│   ├── manifest.py             # Session manifest writer
+│   ├── paths.py                # USER_DATA_PATH-rooted path helpers
+│   ├── session_paths.py        # Per-session artifact path helpers
+│   └── lock.py                 # Single-optimizer session lock
+├── baseline_comparison/        # InferenceX reference fetching & target analysis
+├── breakdown/                  # session_breakdown.json producer (downstream contract)
+├── actions/                    # Per-action markdown specs + scheduling metadata
+├── tools/                      # Operator CLIs (dump_session_breakdown/event_counts/…)
+├── experiments/                # A/B and roofline-audit scripts
+├── assets/                     # install.sh/local_setup.sh + baseline/profile configs
+├── data/                       # Framework/recipe reference data (framework/, recipes/)
+└── tests/                      # Unit + regression tests
 ```
+
+The Coordinator + agent roles + action executors live in the sibling
+`hyperloom.orchestrator` package (`src/hyperloom/orchestrator/`), not under
+`inference_optimizer/` (tree-reform.MD P2.3).
 
 ## Package metadata
 

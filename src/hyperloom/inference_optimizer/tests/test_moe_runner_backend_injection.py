@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer import cli
-from hyperloom.inference_optimizer import cli_model_gate
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
     HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,

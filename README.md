@@ -121,10 +121,13 @@ Hyperloom/
 │   ├── common/                           # Zero-dependency shared library (io/env/jsonio/...)
 │   ├── inference_optimizer/              # Inference optimization skill (sole entry point)
 │   │   ├── SKILL.md                      # Skill spec (Cursor/Claw entry point)
-│   │   ├── cli.py                        # CLI entry: inference_optimizer optimize
+│   │   ├── cli/                          # CLI entry: inference_optimizer optimize
+│   │   ├── session/                      # Session paths, manifest writer, single-optimizer lock
 │   │   ├── actions/_meta/                # Action metadata and scheduling policy
 │   │   ├── baseline_comparison/          # InferenceX baseline comparison and target analysis
-│   │   ├── scripts/                      # Install scripts, baseline/profile configs
+│   │   ├── tools/                        # Operator CLIs (dump_session_breakdown/event_counts/…)
+│   │   ├── experiments/                  # A/B and roofline-audit scripts
+│   │   ├── assets/                       # Install scripts, baseline/profile configs
 │   │   └── tests/                        # Inference optimizer unit and regression tests
 │   └── orchestrator/                     # Coordinator + agent roles + action executors
 │       ├── loop/                         # Coordinator facade + collaborators

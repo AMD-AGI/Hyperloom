@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer import cli_model_gate
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.orchestrator.actions.executors import _workload_envs
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,

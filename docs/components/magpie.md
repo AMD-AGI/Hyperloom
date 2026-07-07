@@ -54,7 +54,7 @@ Hyperloom installs Magpie for you during install/preflight rather than via
 `local_setup.sh`. `src/hyperloom/inference_optimizer/assets/install.sh` clones it (pinned to
 `MAGPIE_REF`, default under `$MAGPIE_PATH`) and editable-installs it, while also
 applying the Hyperloom atomic benchmark-script patch when needed.
-`src/hyperloom/inference_optimizer/cli.py` can also clone + `pip install -e` Magpie on
+`src/hyperloom/inference_optimizer/cli/__init__.py` can also clone + `pip install -e` Magpie on
 preflight if it is not importable; that fallback clone uses the repository
 default branch rather than the install-time `MAGPIE_REF` pin. Magpie subprocesses
 are launched with the interpreter

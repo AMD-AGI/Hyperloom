@@ -444,7 +444,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         ]
     )
 
-    import hyperloom.inference_optimizer.cli_executors as cli_mod
+    import hyperloom.inference_optimizer.cli.executors as cli_mod
 
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-mock")

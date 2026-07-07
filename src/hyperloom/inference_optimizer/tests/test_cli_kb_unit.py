@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 
 
-from hyperloom.inference_optimizer import cli_kb
+from hyperloom.inference_optimizer.cli import kb as cli_kb
 
 
 def _args(**over):
