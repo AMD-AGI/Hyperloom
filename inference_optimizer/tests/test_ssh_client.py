@@ -26,7 +26,14 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
-def test_ssh_run_builds_expected_argv(monkeypatch):
+@pytest.fixture
+def known_hosts(tmp_path):
+    kh = tmp_path / "known_hosts"
+    kh.write_text("", encoding="utf-8")
+    return kh
+
+
+def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts):
     captured = {}
 
     def _run(argv, **kwargs):
@@ -39,25 +46,24 @@ def test_ssh_run_builds_expected_argv(monkeypatch):
         "10.0.0.1",
         "echo hi",
         key_path="/k/id",
+        known_hosts=known_hosts,
         port=2345,
         timeout=42,
     )
     assert cp.returncode == 0
     argv = captured["argv"]
     assert argv[0] == "ssh"
-    # Key / port / target / remote shell are all present and ordered.
     assert "-i" in argv and argv[argv.index("-i") + 1] == "/k/id"
     assert "-p" in argv and argv[argv.index("-p") + 1] == "2345"
     assert "root@10.0.0.1" in argv
     assert argv[-3:] == ["bash", "-lc", shlex.quote("echo hi")]
-    # Hardened non-interactive options must be present.
-    assert "StrictHostKeyChecking=no" in argv
-    assert "BatchMode=yes" in argv
+    assert "StrictHostKeyChecking=yes" in argv
+    assert str(known_hosts) in " ".join(argv)
     assert captured["kwargs"]["timeout"] == 42
     assert captured["kwargs"]["capture_output"] is True
 
 
-def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch):
+def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch, known_hosts):
     captured = {}
 
     def _run(argv, **kwargs):
@@ -72,37 +78,47 @@ def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch):
         "python3",
         "--flag v",
         key_path="/k",
-        env={"MORI_DISPATCH": "1", "X Y": "a b"},
+        known_hosts=known_hosts,
+        env={"MORI_DISPATCH": "1", "SGLANG_FOO": "a b"},
         remote_path="/tmp/run.py",
     )
-    # The remote command is the last argv element (bash -lc <quoted cmd>).
     remote_cmd = captured["argv"][-1]
-    # Script body is shipped base64-encoded (survives the command line).
     enc = base64.b64encode(script.encode()).decode()
     assert enc in remote_cmd
     assert "base64 -d" in remote_cmd
     assert "/tmp/run.py" in remote_cmd
-    # Env is prepended as KEY=VAL before the interpreter, shell-quoted.
     assert "MORI_DISPATCH=1" in remote_cmd
-    assert "'a b'" in remote_cmd  # shlex.quote on the value
+    assert "'a b'" in remote_cmd
     assert "python3" in remote_cmd and "--flag v" in remote_cmd
 
 
-def test_ssh_run_script_no_env_has_no_prefix(monkeypatch):
+def test_ssh_run_script_rejects_invalid_env_key(monkeypatch, known_hosts):
+    monkeypatch.setattr(ssh_client.subprocess, "run", lambda *a, **kw: _FakeCompleted(0))
+    with pytest.raises(ValueError, match="disallowed SSH forward env keys"):
+        ssh_client.ssh_run_script(
+            "h",
+            "x=1",
+            "python3",
+            "",
+            key_path="/k",
+            known_hosts=known_hosts,
+            env={"BAD KEY": "1"},
+        )
+
+
+def test_ssh_run_script_no_env_has_no_prefix(monkeypatch, known_hosts):
     captured = {}
     monkeypatch.setattr(
         ssh_client.subprocess,
         "run",
         lambda argv, **kw: captured.setdefault("argv", argv) or _FakeCompleted(0),
     )
-    ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path="/k")
+    ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path="/k", known_hosts=known_hosts)
     remote_cmd = captured["argv"][-1]
-    # No env prefix: the interpreter runs immediately after "&& " with no
-    # "KEY=VAL " assignment in between.
     assert "&& python3 /tmp/mn_dynamo_launch" in remote_cmd
 
 
-def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch):
+def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts):
     captured = {}
 
     def _run(argv, **kwargs):
@@ -116,9 +132,8 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch):
         "echo body",
         {"OOB_API_KEY": "secret-123"},
         key_path="/k",
+        known_hosts=known_hosts,
     )
-    # bash -s reads the script from stdin; the secret is in the piped input,
-    # never on argv (so it cannot leak via ps/argv or the pod's disk).
     assert captured["argv"][-2:] == ["bash", "-s"]
     assert "export OOB_API_KEY=secret-123" in captured["input"]
     assert "echo body" in captured["input"]
@@ -126,36 +141,33 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch):
     assert not any("secret-123" in a for a in captured["argv"])
 
 
-def test_probe_ssh_true_on_marker(monkeypatch):
+def test_probe_ssh_true_on_marker(monkeypatch, known_hosts):
     monkeypatch.setattr(
         ssh_client,
         "ssh_run",
         lambda *a, **kw: _FakeCompleted(0, "mn_ssh_ok\n", ""),
     )
-    assert ssh_client.probe_ssh("h", key_path="/k") is True
+    assert ssh_client.probe_ssh("h", key_path="/k", known_hosts=known_hosts) is True
 
 
-def test_probe_ssh_false_on_bad_rc(monkeypatch):
+def test_probe_ssh_false_on_bad_rc(monkeypatch, known_hosts):
     monkeypatch.setattr(
         ssh_client,
         "ssh_run",
         lambda *a, **kw: _FakeCompleted(255, "", "conn refused"),
     )
-    assert ssh_client.probe_ssh("h", key_path="/k") is False
+    assert ssh_client.probe_ssh("h", key_path="/k", known_hosts=known_hosts) is False
 
 
-def test_probe_ssh_false_on_timeout(monkeypatch):
+def test_probe_ssh_false_on_timeout(monkeypatch, known_hosts):
     def _boom(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="ssh", timeout=1)
 
     monkeypatch.setattr(ssh_client, "ssh_run", _boom)
-    assert ssh_client.probe_ssh("h", key_path="/k") is False
+    assert ssh_client.probe_ssh("h", key_path="/k", known_hosts=known_hosts) is False
 
 
 def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
-    # An existing key pair is reused verbatim (so create-dynamo retries keep the
-    # same authorized key the running pods already trust) without invoking
-    # ssh-keygen again.
     priv = tmp_path / "mn_id_ed25519"
     pub = tmp_path / "mn_id_ed25519.pub"
     priv.write_text("PRIV", encoding="utf-8")

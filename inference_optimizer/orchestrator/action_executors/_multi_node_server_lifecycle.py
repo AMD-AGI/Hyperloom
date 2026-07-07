@@ -25,6 +25,8 @@ import os
 from pathlib import Path
 
 from ..coordinator_helpers import format_exc_brief
+from ...multi_node._internal.env_safety import filter_forward_env
+from ...multi_node._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from ._multi_node_env import _read_state, is_multi_node
 
 
@@ -353,6 +355,11 @@ async def restart_server_for_round(
     if fw == "sglang":
         extra_server_args = _merge_sglang_defaults(extra_server_args)
 
+    try:
+        validate_server_args(extra_server_args, context="restart_server_for_round")
+    except ServerArgsRejected as exc:
+        raise ServerRestartFailed(str(exc)) from exc
+
     saved_trace_env = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR")
     if torch_profiler_dir:
         try:
@@ -372,7 +379,8 @@ async def restart_server_for_round(
     # inherit this round's envs. Restored in the ``finally`` below.
     saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
     if extra_env:
-        os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps({str(k): str(v) for k, v in extra_env.items()})
+        safe_env = filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True)
+        os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(safe_env)
     else:
         os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
 
