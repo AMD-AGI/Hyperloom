@@ -134,6 +134,141 @@ def test_first_call_inserts_perstep_annotation(fake_xdit: Path) -> None:
     ast.parse(text)
 
 
+def _run_patched_profile(patched_src: str, scheduler, steps_per_iter: int):
+    """Exec a patched ``base_model.py`` and drive ``profile()`` with stub
+    torch/profiler primitives, returning the ordered list of ``record_function``
+    marker names. Raises whatever the wrapped step raises (e.g. RecursionError)."""
+    import contextlib
+
+    markers: list[str] = []
+
+    @contextlib.contextmanager
+    def record_function(name):  # noqa: ANN001
+        markers.append(name)
+        yield
+
+    class _Prof:
+        def step(self):  # noqa: D401
+            pass
+
+    @contextlib.contextmanager
+    def profile(*_a, **_k):  # noqa: ANN002, ANN003
+        yield _Prof()
+
+    class _Activities:
+        CPU = 1
+        CUDA = 2
+
+    class _Torch:
+        class profiler:
+            @staticmethod
+            def schedule(**_k):  # noqa: ANN003
+                return None
+
+    ns: dict = {
+        "torch": _Torch,
+        "profile": profile,
+        "ProfilerActivity": _Activities,
+        "record_function": record_function,
+        "log": lambda *_a, **_k: None,
+    }
+    exec(compile(patched_src, "<patched_base_model>", "exec"), ns)  # noqa: S102
+    model_cls = ns["xFuserModel"]
+    model = model_cls.__new__(model_cls)
+
+    class _Cfg:
+        profile_wait = 0
+        profile_warmup = 0
+        profile_active = 2  # -> 2 profiled iterations
+
+    class _Pipe:
+        pass
+
+    model.config = _Cfg()
+    model.pipe = _Pipe()
+    model.pipe.scheduler = scheduler
+
+    def _run_timed_pipe(_args):  # noqa: ANN001
+        for _ in range(steps_per_iter):
+            model.pipe.scheduler.step()
+        return ("out", 0.0)
+
+    model._run_timed_pipe = _run_timed_pipe
+    model.profile({})
+    return markers
+
+
+def test_annotation_no_recursion_with_xfuser_wrapper(fake_xdit: Path) -> None:
+    """Regression: xfuser's scheduler wrapper delegates ``step`` to ``self.module``
+    and its ``__setattr__`` redirects writes to ``.module``. Patching/capturing the
+    wrapper's ``step`` (instead of the module's) caused infinite recursion on models
+    whose ``pipe.scheduler`` is the xfuser wrapper (e.g. SD3.5-large-turbo). The
+    patch must target ``.module`` so the wrapped call terminates."""
+    ensure_xdit_profiler_patched()
+    patched_src = fake_xdit.read_text()
+
+    class FakeInnerScheduler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def step(self, *_a, **_k):  # noqa: ANN002, ANN003
+            self.calls += 1
+            return "ok"
+
+    class FakeXFuserSchedulerWrapper:
+        """Mirrors xFuserSchedulerBaseWrapper: delegates step to self.module and
+        redirects attribute writes onto the module."""
+
+        def __init__(self, module) -> None:  # noqa: ANN001
+            object.__setattr__(self, "module", module)
+
+        def __setattr__(self, name, value):  # noqa: ANN001
+            if name == "module":
+                object.__setattr__(self, name, value)
+            elif getattr(self, "module", None) is not None and hasattr(self.module, name):
+                setattr(self.module, name, value)
+            else:
+                object.__setattr__(self, name, value)
+
+        def step(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return self.module.step(*args, **kwargs)
+
+    inner = FakeInnerScheduler()
+    wrapper = FakeXFuserSchedulerWrapper(inner)
+
+    # Must not raise RecursionError; 2 iterations x 3 steps = 6 real step calls.
+    markers = _run_patched_profile(patched_src, wrapper, steps_per_iter=3)
+
+    assert inner.calls == 6
+    # Per-iteration reset => denoise index restarts at 0 each profiled iteration.
+    assert markers.count("denoise_step_0") == 2
+    assert markers.count("denoise_step_1") == 2
+    assert markers.count("denoise_step_2") == 2
+    assert "denoise_step_3" not in markers
+
+
+def test_annotation_no_recursion_with_plain_scheduler(fake_xdit: Path) -> None:
+    """A plain diffusers scheduler (no ``.module``) is patched in place and still
+    produces per-step markers without recursion."""
+    ensure_xdit_profiler_patched()
+    patched_src = fake_xdit.read_text()
+
+    class PlainScheduler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def step(self, *_a, **_k):  # noqa: ANN002, ANN003
+            self.calls += 1
+            return "ok"
+
+    sched = PlainScheduler()
+    markers = _run_patched_profile(patched_src, sched, steps_per_iter=2)
+
+    assert sched.calls == 4
+    assert markers.count("denoise_step_0") == 2
+    assert markers.count("denoise_step_1") == 2
+
+
 def test_both_patches_present_after_apply(fake_xdit: Path) -> None:
     """A fully patched file carries both sentinels and reports patched."""
     ensure_xdit_profiler_patched()
