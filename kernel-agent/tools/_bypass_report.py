@@ -29,8 +29,10 @@ from typing import Any
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from _bypass_classify import classify_kernel
 from _bypass_fusion import analyze_fusion
+from _analysis_md import render_report as _render_canonical_report
 from _bypass_roofline import compute_roofline
 from _bypass_source_resolver import editable_trace_source, resolve_source
+from _idle_gate import resolve_idle_pct_threshold as _resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
@@ -716,33 +718,137 @@ def render_analysis_md(
     top_cat = rollup[0]["category"] if rollup else "n/a"
     scope = candidates.get("aggregation_scope", "full_trace")
 
-    L: list[str] = []
-    L.append(f"# Bypass Analysis Report - {model_name or 'Workload'}")
-    L.append("")
-    L.append(
-        f"> Generated via bypass route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass). "
+    total_ms = timeline.get("total_time_ms")
+    memcpy_ms = timeline.get("gpu_memcpy_ms")
+    idle_pct = timeline.get("idle_pct")
+    exec_summary = {
+        "total_gpu_time_ms": total_ms,
+        "gpu_busy_pct": timeline.get("busy_pct"),
+        "gpu_idle_pct": idle_pct,
+        "gpu_memcpy_ms": memcpy_ms,
+        "top_bottleneck_category": top_cat,
+        "attribution_pct": attribution.get("attributed_pct"),
+    }
+    # memcpy as % of total wall time for the shared System-Level Signals table.
+    memcpy_pct: float | None = None
+    if isinstance(memcpy_ms, (int, float)) and isinstance(total_ms, (int, float)) and total_ms:
+        memcpy_pct = float(memcpy_ms) / float(total_ms) * 100.0
+    system_signals = {
+        "idle_pct": idle_pct,
+        "exposed_comm_pct": None,  # bypass does not model exposed communication
+        "exposed_memcpy_pct": memcpy_pct,
+    }
+
+    # Shared Top Hot Kernels rows (bypass models AI + analytical efficiency).
+    hot_rows = [
+        {
+            "name": c.get("name"),
+            "time_us": c.get("duration_us"),
+            "gpu_pct": c.get("gpu_pct"),
+            "efficiency_percent": c.get("efficiency_percent"),
+            "arithmetic_intensity": c.get("arithmetic_intensity"),
+            "bound_type": c.get("bound_type"),
+            "category": c.get("kernel_category"),
+            "source_file": c.get("source_file"),
+        }
+        for c in hot
+    ]
+
+    # Shared per-P-item Data tables: one P-item per routable candidate (ranked by
+    # optimization ROI). %E2E and launcher Kernel Path are not modelled by bypass.
+    routable = [c for c in hot if c.get("reusable_native_kernel")]
+    dispatchable = [c for c in routable if c.get("source_file")]
+    p_items = []
+    for i, c in enumerate(routable, start=1):
+        shapes = c.get("input_shapes") or c.get("shapes") or []
+        args = [str(s.get("shape")) for s in shapes if isinstance(s, dict) and s.get("shape")]
+        p_items.append(
+            {
+                "rank": c.get("priority_rank") or i,
+                "category": c.get("kernel_category"),
+                "rows": [
+                    {
+                        "name": c.get("name"),
+                        "time_us": c.get("duration_us"),
+                        "gpu_pct": c.get("gpu_pct"),
+                        "e2e_pct": None,
+                        "call_count": c.get("call_count"),
+                        "flops_per_byte": c.get("flops_per_byte"),
+                        "efficiency_percent": c.get("efficiency_percent"),
+                        "bound_type": c.get("bound_type"),
+                        "args": args,
+                        "source_file": c.get("source_file"),
+                        "kernel_path": None,
+                    }
+                ],
+            }
+        )
+
+    provenance = (
         f"framework={framework or 'unknown'}, platform={target_platform or 'unknown'}, "
         f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
-        f"Not a TraceLens report; per-kernel roofline (bound/AI/efficiency) is computed "
-        f"analytically from captured operand shapes + measured kernel time "
-        f"(roofline_source=analytical), with optional rocprof-compute refinement."
+        f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
+        f"operand shapes + measured kernel time (roofline_source=analytical), with optional "
+        f"rocprof-compute refinement."
     )
-    L.append("")
 
-    # Executive Summary
-    L.append("## Executive Summary")
-    L.append("")
-    L.append("| Metric | Value |")
-    L.append("|--------|-------|")
-    L.append(f"| Total GPU Time | {timeline.get('total_time_ms', 0)} ms |")
-    L.append(f"| GPU Busy % | {timeline.get('busy_pct', 0)}% |")
-    L.append(f"| Idle % | {timeline.get('idle_pct', 0)}% |")
-    L.append(f"| GPU MemCpy | {timeline.get('gpu_memcpy_ms', 0)} ms |")
-    L.append(f"| Top Bottleneck Category | {top_cat} |")
-    L.append(f"| Op-attribution Coverage | {attribution.get('attributed_pct', 0)}% |")
-    L.append("")
+    extra = _render_bypass_extra_sections(
+        candidates,
+        analyze_out,
+        hot=hot,
+        rollup=rollup,
+        routable=routable,
+        dispatchable=dispatchable,
+        timeline=timeline,
+        attribution=attribution,
+        framework=framework,
+        target_platform=target_platform,
+        throughput_unit=throughput_unit,
+        scope=scope,
+        metrics_csv_path=metrics_csv_path,
+        summary_csv_path=summary_csv_path,
+    )
 
-    # Top Operations (category rollup)
+    return _render_canonical_report(
+        route="bypass",
+        model_name=model_name or "Workload",
+        provenance_detail=provenance,
+        exec_summary=exec_summary,
+        system_signals=system_signals,
+        idle_threshold=_resolve_idle_pct_threshold(),
+        hot_kernels=hot_rows,
+        p_items=p_items,
+        extra_sections=extra,
+    )
+
+
+def _render_bypass_extra_sections(
+    candidates: dict[str, Any],
+    analyze_out: dict[str, Any],
+    *,
+    hot: list[dict[str, Any]],
+    rollup: list[dict[str, Any]],
+    routable: list[dict[str, Any]],
+    dispatchable: list[dict[str, Any]],
+    timeline: dict[str, Any],
+    attribution: dict[str, Any],
+    framework: str,
+    target_platform: str,
+    throughput_unit: str,
+    scope: str,
+    metrics_csv_path: str,
+    summary_csv_path: str,
+) -> str:
+    """Render the bypass-only richer sections appended after the shared spine.
+
+    Kept verbatim (category rollup / optimization-priority Top-N / per-candidate
+    optimization prose / task groups / per-kernel detail / appendix / CSV links)
+    so no bypass analytical content is lost while the cross-route sections stay
+    identical.
+    """
+    L: list[str] = []
+
+    # Top Operations (category rollup) + analytical bound distribution.
     L.append("## Top Operations")
     L.append("")
     if rollup:
@@ -753,15 +859,13 @@ def render_analysis_md(
     else:
         L.append("_No GPU kernels found in trace._")
     L.append("")
-    # Analytical roofline bound distribution (one-liner).
     n_compute = sum(1 for c in hot if c.get("bound_type") == "compute_bound")
     n_memory = sum(1 for c in hot if c.get("bound_type") == "memory_bound")
     if n_compute or n_memory:
         L.append(f"_Analytical roofline bound: {n_compute} compute-bound, {n_memory} memory-bound hot kernel(s)._")
         L.append("")
 
-    # Top 10 kernels by optimization ROI (priority = gpu_pct x (1 - efficiency);
-    # high-impact + low-efficiency first). Full per-kernel table lives in the CSV.
+    # Top 10 kernels by optimization ROI.
     L.append("## Top 10 Kernels by Optimization Priority")
     L.append("")
     ranked = sorted(hot, key=lambda c: c.get("optimization_priority") or 0.0, reverse=True)[:10]
@@ -787,18 +891,13 @@ def render_analysis_md(
         L.append("_No GPU kernels found in trace._")
     L.append("")
 
-    # Compute Kernel Optimizations
+    # Compute Kernel Optimizations (per-candidate insight/action/source/impact).
     L.append("## Compute Kernel Optimizations")
     L.append("")
-    routable = [c for c in hot if c.get("reusable_native_kernel")]
-    dispatchable = [c for c in routable if c.get("source_file")]
     if not routable:
         L.append("_No rewritable compute-kernel candidates identified._")
         L.append("")
     else:
-        # Downstream kernel-opt dispatches only candidates that are both
-        # rewritable AND carry a resolved editable source; surface that split so
-        # the report never implies an unresolved candidate is actionable.
         L.append(
             f"_{len(dispatchable)} of {len(routable)} rewritable candidate(s) have a resolved "
             f"editable source (auto-dispatchable to kernel-opt); the rest need a source first._"
@@ -839,7 +938,7 @@ def render_analysis_md(
             )
             L.append("")
 
-    # Task Groups (source-function dispatch grouping)
+    # Task Groups (source-function dispatch grouping).
     task_groups = candidates.get("task_groups") or []
     if task_groups:
         L.append("## Task Groups")
@@ -859,20 +958,16 @@ def render_analysis_md(
             )
         L.append("")
 
-    # System-Level Signals
-    L.append("## System-Level Signals")
-    L.append("")
-    L.append(f"- GPU idle: {timeline.get('idle_pct', 0)}% of total")
-    L.append(f"- Device memcpy: {timeline.get('gpu_memcpy_ms', 0)} ms")
+    # Non-rewritable note (was in the old bullet System-Level Signals).
     skipped = candidates.get("skipped_kernels") or []
     if skipped:
         L.append(
-            f"- {len(skipped)} hot kernel(s) are non-rewritable "
-            f"(vendor library / unresolved source) — see Appendix."
+            f"_{len(skipped)} hot kernel(s) are non-rewritable "
+            f"(vendor library / unresolved source) — see Detailed Analysis._"
         )
-    L.append("")
+        L.append("")
 
-    # Detailed Analysis
+    # Detailed Analysis (per hot kernel).
     L.append("## Detailed Analysis")
     L.append("")
     for c in hot:
@@ -907,7 +1002,7 @@ def render_analysis_md(
         L.append(f"**Suggested action:** {c.get('suggestion', '')}")
         L.append("")
 
-    # Appendix
+    # Appendix.
     L.append("## Appendix")
     L.append("")
     L.append(f"- Framework: {framework or 'unknown'}")

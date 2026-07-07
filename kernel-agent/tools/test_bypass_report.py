@@ -227,15 +227,23 @@ def test_render_analysis_md_sections_textgen():
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
     md = report.render_analysis_md(cands, analyze, model_name="Llama", framework="vllm", target_platform="MI300X")
     for header in (
-        "# Bypass Analysis Report - Llama",
+        # Shared canonical spine (identical across routes).
+        "# Performance Analysis Report \u2014 Llama",
         "## Executive Summary",
+        "## System-Level Signals",
+        "## Top Hot Kernels",
+        # bypass-only richer sections appended after the divider.
         "## Top Operations",
         "## Compute Kernel Optimizations",
-        "## System-Level Signals",
         "## Detailed Analysis",
         "## Appendix",
     ):
         assert header in md, header
+    assert "> Generated via bypass route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass)." in md
+    # shared System-Level Signals is now a table, not bullets
+    assert "| Signal | % of total GPU time | Note |" in md
+    # divider that separates the shared spine from bypass-only extras
+    assert "Additional route-specific detail below" in md
     assert "throughput_unit=tok/s" in md
     assert "Throughput unit: tok/s" in md
     # routable SDPA candidate rendered as a P-item

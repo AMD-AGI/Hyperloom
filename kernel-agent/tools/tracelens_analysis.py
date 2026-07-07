@@ -78,6 +78,10 @@ from _roofline_source import (
     PLACEHOLDER as _RL_PLACEHOLDER,
 )
 
+# Shared canonical analysis.md renderer so the deterministic route emits the same
+# section structure + table schemas as the bypass route.
+from _analysis_md import render_report as _render_canonical_report
+
 
 # ---------------------------------------------------------------------------
 # Kernel-candidate pool size (issue #667).
@@ -4546,40 +4550,29 @@ def generate_minimal_analysis_md(
     output_dir: Path,
     candidates: list[dict[str, Any]],
     idle_pct: float | None = None,
+    *,
+    model_name: str = "",
 ) -> Path:
-    """Generate a minimal deterministic analysis.md for human-readable output.
+    """Generate the deterministic-route ``analysis.md`` (human-readable output).
 
     Deterministic hot-kernel extraction uses structured ``*_metrics.json`` and
-    ``priority_data.json`` directly. This Markdown report is intentionally not
-    the parser contract used by the LLM-agent route.
+    ``priority_data.json`` directly; this Markdown report is intentionally not
+    the LLM-agent parser contract. It is rendered through the SHARED canonical
+    renderer (:func:`_analysis_md.render_report`), so its section structure and
+    table schemas match the bypass route exactly (fields the deterministic
+    minimal report does not model, e.g. arithmetic intensity, render as an em
+    dash rather than a fabricated value).
 
     Args:
         output_dir: Directory the ``analysis.md`` report is written into.
         candidates: The finalized hot-kernel candidates to tabulate.
-        idle_pct: Optional GPU idle percentage to include in the summary.
+        idle_pct: Optional GPU idle percentage (Executive Summary + idle gate).
+        model_name: Model identifier for the shared report title.
 
     Returns:
         The path to the written ``analysis.md``.
     """
     report_path = output_dir / "analysis.md"
-    lines: list[str] = []
-
-    def _fnum(v: Any, default: float = 0.0) -> float:
-        """Coerce a possibly-null/str metric to float for ``:.Nf`` formatting.
-
-        Deterministic "other"-bucket candidates (e.g. synthetic GDN/MoE ops)
-        can carry present-but-null metric fields; a bare ``.get(k, 0)`` returns
-        None then and ``f"{None:.2f}"`` raises ``unsupported format string
-        passed to NoneType.__format__``. Treat null/non-numeric as the default.
-        """
-        if isinstance(v, bool):
-            return default
-        if isinstance(v, (int, float)):
-            return float(v)
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return default
 
     gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
     gpu_rows: list[dict[str, str]] = []
@@ -4590,141 +4583,93 @@ def generate_minimal_analysis_md(
         except (OSError, csv.Error):
             pass
 
-    lines.append("# TraceLens Performance Analysis Report")
-    lines.append("")
-    lines.append("> Generated via deterministic analysis route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic)")
-    lines.append("")
-
-    # Executive Summary
-    lines.append("## Executive Summary")
-    lines.append("")
-    if gpu_rows:
-        lines.append("| Metric | Time (ms) | % |")
-        lines.append("|--------|-----------|---|")
+    def _row_field(row_type: str, field: str) -> float | None:
+        """Return a numeric field from the gpu_timeline row of ``row_type``."""
         for row in gpu_rows:
-            rtype = row.get("type", "")
-            time_ms = row.get("time ms", "0")
-            pct = row.get("percent", "0")
-            lines.append(f"| {rtype} | {time_ms} | {pct}% |")
-        lines.append("")
+            if (row.get("type") or "").strip().lower() == row_type:
+                try:
+                    return float(row.get(field, 0))
+                except (TypeError, ValueError):
+                    return None
+        return None
 
-    if idle_pct is not None:
-        lines.append(f"**Idle %**: {idle_pct:.2f}%")
-        lines.append("")
+    idle_share = idle_pct if idle_pct is not None else _row_field("idle_time", "percent")
+    busy_pct = _row_field("busy_time", "percent")
+    if busy_pct is None and isinstance(idle_share, (int, float)):
+        busy_pct = 100.0 - float(idle_share)
+    busy_ms = _row_field("busy_time", "time ms")
+    idle_ms = _row_field("idle_time", "time ms")
+    total_ms: float | None = None
+    if isinstance(busy_ms, (int, float)) or isinstance(idle_ms, (int, float)):
+        total_ms = (busy_ms or 0.0) + (idle_ms or 0.0) or None
+    memcpy_ms = _row_field("exposed_memcpy_time", "time ms")
 
-    # System-Level Signals — deterministic GPU-timeline shares (idle / exposed
-    # communication / exposed device copy). Read straight from gpu_timeline.csv
-    # with no LLM interpretation; idle is flagged against the same threshold
-    # that gates hot-kernel extraction. The agent route surfaces these as
-    # LLM-written recommendations — here we expose only the underlying numbers.
-    if gpu_rows:
-
-        def _timeline_pct(row_type: str) -> float | None:
-            """Return the GPU-timeline percentage for a given row type.
-
-            Args:
-                row_type (str): The timeline row ``type`` to match (e.g.
-                    ``idle_time``).
-
-            Returns:
-                float | None: The row's ``percent`` value, or ``None`` when the
-                row is absent or its percent is unparseable.
-            """
-            for row in gpu_rows:
-                if (row.get("type") or "").strip().lower() == row_type:
-                    try:
-                        return float(row.get("percent", 0))
-                    except (TypeError, ValueError):
-                        return None
-            return None
-
-        idle_share = _timeline_pct("idle_time")
-        comm_share = _timeline_pct("exposed_comm_time")
-        memcpy_share = _timeline_pct("exposed_memcpy_time")
-        if any(v is not None for v in (idle_share, comm_share, memcpy_share)):
-            idle_threshold = _resolve_idle_pct_threshold()
-            lines.append("## System-Level Signals")
-            lines.append("")
-            lines.append("| Signal | % of total GPU time | Note |")
-            lines.append("|--------|---------------------|------|")
-            if idle_share is not None:
-                note = (
-                    f"above {idle_threshold:.0f}% idle gate"
-                    if idle_share > idle_threshold
-                    else f"within {idle_threshold:.0f}% idle gate"
-                )
-                lines.append(f"| GPU idle | {idle_share:.2f}% | {note} |")
-            if comm_share is not None:
-                lines.append(f"| Exposed communication | {comm_share:.2f}% | - |")
-            if memcpy_share is not None:
-                lines.append(f"| Exposed memcpy (device copy) | {memcpy_share:.2f}% | - |")
-            lines.append("")
-
-    # Top Hot Kernels table
-    lines.append("## Top Hot Kernels")
-    lines.append("")
+    top_cat = ""
     if candidates:
-        # GPU% is the kernel's share of total GPU time (gpu_pct), the real
-        # impact signal — unlike Impact (impact_score) which is 0 for the
-        # "other" bucket that has no TraceLens efficiency model.
-        lines.append("| Rank | Operation | Time (us) | GPU% | Efficiency | Impact | Category | Bound | Source File |")
-        lines.append("|------|-----------|-----------|------|------------|--------|----------|-------|-------------|")
-        for i, c in enumerate(candidates, 1):
-            lines.append(
-                f"| {i} | {c.get('name', '')} "
-                f"| {_fnum(c.get('duration_us')):.1f} "
-                f"| {_fnum(c.get('gpu_pct')):.2f}% "
-                f"| {_fnum(c.get('efficiency_percent')):.1f}% "
-                f"| {_fnum(c.get('impact_score')):.2f} "
-                f"| {c.get('tracelens_category', '')} "
-                f"| {c.get('bound_type', '')} "
-                f"| {c.get('source_file', '') or '-'} |"
-            )
-        lines.append("")
+        top_cat = candidates[0].get("tracelens_category") or candidates[0].get("kernel_category") or ""
 
-    # Per-P-item details for humans/downstream display; deterministic route
-    # consumers should use the structured JSON artifacts instead of parsing this.
-    # Emit P-item sections in ascending rank order (P0, P1, ...) regardless of
-    # the time-sorted candidate order above.
-    seen_ranks: set[int] = set()
-    ordered_ranks = sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates})
-    for rank in ordered_ranks:
-        if rank in seen_ranks:
-            continue
-        seen_ranks.add(rank)
-        rank_cands = [x for x in candidates if x.get("tracelens_pitem_rank") == rank]
+    exec_summary = {
+        "total_gpu_time_ms": total_ms,
+        "gpu_busy_pct": busy_pct,
+        "gpu_idle_pct": idle_share,
+        "gpu_memcpy_ms": memcpy_ms,
+        "top_bottleneck_category": top_cat,
+        "attribution_pct": None,  # not modelled by the deterministic minimal report
+    }
+    system_signals = {
+        "idle_pct": idle_share,
+        "exposed_comm_pct": _row_field("exposed_comm_time", "percent"),
+        "exposed_memcpy_pct": _row_field("exposed_memcpy_time", "percent"),
+    }
+
+    hot_rows = [
+        {
+            "name": c.get("name"),
+            "time_us": c.get("duration_us"),
+            "gpu_pct": c.get("gpu_pct"),
+            "efficiency_percent": c.get("efficiency_percent"),
+            "arithmetic_intensity": c.get("arithmetic_intensity") or c.get("flops_per_byte"),
+            "bound_type": c.get("bound_type"),
+            "category": c.get("tracelens_category") or c.get("kernel_category"),
+            "source_file": c.get("source_file"),
+        }
+        for c in candidates
+    ]
+
+    # P-items in ascending rank order (P0, P1, ...), one group per pitem rank.
+    p_items: list[dict[str, Any]] = []
+    for rank in sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates}):
+        rank_cands = [x for x in candidates if int(x.get("tracelens_pitem_rank", 0)) == rank]
         cat = rank_cands[0].get("tracelens_category", "") if rank_cands else ""
+        rows = [
+            {
+                "name": rc.get("name"),
+                "time_us": rc.get("duration_us"),
+                "gpu_pct": rc.get("gpu_pct"),
+                "e2e_pct": rc.get("impact_score"),
+                "call_count": rc.get("call_count", 1),
+                "flops_per_byte": rc.get("flops_per_byte"),
+                "efficiency_percent": rc.get("efficiency_percent"),
+                "bound_type": rc.get("bound_type"),
+                "args": rc.get("shapes"),
+                "source_file": rc.get("source_file"),
+                "kernel_path": rc.get("kernel_path"),
+            }
+            for rc in rank_cands
+        ]
+        p_items.append({"rank": rank, "category": cat, "rows": rows})
 
-        lines.append(f"### P{rank}: {cat} kernels")
-        lines.append("")
-        lines.append(f"<!-- reasoning-candidate tier=compute rank={rank} -->")
-        lines.append("")
-        lines.append(
-            "**Data:**\n\n"
-            "| Operation | Time (us) | GPU% | %E2E | Count | FLOPS/Byte | "
-            "Efficiency | Bound | Args | Source File | Kernel Path (launcher) |"
-        )
-        lines.append(
-            "|-----------|-----------|------|------|-------|------------|"
-            "------------|-------|------|-------------|------------------------|"
-        )
-        for rc in rank_cands:
-            lines.append(
-                f"| {rc.get('name', '')} "
-                f"| {_fnum(rc.get('duration_us')):.1f} "
-                f"| {_fnum(rc.get('gpu_pct')):.2f}% "
-                f"| {_fnum(rc.get('impact_score')):.2f} "
-                f"| {rc.get('call_count', 1)} "
-                f"| - "
-                f"| {_fnum(rc.get('efficiency_percent')):.1f}% "
-                f"| {rc.get('bound_type', '')} "
-                f"| {' '.join(rc.get('shapes', []))} "
-                f"| {rc.get('source_file', '') or '-'} "
-                f"| {rc.get('kernel_path', '')} |"
-            )
-        lines.append("")
-
-    report_path.write_text("\n".join(lines), encoding="utf-8")
+    body = _render_canonical_report(
+        route="deterministic",
+        model_name=model_name,
+        provenance_detail="Deterministic hot-kernel extraction from structured *_metrics.json / priority_data.json.",
+        exec_summary=exec_summary,
+        system_signals=system_signals,
+        idle_threshold=_resolve_idle_pct_threshold(),
+        hot_kernels=hot_rows,
+        p_items=p_items,
+    )
+    report_path.write_text(body, encoding="utf-8")
     return report_path
 
 
@@ -6501,6 +6446,7 @@ def main() -> int:
                     tracelens_dir,
                     agent_candidates or [],
                     idle_pct=idle_pct_value,
+                    model_name=getattr(args, "model_name", "") or "",
                 )
                 artifacts["tracelens_agent_report"] = str(agent_report_path)
 

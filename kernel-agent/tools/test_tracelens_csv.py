@@ -4145,11 +4145,15 @@ def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
     assert "Exposed memcpy (device copy) | 1.00%" in text
 
 
-def test_minimal_analysis_md_omits_system_signals_without_timeline(tmp_path):
-    """No gpu_timeline.csv -> no System-Level Signals section (no fabrication)."""
+def test_minimal_analysis_md_system_signals_present_but_dash_without_timeline(tmp_path):
+    """No gpu_timeline.csv + no idle -> the System-Level Signals section is still
+    present (shared canonical spine, identical to the bypass route) but every
+    value is an em dash rather than a fabricated 0."""
     report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=None)
     text = report.read_text(encoding="utf-8")
-    assert "## System-Level Signals" not in text
+    assert "## System-Level Signals" in text
+    assert "| Signal | % of total GPU time | Note |" in text
+    assert "| GPU idle | \u2014 | - |" in text  # unknown share -> em dash, not 0
 
 
 def test_deterministic_other_bucket_keeps_resolvable_graph_op(
