@@ -1192,6 +1192,13 @@ class SpecialistRunner:
         # authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
+        # #5-P2: re-stamp cross-framework provenance from task params so the KB
+        # ledger records source/target framework deterministically, regardless
+        # of whether the specialist echoed them in its proposal.
+        _cf_params = ctx.task.params or {}
+        if _cf_params.get("cross_framework"):
+            done_payload["source_framework"] = str(_cf_params.get("source_framework") or "")
+            done_payload["target_framework"] = str(_cf_params.get("target_framework") or "")
         if gpu_ids:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:

@@ -46,10 +46,11 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domains_m5_covers_all_active_domains():
-    """The M5 active set covers the full catalogue (nine entries: seven legacy
-    domains + static_recon_specialist + enablement_specialist)."""
+    """The M5 active set covers the full catalogue (ten entries: seven legacy
+    domains + static_recon_specialist + enablement_specialist +
+    cross_framework_rewrite_specialist)."""
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 9
+    assert len(SPECIALIST_DOMAINS_M5) == 10
 
 
 # 2. Per-domain content checks — each template mentions its signature
@@ -426,9 +427,10 @@ def _valid_done_payload(
 
 
 # 1. specialist_domains catalogue
-def test_specialist_domains_catalogue_has_nine_entries():
-    """Nine entries: seven legacy domains + static_recon_specialist + enablement_specialist."""
-    assert len(SPECIALIST_DOMAINS) == 9
+def test_specialist_domains_catalogue_has_ten_entries():
+    """Ten entries: seven legacy domains + static_recon_specialist +
+    enablement_specialist + cross_framework_rewrite_specialist (#5-P2)."""
+    assert len(SPECIALIST_DOMAINS) == 10
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 

@@ -1191,6 +1191,65 @@ def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
         return None
 
 
+_FRAMEWORK_KB_PROVENANCE_PREFIX = "specialist:serving:framework"
+
+
+def _stamp_framework_kb_provenance(
+    done_payload: dict[str, Any] | None,
+    *,
+    params: dict[str, Any],
+    shared_state: Any,
+) -> None:
+    """Ensure a FRAMEWORK-dispatched deliverable carries KB-writeback provenance.
+
+    The authoring specialist's own LLM output has no reliable convention for
+    tagging ``proposal_set`` entries with the
+    ``specialist:serving:framework...`` provenance prefix that
+    :meth:`IntegratePatchExecutor._find_frameworkoposal` requires (that prefix
+    is only ever emitted by the cross-framework prompt path) — so same-
+    framework PR / config-lever deliverables silently never reach
+    ``lessons.jsonl``. Stamp it here from the dispatch context (candidate URL
+    + framework), which the Coordinator already carries in ``params``, so the
+    KB writeback works regardless of what the LLM itself wrote.
+
+    Mutates ``done_payload["proposal_set"][0]`` in place; no-ops when this
+    action was not dispatched from FRAMEWORK authoring (``params`` lacks
+    ``framework_agent_authoring``), or when a proposal already carries a
+    matching provenance (cross-framework case — left untouched).
+
+    Args:
+        done_payload: The specialist's parsed ``specialist_done.json`` (may
+            be ``None``/malformed; no-ops in that case).
+        params: The ``integrate_patch`` action's dispatch params (carries
+            ``framework_agent_authoring`` / ``framework_agent_candidate_id``
+            when this run came from FRAMEWORK_AGENT).
+        shared_state: The run's ``SharedState`` (best-effort ``framework``
+            read for the provenance suffix).
+    """
+    if not isinstance(done_payload, dict):
+        return
+    if not params.get("framework_agent_authoring"):
+        return
+    pr_url = str(params.get("framework_agent_candidate_id") or "").strip()
+    if not pr_url:
+        return
+    proposals = done_payload.get("proposal_set")
+    if not isinstance(proposals, list) or not proposals or not isinstance(proposals[0], dict):
+        # A config-lever / patch deliverable with no proposal_set entry to
+        # stamp (e.g. a minimal done_payload) still needs a KB-writeback
+        # anchor — synthesize a minimal one.
+        done_payload["proposal_set"] = [{}]
+        proposals = done_payload["proposal_set"]
+    target = proposals[0]
+    existing = str(target.get("provenance") or "")
+    if existing.startswith(_FRAMEWORK_KB_PROVENANCE_PREFIX):
+        return  # cross-framework (or already-stamped) path already complies
+    framework = str(getattr(shared_state, "framework", "") or "").strip().lower()
+    target["provenance"] = f"{_FRAMEWORK_KB_PROVENANCE_PREFIX}:{framework}" if framework else _FRAMEWORK_KB_PROVENANCE_PREFIX
+    target.setdefault("fa_pr_url", pr_url)
+    target.setdefault("framework", framework)
+
+
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
@@ -1295,6 +1354,7 @@ class IntegratePatchExecutor:
 
         # Read done payload for patches_written + config_changes_default.
         done_payload = _read_done_payload(specialist_workspace)
+        _stamp_framework_kb_provenance(done_payload, params=params, shared_state=shared_state)
 
         # Enablement environment setup (Q3): replay allowlisted install-only
         # commands (base stacked from prior rounds + this specialist's
@@ -2076,6 +2136,18 @@ class IntegratePatchExecutor:
         try:
             from ..kb_writeback import write_framework_record
 
+            gap_keywords = proposal.get("gap_keywords") or (done_payload or {}).get("gap_keywords") or []
+            if isinstance(gap_keywords, str):
+                gap_keywords = [gap_keywords]
+            changed_files = proposal.get("changed_files") or (done_payload or {}).get("changed_files") or []
+            if isinstance(changed_files, str):
+                changed_files = [changed_files]
+            try:
+                accuracy_delta_pct = float(
+                    proposal.get("accuracy_delta_pct") or (done_payload or {}).get("accuracy_delta_pct") or 0.0
+                )
+            except (TypeError, ValueError):
+                accuracy_delta_pct = 0.0
             written = await write_framework_record(
                 pr_url=pr_url,
                 pr_sha=pr_sha,
@@ -2083,6 +2155,24 @@ class IntegratePatchExecutor:
                 outcome=outcome,
                 tps_delta_pct=float(tps_delta_pct),
                 session_id=session_id,
+                framework=str(proposal.get("framework") or (done_payload or {}).get("framework") or "").strip().lower(),
+                gap_canonical_id=str(
+                    proposal.get("gap_canonical_id") or (done_payload or {}).get("gap_canonical_id") or ""
+                ).strip(),
+                gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
+                model_class=str(getattr(shared_state, "model_class", "") if shared_state is not None else "").strip(),
+                gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
+                precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
+                applicability=str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip(),
+                provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
+                accuracy_delta_pct=accuracy_delta_pct,
+                changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                source_framework=str(
+                    proposal.get("source_framework") or (done_payload or {}).get("source_framework") or ""
+                ).strip().lower(),
+                target_framework=str(
+                    proposal.get("target_framework") or (done_payload or {}).get("target_framework") or ""
+                ).strip().lower(),
             )
             log.info(
                 "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
