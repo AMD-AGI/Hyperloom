@@ -189,3 +189,31 @@ def test_sdpa_self_attention_ambiguous_layout_is_marked_inferred():
     nbytes = dbytes * (3 * B * H * S * D)
     assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
     assert r.get("roofline_layout_inferred") is True
+
+
+def test_sdpa_score_tensor_disambiguates_shared_seqlen():
+    # Equal-seq cross-attn with different Q/K head counts (Hq=16, Hkv=4): the
+    # only value Q/K middle dims share is the SEQ length, so shared-dim inference
+    # would wrongly treat seq as the head. The authoritative score (B,Hq,Sq,Skv)
+    # must resolve it -> H=Hq, and it must NOT be silently mis-labeled "exact".
+    B, S, Hq, Hkv, D = 2, 256, 16, 4, 64
+    shp = (f"({B},{S},{Hq},{D}) bf16<br>({B},{S},{Hkv},{D}) bf16<br>"
+           f"({B},{S},{Hkv},{D}) bf16<br>({B},{Hq},{S},{S}) bf16")
+    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
+    assert r is not None
+    flops = 4.0 * B * Hq * S * S * D  # NOT 4*B*S*Hq*Hkv*D (the shared-dim mistake)
+    nbytes = 2.0 * (B * S * Hq * D + B * S * Hkv * D + B * S * Hkv * D)
+    assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
+
+
+def test_sdpa_cross_attention_shared_dim_without_score():
+    # Cross-attn Q/K/V only (no score operand): the shared head dim resolves the
+    # layout exactly (Sq=1024 != Skv=300) -> not inferred.
+    B, Sq, H, D, Skv = 2, 1024, 20, 112, 300
+    shp = (f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16")
+    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1, gpu_type="mi300x")
+    assert r is not None
+    flops = 4.0 * B * H * Sq * Skv * D
+    nbytes = 2.0 * (B * Sq * H * D + B * Skv * H * D + B * Skv * H * D)
+    assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
+    assert "roofline_layout_inferred" not in r

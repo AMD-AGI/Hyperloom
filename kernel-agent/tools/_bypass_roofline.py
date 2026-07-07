@@ -104,24 +104,29 @@ def _sdpa_flops_bytes(
     practice) and flag ``roofline_layout_inferred`` so the estimate is honest.
     """
     q = four_d[0]
-    k = four_d[1] if len(four_d) >= 2 else q
     b, d = q[0], q[-1]
-    qmid = (q[1], q[2])
-    kmid = (k[1], k[2])
     meta: dict[str, Any] = {}
-    common = set(qmid) & set(kmid)
-    if len(common) == 1:
-        h = next(iter(common))
-        sq = qmid[1] if qmid[0] == h else qmid[0]
-        skv = kmid[1] if kmid[0] == h else kmid[0]
+    # Authoritative first: an explicit score/attn-weight tensor (B,H,Sq,Skv). Its
+    # last dim is a key length (not the head dim D), so it is distinguishable from
+    # Q/K/V (all (...,D)) and pins H/Sq/Skv unambiguously — even when Q/K share a
+    # sequence length rather than the head (e.g. equal-seq / grouped-head attn).
+    score = next((t for t in four_d[1:] if t[0] == b and t[-1] != d), None)
+    if score is not None:
+        h, sq, skv = score[1], score[2], score[3]
     else:
-        # Ambiguous self-attention (Q/K middle dims coincide). Prefer an explicit
-        # score/attn tensor (B,H,Sq,Skv): a 4D operand past Q/K/V whose last dim
-        # is not the head dim D.
-        score = next((t for t in four_d[3:] if t[0] == b and t[-1] != d), None)
-        if score is not None:
-            h, sq, skv = score[1], score[2], score[3]
+        # No score: the head count is the value shared by Q's and K's two middle
+        # dims — this resolves the (B,S,H,D) vs (B,H,S,D) ambiguity and cross-attn
+        # exactly (Sq != Skv).
+        k = four_d[1] if len(four_d) >= 2 else q
+        qmid, kmid = (q[1], q[2]), (k[1], k[2])
+        common = set(qmid) & set(kmid)
+        if len(common) == 1:
+            h = next(iter(common))
+            sq = qmid[1] if qmid[0] == h else qmid[0]
+            skv = kmid[1] if kmid[0] == h else kmid[0]
         else:
+            # Ambiguous (self-attn: Q/K middle dims coincide, or no shared dim):
+            # heads = the smaller middle dim (num_heads <= seq_len in practice).
             h, sq = min(qmid), max(qmid)
             skv = sq
             meta["roofline_layout_inferred"] = True
