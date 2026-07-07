@@ -60,6 +60,67 @@ _NODES_DISCOVERY_TIMEOUT_SEC = 120
 # rank-0 /health probe budget (cold MoE can exceed it; --no-wait-health to bypass).
 _HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get("SGLANG_HEALTH_PROBE_TIMEOUT_SEC", "1800"))
 
+# Keep in sync with multi_node/_internal/server_args_safety.py
+_DENIED_SERVER_FLAGS = frozenset(
+    {
+        "--adapter-model-path",
+        "--adapter-path",
+        "--allowed-local-media-path",
+        "--chat-template",
+        "--code-revision",
+        "--config",
+        "--download-dir",
+        "--hf-overrides",
+        "--lora-dirs",
+        "--lora-modules",
+        "--lora-path",
+        "--lora-paths",
+        "--model",
+        "--model-id",
+        "--model-path",
+        "--quantization-param-path",
+        "--revision",
+        "--tokenizer",
+        "--tokenizer-path",
+        "--tokenizer-revision",
+    }
+)
+_DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
+
+
+def _is_denied_server_flag(flag: str) -> bool:
+    """Return whether a single ``--flag`` token is denied at the pod boundary."""
+    name = (flag or "").strip()
+    if not name.startswith("--"):
+        return False
+    if name in _DENIED_SERVER_FLAGS:
+        return True
+    return any(name.endswith(suffix) for suffix in _DENIED_SERVER_FLAG_SUFFIXES)
+
+
+def _denied_extra_args(raw: str) -> list[str]:
+    """Return denied CLI flag tokens in a pod-side extra-args string.
+
+    Args:
+        raw: Whitespace-separated server flags.
+
+    Returns:
+        list[str]: Denied flag names (empty when clean).
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return ["<unparseable>"]
+    out: list[str] = []
+    for tok in tokens:
+        flag = tok.split("=", 1)[0]
+        if _is_denied_server_flag(flag) and flag not in out:
+            out.append(flag)
+    return out
+
 
 def _log(msg: str) -> None:
     """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point).
@@ -828,6 +889,10 @@ def main() -> int:
         ib_dev = ""
 
     extra_args = args.extra_args.split() if args.extra_args else []
+    denied = _denied_extra_args(args.extra_args)
+    if denied:
+        _log(f"ERROR denied server flags in --extra-args: {denied}")
+        return 2
 
     _log(f"framework={args.framework} model={args.model} tp={args.tp} nnodes={args.nnodes}")
 
