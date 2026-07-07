@@ -96,6 +96,7 @@ def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, cap
     def fake_enum(r):
         captured["search_perf_prs"] = r.search_perf_prs
         captured["search_modes"] = list(r.search_modes)
+        captured["keywords"] = list(r.keywords)
         return [
             Candidate(ref="PR:42", repo="ROCm/vllm", source="github",
                       title="perf: moe fp8", html_url="https://github.com/ROCm/vllm/pull/42", score=0.9),
@@ -117,6 +118,7 @@ def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, cap
     assert captured["search_perf_prs"] is True
     # No primus URL configured -> GitHub-only (no SourceConfigError raise).
     assert captured["search_modes"] == ["github"]
+    assert "moe" in captured["keywords"]
     assert payload["candidate_count"] == 1
 
 

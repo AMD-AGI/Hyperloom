@@ -4180,6 +4180,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--downloads", default=os.environ.get("HYPERLOOM_DOWNLOADS", ""))
 
     parser.add_argument(
+        "--session-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Session-scoped env var forwarded to SaFE (body.env) and relayed by "
+        "Claw into the sandbox process environment (the reliable channel the "
+        "inference_optimizer process actually reads — unlike a shell export in "
+        "--prompt-prefix, which depends on unverified cross-tool-call shell "
+        "persistence). Repeatable. e.g. "
+        "--session-env FRAMEWORK_AGENT_CROSS_DISCOVER_TAG=1",
+    )
+
+    parser.add_argument(
         "--dry-run", action="store_true", help="Auto-detect and print plan without registering or submitting"
     )
     parser.add_argument(
@@ -4439,6 +4452,22 @@ def main() -> int:
         )
         time.sleep(d)
 
+    # Parse --session-env KEY=VALUE pairs once, up front, so a malformed pair
+    # fails fast before any task is submitted (rather than silently dropped).
+    cli_session_env: dict[str, str] = {}
+    for pair in args.session_env or []:
+        if "=" not in pair:
+            log.error("invalid --session-env %r: expected KEY=VALUE", pair)
+            return 2
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if not key:
+            log.error("invalid --session-env %r: empty key", pair)
+            return 2
+        cli_session_env[key] = value
+    if cli_session_env:
+        log.info("session env from --session-env: %s", cli_session_env)
+
     records: list[SubmissionRecord] = []
     for repo in repos:
         log.info("=" * 60)
@@ -4452,6 +4481,10 @@ def main() -> int:
                 submit_env = {"CLAUDE_MODEL": "claude-opus-4-6"}
         except (TypeError, ValueError):
             submit_env = None
+        # Merge explicit --session-env KEY=VALUE pairs (reliable session_env
+        # channel). These win over the CLAUDE_MODEL default on key collision.
+        if cli_session_env:
+            submit_env = {**(submit_env or {}), **cli_session_env}
         rec = process_model(
             repo,
             hf,

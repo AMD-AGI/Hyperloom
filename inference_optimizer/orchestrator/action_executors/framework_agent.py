@@ -965,6 +965,12 @@ class FrameworkAgentExecutor:
         if ss is not None:
             session_id = str(getattr(ss, "cortex_session_id", "") or "")
         try:
+            gap_keywords = candidate.get("gap_keywords") or []
+            if isinstance(gap_keywords, str):
+                gap_keywords = [gap_keywords]
+            changed_files = candidate.get("changed_files") or []
+            if isinstance(changed_files, str):
+                changed_files = [changed_files]
             written = await write_framework_record(
                 pr_url=pr_url,
                 pr_sha=pr_sha,
@@ -972,6 +978,15 @@ class FrameworkAgentExecutor:
                 outcome=outcome,
                 tps_delta_pct=float(tps_delta_pct),
                 session_id=session_id,
+                framework=str(candidate.get("framework") or "").strip().lower(),
+                gap_canonical_id=str(candidate.get("gap_canonical_id") or "").strip(),
+                gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
+                model_class=str(getattr(ss, "model_class", "") if ss is not None else "").strip(),
+                gpu_type=str(getattr(ss, "gpu_type", "") if ss is not None else "").strip(),
+                precision=str(getattr(ss, "precision", "") if ss is not None else "").strip(),
+                applicability=str(candidate.get("applicability") or "").strip(),
+                provenance="framework_agent",
+                changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
             )
             log.info(
                 "framework: wrote KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
