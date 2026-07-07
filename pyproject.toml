@@ -87,6 +87,10 @@ fa = "hyperloom.agents.framework.runtime.cli:main"
 # always shells out to ``python -m hyperloom.agents.robustness.runtime.cli``
 # directly, not via this console script).
 robustness-agent = "hyperloom.agents.robustness.main:main"
+# tree-reform.MD P2.5: quantization_agent previously had no console-script
+# entry point (only ``python -m quantization_agent.cli``); this is a new
+# convenience entry added during its promotion into hyperloom.agents.
+quantization-agent = "hyperloom.agents.quantization.cli:main"
 
 # Packages are provided by setup.py so editable installs use the same package
 # discovery as local source runs.
@@ -150,6 +154,13 @@ hyperloom = [
     "examples/*.py",
     "scripts/*.sh",
 ]
+# tree-reform.MD P2.5: quantization_agent's skill assets, promoted alongside
+# its package (near-verbatim move; the package itself already used relative
+# imports throughout).
+"hyperloom.agents.quantization" = [
+    "SKILL.md",
+    "README.md",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -158,7 +169,7 @@ testpaths = [
     "src/hyperloom/agents/robustness/tests",
     "src/hyperloom/agents/critic/runtime/tests",
     "src/hyperloom/agents/framework/tests",
-    "quantization_agent/tests",
+    "src/hyperloom/agents/quantization/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
     "kernel-agent/tools/test_gemm_tuning.py",
@@ -179,15 +190,15 @@ testpaths = [
 # Tree-reform transition (tree-reform.MD P2.0): ``src`` (new ``hyperloom.*``
 # namespace) is added alongside the legacy import roots so both resolve during
 # the migration window (dual-importable). Legacy roots are removed only in
-# P2.7. ``.`` is still required for the still-flat ``quantization_agent`` and
-# ``ci`` packages (tree-reform.MD P2.4 only promoted ``inference_optimizer``;
-# quantization_agent/ci src-layout promotion is P2.6). tree-reform.MD P2.5:
-# critic-agent, robustness-agent, and framework-agent were all promoted into
-# ``src/hyperloom/agents/{critic,robustness,framework}`` (bare/sibling module
-# names -> package-qualified ``hyperloom.agents.*``), so their standalone
-# ``critic-agent`` / ``robustness-agent/src`` / ``framework-agent/src``
-# pythonpath entries are dropped here (all resolve via the single ``src``
-# entry now).
+# P2.7. ``.`` is still required for the still-flat ``ci`` package
+# (tree-reform.MD P2.4 only promoted ``inference_optimizer``; ci src-layout
+# promotion is a later phase). tree-reform.MD P2.5: critic-agent,
+# robustness-agent, framework-agent, and quantization_agent were all promoted
+# into ``src/hyperloom/agents/{critic,robustness,framework,quantization}``
+# (bare/sibling module names -> package-qualified ``hyperloom.agents.*``), so
+# their standalone ``critic-agent`` / ``robustness-agent/src`` /
+# ``framework-agent/src`` / ``.`` (for bare ``quantization_agent``) pythonpath
+# entries are dropped here (all resolve via the single ``src`` entry now).
 pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
@@ -204,8 +215,8 @@ filterwarnings = [
 # Coverage configuration: limit coverage measurement to first-party
 # ``source`` trees. The ``ci/`` benchmark pipeline is now collected for tests
 # (see ``testpaths``) and measured for coverage (listed in ``source``), so it
-# DOES count toward the ``fail_under`` (90%) settlement. ``OOB/`` and
-# ``quantization_agent/`` are included and measured as well.
+# DOES count toward the ``fail_under`` (90%) settlement. ``OOB/`` is included
+# and measured as well.
 #
 # omit patterns exclude:
 #   * tests / __init__.py / __main__.py — non-source
@@ -225,13 +236,13 @@ source = [
     # P2.4: inference_optimizer moved under src/hyperloom too (both were
     # previously counted under a standalone "inference_optimizer" entry).
     # tree-reform.MD P2.5: critic-agent's ``runtime`` package, robustness-agent,
-    # and framework-agent were all promoted into src/hyperloom/agents/{critic,
-    # robustness,framework} (so they're now measured as part of the
-    # "src/hyperloom" tree instead of standalone "critic-agent/runtime" /
-    # "robustness_agent" / "framework-agent/src" entries).
+    # framework-agent, and quantization_agent were all promoted into
+    # src/hyperloom/agents/{critic,robustness,framework,quantization} (so
+    # they're now measured as part of the "src/hyperloom" tree instead of
+    # standalone "critic-agent/runtime" / "robustness_agent" /
+    # "framework-agent/src" / "quantization_agent" entries).
     "src/hyperloom",
     "kernel-agent/tools",
-    "quantization_agent",
     "OOB",
     "ci",
 ]
@@ -275,7 +286,7 @@ omit = [
     # kernel-agent skill harness validator — standalone operator script.
     "kernel-agent/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
-    "quantization_agent/cli.py",
+    "src/hyperloom/agents/quantization/cli.py",
     # OOB agent_mcp_server entrypoints / server-side runtime: CLI, HTTP
     # server, scheduler, auth proxy, and the subprocess agent backends are
     # network / long-running services exercised end-to-end, not by unit
@@ -450,6 +461,10 @@ ignore = ["E501", "E741"]
 # helpers/constants they close over (cycle-safe ordering), so the mixin import
 # sits below the top import block. P2.3 stage B: path updated for state/.
 "src/hyperloom/orchestrator/state/shared_state.py" = ["E402"]
+# tree-reform.MD P2.4 follow-up: cli/__init__.py re-exports parser.py's
+# _build_parser cluster after the module docstring + logging setup it closes
+# over (cycle-safe ordering), so the import sits below the top import block.
+"src/hyperloom/inference_optimizer/cli/__init__.py" = ["E402"]
 # tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,dynamo}.py
 # after the base helpers/constants they import back are already defined
 # (cycle-safe ordering), so the import sits below the top import block.

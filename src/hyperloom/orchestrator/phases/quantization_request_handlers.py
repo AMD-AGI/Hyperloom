@@ -1,9 +1,10 @@
 """Adapter: drive the quantization-agent from hyperloom.inference_optimizer.
 
-Thin shim between ``cli._run_quantization_prelude`` and the standalone
-``quantization_agent`` package. It builds an effective prompt (source model
-path + export dir + the user's ``--quantize`` text), runs ``quantize_via_prompt``
-once, and maps its ``QuantSkillRunResult.status`` to a concrete decision:
+Thin shim between ``cli._run_quantization_prelude`` and the
+``hyperloom.agents.quantization`` package. It builds an effective prompt
+(source model path + export dir + the user's ``--quantize`` text), runs
+``quantize_via_prompt`` once, and maps its ``QuantSkillRunResult.status`` to a
+concrete decision:
 
   * ``success``                    -> return ``quantized_model_dir``
   * ``partial`` (model usable)     -> warn, then return ``quantized_model_dir``
@@ -48,9 +49,11 @@ async def run_quantization_prelude_async(
     Raises:
         SystemExit: If quantization failed or produced no usable model.
     """
-    # quantization_agent is a top-level package (sibling of inference_optimizer);
-    # imported lazily so this module loads even where its deps are absent.
-    from quantization_agent import quantize_via_prompt
+    # hyperloom.agents.quantization is always installed alongside orchestrator
+    # (tree-reform.MD P2.5 promoted it into the hyperloom namespace); imported
+    # lazily so this module loads even where its runtime deps (e.g. Quark) are
+    # absent.
+    from hyperloom.agents.quantization import quantize_via_prompt
 
     workspace = Path(workspace)
     export_dir = workspace / "quantized"

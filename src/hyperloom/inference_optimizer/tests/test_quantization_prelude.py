@@ -9,7 +9,7 @@ Three groups, all offline (no Quark / Claude SDK / GPU):
                skipped on --resume, gated on $HYPERLOOM_QUANTIZE_ENABLED, and
                rewrites args.model otherwise.
 
-``quantization_agent.quantize_via_prompt`` is monkeypatched so nothing real runs.
+``hyperloom.agents.quantization.quantize_via_prompt`` is monkeypatched so nothing real runs.
 """
 
 from __future__ import annotations
@@ -54,9 +54,9 @@ def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
 
 
 def _patch_quantize(monkeypatch: pytest.MonkeyPatch, result):
-    """Replace quantization_agent.quantize_via_prompt with an async stub that
-    records its call (prompt + kwargs) and returns ``result``."""
-    import quantization_agent
+    """Replace hyperloom.agents.quantization.quantize_via_prompt with an async
+    stub that records its call (prompt + kwargs) and returns ``result``."""
+    import hyperloom.agents.quantization as quantization_agent
 
     calls: list[dict] = []
 
