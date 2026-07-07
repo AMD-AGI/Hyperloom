@@ -965,6 +965,14 @@ def build_kernel_roofline(
                 "gpu_pct": c["gpu_pct"],
                 "call_count": c["call_count"],
                 "bound_type": c["bound_type"],
+                # Contract alignment (F5): TraceLens kernel_roofline superset.
+                # bottleneck falls back to bound_type (same rule TraceLens uses);
+                # roofline_name has no analytical analogue so it stays null;
+                # suggestion/recommended_actions carry the deterministic hint.
+                "bottleneck": c.get("bottleneck") or c.get("bound_type"),
+                "roofline_name": c.get("roofline_name"),
+                "suggestion": c.get("suggestion") or "",
+                "recommended_actions": list(c.get("recommended_actions") or []),
                 "efficiency_percent": c["efficiency_percent"],
                 "arithmetic_intensity": c["arithmetic_intensity"],
                 "compute_utilization_pct": c["compute_utilization_pct"],

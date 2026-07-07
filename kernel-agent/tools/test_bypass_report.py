@@ -88,6 +88,20 @@ def test_build_kernel_roofline_shape():
     assert len(rows) == 2
     assert all("kernel_id" in r for r in rows)
     assert all(r["rocprof_roofline"] is None for r in rows)
+    # F5: rows are a superset of the TraceLens kernel_roofline row schema.
+    tracelens_row_keys = {
+        "kernel_id", "name", "gpu_pct", "duration_us", "call_count", "kernel_category",
+        "source_file", "bottleneck", "bound_type", "arithmetic_intensity", "flops_per_byte",
+        "efficiency_percent", "compute_utilization_pct", "bandwidth_utilization_pct",
+        "suggestion", "roofline_name", "recommended_actions", "reusable_native_kernel",
+        "rocprof_roofline",
+    }
+    for r in rows:
+        assert tracelens_row_keys.issubset(r.keys())
+        # bottleneck falls back to bound_type; recommended_actions is always a list.
+        assert r["bottleneck"] == (r.get("bottleneck") or r["bound_type"])
+        assert isinstance(r["recommended_actions"], list)
+        assert "roofline_name" in r  # present even when null (no analytical analogue)
 
 
 def test_build_candidates_fills_analytical_roofline_incl_vendor():
