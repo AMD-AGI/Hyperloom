@@ -362,3 +362,38 @@ P2.5 分六个子步骤执行,每个子步骤对应 tree-reform.MD §5.4–§5.6
 **验收(六个子步骤累计,最终状态)**:`pytest --collect-only` 0 错误、9458 个测试;全量非-e2e 门 `9381 passed, 4 skipped, 47 deselected, 12 subtests passed`(外加 13 个 kernel-agent 预存失败 + 15 个预存 error,均通过 `git stash` A/B 对比确认是迁移前就存在的环境相关问题——例如 `ray` 模块未安装、`TraceLens-internal` 检出缺失——与本次搬迁无关,不阻塞 P2.5 完成)。相比 P2.5 开始前的基线(`8497 passed, 3 skipped, 47 deselected`),净增约 900 个测试收集,主要来自:critic/robustness/framework 三个包的 `tests/` 目录首次被 `testpaths` 收录(此前它们在各自独立的 `pytest.ini`/`pyproject.toml` 下跑,根目录跑全量测试不会碰到)、以及 kernel-agent 前述 26 个此前游离的测试文件首次被收集。
 
 **给 P2.6(ci/ 拆库改名)及以后步骤的前瞻**:P2.5 六个子步骤共同验证了"critic-agent 打了个样、后四个子步骤依样画瓢"的可复制性——每一步都是"git mv 物理搬迁 → grep 全仓库找 import/字符串/monkeypatch 引用点 → 改 pyproject.toml 的 testpaths/coverage/package-data/entry_points → 改 CI workflow → `--collect-only` 快速迭代 → 全量非-e2e 门 → 分批 commit"的同一套流程,唯一因包而异的是"该包原来的打包约定有多不规范"(critic 最不规范→最高风险,kernel-agent 因为 sys.path hack + 测试混放次之,quantization 因为纯相对导入几乎零风险)。P2.6 的 `ci/` 拆库(§5.7)会引入一个新维度——它不是简单的"整体搬迁",而是要把库代码和真 CI 脚本拆开、还要处理与顶层 `orchestrator` 的同名冲突(`ci/orchestrator.py` 必须改名),预期比 P2.5 的任何一步都更接近 P2.2/P2.3 的"内容级拆分"复杂度而非纯"目录搬迁"复杂度。
+
+## 13. P2.7 实战(四个提交,门绿)= 测试统一 + 契约收敛(删过渡期 re-export 与死代码)
+
+P2.7 的执行分两条并行轨道同时推进(本次由两个独立 agent session 交错完成,commit 历史里两边的改动互相补全、无冲突):一条是"删 P2.1 过渡期 shim + §2.5 死代码清单",另一条是"收敛 pyproject.toml 的 testpaths/coverage/package-data 契约"。两条轨道各自独立可验证(每删一个 shim / 每改一条 pyproject 路径,立即 `--collect-only` + 针对性单测回归),汇合时用一次全量非-e2e 门兜底confirm 无冲突。
+
+**shim 清理(P2.1 抽 common 时特意保留的"旧文件转调新实现"过渡层,窗口在 P2.7 关闭)**:
+
+1. `orchestrator/_json_io.py` / `_time.py` / `gain_math.py` 三个纯 re-export shim(分别转发 `hyperloom.common.jsonio` / `timeutil` / `gain_math`)直接删除,6+14+3 个调用点改为直连 `hyperloom.common.*`。这三个是"零风险"档:全仓库 grep 确认零 monkeypatch 依赖,纯机械 import 路径替换。
+2. `agents/robustness/_payload_aliases.py`(P2.1 时代的重复 re-export 副本)删除,唯一生产调用点(`signals/repeated_payload.py`)和专用 shim 测试改直连 `hyperloom.common.payload_aliases`。
+3. `inference_optimizer/compat.py`(P2.4 把 `compat/` 包扁平化后的产物,本身也是纯 re-export)删除,8 个调用点(6 生产 + 2 测试)改直连。**关键验证点**:`common.payload_aliases.read_extra_server_args` 的 `stacklevel=3` deprecation warning 依赖"调用链只有两帧"——因为 P2.4 时选的是 re-export 而非 re-wrap(§2.2 记录的决策),删 shim 后调用链依然是两帧,`test_deprecation_stacklevel_points_at_caller` 照常通过,无需改动 stacklevel 数值。
+4. `agents/kernel/tools/_payload_aliases.py` **有意不删**:kernel-agent 的 `tools/` 目录设计为可脱离 `hyperloom` 包独立在远端节点运行(`sys.path.insert` 自定位,Ray worker 不继承 driver 的 sys.path),`kernel_optimization.py` 用裸模块名 `from _payload_aliases import` 而非包限定路径引用它。删除这个 shim 会破坏该约束,留作已知的、有意为之的例外。
+
+**§2.5 死代码清单核查结果(逐项确认现状后再决定是否删)**:
+
+- `specialists/bench.py`(42 行纯 stub,`__all__` 为空)——全仓库 grep 确认零调用方(tree-reform.MD 原计划的"内联进 runner.py"那一步实际上从未发生,文件就这么孤零零地留在那)。直接删除,连带它唯一的专用测试 `test_specialist_bench_unit.py`(该测试只测 stub 自己的两个 envelope 函数,不是任何生产路径的回归覆盖)。
+- `specialists/domains.py` 的 `SPECIALIST_DOMAINS_M5`——逐字节比对确认与 `SPECIALIST_DOMAIN_KEYS` 完全相等,是历史误导性别名。2 个生产引用(`runner.py`)+ 测试里的断言全部替换为 canonical 名字后删除定义。
+- `breakdown/legacy_collectors.py`(v0.6 pre-`phase_history` session 的独立 collector)——**docstring 声称**"callers detect legacy session via `is_legacy_session()` 并 prefer 这里的输出",但实测 `exporter.py` 里唯一的 `collect_phase_segments` 调用点走的是主线 `collectors` 模块,从未调用过 `legacy_collectors` 里的同名函数——即该模块的"接线"步骤实际上从未完成,是彻底的死代码。删除,连带其专用测试 `test_legacy_collectors_unit.py`。这一条的教训是:**模块 docstring 里描述的"调用方如何使用我"不能替代实际 grep 调用点**——必须验证 docstring 断言与代码现实一致,再决定是否是"死代码"。
+- `compat/`(单模块 deprecation shim 却包成子包)、`robustness-agent` 的 `conductor.py`/`monitors/`/`providers/`、`orchestrator/framework/client.py` 的 fallback dict、`coordinator.py` 的 14 个 `_handle_*` 空转发 shim——**均已在更早的阶段(P2.4/P2.5/3b-0)处理完毕**,§2.5 清单里这几条到 P2.7 时已经是"确认已处理,无需动作"而非"待删除"。
+- `_PHASE4_LEGACY_KEY_RENAMES`(`shared_state.py` 里 `extra_sglang_args → extra_server_args` 的 schema 迁移表)——**判定为不可删**:只要磁盘上可能还存在带旧字段名的历史 `state.json`(用于 resume),这个迁移表就是活的兼容层,与 `extra_sglang_args` 整体窗口关闭是同一个问题,不属于 P2.7 范围。
+
+**pyproject.toml 契约收敛**:
+
+- `testpaths` 的 6 条 `src/hyperloom/{inference_optimizer,agents/*}/tests` 单独列举收敛成一条 `"src/hyperloom/**/tests"` glob(pytest 原生支持 `**` 递归展开,实测收集结果集合不变);`ci` 因未做 P2.6 迁移,继续保留独立条目。
+- `coverage.omit` 修复两类 ghost 条目:(a) 指向"文件已被拆包"的过时路径(`breakdown/collectors.py` 单文件 → P2.2 早已拆成 `breakdown/collectors/` 子包,旧路径静默匹配不到任何文件);(b) 指向"从未存在或已删除"文件的条目(`ci/pipeline_run.py`、`ci/download_ab_stitched_session_logs.py`、`ci/run_llm_batch.py`)。`coverage` 的 `omit`/`source` 对不存在路径不报错、只是静默忽略——这类 ghost entry 不会在常规测试运行中暴露,只能靠专门的"逐条核对磁盘是否存在"侦察发现。
+- `package-data` 里 `benches/*.sh` / `benches/README.md` 两条 ghost glob(目录不存在)一并删除。
+- SKILL.md/AGENTS.md 的旧路径引用(`framework-agent/` sibling 布局图、`framework_agent.*` 裸模块名示例代码)更新为当前的 `src/hyperloom/agents/framework/` + `hyperloom.agents.framework.*`——这类文档性内容不受 pytest/coverage 门控保护,只能靠人工 grep 发现,漏改不影响任何自动化测试但会误导后续读者(包括未来的 LLM agent)。
+
+**验收**:`pytest --collect-only` 0 错误、9444 个测试(相对 P2.5 收尾时的 9458,净减 14 = 删除 `test_specialist_bench_unit.py` 的 1 个 + `test_legacy_collectors_unit.py` 的 11 个 + `test_per_domain_prompts.py`/`test_no_legacy_writer_sites.py` 因去重断言减少的净 2 个);全量非-e2e 门 `9363 passed, 4 skipped, 47 deselected, 12 subtests passed`,外加 17 个 kernel-agent 预存 failed + 15 个预存 error(与 P2.5 收尾时的 13 failed + 15 error 相比,数量差异是 pytest 收集顺序/`--collect-only` 与实际执行时 `ray`/网络依赖缺失触发的非确定性 collection error 边界效应,并非本次改动引入的新回归——通过 `git stash`/逐 commit 对比确认每个 FAILED/ERROR 用例名称集合与迁移前完全一致)。
+
+**给以后清理任务的 checklist(本次总结)**:
+
+1. **shim 删除前必须验证三件事**:(a) 全仓库 grep 是否有 `monkeypatch.setattr` 直接打在 shim 模块上(而非打在它转发的目标上);(b) shim 是否承载了转发目标之外的额外逻辑(比如错误处理、日志、参数校验)——如果有,不能整体删,只能删"纯转发"的那部分;(c) 依赖 stacklevel/文件名的测试(比如 deprecation warning 断言)在改写调用链后是否还成立。
+2. **死代码判定不能只看"计划文档怎么说",必须验证"生产代码实际怎么用"**:`legacy_collectors.py` 的教训是模块自己的 docstring 断言的"调用契约"可能从未被真正实现过。
+3. **pyproject.toml 的 ghost entry 只能靠主动核对磁盘存在性发现**,因为 `coverage`/`setuptools.package-data` 的 glob 对不存在路径是静默无操作,不会在任何测试运行中报错或警告。
+4. **两个 agent session 并行处理同一任务时**,只要各自的改动集合是"文件级不重叠或语义完全一致"(比如两边都独立发现并修复了同一个 ghost entry,写出的修复内容字节级相同),`git status`/`git diff` 汇合后不会有冲突,可以放心地在汇合点做一次全量测试门验证后统一提交——不需要互相阻塞等待。
