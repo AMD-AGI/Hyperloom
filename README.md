@@ -103,7 +103,7 @@ Self-hosted Hyperloom is MIT licensed (see
 
 ## Detailed Skill Documentation
 
-The repo ships a single skill — `inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
+The repo ships a single skill — `src/hyperloom/inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
 
 | Domain | Skill | Description |
 |--------|-------|-------------|
@@ -135,11 +135,19 @@ Hyperloom/
 │   │   ├── policy/                       # PolicyGate + action surfaces
 │   │   ├── actions/                      # Action registry + executors/
 │   │   ├── roles/                        # Claude/Codex/Critic/Robustness backend adapters
+│   │   ├── state/                        # SharedState + journal/memory/task-registry/objective
+│   │   ├── bus/                          # Message bus, cursor store, GPU pool, resource locks
+│   │   ├── knowledge/                    # KB writeback, PR monitor, research hints
+│   │   ├── specialists/                  # EXPLORE specialist search ("Arbor")
+│   │   ├── kernel/                       # Kernel-request handling + roofline
+│   │   ├── framework/                    # FRAMEWORK_AGENT client/paths
+│   │   ├── scoring/                      # Proposal scorer
 │   │   └── prompts/                      # Orchestration prompt construction
 │   └── agents/                           # Sibling skills, promoted into the hyperloom namespace
 │       ├── critic/                       # Critic subprocess runtime (proposal review)
 │       ├── robustness/                   # Robustness subprocess runtime (health/RCA)
 │       ├── framework/                    # Framework-agent (PR/ref discovery + enablement)
+│       ├── quantization/                 # Optional AMD Quark PTQ prelude (--quantize)
 │       └── kernel/                       # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
 │           ├── SKILL.md                  # Kernel-agent operation spec
 │           ├── tools/                    # TraceLens analysis, kernel optimization, patch apply

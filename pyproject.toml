@@ -92,8 +92,12 @@ robustness-agent = "hyperloom.agents.robustness.main:main"
 # convenience entry added during its promotion into hyperloom.agents.
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 
-# Packages are provided by setup.py so editable installs use the same package
-# discovery as local source runs.
+# tree-reform.MD P2.8: package discovery is fully declarative now that the
+# whole ``hyperloom`` distribution lives under a single src-layout namespace
+# (setup.py used to carry find_packages(where="src") + an explicit
+# package_dir mapping; both are now expressed here and setup.py is deleted).
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
@@ -268,7 +272,6 @@ omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/__main__.py",
-    "setup.py",
     # CLI driver scripts (subprocess plumbing dominated).
     "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",
