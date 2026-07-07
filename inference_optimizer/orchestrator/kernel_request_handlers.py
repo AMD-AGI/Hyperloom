@@ -2534,11 +2534,16 @@ async def trace_analyze_handler(
         cmd += ["--analysis-mode", str(analysis_mode)]
 
     if scriptable:
-        # No steady-state window to extract; skip the splitter entirely.
-        cmd += ["--skip-split"]
-        # Forward the denoise-step count so the diffusion workload roofline can
-        # emit per-denoise-step timings. Priority: payload override (steps in
-        # the profiled window) > baseline workload metadata (full schedule).
+        # --skip-split is a TraceLens-only splitter control; the bypass backend
+        # has its own steady-state windowing (ProfilerStep anchoring) and does not
+        # define this flag, so route-converge it (sending it to bypass would crash
+        # argparse -> trace_analyze_failed -> degraded roofline).
+        if not is_bypass:
+            cmd += ["--skip-split"]
+        # Forward the denoise-step count to BOTH routes so the diffusion workload
+        # roofline can emit per-denoise-step timings (bypass consumes it too).
+        # Priority: payload override (steps in the profiled window) > baseline
+        # workload metadata (full schedule).
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:

@@ -74,6 +74,20 @@ def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
     _assert_artifacts(result)
 
 
+def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
+    # F1: the coordinator forwards --num-denoise-steps for scriptable workloads;
+    # bypass must accept it (no argparse crash -> no degraded roofline) and surface
+    # it in the result (effective = requested when the trace infers no steps).
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    rc, result, _ = _run(
+        _base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run", "--num-denoise-steps", "20"]),
+        capsys,
+    )
+    assert rc == 0
+    assert result["status"] == "ok"
+    assert result["num_denoise_steps"] == 20
+
+
 def test_missing_trace_falls_back_gracefully(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     rc, result, _ = _run(_base_argv(tmp_path, str(tmp_path / "does_not_exist.trace.json")), capsys)

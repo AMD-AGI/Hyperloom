@@ -232,6 +232,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--capture-folder", default="")
     p.add_argument("--steady-state-mode", default="")
     p.add_argument("--roofline-output-name", default="kernel_roofline.json")
+    # Denoise-step count for scriptable/diffusion workloads (forwarded by the
+    # coordinator). Consumed for per-step diffusion roofline + step-count
+    # validation; 0 means "infer from the trace".
+    p.add_argument("--num-denoise-steps", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -365,6 +369,28 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
+    # Denoise-step-count validation: the coordinator forwards --num-denoise-steps
+    # (the profiled/scheduled step count) for scriptable/diffusion workloads. Do
+    # NOT silently drop it — compare against the step count the reader inferred
+    # from ProfilerStep annotations and warn on a mismatch (it is a key per-step
+    # diffusion-roofline input consumed by diffusion_roofline).
+    requested_denoise_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
+    inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0) or int(
+        (analyze.get("attribution") or {}).get("annotation_window_count", 0) or 0
+    )
+    if requested_denoise_steps > 0 and inferred_denoise_steps > 0 and requested_denoise_steps != inferred_denoise_steps:
+        trace_health_warnings.append(
+            {
+                "code": "bypass_denoise_steps_mismatch",
+                "severity": "info",
+                "message": (
+                    f"requested --num-denoise-steps={requested_denoise_steps} differs from the "
+                    f"{inferred_denoise_steps} step(s) inferred from the trace annotations; the "
+                    "trace-inferred per-step window is used for kernel shares."
+                ),
+            }
+        )
+
     # Analysis-quality health signals (observability only; never fatal). Gated
     # on GPU kernels present so shares are meaningful.
     if analyze.get("kernels"):
@@ -481,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         "analysis_degraded": analysis_degraded,
         "analyzed_rank": analyzed_rank,
         "rank_count": rank_count,
+        "num_denoise_steps": requested_denoise_steps or inferred_denoise_steps,
         "framework": args.framework,
         "target_platform": args.target_platform,
         "hot_kernels": hot_kernels,

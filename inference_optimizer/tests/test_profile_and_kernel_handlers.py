@@ -1704,6 +1704,44 @@ async def test_trace_analyze_handler_invalid_route_falls_back_to_agent(session_d
 
 
 @pytest.mark.asyncio
+async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
+    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only
+    (must NOT reach bypass, which would crash argparse -> degraded), while
+    --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    base = {
+        "trace_input": str(fake_trace),
+        "session_id": session_dir.name,
+        "framework": "xdit",
+        "num_denoise_steps": 20,
+        "top_k": 5,
+    }
+    # Explicit bypass route: no --skip-split, but --num-denoise-steps forwarded.
+    await krh.trace_analyze_handler({**base, "analysis_route": "bypass"}, session_dir=session_dir)
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--skip-split" not in cmd
+    assert "--num-denoise-steps" in cmd and "20" in cmd
+    # TraceLens (deterministic) route: both flags present.
+    await krh.trace_analyze_handler({**base, "analysis_route": "deterministic"}, session_dir=session_dir)
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--skip-split" in cmd
+    assert "--num-denoise-steps" in cmd
+
+
+@pytest.mark.asyncio
 async def test_trace_analyze_handler_text_gen_deterministic_escapes_to_tracelens(session_dir, monkeypatch):
     """TraceLens stays reachable as an explicit escape hatch: text-gen with
     analysis_route=deterministic runs the TraceLens tool, not bypass."""
