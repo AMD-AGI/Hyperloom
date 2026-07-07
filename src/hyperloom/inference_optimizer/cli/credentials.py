@@ -15,27 +15,27 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+from .executors import (  # noqa: F401 - re-exported for callers/tests
     _NOOP_KINDS_KERNEL_ONLY,
     _REAL_EXECUTORS_FULL,
     _build_specialist_executor,
     _noop_prep,
     _register_executors,
 )
-from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+from .kb import (  # noqa: F401 - re-exported for callers/tests
     _bootstrap_cortex_kb,
     _bootstrap_knowledge_plane,
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+from .backends import (  # noqa: F401 - re-exported for callers/tests
     _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
+from .model_gate import (  # noqa: F401 - re-exported for callers/tests
     _AMD_GPU_TYPES,
     _AMD_UNSUPPORTED_ARCHITECTURES,
     _AMD_UNSUPPORTED_MODEL_TYPES,
@@ -93,11 +93,11 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
     _resolve_gpu_type,
     _resolve_max_model_len,
 )
-from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
     summarize_model_config,
 )
-from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
+from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
     _parse_conc_sweep_concs,
     _print_final_summary,
@@ -126,11 +126,15 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 
-# Critic-agent skill root resolution. Env wins; else sibling ``critic-agent/`` next to repo root.
+# Critic-agent skill root resolution. Env wins; else the in-tree
+# ``src/hyperloom/agents/critic/`` package (tree-reform.MD P2.5: critic-agent
+# was promoted from the sibling ``critic-agent/`` checkout into the
+# ``hyperloom`` src-layout namespace; the CLI module is now package-qualified
+# as ``hyperloom.agents.critic.runtime.cli`` instead of bare ``runtime.cli``).
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 def _resolve_critic_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``.
+    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else the in-tree package), or ``None``.
 
     Returns:
         Path | None: The validated critic-agent root, or ``None`` when no
@@ -140,13 +144,13 @@ def _resolve_critic_agent_root() -> Path | None:
     if override:
         p = Path(override).expanduser()
         return p if (p / "runtime" / "cli.py").is_file() else None
-    from .session.paths import PACKAGE_ROOT
+    from ..session.paths import PACKAGE_ROOT
 
-    candidate = PACKAGE_ROOT.parent / "critic-agent"
+    candidate = PACKAGE_ROOT.parent / "agents" / "critic"
     return candidate if (candidate / "runtime" / "cli.py").is_file() else None
 
 def _validate_critic_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work.
+    """Fail fast (SystemExit) if ``python -m hyperloom.agents.critic.runtime.cli --help`` doesn't work.
 
     Args:
         root (Path): The critic-agent skill root to validate.
@@ -155,7 +159,7 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         SystemExit: With code 2 when the runtime cannot start or exits
             non-zero.
     """
-    cmd = [sys.executable, "-m", "runtime.cli", "--help"]
+    cmd = [sys.executable, "-m", "hyperloom.agents.critic.runtime.cli", "--help"]
     try:
         proc = subprocess.run(
             cmd,
@@ -169,15 +173,15 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             f"ERROR: critic-agent runtime sanity check failed: {exc!r}\n"
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
-            f"Either fix CRITIC_AGENT_ROOT, install critic-agent at "
-            f"$REPO_ROOT/critic-agent, or pass --critic-mock to bypass "
-            f"critic-agent.",
+            f"Either fix CRITIC_AGENT_ROOT, check the "
+            f"src/hyperloom/agents/critic/ install, or pass --critic-mock to "
+            f"bypass critic-agent.",
             file=sys.stderr,
         )
         sys.exit(2)
     if proc.returncode != 0:
         print(
-            f"ERROR: critic-agent runtime.cli --help exited rc={proc.returncode}\n"
+            f"ERROR: hyperloom.agents.critic.runtime.cli --help exited rc={proc.returncode}\n"
             f"  cwd={root}\n"
             f"  stderr={proc.stderr.strip()[:500]}",
             file=sys.stderr,
@@ -198,7 +202,7 @@ def _resolve_robustness_agent_root() -> Path | None:
     if override:
         p = Path(override).expanduser()
         return p if (p / "src" / "robustness_agent" / "runtime" / "cli.py").is_file() else None
-    from .session.paths import PACKAGE_ROOT
+    from ..session.paths import PACKAGE_ROOT
 
     candidate = PACKAGE_ROOT.parent / "robustness-agent"
     cli_module = candidate / "src" / "robustness_agent" / "runtime" / "cli.py"

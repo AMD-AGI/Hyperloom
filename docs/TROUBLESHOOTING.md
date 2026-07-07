@@ -5,7 +5,7 @@ users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
-[`critic-agent/SKILL.md`](../critic-agent/SKILL.md),
+[`src/hyperloom/agents/critic/SKILL.md`](../src/hyperloom/agents/critic/SKILL.md),
 [`robustness-agent/SKILL.md`](../robustness-agent/SKILL.md).
 
 ---

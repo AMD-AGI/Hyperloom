@@ -10,7 +10,6 @@ focus stays on the LLM tool-call loop. Web tool clients are injected via
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,14 +23,17 @@ from hyperloom.inference_optimizer.tests.test_critic_agent_backend import (
 )
 
 
-# Resolve critic-agent's on-disk ``runtime`` package so its web_tools import succeeds at test time.
-REAL_CRITIC_AGENT_ROOT = Path(__file__).resolve().parents[4] / "critic-agent"
+# tree-reform.MD P2.5: critic-agent's ``runtime`` package is now promoted into
+# the ``hyperloom`` src-layout namespace (installed alongside everything
+# else), so its on-disk root is resolved from this package's own tree rather
+# than a sibling checkout.
+REAL_CRITIC_AGENT_ROOT = Path(__file__).resolve().parents[2] / "agents" / "critic"
 
 
-# Skip the module when critic-agent isn't checked out alongside the parent project.
+# Skip the module when the critic-agent package isn't present in this checkout.
 pytestmark = pytest.mark.skipif(
     not (REAL_CRITIC_AGENT_ROOT / "runtime" / "web_tools" / "__init__.py").is_file(),
-    reason="critic-agent runtime.web_tools not present on disk",
+    reason="hyperloom.agents.critic.runtime.web_tools not present on disk",
 )
 
 
@@ -192,22 +194,8 @@ def _tool_call(
 
 
 def _import_web_tools_config():
-    """Late import so REAL_CRITIC_AGENT_ROOT is on sys.path first; evicts a stale ``runtime`` namespace cache."""
-    real = str(REAL_CRITIC_AGENT_ROOT)
-    if real not in sys.path:
-        sys.path.insert(0, real)
-    expected = Path(real, "runtime").resolve()
-    runtime_mod = sys.modules.get("runtime")
-    cached_paths = []
-    if runtime_mod is not None:
-        try:
-            cached_paths = [Path(p).resolve() for p in (getattr(runtime_mod, "__path__", []) or [])]
-        except (OSError, ValueError):
-            cached_paths = []
-    if runtime_mod is not None and expected not in cached_paths:
-        for key in [k for k in sys.modules if k == "runtime" or k.startswith("runtime.")]:
-            sys.modules.pop(key, None)
-    from runtime.web_tools import WebToolsConfig
+    """Import :class:`WebToolsConfig` from the installed critic-agent package."""
+    from hyperloom.agents.critic.runtime.web_tools import WebToolsConfig
 
     return WebToolsConfig
 

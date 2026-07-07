@@ -12,8 +12,10 @@ name: Lint
 #
 # Pylint: ``--errors-only`` limits output to fatal/error-severity messages
 # (not convention or refactor hints). Multiple first-party packages are checked
-# after editable installs + ``PYTHONPATH`` for critic ``runtime`` and
-# ``quantization_agent`` (see the ``pylint`` job run script).
+# after editable installs + ``PYTHONPATH`` for ``quantization_agent`` (see the
+# ``pylint`` job run script). tree-reform.MD P2.5: critic-agent's ``runtime``
+# package was promoted into ``hyperloom.agents.critic.runtime`` (no more bare
+# ``runtime`` PYTHONPATH entry).
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
@@ -98,14 +100,16 @@ jobs:
       - name: Pylint (errors only)
         continue-on-error: true
         env:
-          # critic-agent: top-level package is ``runtime``; repo root for
-          # ``quantization_agent`` (not installed as its own distribution here).
+          # repo root for ``quantization_agent`` (not installed as its own
+          # distribution here). tree-reform.MD P2.5: critic's ``runtime``
+          # package now resolves via the editable ``hyperloom`` install (no
+          # separate bare-``runtime`` PYTHONPATH entry needed).
           PYTHONPATH: >-
-            ${{ github.workspace }}/critic-agent:${{ github.workspace }}
+            ${{ github.workspace }}
         run: |
           pylint --errors-only \
             inference_optimizer \
             robustness_agent \
             framework_agent \
-            runtime \
+            hyperloom.agents.critic.runtime \
             quantization_agent

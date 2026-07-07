@@ -89,13 +89,23 @@ hyperloom = [
     "data/framework/*.md",
     "data/recipes/*.json",
 ]
+# tree-reform.MD P2.5: critic-agent's LLM skill assets (mounted by the A2A /
+# Codex chat server host, not imported as Python) promoted alongside its
+# ``runtime`` package.
+"hyperloom.agents.critic" = [
+    "SKILL.md",
+    "AGENTS.md",
+    "actions/*.md",
+    "references/*.md",
+    "kb_contributions/*.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = [
     "src/hyperloom/inference_optimizer/tests",
     "robustness-agent/tests",
-    "critic-agent/runtime/tests",
+    "src/hyperloom/agents/critic/runtime/tests",
     "quantization_agent/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
@@ -119,8 +129,11 @@ testpaths = [
 # the migration window (dual-importable). Legacy roots are removed only in
 # P2.7. ``.`` is still required for the still-flat ``quantization_agent`` and
 # ``ci`` packages (tree-reform.MD P2.4 only promoted ``inference_optimizer``;
-# quantization_agent/ci src-layout promotion is P2.5/P2.6).
-pythonpath = ["src", ".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
+# quantization_agent/ci src-layout promotion is P2.6). tree-reform.MD P2.5:
+# critic-agent was promoted into ``src/hyperloom/agents/critic`` (module
+# ``runtime`` -> package-qualified ``hyperloom.agents.critic.runtime``), so
+# its bare ``critic-agent`` pythonpath entry is dropped here.
+pythonpath = ["src", ".", "ci", "robustness-agent/src", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -156,9 +169,11 @@ source = [
     # tree-reform.MD P2.3: orchestrator moved under src/hyperloom. tree-reform.MD
     # P2.4: inference_optimizer moved under src/hyperloom too (both were
     # previously counted under a standalone "inference_optimizer" entry).
+    # tree-reform.MD P2.5: critic-agent's ``runtime`` package was promoted
+    # into src/hyperloom/agents/critic (so it's now measured as part of the
+    # "src/hyperloom" tree instead of a standalone "critic-agent/runtime" entry).
     "src/hyperloom",
     "robustness_agent",
-    "critic-agent/runtime",
     "framework-agent/src",
     "kernel-agent/tools",
     "quantization_agent",
@@ -397,4 +412,4 @@ ignore = ["E501", "E741"]
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
 "src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
-"critic-agent/runtime/decision_reviewer.py" = ["E402"]
+"src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]

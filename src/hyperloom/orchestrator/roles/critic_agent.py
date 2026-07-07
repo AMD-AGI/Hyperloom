@@ -1,13 +1,14 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CriticAgentBackend — bridges the ``critic-agent`` runtime into the
-Coordinator as a real Critic Backend.
+"""CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into
+the Coordinator as a real Critic Backend.
 
-Runs the two-phase loop from ``critic-agent/AGENTS.md`` (prepare-review →
-Codex review.json → commit-review), giving KB priors, per-session memory,
-review_constraints injection, and emergency fallbacks. The returned envelope
-is re-validated locally so malformed replies surface as backend-tagged
-errors. ``codex_client_factory`` / ``runtime_caller_factory`` are test seams.
+Runs the two-phase loop from ``src/hyperloom/agents/critic/AGENTS.md``
+(prepare-review → Codex review.json → commit-review), giving KB priors,
+per-session memory, review_constraints injection, and emergency fallbacks.
+The returned envelope is re-validated locally so malformed replies surface as
+backend-tagged errors. ``codex_client_factory`` / ``runtime_caller_factory``
+are test seams.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,9 +37,7 @@ from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
 if TYPE_CHECKING:  # pragma: no cover
-    # Type-only import; runtime.web_tools resolves after sys.path insert
-    # in __post_init__.
-    from runtime.web_tools import WebToolClients, WebToolsConfig
+    from hyperloom.agents.critic.runtime.web_tools import WebToolClients, WebToolsConfig
 
 
 log = logging.getLogger(__name__)
@@ -140,7 +138,7 @@ def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
-    """Real implementation — runs ``python -m runtime.cli <phase> ...``.
+    """Real implementation — runs ``python -m hyperloom.agents.critic.runtime.cli <phase> ...``.
 
     Args:
         call (RuntimeCall): The invocation descriptor with phase, request /
@@ -159,7 +157,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
     # Exit codes: 0 success; 2 adapter bug (host → needs_review).
     invoke_runtime_cli(
         call,
-        module="runtime.cli",
+        module="hyperloom.agents.critic.runtime.cli",
         agent_label="critic-agent",
         timeout_sec=CRITIC_AGENT_RUNTIME_TIMEOUT_SEC,
         extra_args=extra_args,
@@ -269,10 +267,12 @@ class CriticAgentBackend:
     Parameters
     ----------
     critic_agent_root:
-        Directory containing ``runtime/cli.py``. The CLI is invoked with
-        ``cwd=critic_agent_root`` because critic-agent's pytest.ini sets
-        ``pythonpath = .`` — we mirror that so ``python -m runtime.cli``
-        resolves the package without needing pip-install.
+        Directory containing ``runtime/cli.py`` (``src/hyperloom/agents/critic/``).
+        The CLI is invoked as the package-qualified
+        ``python -m hyperloom.agents.critic.runtime.cli``, resolved via the
+        normal installed ``hyperloom`` namespace; ``cwd=critic_agent_root``
+        is still set so relative asset reads (``SKILL.md``, ``actions/*.md``)
+        resolve without an absolute path.
     session_dir:
         Coordinator session directory. Used to scope per-turn workdirs
         and the per-session critic memory store.
@@ -366,8 +366,10 @@ class CriticAgentBackend:
     def __post_init__(self) -> None:
         """Validate config, wire transports, and resolve static context.
 
-        Normalises paths, verifies ``runtime/cli.py`` exists and adds the root
-        to ``sys.path``, validates ``kb_mode``, selects the real or test runtime
+        Normalises paths, verifies ``runtime/cli.py`` exists under
+        ``critic_agent_root`` (used as the subprocess ``cwd`` for
+        ``runtime.cli`` invocations and to load ``SKILL.md`` / action
+        prompts), validates ``kb_mode``, selects the real or test runtime
         caller, constructs the Codex/OpenAI client (or its factory), resolves
         the per-session static context (explicit or from ``manifest.json``), and
         initialises optional web tools.
@@ -384,11 +386,6 @@ class CriticAgentBackend:
                 f"{self.critic_agent_root!s} — set CRITIC_AGENT_ROOT or "
                 f"check the install"
             )
-        # Insert critic_agent_root at the front of sys.path so
-        # ``runtime.*`` resolves against the configured checkout, not a stale install.
-        critic_root_str = str(self.critic_agent_root)
-        if critic_root_str not in sys.path:
-            sys.path.insert(0, critic_root_str)
         if self.kb_mode not in ("inmemory", "live"):
             raise BackendError(f"CriticAgentBackend: kb_mode={self.kb_mode!r} not in {{'inmemory','live'}}")
 
@@ -446,19 +443,15 @@ class CriticAgentBackend:
     def _init_web_tools(self) -> None:
         """Resolve :class:`WebToolsConfig` + build clients + freeze schemas;
         never raises (failure falls back to no-tool reasoning)."""
-        # PEP 420 namespace caching can pin ``runtime`` to a stale
-        # critic_agent_root; evict entries that don't cover our root.
-        self._evict_stale_runtime_modules()
         try:
-            from runtime.web_tools import (
+            from hyperloom.agents.critic.runtime.web_tools import (
                 WebToolsConfig as _Cfg,
                 build_clients as _build_clients,
                 build_tool_schemas as _build_schemas,
             )
         except ImportError as exc:
             log.warning(
-                "critic_agent_backend: runtime.web_tools not importable from %s (%s); web tools disabled",
-                self.critic_agent_root,
+                "critic_agent_backend: hyperloom.agents.critic.runtime.web_tools not importable (%s); web tools disabled",
                 exc,
             )
             return
@@ -501,22 +494,6 @@ class CriticAgentBackend:
             [s["function"]["name"] for s in schemas],
             self._web_tool_max_turns,
         )
-
-    def _evict_stale_runtime_modules(self) -> None:
-        """Drop cached ``runtime`` / ``runtime.*`` modules pointing away from
-        this backend's ``critic_agent_root`` (no-op when already covered)."""
-        runtime_mod = sys.modules.get("runtime")
-        if runtime_mod is None:
-            return
-        expected = (self.critic_agent_root / "runtime").resolve()
-        try:
-            cached_paths = [Path(p).resolve() for p in (getattr(runtime_mod, "__path__", []) or [])]
-        except (OSError, ValueError):
-            cached_paths = []
-        if expected in cached_paths:
-            return
-        for key in [k for k in sys.modules if k == "runtime" or k.startswith("runtime.")]:
-            sys.modules.pop(key, None)
 
     # Public API — Backend.run
     async def run(

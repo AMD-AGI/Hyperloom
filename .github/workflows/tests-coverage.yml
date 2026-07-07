@@ -124,10 +124,13 @@ jobs:
           # form the data uses (e.g. OOB is editable-installed as
           # ``agent_mcp_server`` and may be recorded as ``OOB/`` or absolute),
           # and never double-counts (unlike ``--include`` glob unions).
+          # tree-reform.MD P2.5: critic-agent's ``runtime`` package was
+          # promoted into ``src/hyperloom/agents/critic`` (measured as part of
+          # the "src/hyperloom" source tree below instead of a standalone
+          # "critic-agent/runtime" entry).
           _SOURCE_SEGMENTS = {
               "inference_optimizer": ["/inference_optimizer/"],
               "robustness_agent": ["/robustness_agent/"],
-              "critic-agent/runtime": ["/critic-agent/runtime/"],
               "framework-agent/src": ["/framework-agent/src/"],
               "kernel-agent/tools": ["/kernel-agent/tools/"],
               "quantization_agent": ["/quantization_agent/"],

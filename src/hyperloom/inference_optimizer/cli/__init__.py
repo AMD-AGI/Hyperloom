@@ -22,27 +22,27 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+from .executors import (  # noqa: F401 - re-exported for callers/tests
     _NOOP_KINDS_KERNEL_ONLY,
     _REAL_EXECUTORS_FULL,
     _build_specialist_executor,
     _noop_prep,
     _register_executors,
 )
-from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+from .kb import (  # noqa: F401 - re-exported for callers/tests
     _bootstrap_cortex_kb,
     _bootstrap_knowledge_plane,
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+from .backends import (  # noqa: F401 - re-exported for callers/tests
     _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
+from .model_gate import (  # noqa: F401 - re-exported for callers/tests
     _AMD_GPU_TYPES,
     _AMD_UNSUPPORTED_ARCHITECTURES,
     _AMD_UNSUPPORTED_MODEL_TYPES,
@@ -100,11 +100,11 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
     _resolve_gpu_type,
     _resolve_max_model_len,
 )
-from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
     summarize_model_config,
 )
-from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
+from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
     _parse_conc_sweep_concs,
     _print_final_summary,
@@ -125,7 +125,7 @@ from hyperloom.orchestrator.actions.executors._aiter_jit import (
 
 # tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
 # re-exported here so the module namespace + monkeypatch surface is intact.
-from ._cli_credentials import (
+from .credentials import (
     _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
     _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
@@ -145,18 +145,18 @@ from ._cli_credentials import (
     _reset_claude_config_to_upstream as _reset_claude_config_to_upstream,
     _validate_credentials as _validate_credentials,
 )
-from ._cli_multi_node import (
+from .multi_node import (
     _gc_old_profile_traces as _gc_old_profile_traces,
     _resolve_mn_backend as _resolve_mn_backend,
     _provision_multi_node_dynamo_stack as _provision_multi_node_dynamo_stack,
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
     _replay_kernel_patches_for_multi_node as _replay_kernel_patches_for_multi_node,
 )
-from ._cli_quantization import (
+from .quantization import (
     _quantization_enabled_via_env as _quantization_enabled_via_env,
     _run_quantization_prelude as _run_quantization_prelude,
 )
-from ._cli_recover import (
+from .recover import (
     _session_recovery_status as _session_recovery_status,
     _run_recover_session as _run_recover_session,
 )
@@ -209,8 +209,8 @@ __all__ = [
     "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
     "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
 ]
-from . import framework_registry
-from .session.manifest import load_manifest, write_manifest
+from .. import framework_registry
+from ..session.manifest import load_manifest, write_manifest
 from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
@@ -221,8 +221,8 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from .session.lock import SessionAlreadyRunning, SessionLock
-from .session.paths import (
+from ..session.lock import SessionAlreadyRunning, SessionLock
+from ..session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
@@ -1114,7 +1114,7 @@ def _emit_preflight_diagnostics(
         BASELINE_DEFAULT_TIMEOUT_SEC,
         _probe_aiter_jit_cache,
     )
-    from .session.paths import asset_root
+    from ..session.paths import asset_root
 
     probe = _probe_aiter_jit_cache()
     cold_cap = os.environ.get(
@@ -1195,7 +1195,7 @@ def _print_cortex_kb_queue_status() -> None:
         Side-effecting: writes the queue status summary to stdout and returns
         nothing.
     """
-    from .session.session_paths import (
+    from ..session.session_paths import (
         cortex_dead_letter_ndjson,
         cortex_flushed_ndjson,
         cortex_pending_ndjson,
@@ -1741,7 +1741,7 @@ def _preflight(
         if magpie_env:
             magpie_dir = Path(magpie_env)
         else:
-            from .session.paths import magpie_dir as _magpie_default
+            from ..session.paths import magpie_dir as _magpie_default
 
             magpie_dir = _magpie_default(_session_dir_resolve())
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1772,7 +1772,7 @@ def _preflight(
     # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
-        from .session.paths import (
+        from ..session.paths import (
             magpie_dir as _magpie_default,
             open_source_root as _open_source_default,
         )
@@ -1799,7 +1799,7 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .session.paths import open_source_root as _open_source_default
+        from ..session.paths import open_source_root as _open_source_default
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
@@ -2390,7 +2390,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Resume mode: USER_DATA_PATH stays at workspace level; pick the per-session subdir via --resume-from
         # or auto-pick the latest under <model>/<ts>/ (legacy flat layout fallback). Pin
         # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR so paths/subprocesses resolve consistently.
-        from .session.paths import (
+        from ..session.paths import (
             ENV_CURRENT_SESSION_DIR,
             find_latest_per_session_dir,
             workspace_root,
@@ -2717,7 +2717,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ.get("FRAMEWORK_VERSION", "") or ""
         ).strip()
         if not _fw_version_for_env:
-            from .recipe_snapshot_constants import (
+            from ..recipe_snapshot_constants import (
                 DEFAULT_FRAMEWORK_VERSION_SLUG,
                 detect_framework_version,
             )
@@ -2878,8 +2878,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"ERROR: --critic-agent selected but critic-agent runtime not "
                 f"found.\n"
                 f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
-                f"runtime/cli.py, or install critic-agent at "
-                f"$REPO_ROOT/critic-agent/.\n"
+                f"runtime/cli.py, or check the "
+                f"src/hyperloom/agents/critic/ install.\n"
                 f"  Bypass with --critic-mock.",
                 file=sys.stderr,
             )
@@ -3140,7 +3140,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # finally has persisted state.json (with stop_reason) before we get
         # here, so the fields are current.
         try:
-            from .breakdown import write_minimal_final_json
+            from ..breakdown import write_minimal_final_json
 
             final_json = write_minimal_final_json(session_dir)
             print(f"Final summary     : {final_json}")
@@ -3168,7 +3168,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 )
 
                 flush_session(session_dir)
-                from .breakdown import patch_breakdown_langfuse
+                from ..breakdown import patch_breakdown_langfuse
 
                 patch_breakdown_langfuse(session_dir)
                 record_session_breakdown(session_dir)
@@ -3176,7 +3176,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
             try:
-                from .breakdown import write_breakdown_json
+                from ..breakdown import write_breakdown_json
 
                 breakdown_path = write_breakdown_json(session_dir)
                 print(f"Session breakdown : {breakdown_path}")
@@ -3184,7 +3184,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception("session_breakdown finalize failed (non-fatal)")
             # Issue-I: safety-net reports/final.md (no-op when the sequencer's final.md already exists).
             try:
-                from .breakdown import write_minimal_final_report
+                from ..breakdown import write_minimal_final_report
 
                 final_md = write_minimal_final_report(session_dir)
                 print(f"Final report      : {final_md}")
@@ -3205,7 +3205,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 )
 
                 flush_session(session_dir)
-                from .breakdown import patch_breakdown_langfuse
+                from ..breakdown import patch_breakdown_langfuse
 
                 patch_breakdown_langfuse(session_dir)
                 record_session_breakdown(session_dir)
@@ -3220,7 +3220,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # must not mask stop_reason. Runs after the SBD/final.md +
         # Langfuse flush above so the freshest products are bundled.
         try:
-            from .breakdown import package_session_artifacts
+            from ..breakdown import package_session_artifacts
 
             pkg_path = package_session_artifacts(
                 session_dir,
