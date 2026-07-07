@@ -12,24 +12,48 @@ from __future__ import annotations
 
 import argparse
 import base64
-import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
+
+import pytest
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def patch_env(tmp_path, monkeypatch):
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    bak = tmp_path / "bak"
+    bak.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", f"{fw}/")
+    monkeypatch.setenv("HYPERLOOM_MN_KERNEL_BACKUP_DIR", str(bak))
+    return fw, bak
+
+
+def _strip_pod_script_header(body: str) -> str:
+    lines = body.splitlines()
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]
+    lines = [ln for ln in lines if ln.strip() != "from __future__ import annotations"]
+    return "\n".join(lines).strip()
+
+
+def _bundle_kernel_node_ops() -> str:
+    root = _repo_root() / "multi_node" / "scripts"
+    chunks = [_strip_pod_script_header((root / dep).read_text(encoding="utf-8")) for dep in ("patch_path_safety.py",)]
+    main_body = _strip_pod_script_header((root / "kernel_node_ops.py").read_text(encoding="utf-8"))
+    return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
+
+
 def _load(unique_name: str):
-    path = _repo_root() / "multi_node" / "scripts" / "kernel_node_ops.py"
-    spec = importlib.util.spec_from_file_location(unique_name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
+    mod = types.ModuleType(unique_name)
+    exec(compile(_bundle_kernel_node_ops(), "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
-    spec.loader.exec_module(mod)
     return mod
 
 
@@ -50,13 +74,14 @@ def test_safe_name_sanitizes_truncates_and_falls_back():
     assert len(k._safe_name("x" * 200)) == 80
 
 
-def test_apply_non_py_target_skips_compile(tmp_path, capsys):
+def test_apply_non_py_target_skips_compile(patch_env, capsys):
+    fw, bak = patch_env
     k = _load("kno_apply_nonpy")
-    target = tmp_path / "kernel.cpp"
+    target = fw / "kernel.cpp"
     target.write_text("// old", encoding="utf-8")
     ns = argparse.Namespace(
         target_path=str(target),
-        backup_dir=str(tmp_path / "bak"),
+        backup_dir=str(bak),
         kernel_id="k1",
         patch_b64=_b64("// new content"),
     )
@@ -68,13 +93,14 @@ def test_apply_non_py_target_skips_compile(tmp_path, capsys):
     assert target.read_text(encoding="utf-8") == "// new content"
 
 
-def test_apply_valid_py_compiles_ok(tmp_path, capsys):
+def test_apply_valid_py_compiles_ok(patch_env, capsys):
+    fw, bak = patch_env
     k = _load("kno_apply_py_ok")
-    target = tmp_path / "mod.py"
+    target = fw / "mod.py"
     target.write_text("x = 1\n", encoding="utf-8")
     ns = argparse.Namespace(
         target_path=str(target),
-        backup_dir=str(tmp_path / "bak"),
+        backup_dir=str(bak),
         kernel_id="k",
         patch_b64=_b64("y = 2\n"),
     )
@@ -85,15 +111,16 @@ def test_apply_valid_py_compiles_ok(tmp_path, capsys):
     assert target.read_text(encoding="utf-8") == "y = 2\n"
 
 
-def test_apply_bad_py_auto_reverts(tmp_path, capsys):
+def test_apply_bad_py_auto_reverts(patch_env, capsys):
     # SAFETY: a syntactically invalid .py patch must be auto-reverted so the pod
     # is never left with an unimportable kernel file.
+    fw, bak = patch_env
     k = _load("kno_apply_py_bad")
-    target = tmp_path / "mod.py"
+    target = fw / "mod.py"
     target.write_text("good = 1\n", encoding="utf-8")
     ns = argparse.Namespace(
         target_path=str(target),
-        backup_dir=str(tmp_path / "bak"),
+        backup_dir=str(bak),
         kernel_id="k",
         patch_b64=_b64("def broken(:\n"),
     )
@@ -106,11 +133,12 @@ def test_apply_bad_py_auto_reverts(tmp_path, capsys):
     assert target.read_text(encoding="utf-8") == "good = 1\n"
 
 
-def test_apply_missing_target_fails(tmp_path, capsys):
+def test_apply_missing_target_fails(patch_env, capsys):
+    fw, bak = patch_env
     k = _load("kno_apply_missing")
     ns = argparse.Namespace(
-        target_path=str(tmp_path / "nope.py"),
-        backup_dir=str(tmp_path / "bak"),
+        target_path=str(fw / "nope.py"),
+        backup_dir=str(bak),
         kernel_id="k",
         patch_b64=_b64("x=1"),
     )
@@ -120,13 +148,14 @@ def test_apply_missing_target_fails(tmp_path, capsys):
     assert "does not exist" in payload["error"]
 
 
-def test_apply_bad_base64_fails(tmp_path, capsys):
+def test_apply_bad_base64_fails(patch_env, capsys):
+    fw, bak = patch_env
     k = _load("kno_apply_b64")
-    target = tmp_path / "f.txt"
+    target = fw / "f.txt"
     target.write_text("orig", encoding="utf-8")
     ns = argparse.Namespace(
         target_path=str(target),
-        backup_dir=str(tmp_path / "bak"),
+        backup_dir=str(bak),
         kernel_id="k",
         patch_b64="!!!not-base64!!!",
     )
@@ -148,17 +177,63 @@ def test_revert_missing_backup_is_noop(tmp_path, capsys):
     assert payload["status"] == "noop_missing_backup"
 
 
-def test_revert_restores_from_backup(tmp_path, capsys):
+def test_revert_restores_from_backup(patch_env, capsys):
+    fw, bak = patch_env
     k = _load("kno_revert_ok")
-    backup = tmp_path / "b.bak"
+    backup = bak / "b.bak"
     backup.write_text("restored", encoding="utf-8")
-    target = tmp_path / "t.py"
+    target = fw / "t.py"
     target.write_text("current", encoding="utf-8")
     ns = argparse.Namespace(target_path=str(target), backup_path=str(backup))
     rc = k._do_revert(ns)
     payload = _last_json(capsys)
     assert rc == 0 and payload["status"] == "restored"
     assert target.read_text(encoding="utf-8") == "restored"
+
+
+def test_revert_rejects_backup_outside_root(patch_env, capsys):
+    fw, bak = patch_env
+    k = _load("kno_revert_bad_backup")
+    target = fw / "t.py"
+    target.write_text("current", encoding="utf-8")
+    outside = bak.parent / "evil.bak"
+    outside.write_text("pwned", encoding="utf-8")
+    ns = argparse.Namespace(target_path=str(target), backup_path=str(outside))
+    rc = k._do_revert(ns)
+    payload = _last_json(capsys)
+    assert rc == 1 and payload["status"] == "failed"
+    assert "backup_path" in payload["error"]
+
+
+def test_revert_rejects_target_outside_framework(patch_env, capsys):
+    fw, bak = patch_env
+    k = _load("kno_revert_bad_target")
+    outside = fw.parent / "escape.py"
+    outside.write_text("x", encoding="utf-8")
+    backup = bak / "b.bak"
+    backup.write_text("restored", encoding="utf-8")
+    ns = argparse.Namespace(target_path=str(outside), backup_path=str(backup))
+    rc = k._do_revert(ns)
+    payload = _last_json(capsys)
+    assert rc == 1 and payload["status"] == "failed"
+    assert "target_path" in payload["error"]
+
+
+def test_apply_rejects_backup_dir_outside_root(patch_env, capsys):
+    fw, bak = patch_env
+    k = _load("kno_apply_bad_bdir")
+    target = fw / "mod.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    ns = argparse.Namespace(
+        target_path=str(target),
+        backup_dir=str(bak.parent / "escape"),
+        kernel_id="k",
+        patch_b64=_b64("y = 2\n"),
+    )
+    rc = k._do_apply(ns)
+    payload = _last_json(capsys)
+    assert rc == 1 and payload["status"] == "failed"
+    assert "backup_dir" in payload["error"]
 
 
 def test_bench_rejects_absolute_and_parent_staging_paths(tmp_path, capsys):
