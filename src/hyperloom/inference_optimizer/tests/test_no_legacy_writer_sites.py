@@ -25,7 +25,7 @@ ALLOWED_FILES: dict[str, str] = {
     # compat/ package (__init__.py + payload_aliases.py) into compat.py.
     "src/hyperloom/inference_optimizer/compat.py": "compat re-export shim docstring names the rename",
     # Sub-agent reader site (kernel-agent) that falls back to the legacy key.
-    "kernel-agent/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
+    "src/hyperloom/agents/kernel/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
     # Back-compat injection points in production code (renamed kwarg
     # alias on GridVariant, walk-and-rewrite on SharedState loader).
     "src/hyperloom/inference_optimizer/actions/_meta/replay_warm_recipe.yaml": "warm-replay internal action schema mirrors RecipeKB best_config "
@@ -62,7 +62,7 @@ ALLOWED_FILES: dict[str, str] = {
     "src/hyperloom/inference_optimizer/tests/test_no_legacy_writer_sites.py": "this guard's allowlist + docstring",
     "src/hyperloom/inference_optimizer/tests/test_optimization_journal.py": "journal tests cover stack entries carrying legacy args field",
     "src/hyperloom/inference_optimizer/tests/test_warm_replay.py": "warm-replay tests mirror RecipeKB best_config field names",
-    "kernel-agent/tools/test_payload_aliases_shim.py": "kernel-agent shim test surface",
+    "src/hyperloom/agents/kernel/tests/test_payload_aliases_shim.py": "kernel-agent shim test surface",
     "src/hyperloom/agents/robustness/tests/test_payload_aliases_shim.py": "robustness-agent shim test surface",
     # Readers that funnel external-envelope payloads through
     # ``read_extra_server_args`` mention the legacy key inline in the

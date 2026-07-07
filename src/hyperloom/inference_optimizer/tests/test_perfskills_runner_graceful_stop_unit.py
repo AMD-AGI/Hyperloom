@@ -20,7 +20,7 @@ import pytest
 
 _RUNNER_PY = (
     Path(__file__).resolve().parents[4]
-    / "kernel-agent" / "tools" / "backends" / "perfskills_runner.py"
+    / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "backends" / "perfskills_runner.py"
 )
 
 

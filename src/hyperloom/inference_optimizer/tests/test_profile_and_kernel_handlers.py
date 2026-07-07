@@ -50,7 +50,7 @@ from hyperloom.inference_optimizer.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "kernel-agent"
+    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
     # A usable checkout needs .git (#722/PR#789 completeness gate); a bare dir

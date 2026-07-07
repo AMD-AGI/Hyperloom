@@ -109,7 +109,12 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
+# tree-reform.MD P2.5: kernel-agent was promoted from a sibling
+# ``kernel-agent/`` checkout into the in-tree ``hyperloom`` src-layout
+# namespace (``src/hyperloom/agents/kernel``); the tools/scripts/skills
+# subdirectory layout underneath it is unchanged, so only this default
+# root needs to move (still overridable via $KERNEL_AGENT_ROOT).
+KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/kernel}"
 # tree-reform.MD P2.5: framework-agent was promoted from a sibling
 # ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
 # namespace (``src/hyperloom/agents/framework``); it no longer has its own

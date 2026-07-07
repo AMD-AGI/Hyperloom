@@ -2,10 +2,10 @@
 
 """Tests for the diffusion workload-level roofline aggregator.
 
-``diffusion_roofline`` (under ``kernel-agent/tools``) aggregates a per-kernel
-TraceLens CSV dir into a single workload roofline (kernel efficiency, gpu busy
-ratio, per denoise-step timings) — the compute-bound dual of the LLM decode
-memory roofline.
+``diffusion_roofline`` (under ``src/hyperloom/agents/kernel/tools``) aggregates
+a per-kernel TraceLens CSV dir into a single workload roofline (kernel
+efficiency, gpu busy ratio, per denoise-step timings) — the compute-bound dual
+of the LLM decode memory roofline.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-_TOOL_DIR = Path(__file__).resolve().parents[4] / "kernel-agent" / "tools"
+_TOOL_DIR = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 

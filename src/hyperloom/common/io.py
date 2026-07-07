@@ -22,8 +22,8 @@ Sites intentionally NOT delegated here (kept local by design):
 * ``action_executors/_magpie_patcher.atomic_write_text`` — returns ``bool``,
   takes keyword args, ``chmod``-mirrors the target, and relies on
   module-global ``os``/``tempfile`` being monkeypatched by its tests.
-* ``kernel-agent/tools/geak_prompt_patcher._atomic_write`` — ``shutil.copystat``
-  preserves the target's mode.
+* ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
+  ``shutil.copystat`` preserves the target's mode.
 * ``recipe_kb/local_store._atomic_write_json`` — best-effort ``fsync`` + DEBUG
   logging for durability on journaling mounts.
 * ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run

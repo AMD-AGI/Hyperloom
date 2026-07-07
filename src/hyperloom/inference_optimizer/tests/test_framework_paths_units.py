@@ -352,7 +352,10 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
-        ka_path = Path(__file__).resolve().parents[4] / "kernel-agent" / "tools" / "tracelens_analysis.py"
+        ka_path = (
+            Path(__file__).resolve().parents[4]
+            / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "tracelens_analysis.py"
+        )
         if not ka_path.is_file():
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         text = ka_path.read_text(encoding="utf-8")
@@ -364,7 +367,10 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        ka_path = Path(__file__).resolve().parents[4] / "kernel-agent" / "tools" / "tracelens_analysis.py"
+        ka_path = (
+            Path(__file__).resolve().parents[4]
+            / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "tracelens_analysis.py"
+        )
         if not ka_path.is_file():
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         from hyperloom.orchestrator.kernel import (
@@ -460,7 +466,10 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
 
 
 # apply_kernel_patch known-target roots (was test_apply_kernel_patch_roots.py)
-_APPLY_TOOL_PATH = Path(__file__).resolve().parents[4] / "kernel-agent" / "tools" / "apply_kernel_patch.py"
+_APPLY_TOOL_PATH = (
+    Path(__file__).resolve().parents[4]
+    / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
+)
 
 
 @pytest.fixture(scope="module")

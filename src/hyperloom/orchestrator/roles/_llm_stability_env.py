@@ -2,7 +2,8 @@
 
 """Shared LLM-transport stability env for spawned claude-CLI / SDK children.
 
-Orchestrator-side twin of ``kernel-agent/tools/backends/_llm_stability_env.py``
+Orchestrator-side twin of
+``src/hyperloom/agents/kernel/tools/backends/_llm_stability_env.py``
 (the two packages are independent, so the helper is duplicated rather than
 cross-imported). See that module for the full RCA: a streaming request to the
 SaFE/LiteLLM gateway can return a partial response (``stop_reason=None``) and

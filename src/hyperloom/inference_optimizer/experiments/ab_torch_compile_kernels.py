@@ -11,7 +11,7 @@ path. This script quantifies overlap/divergence.
 Workflow::
   1. Two Magpie **profile** runs (same YAML except ``EXTRA_SGLANG_ARGS``).
   2. Parse ``torch_trace/*.trace.json.gz`` with the same ``analyze_trace_files``
-     logic as ``kernel-agent/tools/tracelens_analysis.py``.
+     logic as ``src/hyperloom/agents/kernel/tools/tracelens_analysis.py``.
   3. Emit JSON: Jaccard on top-N kernel **names**, names unique to each arm,
      and heuristics for "compile-like" kernels (inductor/triton/torchinductor/tmp).
 
@@ -36,9 +36,10 @@ from typing import Any
 
 import yaml
 
-# kernel-agent lives at the Hyperloom/ repo root, alongside src/hyperloom/inference_optimizer
+# tree-reform.MD P2.5: kernel-agent was promoted into the in-tree
+# hyperloom src-layout namespace (src/hyperloom/agents/kernel).
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_TL = _REPO_ROOT / "kernel-agent" / "tools" / "tracelens_analysis.py"
+_TL = _REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "tracelens_analysis.py"
 if _TL.is_file():
     import importlib.util
 

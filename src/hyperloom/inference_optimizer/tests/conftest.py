@@ -38,7 +38,7 @@ def _bootstrap_kernel_agent_env() -> None:
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
         return
     repo = Path(__file__).resolve().parents[4]
-    kernel_agent = repo / "kernel-agent"
+    kernel_agent = repo / "src" / "hyperloom" / "agents" / "kernel"
     if kernel_agent.is_dir():
         os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] = str(kernel_agent)
 

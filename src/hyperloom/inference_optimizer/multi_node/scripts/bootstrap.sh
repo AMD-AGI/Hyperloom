@@ -53,7 +53,7 @@ fi
 #        ``oob_submit.run_via_ray`` (the legacy single-node ray.remote
 #        entrypoint) is not the path LLMs are prompted to take on
 #        ``--nodes >= 2``. See ``multi_node/SKILL.md`` and
-#        ``kernel-agent/tools/kernel_optimization.py:1244-1283``.
+#        ``src/hyperloom/agents/kernel/tools/kernel_optimization.py:1244-1283``.
 
 # --- 2c. (removed, multi-node only) claude/codex CLI install.
 #        Multi-node head pod never invokes claude/codex CLI directly:

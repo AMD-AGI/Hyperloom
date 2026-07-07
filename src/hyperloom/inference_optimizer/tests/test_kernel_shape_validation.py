@@ -150,7 +150,7 @@ def test_finalize_candidates_stamps_trace_provenance():
     import importlib.util
     import sys
 
-    tools_dir = Path("kernel-agent/tools").resolve()
+    tools_dir = Path("src/hyperloom/agents/kernel/tools").resolve()
     sys.path.insert(0, str(tools_dir))
     try:
         spec = importlib.util.spec_from_file_location(

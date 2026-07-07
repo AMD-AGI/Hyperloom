@@ -429,7 +429,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     kernel_enabled: bool = True
     # KERNEL-phase optimizer: "native" (GEAK/per-kernel loop, default) or
     # "perfskills" (one-shot whole-pipeline e2e optimizer cloned from upstream;
-    # see kernel-agent/tools/backends/perfskills_runner.py).
+    # see src/hyperloom/agents/kernel/tools/backends/perfskills_runner.py).
     kernel_optimizer: str = "native"
     # Snapshot of the last PerfSkills e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).

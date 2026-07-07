@@ -41,7 +41,7 @@ def _silent_backends() -> dict[str, object]:
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers resolve from disk even when the host env is unset.
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "kernel-agent"
+    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver so the unit test never spawns a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")

@@ -334,7 +334,7 @@ def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
     """Extract ``usage`` from ``oob run --json`` stdout.
 
     OOB emits a JSON document on stdout that already carries a ``usage``
-    block (see ``kernel-agent/tools/backends/oob_submit.py``). The exact
+    block (see ``src/hyperloom/agents/kernel/tools/backends/oob_submit.py``). The exact
     envelope can vary, so we search defensively:
 
     1. parse the whole stdout as one JSON object and look for a top-level

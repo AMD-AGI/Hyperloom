@@ -457,13 +457,15 @@ def _tracelens_root_error(root: Path) -> str | None:
     """
     if not root.is_dir():
         return (
-            f"TraceLens root not found: {root}; run kernel-agent/scripts/install.sh "
+            f"TraceLens root not found: {root}; run "
+            "src/hyperloom/agents/kernel/scripts/install.sh "
             "or set TRACELENS_ROOT to an existing checkout"
         )
     if not (root / ".git").exists():
         return (
             f"TraceLens root incomplete (not a git checkout): {root}; "
-            "run kernel-agent/scripts/install.sh or set TRACELENS_ROOT to a valid checkout"
+            "run src/hyperloom/agents/kernel/scripts/install.sh "
+            "or set TRACELENS_ROOT to a valid checkout"
         )
     return None
 
@@ -473,7 +475,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
 
     Only the installer-managed default path is healed; an explicit
     ``TRACELENS_ROOT`` override pointing elsewhere is operator-maintained and
-    must fail fast when missing (mirrors kernel-agent/scripts/install.sh).
+    must fail fast when missing (mirrors
+    src/hyperloom/agents/kernel/scripts/install.sh).
     Best-effort: any failure is swallowed so the caller's normal validation
     produces the user-facing error.
 

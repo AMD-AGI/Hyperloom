@@ -398,8 +398,9 @@ def magpie_dir(session_dir: Path | None = None) -> Path:
 
 def tracelens_root() -> Path:
     """``<open_source_root>/TraceLens/`` — TraceLens checkout (pod-local;
-    ``$TRACELENS_ROOT`` overrides). Aligned with kernel-agent/scripts/install.sh
-    so script and runtime resolve the same checkout even when the consuming
+    ``$TRACELENS_ROOT`` overrides). Aligned with
+    src/hyperloom/agents/kernel/scripts/install.sh so script and runtime
+    resolve the same checkout even when the consuming
     process did not inherit the installer-written env.
 
     Returns:

@@ -2,10 +2,11 @@
 
 """CI-collected tests for TraceLens agent transcript persistence (#266).
 
-The broader ``kernel-agent/tools/test_tracelens_csv.py`` file exercises many
-TraceLens integration paths that require repo-local TraceLens assets. These
-tests isolate the small SDK-runner contract added by #266 so CI covers the
-transcript feature without pulling in those environment-dependent cases.
+The broader ``src/hyperloom/agents/kernel/tests/test_tracelens_csv.py`` file
+exercises many TraceLens integration paths that require repo-local TraceLens
+assets. These tests isolate the small SDK-runner contract added by #266 so CI
+covers the transcript feature without pulling in those environment-dependent
+cases.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-_TOOL_DIR = Path(__file__).resolve().parents[4] / "kernel-agent" / "tools"
+_TOOL_DIR = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
