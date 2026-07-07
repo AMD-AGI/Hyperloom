@@ -519,6 +519,28 @@ def main(argv: list[str] | None = None) -> int:
     fusion = _report.build_fusion(analyze)
     _atomic_write_json(kernel_sequence_path, fusion)
 
+    # Diffusion / scriptable workload-level roofline (parity with the TraceLens
+    # route's diffusion_roofline.json): aggregate the per-kernel analytical
+    # roofline into an end-to-end workload roofline + per-denoise-step split
+    # (consuming the effective num_denoise_steps). Best-effort sidecar; never
+    # blocks the per-kernel artifacts.
+    diffusion_roofline_path: str | None = None
+    if (args.framework or "").lower() == "xdit":
+        try:
+            from diffusion_roofline import build_report_from_bypass  # noqa: E402
+
+            _diff_report = build_report_from_bypass(
+                candidates.get("hot_kernels", []),
+                analyze.get("timeline") or {},
+                (requested_denoise_steps or inferred_denoise_steps) or None,
+                top_k,
+            )
+            _diff_path = run_dir / "diffusion_roofline.json"
+            _atomic_write_json(_diff_path, _diff_report)
+            diffusion_roofline_path = str(_diff_path)
+        except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+            diffusion_roofline_path = None
+
     hot_kernels = candidates.get("hot_kernels", [])
     result: dict[str, Any] = {
         "status": "ok",
@@ -565,6 +587,10 @@ def main(argv: list[str] | None = None) -> int:
             "trace_input_manifest": str(manifest_path),
         },
     }
+    # Surfaced only when produced (xDiT/scriptable), mirroring the TraceLens route.
+    if diffusion_roofline_path:
+        result["diffusion_roofline_path"] = diffusion_roofline_path
+        result["artifact_paths"]["diffusion_roofline"] = diffusion_roofline_path
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

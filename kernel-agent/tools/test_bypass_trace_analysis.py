@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bypass_trace_analysis as bta  # noqa: E402
+import diffusion_roofline as dr  # noqa: E402
 
 _TRACE_EVENTS = [
     {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
@@ -190,6 +191,76 @@ def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
     assert rc == 0
     assert result["hot_kernels"], "gate must not fire below the configured threshold"
     assert "high_gpu_idle_pct" not in {w["code"] for w in result["trace_health_warnings"]}
+
+
+# ── diffusion workload roofline (F4) ─────────────────────────────────────────
+
+
+def test_bypass_diffusion_aggregation_numerics():
+    # aggregate_bypass_candidates: sigma_ideal = sum(actual * eff); placeholder
+    # kernels (no analytical roofline) count only toward no_perf_model_us.
+    hot = [
+        {"duration_us": 100.0, "efficiency_percent": 50.0, "bound_type": "compute_bound", "roofline_source": "analytical", "name": "gemm_k", "kernel_category": "GEMM"},
+        {"duration_us": 60.0, "efficiency_percent": 25.0, "bound_type": "memory_bound", "roofline_source": "analytical", "name": "attn_k", "kernel_category": "SDPA"},
+        {"duration_us": 40.0, "efficiency_percent": 0.0, "roofline_source": "placeholder", "name": "p_k", "kernel_category": "Other"},
+    ]
+    r = dr.build_report_from_bypass(hot, {"busy_pct": 80.0, "idle_pct": 20.0}, 4, 10)
+    t = r["totals"]
+    assert t["sigma_actual_kernel_us"] == 200.0
+    assert t["sigma_ideal_roofline_us"] == 65.0
+    assert round(t["kernel_roofline_efficiency"], 4) == 0.325
+    assert t["compute_bound_us"] == 100.0 and t["memory_bound_us"] == 60.0
+    assert t["no_perf_model_us"] == 40.0
+    assert r["gpu_busy_ratio"] == 0.8
+    assert round(r["end_to_end_efficiency_estimate"], 4) == 0.26
+    assert r["source"] == "bypass_analytical" and r["kernel_scope"] == "analyzed_candidates"
+    assert r["num_denoise_steps"] == 4
+    assert r["per_step"]["actual_kernel_us"] == 50.0 and r["per_step"]["ideal_roofline_us"] == 16.25
+    assert r["top_kernels"][0]["name"] == "gemm_k"
+
+
+def test_bypass_diffusion_report_shape_without_steps():
+    # No denoise steps -> no per_step block, but the core report keys stay put
+    # (identical shape to the TraceLens CSV path via the shared assembler).
+    r = dr.build_report_from_bypass([], {"busy_pct": 0.0}, None, 10)
+    for key in ("source", "totals", "gpu_timeline_pct", "gpu_busy_ratio", "end_to_end_efficiency_estimate", "top_kernels"):
+        assert key in r
+    assert "per_step" not in r
+
+
+def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
+    # F4: parity with the TraceLens route -- the xDiT/scriptable path emits a
+    # workload-level diffusion_roofline.json that consumes --num-denoise-steps.
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "t.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    argv = [
+        "--trace-input", str(trace), "--session-id", "utest-xdit-diff",
+        "--workspace-path", str(tmp_path), "--framework", "xdit",
+        "--target-platform", "MI300X", "--model-name", "utest-dit",
+        "--top-k", "8", "--num-denoise-steps", "20",
+    ]
+    rc, result, _ = _run(argv, capsys)
+    assert rc == 0
+    path = result["artifact_paths"].get("diffusion_roofline")
+    assert path and Path(path).is_file()
+    assert result["diffusion_roofline_path"] == path
+    rep = json.loads(Path(path).read_text())
+    assert rep["source"] == "bypass_analytical"
+    assert rep["num_denoise_steps"] == 20
+    assert "per_step" in rep and "totals" in rep
+
+
+def test_non_xdit_omits_diffusion_roofline(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "t.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)  # vllm route
+    assert rc == 0
+    assert "diffusion_roofline" not in result["artifact_paths"]
+    assert "diffusion_roofline_path" not in result
 
 
 # ── boundary inputs end-to-end (P0-3) ────────────────────────────────────────
