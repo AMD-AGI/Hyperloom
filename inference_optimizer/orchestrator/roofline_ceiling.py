@@ -1442,6 +1442,38 @@ def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) 
     return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
 
 
+def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
+    """Provenance for the compute-peak TFLOPS used by every compute ceiling.
+
+    The unified convention is **max-achievable (sustained)** TFLOPS (LLM + xDiT +
+    bypass all share it); the vendor dense peak is only a coverage-gap fallback.
+    Surfacing the convention + value + source keeps within%/gap interpretable and
+    makes any peak-convention divergence explicit.
+
+    Args:
+        gpu_type: GPU type key for the peak lookup.
+        precision_tag: Precision key for the peak lookup.
+
+    Returns:
+        ``{compute_peak_convention, compute_peak_tflops, compute_peak_source}``.
+    """
+    ach = _resolve_achievable_tflops(gpu_type, precision_tag)
+    if ach > 0:
+        return {
+            "compute_peak_convention": "achievable",
+            "compute_peak_tflops": ach,
+            "compute_peak_source": "TraceLens arch JSON (max-achievable sustained)",
+        }
+    vendor = _resolve_peak_tflops(gpu_type, precision_tag)
+    return {
+        "compute_peak_convention": "vendor" if vendor > 0 else "unknown",
+        "compute_peak_tflops": vendor,
+        "compute_peak_source": (
+            "vendor dense peak (achievable-table miss fallback)" if vendor > 0 else "unavailable"
+        ),
+    }
+
+
 import dataclasses as _dc
 
 

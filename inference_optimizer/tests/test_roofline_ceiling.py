@@ -930,6 +930,23 @@ class TestResolvePeakTFLOPS:
         assert _resolve_peak_tflops("mi355x", "") == 0.0
 
 
+class TestComputePeakProvenance:
+    """roofline_provenance exposes the compute-peak convention/value/source."""
+
+    def test_achievable_convention_and_value(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import resolve_compute_peak_provenance
+        prov = resolve_compute_peak_provenance("mi300x", "bf16")
+        assert prov["compute_peak_convention"] == "achievable"
+        assert prov["compute_peak_tflops"] == _resolve_achievable_tflops("mi300x", "bf16")  # 708
+        assert "achievable" in prov["compute_peak_source"].lower()
+
+    def test_unknown_gpu_is_unknown_convention(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import resolve_compute_peak_provenance
+        prov = resolve_compute_peak_provenance("h100", "bf16")
+        assert prov["compute_peak_convention"] == "unknown"
+        assert prov["compute_peak_tflops"] == 0.0
+
+
 class TestDiffusionComputeCeiling:
     """xDiT compute-bound ceiling (config-analytical DiT FLOP model) + min() wiring."""
 
