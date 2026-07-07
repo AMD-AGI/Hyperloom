@@ -110,7 +110,7 @@ hallucinations can be audited after the fact.
 The script applies the following safeguards when LLM polishing is enabled.
 
 * The deterministic skeleton (headline numbers, action_path,
-  kernel_lifecycle counts) is generated **without** the LLM; the LLM
+  kernel_lifecycle counts) is generated *without* the LLM; the LLM
   only rewrites prose.
 * If the LLM call fails (timeout, 5xx, malformed response), the
   script falls back to the deterministic report and exits 0.

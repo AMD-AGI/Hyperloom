@@ -25,7 +25,7 @@ Hyperloom needs at most three classes of secrets:
    export it only as an explicit operator override.
 
 Everything else (GEAK keys, OOB Claude/Codex keys, Anthropic / OpenAI
-aliases, auth-proxy rewrites) is **derived** from `SAFE_API_KEY` and
+aliases, auth-proxy rewrites) is *derived* from `SAFE_API_KEY` and
 `OPENAI_BASE_URL` by `kernel-agent/scripts/install.sh`. You should never
 need to set them by hand.
 
@@ -42,7 +42,7 @@ Hyperloom reads credentials from two places, in order:
 
 Shell environment variables always win over `.env`.
 Both `inference_optimizer/cli.py` (`_maybe_load_env_file_into_environ`)
-and `kernel-agent/scripts/install.sh` honor this rule. Do **not**
+and `kernel-agent/scripts/install.sh` honor this rule. Do *not*
 manually `source .env` from chat — it inverts the precedence and can
 overwrite an exported `SAFE_API_KEY` with a stale value from disk.
 
@@ -120,7 +120,7 @@ attempt with a 401, rather than a silent skip.
 
 ### LLM RCA in robustness-agent
 
-`robustness-agent`'s LLM root-cause-analysis engine activates **only**
+`robustness-agent`'s LLM root-cause-analysis engine activates *only*
 when both `OPENAI_BASE_URL` and `SAFE_API_KEY` are set (they normally
 are). Set `ROBUSTNESS_LLM_RCA_DISABLED=1` to force-disable it even when
 credentials are present.
@@ -226,5 +226,5 @@ auth-proxy and all aliases pick up the new value.
 Use these resources for related configuration and reference information:
 
 * [Environment variables](environment-variables.md) — Every environment variable read by the code, including non-credential tunables.
-* [Integrate Recipe/Cortex knowledge base in Hyperloom](../reference/integrate-kb.md) — Local recipe KB and optional Cortex KB setup.
+* [Integrate Recipe/Cortex knowledge base in Hyperloom](integrate-kb.md) — Local recipe KB and optional Cortex KB setup.
 * [Troubleshooting Hyperloom](../troubleshooting.md) — Common 401 / auth-proxy / Ray-GPU symptoms.

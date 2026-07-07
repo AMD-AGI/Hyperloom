@@ -67,8 +67,7 @@ inference_optimizer optimize \
     --max-hours 2.0
 ```
 
-Supported `--model-class` values (non-exhaustive; see
-`../../inference_optimizer/SKILL.md` §"Model classes"): `dense`, `moe`,
+Supported `--model-class` values (non-exhaustive; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/SKILL.md)): `dense`, `moe`,
 `moe_mla`, `moe_mla_nsa`, `mxfp4_moe`, `hybrid_attention`.
 
 If `--model-class` is omitted and inference cannot determine the family, the

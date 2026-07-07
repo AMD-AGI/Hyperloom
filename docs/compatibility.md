@@ -37,10 +37,10 @@ image is supplied.
 
 These inference frameworks are supported:
 
-| Framework | Status | Notes |
-|-----------|--------|-------|
-| SGLang (ROCm) | Supported | Default framework |
-| vLLM (ROCm) | Supported | Do not mix frameworks within one session |
+| Framework | ROCm version | Status | Notes |
+|-----------|--------------|--------|-------|
+| SGLang (ROCm) | 7.2.0 | Supported | Default framework |
+| vLLM (ROCm) | 7.2.0 | Supported | Do not mix frameworks within one session |
 
 ## Container images
 
@@ -64,8 +64,9 @@ These are the Hyperloom components:
 
 | Component | Source |
 |-----------|--------|
-| TraceLens | <https://github.com/AMD-AGI/TraceLens> |
-| Magpie | <https://github.com/AMD-AGI/Magpie> |
-| IntelliKit | <https://github.com/AMDResearch/intellikit> |
-| GEAK | <https://github.com/AMD-AGI/GEAK> |
+| [TraceLens](components/tracelens.md) | <https://github.com/AMD-AGI/TraceLens> |
+| [Magpie](components/magpie.md) | <https://github.com/AMD-AGI/Magpie> |
+| [IntelliKit](components/intellikit.md) | <https://github.com/AMDResearch/intellikit> |
+| [GEAK](components/geak.md) | <https://github.com/AMD-AGI/GEAK> |
+| [AgentKernelArena](components/agentkernelarena.md) |<https://github.com/AMD-AGI/AgentKernelArena> |
 | AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |

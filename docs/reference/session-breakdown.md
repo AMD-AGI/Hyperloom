@@ -39,7 +39,7 @@ strings can therefore appear in production today.
 captures facts the collectors can miss (pre-dispatch / infra failures,
 pruned robustness signals) but adds no breaking field changes. A reader
 written for `v2` parses a `v3.0` file unchanged by ignoring unknown keys.
-`v2` is itself additive over `v1`: it only adds sections (e.g.,
+`v2` is itself additive over `v1`: it only adds sections (for example,
 `specialist_runs`, `action_timeline`, `kernel_optimization_summary`,
 `conc_sweep_summary`).
 
@@ -47,13 +47,13 @@ Compatibility rules:
 
 * **Do not gate on string equality**. A consumer that treats
   `schema_version` as a contract MUST accept the `v2` and `v3.0`
-  family (e.g., parse the `vN[.M]` prefix and compare the major
+  family (for example, parse the `vN[.M]` prefix and compare the major
   component, or allowlist both strings). Pinning to the exact `v2`
   string will reject `v3.0` files even though they are wire-compatible.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
-  bump (e.g., `v3` → `v4`). The runtime will continue to write the previous
+  bump (for example, `v3` → `v4`). The runtime will continue to write the previous
   version's file in parallel for at least one release after the bump.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
@@ -62,7 +62,7 @@ Compatibility rules:
   Python-specific types in the wire shape).
 
 The `exporter_version` field carries the producing Hyperloom version
-(e.g., `"0.6.0"`) for incident triage and per-version filtering.
+(for example, `"0.6.0"`) for incident triage and per-version filtering.
 
 ---
 
@@ -270,7 +270,7 @@ Paths only (no copied content): `baseline_report_path`,
 
 Paths are session-dir relative when the producer can express them
 that way; absolute otherwise. Consumers that need to pull raw
-artifacts (e.g., for a replay) should resolve relative paths against
+artifacts (for example, for a replay) should resolve relative paths against
 `session.session_dir`.
 
 ---
@@ -457,6 +457,5 @@ alerting.
 Use the following resources for related reference information.
 
 * [Hyperloom operator scripts](operator-scripts.md) — How to produce a breakdown from a finished session directory.
-* [Hyperloom self-hosting and operations guide](operations.md) §3 — Retention recommendations.
-* [`../inference_optimizer/breakdown/schema.py`](../inference_optimizer/breakdown/schema.py)
-  — TypedDict source of truth.
+* [Hyperloom self-hosting and operations guide](operations.md) — Retention recommendations.
+* [`../inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/breakdown/schema.py) — TypedDict source of truth.

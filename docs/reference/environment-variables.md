@@ -10,12 +10,12 @@ Every environment variable read by the Hyperloom runtime, grouped by
 purpose. This page is the *exhaustive* reference; the root README,
 `.env.template`, and each agent SKILL file are *convenience excerpts*.
 
-Variables marked **required** must be set (using shell or `$REPO_ROOT/.env`)
-or the CLI will exit fast at startup. Variables marked **optional** have
+Variables marked **Required** must be set (using shell or `$REPO_ROOT/.env`)
+or the CLI will exit fast at startup. Variables marked **Optional** have
 sensible defaults; the default is shown in the **Default** column.
 
 Precedence rule (applies everywhere): shell-exported env wins over `.env`.
-See [Hyperloom authentication and credentials](authentication.md) §1.
+See [Hyperloom authentication and credentials](authentication.md).
 
 ---
 
@@ -36,7 +36,7 @@ These variables configure LLM gateway access and optional backend credentials.
 | `GEAK_MODEL_NAME`      | No       | `claude-`<br>`opus-4-7` | GEAK preprocessor / solver model id.                                                                                                                                                           |
 | `ANTHROPIC_API_KEY`    | No       | Inherits `SAFE_API_KEY` (using auth-proxy) | Only set explicitly to override.                                                                                                                                |
 | `OPENAI_API_KEY`       | No       | Inherits `SAFE_API_KEY` (using auth-proxy) | Only set explicitly to override.                                                                                                                                |
-| `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (e.g., `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
+| `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
 

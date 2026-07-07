@@ -40,7 +40,7 @@ patch-based kernel optimization:
   result in `final_report.json`.
 - **Skills & subagents** — domain skills (`triton`, `hip`, `flydsl`,
   `pytorch2flydsl-translation`, `fp8-gemm-tuning-sglang-aiter`) and specialist
-  subagents (e.g., `general-kernel-optimization`, `harness-generator`,
+  subagents (for example, `general-kernel-optimization`, `harness-generator`,
   `codebase-explore`, `gemm-tuning`, `speedup-verify`) handle different kernel
   types and tasks.
 - **Tooling layer** — kernel profiling for bottleneck analysis, optional retrieval-augmented generation (RAG)
@@ -63,7 +63,7 @@ pip install -e .      # editable
 pip install .         # non-editable (recommended for embedding consumers)
 ```
 
-Configure a model and provider key before running, e.g.,
+Configure a model and provider key before running, for example:
 
 ```bash
 export MSWEA_MODEL_NAME="openai/gpt-5"

@@ -9,9 +9,8 @@ myst:
 This guide walks through a complete optimization run, end to end. It assumes you
 have already followed [Install Hyperloom](../install/hyperloom-installation.md) and have your API key.
 
-There are two ways to run Hyperloom: the hosted **UI** (no local setup) and
-**Local Mode** (driven from Cursor against a remote AMD GPU). Both are covered
-below.
+There are two ways to run Hyperloom: the hosted UI (no local setup) and
+Local Mode (driven from Cursor against a remote AMD GPU).
 
 ## Option A — Hosted UI (PrimusClaw)
 
