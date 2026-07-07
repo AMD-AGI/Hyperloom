@@ -84,29 +84,38 @@ _CAPTURE_DIR_NAME = "capture_traces"
 _CAPTURE_FRAGMENT_RE = re.compile(r"^bs_\d+_rank\d+", re.IGNORECASE)
 
 
-def _is_capture_fragment(path: str | Path) -> bool:
+def _is_capture_fragment(path: str | Path, root: str | Path | None = None) -> bool:
     """True if ``path`` is a sglang CUDA-graph capture shard, not a main trace.
 
-    Detected by either the dedicated ``capture_traces/`` parent directory or the
-    ``bs_<batch>_rank<n>`` capture filename.
+    Detected by either the ``bs_<batch>_rank<n>`` capture filename or a
+    ``capture_traces/`` directory *within the trace tree*. The directory check
+    is made relative to ``root`` when given, so an unrelated ancestor named
+    ``capture_traces`` above the search root never trips it, and it is
+    case-insensitive to match the filename regex.
     """
     p = Path(path)
-    if _CAPTURE_DIR_NAME in p.parts:
+    if _CAPTURE_FRAGMENT_RE.match(p.name) is not None:
         return True
-    return _CAPTURE_FRAGMENT_RE.match(p.name) is not None
+    parts: tuple[str, ...] = p.parts
+    if root is not None:
+        try:
+            parts = p.relative_to(root).parts
+        except ValueError:
+            parts = p.parts
+    return any(part.lower() == _CAPTURE_DIR_NAME for part in parts)
 
 
-def _main_trace_candidates(candidates: list[Path]) -> list[Path]:
+def _main_trace_candidates(candidates: list[Path], root: str | Path | None = None) -> list[Path]:
     """Drop CUDA-graph capture shards, keeping only main workload traces.
 
     Falls back to the full list when every candidate is a capture shard, so a
     trace is always resolvable (the selection pool is never emptied).
     """
-    main = [c for c in candidates if not _is_capture_fragment(c)]
+    main = [c for c in candidates if not _is_capture_fragment(c, root)]
     return main or candidates
 
 
-def _select_trace_file(candidates: list[Path]) -> Path:
+def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -> Path:
     """Deterministically pick one trace file from candidates.
 
     Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
@@ -119,7 +128,7 @@ def _select_trace_file(candidates: list[Path]) -> Path:
     was non-deterministic on equal sizes, which is exactly the xDiT TP>1 case of
     N equal per-rank traces).
     """
-    candidates = _main_trace_candidates(candidates)
+    candidates = _main_trace_candidates(candidates, root)
     merged = [c for c in candidates if c.name.startswith("merged-")]
     if merged:
         return max(merged, key=lambda c: (_file_size(c), c.name))
@@ -151,7 +160,7 @@ def resolve_trace_file(trace_input: str | Path) -> Path | None:
     candidates = _trace_candidates(p)
     if not candidates:
         return None
-    return _select_trace_file(candidates)
+    return _select_trace_file(candidates, p)
 
 
 def _trace_rank_count(trace_input: str | Path) -> int:
@@ -168,7 +177,7 @@ def _trace_rank_count(trace_input: str | Path) -> int:
         return 1
     if not p.is_dir():
         return 0
-    main = _main_trace_candidates(_trace_candidates(p))
+    main = _main_trace_candidates(_trace_candidates(p), p)
     ranks = {r for c in main if (r := _rank_of(c)) is not None}
     return len(ranks) if ranks else 1
 
@@ -669,6 +678,13 @@ def analyze_trace(
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
 
+    # True when the selected trace is a CUDA-graph capture shard, i.e. no main
+    # profiler trace was available (the only-fragments fallback fired). The tool
+    # layer surfaces this as a health warning so the sparse analysis is not
+    # silent. Detection is relative to the input dir (see _is_capture_fragment).
+    _input_root = Path(trace_input)
+    _input_root = _input_root if _input_root.is_dir() else None
+
     result: dict[str, Any] = {
         "status": "ok",
         "trace_file": str(tf),
@@ -676,6 +692,7 @@ def analyze_trace(
         "aggregation_scope": scope,
         "analyzed_rank": _rank_of(tf),
         "rank_count": _trace_rank_count(trace_input),
+        "selected_capture_fragment": _is_capture_fragment(tf, _input_root),
         "annotation_windows": annotation_windows,
         **body,
     }

@@ -162,11 +162,12 @@ def test_empty_trace_events_end_to_end(tmp_path, capsys, monkeypatch):
 # ── analysis-quality health signals (P0-2, _emit_quality_warnings) ───────────
 
 
-def _analyze(*, kernels=None, attributed_pct=100.0, steady_status=None):
+def _analyze(*, kernels=None, attributed_pct=100.0, steady_status=None, capture_fragment=False):
     """Build a minimal analyze dict for the quality-warning unit tests."""
     out = {
         "kernels": kernels if kernels is not None else [],
         "attribution": {"attributed_pct": attributed_pct},
+        "selected_capture_fragment": capture_fragment,
     }
     if steady_status is not None:
         out["steady_window_status"] = steady_status
@@ -226,6 +227,24 @@ def test_quality_warning_steady_fallback(monkeypatch):
         warnings,
     )
     assert "bypass_steady_fallback_full_trace" in _codes(warnings)
+
+
+def test_quality_warning_only_capture_fragments(monkeypatch):
+    # F2: analysis ran on a sglang CUDA-graph capture shard (no main trace) ->
+    # a warning-severity signal so the sparse analysis is never silent.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_OTHERS_WARN_PCT", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CORR_WARN_PCT", raising=False)
+    warnings: list = []
+    bta._emit_quality_warnings(
+        _analyze(kernels=_HEALTHY_KERNELS, attributed_pct=80.0, capture_fragment=True),
+        warnings,
+    )
+    w = next((w for w in warnings if w["code"] == "bypass_only_capture_fragments"), None)
+    assert w is not None and w["severity"] == "warning"
+    # a normal (main-trace) analysis must not raise it.
+    warnings2: list = []
+    bta._emit_quality_warnings(_analyze(kernels=_HEALTHY_KERNELS, attributed_pct=80.0), warnings2)
+    assert "bypass_only_capture_fragments" not in _codes(warnings2)
 
 
 def test_quality_warning_others_threshold_env(monkeypatch):

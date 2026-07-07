@@ -141,7 +141,8 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
     Emits (all non-fatal) when:
       * too much GPU time is unclassified (``Others`` share high) -> taxonomy gap;
       * op-attribution coverage is near-zero -> correlation chain broken;
-      * steady-state windowing was requested but fell back to the full trace.
+      * steady-state windowing was requested but fell back to the full trace;
+      * only CUDA-graph capture shards were found (no main profiler trace).
 
     Thresholds are env-tunable (``HYPERLOOM_BYPASS_OTHERS_WARN_PCT`` default 40,
     ``HYPERLOOM_BYPASS_CORR_WARN_PCT`` default 10). Only called when the trace
@@ -196,6 +197,19 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
                 "message": (
                     "steady-state windowing requested but no repeating window found; "
                     "fell back to full-trace share aggregation."
+                ),
+            }
+        )
+
+    if analyze.get("selected_capture_fragment"):
+        warnings.append(
+            {
+                "code": "bypass_only_capture_fragments",
+                "severity": "warning",
+                "message": (
+                    "no main profiler trace found; analysis ran on a sglang CUDA-graph "
+                    "capture shard (device-kernel sparse). Ensure the main "
+                    "*-TP-*.trace.json.gz (not just capture_traces/bs_*) was captured."
                 ),
             }
         )

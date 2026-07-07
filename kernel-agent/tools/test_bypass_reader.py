@@ -251,6 +251,59 @@ def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
     assert resolved is not None and resolved.name == main.name
 
 
+def test_capture_traces_detection_is_relative_to_trace_root(tmp_path):
+    # F1: an unrelated ancestor dir named ``capture_traces`` ABOVE the trace root
+    # must not flag the real main trace. Detection is relative to the root, so
+    # only a genuine capture_traces/ subdir *within* the root marks shards.
+    root = tmp_path / "capture_traces" / "torch_trace"  # ancestor coincidentally named
+    main = _write_main_tp_trace(root, name="rank_0.trace.json.gz")
+    _write_capture_fragment(root / "capture_traces", 512)  # genuine sub-shard
+    resolved = reader.resolve_trace_file(root)
+    assert resolved is not None and resolved.name == main.name
+
+
+def test_uppercase_capture_dir_with_generic_shard_name(tmp_path):
+    # F4 + dir-based detection independent of the bs_ filename: a generic-named,
+    # LARGER shard under an uppercase ``Capture_Traces/`` dir is still excluded,
+    # so a smaller top-level main trace wins over the larger shard.
+    d = tmp_path / "torch_trace"
+    main = _write_main_tp_trace(d)
+    cap = d / "Capture_Traces"
+    cap.mkdir(parents=True, exist_ok=True)
+    big = cap / "shard.trace.json.gz"
+    with gzip.open(big, "wb") as f:
+        f.write(json.dumps({"traceEvents": list(_TRACE_EVENTS) * 50}).encode("utf-8"))
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name == main.name
+
+
+def test_rank_count_ignores_multi_rank_capture_shards(tmp_path):
+    # F3: multi-GPU capture emits bs_*_rank0 AND bs_*_rank1 shards; their rank
+    # tags must not be counted as real per-rank workload traces.
+    d = tmp_path / "torch_trace"
+    _write_main_tp_trace(d)
+    cap = d / "capture_traces"
+    _write_capture_fragment(cap, 512, rank=0)
+    _write_capture_fragment(cap, 512, rank=1)
+    out = reader.analyze_trace(d, top_k=0)
+    assert out["rank_count"] == 1
+    assert {k["name"] for k in out["kernels"]} == {"Cijk_Alik_Bljk_HHS", "paged_attention_v1"}
+
+
+def test_selected_capture_fragment_flag(tmp_path):
+    # F2: only capture shards -> analyze marks selected_capture_fragment so the
+    # tool layer can surface a health warning; a normal main trace does not.
+    only_shards = tmp_path / "torch_trace_shards"
+    _write_capture_fragment(only_shards / "capture_traces", 512)
+    out = reader.analyze_trace(only_shards, top_k=0)
+    assert out["selected_capture_fragment"] is True
+
+    main_dir = tmp_path / "torch_trace_main"
+    _write_main_tp_trace(main_dir)
+    out2 = reader.analyze_trace(main_dir, top_k=0)
+    assert out2["selected_capture_fragment"] is False
+
+
 def test_top_k_limits_returned_rows(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     out = reader.analyze_trace(tf, top_k=1)
