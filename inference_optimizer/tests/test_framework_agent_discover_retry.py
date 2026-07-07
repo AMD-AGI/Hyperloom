@@ -55,6 +55,12 @@ class _CoordinatorStub:
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
     _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
     _stamp_framework_progress = Coordinator._stamp_framework_progress
+    # #5-P2 cross-framework discovery lane is default-on; the real discovery merge
+    # calls this reverse-lookup on every repo (here it resolves to "sglang" == the
+    # session framework, so nothing is tagged — same-framework path is unchanged).
+    _framework_agent_repo_url_origin_framework = staticmethod(
+        Coordinator._framework_agent_repo_url_origin_framework
+    )
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
