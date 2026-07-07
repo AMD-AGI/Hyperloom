@@ -1968,9 +1968,17 @@ class SharedState:
                 sidecar = Path(str(kernel_roofline_path)).parent.parent / "diffusion_roofline.json"
                 if sidecar.is_file():
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
-                    analytic = data.get("analytic_dit_ceiling") if isinstance(data, dict) else None
-                    totals = data.get("totals") if isinstance(data, dict) else None
-                    if isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
+                    data = data if isinstance(data, dict) else {}
+                    # Priority: a-priori approach-a analytic ceiling (full
+                    # pipeline, config/safetensors-derived, already in ms) >
+                    # DiT-only analytic ceiling (us) > trace-summed per-kernel
+                    # ideal (us; 0 under torch.compile fusion).
+                    approach_a = data.get("analytic_ceiling")
+                    analytic = data.get("analytic_dit_ceiling")
+                    totals = data.get("totals")
+                    if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
+                        roofline_ideal_ms = float(approach_a["ideal_ms"])
+                    elif isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
                         roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
                     elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
                         roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
