@@ -40,9 +40,9 @@ from .trace.parse_usage import (
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
 
-# Recognized trace-analysis routes: ``bypass`` (independent backend, default) and
-# the TraceLens escape hatches ``deterministic`` / ``agent``. An unknown value
-# (e.g. an LLM typo) must not silently mis-route — it falls back to ``bypass``.
+# Recognized trace-analysis routes: the TraceLens ``agent`` (default) / ``deterministic``
+# routes and the independent, TraceLens-free ``bypass`` backend (explicit). An unknown
+# value (e.g. an LLM typo) must not silently mis-route — it falls back to ``agent``.
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
@@ -2435,25 +2435,24 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # Analysis route: ``bypass`` runs the independent, TraceLens-free backend
-    # (no TraceLens root / CLI / package required) and is now the DEFAULT for all
-    # frameworks (text-gen + xDiT) — bypass fully replaces the TraceLens analysis
-    # layer end to end. TraceLens stays available only as an explicit escape hatch
-    # (``deterministic`` / ``agent`` via payload ``analysis_route`` or
-    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``). An explicit route always wins; the value
-    # is coerced to str first so a non-string payload value cannot raise
-    # AttributeError.
+    # Analysis route: the DEFAULT for all frameworks (text-gen + xDiT) is the
+    # TraceLens ``agent`` route (the shipped/production default). The independent,
+    # TraceLens-free ``bypass`` backend stays available as an explicit route
+    # (``bypass`` via payload ``analysis_route`` or ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``)
+    # — that is how development/validation exercises it. ``deterministic`` is the
+    # no-LLM TraceLens variant. An explicit route always wins; the value is coerced
+    # to str first so a non-string payload value cannot raise AttributeError.
     explicit_route = (
         str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
     )
     # Reject an unknown route rather than silently mis-routing: an LLM typo like
-    # ``"foobar"`` would otherwise be truthy, skip bypass, and quietly run the
-    # TraceLens default. Warn + fall back to the default ``bypass`` instead.
+    # ``"foobar"`` would otherwise be truthy and quietly change routing. Warn +
+    # fall back to the default ``agent`` route instead.
     route_health_warnings: list[dict[str, Any]] = []
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
         log.warning(
             "trace_analyze: unknown analysis_route %r (expected one of %s); "
-            "falling back to the default 'bypass' route",
+            "falling back to the default 'agent' route",
             explicit_route, sorted(_VALID_ANALYSIS_ROUTES),
         )
         route_health_warnings.append({
@@ -2461,12 +2460,12 @@ async def trace_analyze_handler(
             "severity": "warning",
             "message": (
                 f"unknown analysis_route {explicit_route!r} (expected one of "
-                f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'bypass' route."
+                f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
             ),
             "requested_route": explicit_route,
         })
         explicit_route = ""
-    analysis_route = explicit_route or "bypass"
+    analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
     # Resolve TraceLens root independently of inherited env (the coordinator may
     # not have sourced kernel-agent.env.sh). If the installer-managed checkout

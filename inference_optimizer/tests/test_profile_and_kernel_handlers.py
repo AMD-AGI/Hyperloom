@@ -1543,9 +1543,12 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         "top_k": 5,
         "dry_run": True,
         "budget_minutes": 1,
+        # Exercise the structured-result plumbing via the explicit bypass route
+        # (the default is now the TraceLens agent route, which needs a real root).
+        "analysis_route": "bypass",
     }
     res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-    # Structured result regardless of route; bypass is now the default backend.
+    # Structured result surfaced verbatim by the bypass backend.
     assert res["status"] in ("ok", "succeeded", "failed")
     assert res.get("route") == "bypass"
     assert res.get("candidates_path") and "artifact_paths" in res
@@ -1573,17 +1576,19 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_xdit_auto_routes_to_bypass(session_dir, monkeypatch):
-    """xDiT (diffusion) is unsupported by TraceLens, so with no explicit route it
-    must default to the independent bypass backend and skip the TraceLens root."""
+async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the
+    TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
         captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "bypass", "hot_kernels": []}), ""
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
     res = await krh.trace_analyze_handler(
@@ -1598,11 +1603,10 @@ async def test_trace_analyze_handler_xdit_auto_routes_to_bypass(session_dir, mon
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert any("bypass_trace_analysis.py" in c for c in cmd)
-    assert not any("tracelens_analysis.py" in c for c in cmd)
-    # Bypass never touches TraceLens; framework forwarded so the tool emits img/s.
-    assert "--tracelens-root" not in cmd
-    assert "--framework" in cmd and "xdit" in cmd
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+    assert "--tracelens-root" in cmd
 
 
 @pytest.mark.asyncio
@@ -1635,10 +1639,12 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_text_gen_defaults_to_bypass(session_dir, monkeypatch):
-    """Text-gen with no explicit route now DEFAULTS to the bypass backend (bypass
-    fully replaces the TraceLens analysis layer); TraceLens root is not touched."""
+async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
+    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route
+    (the shipped default). Bypass is reached only via an explicit route."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
@@ -1659,16 +1665,18 @@ async def test_trace_analyze_handler_text_gen_defaults_to_bypass(session_dir, mo
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert any("bypass_trace_analysis.py" in c for c in cmd)
-    assert not any("tracelens_analysis.py" in c for c in cmd)
-    assert "--tracelens-root" not in cmd
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_invalid_route_falls_back_to_bypass(session_dir, monkeypatch):
-    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route to
-    TraceLens; it falls back to the default bypass backend and surfaces a warning."""
+async def test_trace_analyze_handler_invalid_route_falls_back_to_agent(session_dir, monkeypatch):
+    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route;
+    it falls back to the default TraceLens ``agent`` route and surfaces a warning."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
@@ -1689,9 +1697,8 @@ async def test_trace_analyze_handler_invalid_route_falls_back_to_bypass(session_
         session_dir=session_dir,
     )
     cmd = captured["cmd"]
-    assert any("bypass_trace_analysis.py" in c for c in cmd)
-    assert not any("tracelens_analysis.py" in c for c in cmd)
-    assert "--tracelens-root" not in cmd
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
     codes = {w.get("code") for w in res.get("trace_health_warnings", [])}
     assert "invalid_analysis_route" in codes
 
