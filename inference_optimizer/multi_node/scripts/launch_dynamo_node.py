@@ -50,6 +50,40 @@ _RAY_GCS_PORT = 6379
 # unreachable. Pods have distinct IPs so every worker can share one port.
 _DEFAULT_DYN_SYSTEM_PORT = 9090
 
+_DENIED_SERVER_FLAGS = frozenset(
+    {
+        "--allowed-local-media-path",
+        "--download-dir",
+        "--revision",
+        "--code-revision",
+        "--tokenizer-path",
+    }
+)
+
+
+def _denied_extra_args(raw: str) -> list[str]:
+    """Return denied CLI flag tokens in a pod-side extra-args string.
+
+    Args:
+        raw: Whitespace-separated server flags.
+
+    Returns:
+        list[str]: Denied flag names (empty when clean).
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return ["<unparseable>"]
+    out: list[str] = []
+    for tok in tokens:
+        flag = tok.split("=", 1)[0]
+        if flag in _DENIED_SERVER_FLAGS and flag not in out:
+            out.append(flag)
+    return out
+
 
 def _log(msg: str) -> None:
     """Write a timestamped launcher log line to stderr.
@@ -483,6 +517,11 @@ def main() -> int:
 
     if not args.model or args.tp <= 0:
         _log("ERROR --model and --tp are required unless --kill-only")
+        return 2
+
+    denied = _denied_extra_args(args.extra_args)
+    if denied:
+        _log(f"ERROR denied server flags in --extra-args: {denied}")
         return 2
 
     _log(

@@ -2466,8 +2466,9 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
     """
     nodes = max(1, int(args.nodes))
     from .multi_node.cli import cmd_create_dynamo, _load_state
+    from .multi_node.state_paths import resolve_state_file
 
-    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    state_path = resolve_state_file()
     image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
         "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
     ).strip()
@@ -2584,9 +2585,10 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         return
 
     from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
+    from .multi_node.state_paths import resolve_state_file
     from .orchestrator.action_executors._multi_node_env import export_ray_address_to_os
 
-    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    state_path = resolve_state_file()
     image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
         "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
     ).strip()
@@ -2648,6 +2650,11 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         rc_boot = cmd_bootstrap(ns_boot)
         if rc_boot != 0:
             sys.exit(rc_boot)
+
+    if not getattr(args, "no_kernel", False):
+        from .multi_node.cli import install_oob_on_pods_best_effort
+
+        install_oob_on_pods_best_effort()
 
     export_ray_address_to_os()
     ra = os.environ.get("RAY_ADDRESS", "")
@@ -3178,8 +3185,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if v:
                 os.environ[env_key] = v
 
-    await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
-
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = _clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
@@ -3617,7 +3622,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 cortex_client=cortex_client,
                 session_dir=session_dir,
             )
-        )
+            )
+
+    from .multi_node.state_paths import bind_state_file_to_session
+
+    bind_state_file_to_session(session_dir)
+    if nodes_resolved >= 2:
+        await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
 
     objective = build_objective(
         {
