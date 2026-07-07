@@ -38,6 +38,14 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 class _FakeTasks:
     def __init__(self):
         self.calls = []
+        self._queued = []
+        self._running = []
+
+    async def queued(self):
+        return self._queued
+
+    async def running(self):
+        return self._running
 
     async def create_or_return_existing(self, *, kind, params, idempotency_key, **kwargs):
         self.calls.append(
@@ -415,3 +423,287 @@ def test_mn_explore_skips_framework_config_generation_specialist(monkeypatch):
         )
     )
     assert s.tasks.calls == []  # guard skipped the generation specialist
+
+
+# --------------------------------------------------------------------------
+# Generation-specialist dispatch / inflight / result-record
+# --------------------------------------------------------------------------
+def _dispatch_deps(s):
+    async def _warm(params):
+        return None
+
+    s._warm_specialist_params = _warm
+    s._framework_gpu_params = lambda: {}
+    s._framework_authoring_lanes_ttl = lambda params, base_ttl_sec: ([], base_ttl_sec)
+    return s
+
+
+def test_dispatch_generation_specialist_params_and_marker():
+    s = _dispatch_deps(_fake_self(framework="sglang"))
+    tid = asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 2))
+    assert tid == "framework-config-explore-1"
+    call = s.tasks.calls[0]
+    assert call["kind"] == "specialist"
+    assert "round2" in call["idempotency_key"]
+    p = call["params"]
+    assert p["domain"] == "serving_specialist"
+    assert p["framework_config_generation"] is True
+    assert p["readonly"] is True
+    assert p["gap_layer"] == "framework"
+    assert p["framework"] == "sglang"
+
+
+def test_dispatch_generation_specialist_swallows_error():
+    s = _dispatch_deps(_fake_self())
+
+    async def _boom(**kwargs):
+        raise RuntimeError("queue down")
+
+    s.tasks.create_or_return_existing = _boom
+    assert asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1)) == ""
+
+
+def test_generation_inflight_detects_marker():
+    s = _fake_self()
+    s.tasks._running = [SimpleNamespace(kind="specialist", params={"framework_config_generation": True})]
+    assert asyncio.run(Coordinator._framework_config_generation_inflight(s)) is True
+    s.tasks._running = [SimpleNamespace(kind="specialist", params={})]
+    s.tasks._queued = []
+    assert asyncio.run(Coordinator._framework_config_generation_inflight(s)) is False
+
+
+def test_generation_inflight_swallows_error():
+    s = _fake_self()
+
+    async def _boom():
+        raise RuntimeError("db down")
+
+    s.tasks.queued = _boom
+    assert asyncio.run(Coordinator._framework_config_generation_inflight(s)) is False
+
+
+def test_exploration_inflight_detects_source_marker():
+    s = _fake_self()
+    s.tasks._running = [SimpleNamespace(kind="explore", params={"source": "framework_config_exploration"})]
+    assert asyncio.run(Coordinator._framework_config_exploration_inflight(s)) is True
+    s.tasks._running = [SimpleNamespace(kind="explore", params={"source": "other"})]
+    assert asyncio.run(Coordinator._framework_config_exploration_inflight(s)) is False
+
+
+def test_exploration_inflight_swallows_error():
+    s = _fake_self()
+
+    async def _boom():
+        raise RuntimeError("db down")
+
+    s.tasks.running = _boom
+    assert asyncio.run(Coordinator._framework_config_exploration_inflight(s)) is False
+
+
+def test_record_result_appends_row_with_kept_count():
+    s = _fake_self()
+    task = SimpleNamespace(task_id="cfg-1", params={"reason": "framework_config_round_1"})
+    result = {
+        "grid": [{"name": "a"}, {"name": "b"}],
+        "per_variant_outcomes": [{"outcome": "KEEP"}, {"outcome": "REVERT"}],
+        "best_gain_pct": 3.5,
+    }
+    Coordinator._record_framework_config_exploration_result(s, task=task, result=result)
+    rows = s.shared_state.framework_config_exploration_results
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "cfg-1"
+    assert rows[0]["kept"] == 1
+    assert rows[0]["best_gain_pct"] == 3.5
+    assert rows[0]["variant_count"] == 2
+
+
+def test_record_result_variant_count_falls_back_to_outcomes():
+    s = _fake_self()
+    task = SimpleNamespace(task_id="cfg-2", params={})
+    result = {"per_variant_outcomes": [{"outcome": "REVERT"}, {"outcome": "REVERT"}]}
+    Coordinator._record_framework_config_exploration_result(s, task=task, result=result)
+    rows = s.shared_state.framework_config_exploration_results
+    assert rows[-1]["kept"] == 0
+    assert rows[-1]["variant_count"] == 2
+
+
+def _raise(*a, **k):
+    raise RuntimeError("boom")
+
+
+# --------------------------------------------------------------------------
+# Coverage: default seed grid, defensive branches, edge cases
+# --------------------------------------------------------------------------
+def test_build_grid_uses_default_seed_grid(monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import explore as _exp
+
+    gv = SimpleNamespace(name="seed1", extra_server_args="--s", extra_envs={"E": "1"}, note="n")
+    monkeypatch.setattr(_exp, "_default_grid_for_framework", lambda framework, *, model_class: [gv])
+    grid = _build(_fake_self(framework="atom"))
+    assert grid[0]["name"] == "seed1"
+    assert grid[0]["provenance"] == "framework_agent:config"
+    assert grid[0]["extra_args"] == "--s"
+
+
+def test_build_grid_seed_error_is_swallowed(monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import explore as _exp
+
+    def _boom(framework, *, model_class):
+        raise RuntimeError("seed fail")
+
+    monkeypatch.setattr(_exp, "_default_grid_for_framework", _boom)
+    assert _build(_fake_self(framework="atom")) == []
+
+
+def test_max_rounds_bad_env_falls_back(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS", "abc")
+    assert Coordinator._framework_config_max_rounds(_fake_self()) == Coordinator._FRAMEWORK_CONFIG_MAX_ROUNDS
+
+
+def test_new_variants_skips_non_dict():
+    out = _fake_self()._framework_config_new_variants([{"name": "a", "extra_args": "--x"}, "nope", 123])
+    assert [g["name"] for g in out] == ["a"]
+
+
+def test_exploration_inflight_skips_non_explore_tasks():
+    s = _fake_self()
+    s.tasks._running = [
+        SimpleNamespace(kind="specialist", params={}),
+        SimpleNamespace(kind="explore", params={"source": "framework_config_exploration"}),
+    ]
+    assert asyncio.run(Coordinator._framework_config_exploration_inflight(s)) is True
+
+
+def test_generation_inflight_skips_non_specialist_tasks():
+    s = _fake_self()
+    s.tasks._running = [
+        SimpleNamespace(kind="explore", params={}),
+        SimpleNamespace(kind="specialist", params={"framework_config_generation": True}),
+    ]
+    assert asyncio.run(Coordinator._framework_config_generation_inflight(s)) is True
+
+
+def test_dispatch_generation_warm_error_is_swallowed():
+    s = _dispatch_deps(_fake_self())
+
+    async def _warm_boom(params):
+        raise RuntimeError("warm fail")
+
+    s._warm_specialist_params = _warm_boom
+    assert asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1)) == "framework-config-explore-1"
+
+
+def test_finish_lane_survives_save_error():
+    s = _fake_self(framework_config_lane_round=2)
+    s.shared_state.save = _raise
+    Coordinator._finish_framework_config_lane(s, reason="max_rounds")
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_ingest_survives_save_error():
+    s = _fake_self()
+    s.shared_state.save = _raise
+    task = SimpleNamespace(task_id="g", params={"framework_config_generation": True})
+    Coordinator._ingest_framework_config_generation(
+        s, task=task, done_payload={"proposal_set": [{"name": "a", "extra_args": "--x"}]}
+    )
+    assert [g["name"] for g in s.shared_state.framework_config_pending_grid] == ["a"]
+
+
+def test_record_survives_save_error_and_inits_list():
+    s = _fake_self()
+    s.shared_state.framework_config_exploration_results = None  # exercises list re-init
+    s.shared_state.save = _raise
+    task = SimpleNamespace(task_id="c", params={})
+    Coordinator._record_framework_config_exploration_result(s, task=task, result={"per_variant_outcomes": []})
+    assert len(s.shared_state.framework_config_exploration_results) == 1
+
+
+def test_start_generation_fallback_no_candidates():
+    s = _fake_self(framework_config_exploration_enabled=True, framework="sglang")
+    s._dispatch_framework_config_generation_specialist = _async_return("")
+    held = asyncio.run(Coordinator._start_framework_config_generation(s, round_no=0))
+    assert held is False
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_start_generation_fallback_dispatch_skipped():
+    s = _fake_self(framework_config_exploration_enabled=True)
+    s._dispatch_framework_config_generation_specialist = _async_return("")
+    s._build_framework_config_grid = lambda **k: [{"name": "v", "extra_args": "--x", "extra_envs": {}}]
+    s._run_framework_config_exploration = _async_return("")
+    held = asyncio.run(Coordinator._start_framework_config_generation(s, round_no=0))
+    assert held is False
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_hold_generating_dispatch_skipped():
+    s = _fake_self(
+        framework_config_exploration_enabled=True,
+        framework_config_lane_state="generating",
+        framework_config_pending_grid=[{"name": "v", "extra_args": "--x", "extra_envs": {}}],
+    )
+    s._framework_config_generation_inflight = _async_return(False)
+    s._run_framework_config_exploration = _async_return("")
+    assert _hold(s) is False
+    assert s.shared_state.framework_config_lane_state == "done"
+
+
+def test_hold_unknown_lane_returns_false():
+    s = _fake_self(framework_config_exploration_enabled=True, framework_config_lane_state="weird")
+    assert _hold(s) is False
+
+
+def test_run_swallows_enqueue_failure():
+    s = _fake_self()
+
+    async def _boom(**kwargs):
+        raise RuntimeError("q down")
+
+    s.tasks.create_or_return_existing = _boom
+    assert asyncio.run(
+        Coordinator._run_framework_config_exploration(s, explicit_grid=[{"name": "v", "extra_args": "--x"}])
+    ) == ""
+
+
+def test_ingest_reinits_non_list_pending():
+    s = _fake_self()
+    s.shared_state.framework_config_pending_grid = None
+    task = SimpleNamespace(task_id="g", params={"framework_config_generation": True})
+    Coordinator._ingest_framework_config_generation(
+        s, task=task, done_payload={"proposal_set": [{"name": "a", "extra_args": "--x"}]}
+    )
+    assert [g["name"] for g in s.shared_state.framework_config_pending_grid] == ["a"]
+
+
+def test_start_generation_success_survives_save_error():
+    s = _fake_self(framework_config_exploration_enabled=True)
+    s._dispatch_framework_config_generation_specialist = _async_return("gen-x")
+    s.shared_state.save = _raise
+    held = asyncio.run(Coordinator._start_framework_config_generation(s, round_no=0))
+    assert held is True
+    assert s.shared_state.framework_config_lane_state == "generating"
+
+
+def test_start_generation_fallback_survives_save_error():
+    s = _fake_self(framework_config_exploration_enabled=True)
+    s._dispatch_framework_config_generation_specialist = _async_return("")
+    s._build_framework_config_grid = lambda **k: [{"name": "v", "extra_args": "--x", "extra_envs": {}}]
+    s._run_framework_config_exploration = _async_return("run-x")
+    s.shared_state.save = _raise
+    held = asyncio.run(Coordinator._start_framework_config_generation(s, round_no=0))
+    assert held is True
+    assert s.shared_state.framework_config_lane_state == "running"
+
+
+def test_hold_generating_survives_save_error():
+    s = _fake_self(
+        framework_config_exploration_enabled=True,
+        framework_config_lane_state="generating",
+        framework_config_pending_grid=[{"name": "v", "extra_args": "--x", "extra_envs": {}}],
+    )
+    s._framework_config_generation_inflight = _async_return(False)
+    s._run_framework_config_exploration = _async_return("run-x")
+    s.shared_state.save = _raise
+    assert _hold(s) is True
+    assert s.shared_state.framework_config_lane_state == "running"
