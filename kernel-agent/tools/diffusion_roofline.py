@@ -342,6 +342,19 @@ def print_summary(report: dict[str, Any]) -> None:
             f" {ac['total_flops'] / 1e12:.1f} TFLOP @ {ac['achievable_tflops']:.0f} TFLOPS"
             f" -> ideal {ac['ideal_compute_us'] / 1e3:.2f} ms"
         )
+    if "analytic_ceiling" in report:
+        ac = report["analytic_ceiling"]
+        line = (
+            "analytic absolute ceiling (approach a):"
+            f" {ac['total_flops'] / 1e12:.1f} TFLOP/img"
+            f" [{ac['family']} h={ac['hidden']} L={ac['layers']}"
+            f" {ac['num_steps']}stepx{ac['cfg_batch']}]"
+        )
+        if "ideal_ms" in ac:
+            line += f" -> ideal {ac['ideal_ms']:.1f} ms @ {ac['peak_tflops']:.0f} TFLOPS ({ac['precision']})"
+        print(line)
+        if "analytic_within_pct" in report:
+            print(f"  analytic within-roofline (ideal/actual-kernel): {report['analytic_within_pct']:.1f}%")
     if "reconciliation" in report:
         rc = report["reconciliation"]
         if "analytic_vs_trace_ideal_ratio" in rc:
@@ -369,6 +382,13 @@ def main() -> int:
     )
     parser.add_argument("--top-k", type=int, default=10, help="Hottest kernels to list.")
     parser.add_argument("--output", default="", help="Optional path to write the report JSON.")
+    # Approach-a absolute analytic ceiling: resolve per-architecture forward
+    # FLOPs from the model's own diffusers config (no hand-passed geometry).
+    parser.add_argument("--model-dir", default="", help="Local diffusers model dir; enables the per-architecture analytic ceiling (diffusion_flops).")
+    parser.add_argument("--height", type=int, default=1024, help="Output image height (px) for the analytic ceiling.")
+    parser.add_argument("--width", type=int, default=1024, help="Output image width (px) for the analytic ceiling.")
+    parser.add_argument("--precision", default="bf16", help="Runtime precision for the peak-TFLOPS ceiling (bf16 / fp8 / mxfp4).")
+    parser.add_argument("--cfg-batch", type=int, default=0, help="Forwards per denoise step (0 = family default; 2 = classifier-free guidance).")
     # Optional a-priori DiT ceiling cross-check (all four geometry flags + a
     # ceiling source required to activate).
     parser.add_argument("--dit-hidden-size", type=int, default=0, help="DiT hidden dim h (analytic ceiling).")
@@ -413,6 +433,33 @@ def main() -> int:
         dit_geometry=dit_geometry,
         achievable_tflops=achievable,
     )
+
+    # Approach-a absolute analytic ceiling (per-architecture, config-derived).
+    if args.model_dir:
+        try:
+            import diffusion_flops as _dflops
+
+            gpu = args.target_platform or "mi355x"
+            est = _dflops.analytic_ceiling(
+                args.model_dir,
+                gpu_type=gpu,
+                precision=args.precision,
+                height=args.height,
+                width=args.width,
+                num_steps=args.num_denoise_steps or None,
+                cfg_batch=args.cfg_batch or None,
+            )
+            if est:
+                report["analytic_ceiling"] = est
+                # reconcile against the trace-measured actual kernel time.
+                actual_us = report["totals"].get("sigma_actual_kernel_us", 0.0)
+                if est.get("ideal_ms") and actual_us > 0:
+                    report["analytic_within_pct"] = round(
+                        est["ideal_ms"] / (actual_us / 1e3) * 100.0, 2
+                    )
+        except Exception as exc:  # noqa: BLE001 — analytic ceiling is best-effort
+            report["analytic_ceiling_error"] = f"{type(exc).__name__}: {exc}"
+
     print_summary(report)
     if args.output:
         out_path = Path(args.output).expanduser().resolve()
