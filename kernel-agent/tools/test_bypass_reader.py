@@ -304,6 +304,25 @@ def test_selected_capture_fragment_flag(tmp_path):
     assert out2["selected_capture_fragment"] is False
 
 
+def test_multi_rank_main_traces_survive_capture_shard_filter(tmp_path):
+    # The "don't break xDiT TP>1" invariant under the capture-shard filter:
+    # genuine top-level per-rank main traces (rank_0..N) coexisting with sglang
+    # capture shards must still resolve to rank_0 (shards are filtered out, then
+    # the lowest-rank policy applies to the real per-rank traces). Pre-fix this
+    # picked the alphabetically-first rank0 shard (bs_496_rank0) instead.
+    d = tmp_path / "torch_trace"
+    _write_ranked(d, 0)
+    _write_ranked(d, 1, extra_events=20)
+    _write_ranked(d, 2, extra_events=40)
+    cap = d / "capture_traces"
+    for bs in (512, 496):
+        _write_capture_fragment(cap, bs)  # bs_*_rank0.json.gz shards
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name == "rank_0.trace.json.gz"
+    # rank_count reflects the 3 real per-rank traces, not the rank0 shards.
+    assert reader._trace_rank_count(d) == 3
+
+
 def test_top_k_limits_returned_rows(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     out = reader.analyze_trace(tf, top_k=1)
