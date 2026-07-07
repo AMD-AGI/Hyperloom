@@ -3346,7 +3346,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.no_framework_agent = True
             print("  framework phase       : DISABLED (persisted from original run)")
         elif bool(getattr(args, "no_framework_agent", False)):
-            # Inverse (P2.d): honour --no-framework-agent on resume only before FRAMEWORK is entered.
+            # Inverse: honour --no-framework-agent on resume only before FRAMEWORK is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
                 state.framework_agent_phase_enabled = False

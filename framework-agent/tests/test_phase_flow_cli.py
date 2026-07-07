@@ -96,6 +96,7 @@ def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, cap
     def fake_enum(r):
         captured["search_perf_prs"] = r.search_perf_prs
         captured["search_modes"] = list(r.search_modes)
+        captured["keywords"] = list(r.keywords)
         return [
             Candidate(ref="PR:42", repo="ROCm/vllm", source="github",
                       title="perf: moe fp8", html_url="https://github.com/ROCm/vllm/pull/42", score=0.9),
@@ -117,6 +118,7 @@ def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, cap
     assert captured["search_perf_prs"] is True
     # No primus URL configured -> GitHub-only (no SourceConfigError raise).
     assert captured["search_modes"] == ["github"]
+    assert "moe" in captured["keywords"]
     assert payload["candidate_count"] == 1
 
 
@@ -143,6 +145,73 @@ def test_phase_discover_uses_primus_when_url_present(monkeypatch, tmp_path: Path
     assert rc == 0
     assert captured["search_modes"] == ["primus_cortex", "github"]
     assert captured["primus_cfg"] is True
+
+
+# Step B — hard-dedup + same-PR de-prioritisation ----------------------------
+def test_extract_pr_number_from_ref_and_url() -> None:
+    assert cli._extract_pr_number("PR:1234") == "1234"
+    assert cli._extract_pr_number("https://github.com/sgl-project/sglang/pull/1234") == "1234"
+    assert cli._extract_pr_number("PR:abc") == ""
+    assert cli._extract_pr_number("") == ""
+
+
+def test_candidate_excluded_by_memory_matches_id_and_pr_number() -> None:
+    # pr_url / ref id match.
+    assert cli._candidate_excluded_by_memory(
+        pr_url="https://github.com/o/r/pull/7", ref="PR:7", pr_number=7,
+        excluded_ids={"PR:7"}, excluded_pr_numbers=set(),
+    )
+    # PR-number match (from a failed candidate).
+    assert cli._candidate_excluded_by_memory(
+        pr_url="", ref="PR:9", pr_number=9,
+        excluded_ids=set(), excluded_pr_numbers={"9"},
+    )
+    # Genuinely new candidate passes.
+    assert not cli._candidate_excluded_by_memory(
+        pr_url="https://github.com/o/r/pull/3", ref="PR:3", pr_number=3,
+        excluded_ids={"PR:7"}, excluded_pr_numbers={"9"},
+    )
+
+
+def test_phase_discover_hard_filters_excluded_and_failed(monkeypatch, tmp_path: Path, capsys) -> None:
+    """excluded_candidate_ids drops a candidate outright; a same-PR-number in
+    failed_candidate_context drops another; only genuinely new PRs survive."""
+    req = {
+        "framework": "sglang",
+        "repo_url": "https://github.com/sgl-project/sglang.git",
+        "work_dir": str(tmp_path / "w"),
+        "gaps": [{"gap_canonical_id": "g1", "gap_description": "decode"}],
+        "max_search_candidates": 5,
+        "batch_id": "batch-x",
+        # PR:1234 already discovered/finalised → hard-excluded by id.
+        "excluded_candidate_ids": ["PR:1234"],
+        # PR:5678 already failed this session → dropped by same-PR-number.
+        "failed_candidate_context": [{"ref": "PR:5678", "status": "reverted", "why": "no-op"}],
+    }
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    import framework_agent.sources as src
+
+    def fake_enum(r):
+        return [
+            Candidate(ref="PR:1234", repo="sgl-project/sglang", source="github",
+                      title="excluded by id", html_url="https://github.com/sgl-project/sglang/pull/1234", score=0.9),
+            Candidate(ref="PR:5678", repo="sgl-project/sglang", source="github",
+                      title="excluded by failed pr#", html_url="https://github.com/sgl-project/sglang/pull/5678", score=0.8),
+            Candidate(ref="PR:9999", repo="sgl-project/sglang", source="github",
+                      title="brand new", html_url="https://github.com/sgl-project/sglang/pull/9999", score=0.7),
+        ]
+
+    monkeypatch.setattr(src, "enumerate_candidates", fake_enum)
+
+    rc = cli.main(["phase-discover", "--request", str(req_path)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    refs = sorted(c["ref"] for c in payload["candidates"])
+    assert refs == ["PR:9999"]
+    assert payload["candidate_count"] == 1
+    assert payload["excluded_count"] == 2
 
 
 def test_phase_discover_missing_request_exits_two(tmp_path: Path) -> None:

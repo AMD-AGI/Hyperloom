@@ -1,30 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for issue #433: at the container default
-``ulimit -n`` (1024) the Ray raylet is unstable (SIGABRT on startup /
-left as a zombie that only ``ray stop --force`` / SIGKILL can clear).
-Ray's raylet opens a large number of fds (sockets, plasma store,
-per-worker pipes); on a 384-CPU node 1024 is far too low.
+"""Regression tests for Ray fd-limit preflight before ``ray start``.
 
-The kernel-agent starts Ray itself via ``ray start --head`` from
-``ensure_ray_cluster`` and ``force_restart_local_cluster``. The child
-raylet inherits this process's ``RLIMIT_NOFILE``, so the runtime must
-run an fd-limit *preflight* that raises the soft limit (to
-``min(target, hard)``) BEFORE spawning ``ray start``.
-
-These tests encode that contract:
-  1. ``ensure_fd_limit`` raises a too-low soft limit up to the target,
-  2. ``ensure_fd_limit`` is a no-op when the soft limit is already high,
-  3. ``ensure_fd_limit`` clamps to the hard limit and warns when the
-     hard limit itself is below the target (the docker ``--ulimit``
-     requirement can only be satisfied at container-launch time), and
-  4. both ``ensure_ray_cluster`` and ``force_restart_local_cluster``
-     run the preflight BEFORE ``ray start``.
-
-Until the preflight lands, every test below fails (no ``ensure_fd_limit``
-symbol / no ``resource.setrlimit`` call before ``ray start``), which is
-exactly the on-disk gap described in #433.
-"""
+Ensure the child raylet does not inherit the low container default."""
 
 from __future__ import annotations
 

@@ -17,7 +17,9 @@ Fields::
     model_type          str   — config.json ``model_type``; stamped into
                                 the recipe-snapshot ``extras`` as a KB tag
     target_summary      str   — set by `target_analysis` action
-    baseline_tput       float — tok/s/GPU after `baseline` action
+    baseline_tput       float — primary throughput after `baseline` action;
+                                tok/s/GPU for serving frameworks, img/s for
+                                scriptable xDiT (displayed as e2el_mean_ms)
     baseline_accuracy   float — GSM8K score after `baseline`
     current_best        dict  — {action: str, tput: float, accuracy: float}
     cumulative_gain     float — % over baseline
@@ -459,12 +461,47 @@ class SharedState:
     baseline_arg_error_streak: int = 0
     # Combined backstop: ANY baseline failure (regardless of error_class) counts
     # here. Mixed classes split the per-class streaks above so neither hits its
-    # threshold; this total catches that and fast-fails (P5 anti time-exhaustion).
+    # threshold; this total catches that and fast-fails (anti time-exhaustion).
     baseline_total_failures: int = 0
     # One-shot: cuda-graph capture failure asks the next baseline to retry
     # by disabling cuda-graph capture (framework-correct flag injected by the
     # BaselineExecutor). Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Enablement path (framework-agent) state.
+    # ``enablement_launch_log``: captured launch/traceback text when baseline
+    #   cannot launch.
+    # ``enablement_dispatched``: in-flight guard that an authoring attempt is
+    #   queued/running; cleared when the attempt REVERTs.
+    # ``enablement_attempts``: number of dispatches (drives candidate rotation
+    #   and idempotency).
+    # ``enablement_succeeded``: terminal KEEP guard.
+    enablement_launch_log: str = ""
+    enablement_dispatched: bool = False
+    enablement_attempts: int = 0
+    enablement_succeeded: bool = False
+    # ``enablement_kept_patches``: ordered, deduped list of patch file paths
+    #   from prior enablement rounds that made *forward progress* (cleared the
+    #   previous crash but revealed a new, deeper gap). These are re-applied as
+    #   a base before the next round's patch so serial gaps stack instead of
+    #   being reverted and re-derived. See ``_maybe_rearm_enablement``.
+    enablement_kept_patches: list = field(default_factory=list)
+    # ``enablement_setup_commands``: ordered, deduped list of allowlisted
+    #   environment-setup shell commands (e.g. ``pip install transformers>=5.12``,
+    #   ``apt-get install -y gh``) that prior enablement rounds ran to make the
+    #   combo buildable/runnable. Re-run (idempotently) by integrate_patch before
+    #   applying patches + booting, so an install a specialist relied on is
+    #   durable and reproducible across re-bench / pod restarts rather than an
+    #   ephemeral side effect of one specialist session. Stacked like
+    #   ``enablement_kept_patches``.
+    enablement_setup_commands: list = field(default_factory=list)
+    # ``enablement_stall_streak``: consecutive enablement rounds that neither
+    #   became runnable nor advanced to a new failure signature. When it reaches
+    #   ``_ENABLEMENT_MAX_STALL`` the loop stops with stop_reason
+    #   ``enablement_stalled`` instead of spinning on the same gap forever.
+    enablement_stall_streak: int = 0
+    # Launch-log hashes already recorded as needs_human_review (UNKNOWN /
+    # non-actionable failures); at most one review record per distinct log.
+    enablement_human_review_logged: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
@@ -565,6 +602,11 @@ class SharedState:
     framework_agent_phase_done: bool = False
     # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_agent_discover_failures: int = 0
+    # Consecutive empty-but-valid ``fa phase-discover`` batches within the current
+    # FRAMEWORK phase; tolerate up to DISCOVER_FAILURE_RETRY_LIMIT before exiting so a
+    # transient upstream blip (cortex/PR-Monitor/GitHub) doesn't skip the phase.
+    # Reset to 0 on any non-empty batch.
+    framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates
     # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
     # reset whenever a phase completes having tested >=1 candidate.
@@ -588,6 +630,14 @@ class SharedState:
     )
     # Re-author rounds per candidate id (capped); needs_review verdicts increment.
     specialist_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
+    # P0-4 backstop: per-candidate-key count of Critic-review submissions. If a
+    # candidate is submitted for review more than the abort threshold (a
+    # terminal-row leak somewhere let it be re-selected), the pump force-stamps
+    # ``repeated_review_abort`` and stops re-selecting it, so no single candidate
+    # can burn the whole phase budget even if a new path forgets its terminal row.
+    framework_agent_review_counts: dict[str, int] = field(
         default_factory=dict,
     )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
@@ -1297,6 +1347,35 @@ class SharedState:
         self.last_consumed_escalate_hint_ts = _now_iso()
         return hint
 
+    def enablement_close_guard_active(self) -> bool:
+        """True while a not-yet-enabled run must be protected from premature close.
+
+        Until a baseline can be *established*, the entire optimization loop is
+        blocked on it — you cannot run EXPLORE/KERNEL/SWEEP without a baseline.
+        So a ``skip_to_close`` (whether the Orchestration LLM or Robustness emits
+        it) is *premature* here: giving up before the model even runs is not a
+        legitimate finish. While this guard is active the ``skip_to_close`` hint
+        is dropped; the only ways a not-yet-enabled run may terminate are the
+        *honest* ones that do not route through ``skip_to_close``:
+
+        * ``enablement_stalled`` — the enablement loop's own stall cap
+          (:data:`_ENABLEMENT_MAX_STALL` consecutive no-progress rounds),
+        * ``prelude_baseline_failed`` — repeated baseline failures with no
+          enablement engaged,
+        * the wall-clock deadline / time-exhausted exits,
+        * hard aborts (crash threshold, signal, emergency, user stop).
+
+        Returns:
+            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
+            has never gone positive and enablement has not yet succeeded.
+        """
+        phase = (self.phase or "").strip().upper()
+        return (
+            phase in ("PRELUDE", "FRAMEWORK_AGENT")
+            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
+            and not bool(getattr(self, "enablement_succeeded", False))
+        )
+
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(
         self,
@@ -1852,6 +1931,55 @@ class SharedState:
         """
         return _first_positive_tput(self.current_best)
 
+    def _scriptable_latency_roofline(
+        self, framework: str, achieved_tput: float, kernel_roofline_path: Any
+    ) -> tuple[float, float]:
+        """Resolve the (measured e2e latency, ideal latency floor) ms pair.
+
+        Scriptable/diffusion workloads have a compute-latency roofline rather
+        than a decode-throughput one. Returns ``(0.0, 0.0)`` for serving
+        frameworks and on any failure so the caller's serving path and legacy
+        behaviour are unchanged.
+
+        Args:
+            framework: Session framework name.
+            achieved_tput: Snapshot-time ``output_throughput`` (img/s for
+                scriptable xDiT).
+            kernel_roofline_path: Path to ``reports/kernel_roofline.json``; the
+                ``diffusion_roofline.json`` sidecar sits at its run-dir root.
+
+        Returns:
+            ``(e2e_mean_ms, roofline_ideal_ms)``; either element is ``0.0``
+            when unavailable.
+        """
+        try:
+            from .. import framework_registry
+
+            if not framework_registry.is_scriptable(framework):
+                return 0.0, 0.0
+            # img/s -> per-image e2e latency (ms); the achieved metric.
+            e2e_mean_ms = float(
+                framework_registry.primary_metric_value(framework, achieved_tput) or 0.0
+            )
+            # Ideal per-image latency floor from the diffusion roofline sidecar
+            # (run_dir/diffusion_roofline.json; kernel_roofline is run_dir/reports/).
+            roofline_ideal_ms = 0.0
+            try:
+                sidecar = Path(str(kernel_roofline_path)).parent.parent / "diffusion_roofline.json"
+                if sidecar.is_file():
+                    data = json.loads(sidecar.read_text(encoding="utf-8"))
+                    analytic = data.get("analytic_dit_ceiling") if isinstance(data, dict) else None
+                    totals = data.get("totals") if isinstance(data, dict) else None
+                    if isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
+                        roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
+                    elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
+                        roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                roofline_ideal_ms = 0.0
+            return e2e_mean_ms, roofline_ideal_ms
+        except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
+            return 0.0, 0.0
+
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.
 
@@ -1896,6 +2024,7 @@ class SharedState:
             mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
             cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
             bound_kind=breakdown.bound_kind,
+            framework=str(getattr(self, "framework", "") or ""),
         )
         # Mark provenance: this is the baseline-arm ceiling backup, not a
         # trace-derived snapshot.
@@ -2130,6 +2259,15 @@ class SharedState:
             except Exception:  # noqa: BLE001 — ceiling is best-effort
                 pass
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # Scriptable/diffusion has no tok/s decode ceiling. Surface the
+            # compute-latency roofline instead: the measured per-image e2e
+            # latency (achieved) vs the compute-roofline ideal floor read from
+            # the diffusion_roofline.json sidecar. Both best-effort → 0 keeps
+            # the serving path and legacy callers unchanged.
+            fw = str(getattr(self, "framework", "") or "")
+            e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(
+                fw, achieved_tput, kernel_roofline_path
+            )
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -2139,6 +2277,9 @@ class SharedState:
                 mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
                 cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
                 bound_kind=breakdown.bound_kind,
+                framework=fw,
+                e2e_mean_ms=e2e_mean_ms,
+                roofline_ideal_ms=roofline_ideal_ms,
             )
             # Per-op PerfModel breakdown for dashboard visualization.
             attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
@@ -3175,8 +3316,10 @@ class SharedState:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
+        from .. import framework_registry
+
         lines = [
-            f"baseline  : {self.baseline_tput} tok/s/GPU",
+            f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
             f"current   : {self._format_current_best_for_mission()}",
             f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
             f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
@@ -3200,9 +3343,17 @@ class SharedState:
         """
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
+        from .. import framework_registry
+
+        cb_tput = self.current_best.get("tput")
+        perf = (
+            framework_registry.format_primary_metric(self.framework, cb_tput)
+            if isinstance(cb_tput, (int, float))
+            else "?"
+        )
         return (
             f"action={self.current_best.get('action', '?')} "
-            f"tput={self.current_best.get('tput', '?')} "
+            f"perf={perf} "
             f"variant={self.current_best.get('variant_name', '?')}"
         )
 

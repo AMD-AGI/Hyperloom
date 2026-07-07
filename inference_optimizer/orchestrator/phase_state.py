@@ -409,6 +409,11 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
         # deterministic, so stop instead of burning the slow-baseline retry budget.
         "baseline_arg_error",
+        # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive enablement
+        # rounds made no forward progress (neither runnable nor advanced to a new
+        # failure signature). Stop instead of re-deriving the same fix until the
+        # wall-clock deadline. A progressing round resets the streak.
+        "enablement_stalled",
     }
 )
 
@@ -1518,15 +1523,33 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     Fires once the consecutive baseline-failure streak reaches 3, routing
     the session straight to CLOSE with ``prelude_baseline_failed``.
 
+    **Enablement-aware:** a *serial* enablement makes the baseline re-fail on
+    purpose — each round clears gap #n and the next boot stops at a new, deeper
+    gap #(n+1). Those crashes are forward progress, not a stuck baseline, so
+    this terminal exit is suppressed while enablement is actively engaged (a
+    progressing patch already stacked, a specialist currently dispatched, or at
+    least one enablement attempt made). In that regime the honest
+    ``enablement_stalled`` cap (consecutive NO-progress rounds, in
+    ``Coordinator._maybe_rearm_enablement``) is the correct fast-fail. Kept in
+    lockstep with the Coordinator's baseline backstop suppression so the two
+    baseline-failure stop paths never disagree.
+
     Args:
-        state (Any): Frozen SharedState view exposing ``baseline_failure_streak``.
+        state (Any): Frozen SharedState view exposing ``baseline_failure_streak``
+            and the ``enablement_*`` progress fields.
 
     Returns:
         tuple[str, dict[str, Any]] | None: ``("prelude_baseline_failed",
-        evidence)`` when the streak threshold is met, else ``None``.
+        evidence)`` when the streak threshold is met and enablement is not
+        engaged, else ``None``.
     """
     streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    if streak >= 3:
+    enablement_engaged = bool(
+        (getattr(state, "enablement_kept_patches", None) or [])
+        or getattr(state, "enablement_dispatched", False)
+        or int(getattr(state, "enablement_attempts", 0) or 0) > 0
+    )
+    if streak >= 3 and not enablement_engaged:
         return "prelude_baseline_failed", {"baseline_failure_streak": streak}
     return None
 

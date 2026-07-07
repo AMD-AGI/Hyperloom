@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -59,28 +58,12 @@ from tracelens_skill_runner import (
 )
 
 # Standalone-tool workspace-root resolver (cannot import inference_optimizer.paths; see _paths.py).
+from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
 from _paths import workspace_root
 
 
-# ---------------------------------------------------------------------------
-# Kernel-candidate pool size (issue #667).
-#
-# ``--top-k`` caps how many analysis.md p-items / hot kernels are written into
-# ``kernel_candidates.json``. Historically this defaulted to 10, which capped
-# the candidate POOL at candidate-build time -- *before* the dispatch layer's
-# own narrowing (source-fn grouping into ``task_groups[]``, op-fanout dedup,
-# and the per-group dispatch attempt cap) had a chance to run. A tight
-# build-time cap disproportionately drops GEAK-editable ops (rmsnorm,
-# add_rmsnorm, mha_batch_prefill, fused RoPE/reshape) while non-editable ops
-# (asm ``fmoe_g1u1`` with a compiled ``.co``, hipblaslt ``aten::mm``) consume
-# the top slots.
-#
-# The two caps are now decoupled: candidate-building uses a large pool by
-# default so the dispatch layer -- which already groups/dedups and caps
-# attempts -- is the real budget gate. Override via
-# ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` (this standalone tool) or the
-# ``top_k`` request param on the orchestrator side. A value of ``0`` (or
-# negative) means "no build-time cap".
+# Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
+# Override with HYPERLOOM_KERNEL_CANDIDATES_TOP_K; non-positive means unbounded.
 _DEFAULT_KERNEL_CANDIDATES_TOP_K = 100
 
 
@@ -105,38 +88,8 @@ def _default_top_k() -> int:
     return val if val > 0 else 1_000_000
 
 
-# ---------------------------------------------------------------------------
-# Dict-first op -> .cu resolver (ground-truth ``op_to_source.json``).
-#
-# TraceLens emits only a CPU op name, a ``.py`` launcher, and (assumed) a device
-# ``Kernel Name`` column. Hyperloom owns the op -> editable ``.cu`` mapping via a
-# curated JSON that is the ground truth (it may be edited over time). This block
-# is the single reader of that JSON.
-#
-# Each entry stores, per container, the device kernels seen under ``vllm`` /
-# ``sglang`` as ``{device_kernel_name: {kernel_source_path, kernel_source_line,
-# kernel_kind, patchable}}``. Routability is *derived* (no stored ``status``): an
-# op is routable iff its selected container holds a ``patchable`` kernel whose
-# ``kernel_source_path`` is an editable source -- native ``.cu``/``.cuh``/``.hip``
-# or a repo ``.py`` Triton kernel (inductor-generated ``.py`` is excluded).
-#
-# Resolution by ``kind``:
-#   * ``single``    -> the container's editable source(s); N sources fan out to
-#                      one GEAK run each.
-#   * ``dispatch``  -> the single kernel whose name matches the trace device
-#                      ``Kernel Name``.
-#   * ``composite`` -> all editable kernels in the container run (fan-out).
-#
-# ``single`` and ``composite`` route IDENTICALLY (both dedup the container's
-# editable sources by path and emit one GEAK run per distinct file); they differ
-# only in ownership semantics -- ``single`` is one logical op whose kernels are
-# its own (variants/phases that may span files), while ``composite`` is an
-# explicit fusion of heterogeneous, independently-owned kernels. ``dispatch`` is
-# the only kind that changes the resolved result (it narrows to one kernel).
-#
-# ``kernel_source_path`` values are absolute. A dictionary miss returns ``None``
-# so the caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
-# ---------------------------------------------------------------------------
+# Dict-first op-to-source resolver; op_to_source.json is the curated ground truth.
+# Dispatch entries narrow by trace kernel name; single/composite fan out editable sources.
 
 # Vendored ground-truth dictionary (committed under tools/data/).
 _OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
@@ -445,11 +398,6 @@ class OpResolver:
             ))
         return out
 
-    @classmethod
-    def _container_sources(cls, container: dict[str, Any] | None) -> list[str]:
-        """Editable, patchable source paths for one container (dedup, order-preserving)."""
-        return [m[0] for m in cls._container_source_meta(container)]
-
     def _select_source_meta(
         self, entry: dict[str, Any], framework: str | None,
     ) -> list[tuple[str, str, str]]:
@@ -481,10 +429,6 @@ class OpResolver:
         if fw == "sglang" and sgl:
             return sgl
         return sgl or vll
-
-    def _select_sources(self, entry: dict[str, Any], framework: str | None) -> list[str]:
-        """Pick the editable source paths, routing to the installed container."""
-        return [m[0] for m in self._select_source_meta(entry, framework)]
 
     def _single(
         self, op_name: str, entry: dict[str, Any], framework: str | None,
@@ -805,6 +749,18 @@ def _build_high_idle_warning(
             "can route to params/backends."
         ),
     }
+
+
+def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple[float, dict[str, Any] | None]:
+    """Return the idle threshold plus a warning when the gate is exceeded."""
+    threshold = _resolve_idle_pct_threshold()
+    if idle_pct is None or idle_pct <= threshold:
+        return threshold, None
+    return threshold, _build_high_idle_warning(
+        idle_pct=idle_pct,
+        threshold_pct=threshold,
+        report_path=report_path,
+    )
 
 
 def _build_trace_split_warning(
@@ -1202,63 +1158,6 @@ RUNTIME_API_NAMES = {
 # No in-process default for the TraceLens roots: TRACELENS_ROOT comes from env / --tracelens-root
 # (fail loudly if absent), and the internal extension is opt-in via TRACELENS_INTERNAL_ROOT.
 DEFAULT_TRACELENS_INTERNAL_ROOT = ""
-
-
-def utc_now() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp in ISO-8601 format.
-    """
-    return datetime.now(timezone.utc).isoformat()
-
-
-def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write ``data`` as pretty-printed JSON to ``path``.
-
-    Writes to a temporary file in the same directory then replaces the
-    target so readers never observe a partially-written file.
-
-    Args:
-        path (Path): Destination JSON file; parent dirs are created.
-        data (dict[str, Any]): JSON-serializable payload to write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
-        json.dump(data, tmp, indent=2, sort_keys=True)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
-
-
-def append_log(log_path: Path, message: str) -> None:
-    """Append a single line to a log file, creating parent dirs as needed.
-
-    Args:
-        log_path (Path): Log file to append to.
-        message (str): Text to append; trailing whitespace is stripped and a
-            newline is added.
-    """
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(message.rstrip() + "\n")
-
-
-def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
-    """Return the last ``limit`` lines of a log file.
-
-    Args:
-        log_path (Path): Log file to read.
-        limit (int): Maximum number of trailing lines to return.
-
-    Returns:
-        list[str]: The trailing lines, or an empty list when the file does
-            not exist.
-    """
-    if not log_path.exists():
-        return []
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return lines[-limit:]
 
 
 def update_status(
@@ -3015,7 +2914,7 @@ def _expand_op_fanout(
     ``--framework``); it disambiguates which container's source to route to when
     both/neither are on disk. Only ``vllm``/``sglang`` are honored (the mapping's
     container keys); any other value (e.g. ``atom``) or an empty/unset value
-    falls through to ``OpResolver._select_sources``' on-disk-presence-then-default
+    falls through to ``OpResolver._select_source_meta``' on-disk-presence-then-default
     ordering.
     """
     framework = (framework or "").strip().lower() or None
@@ -3627,22 +3526,6 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
 
 
-def _is_other_like_category(category: str) -> bool:
-    """Return whether a category counts as the ``other`` bucket.
-
-    Args:
-        category: Raw or upstream category label.
-
-    Returns:
-        ``True`` if the label (or its normalized upstream form) is an
-        other-like category.
-    """
-    raw_l = str(category or "").strip().lower()
-    if raw_l in _OTHER_LIKE_CATEGORIES:
-        return True
-    return str(normalize_upstream_category(category or "")).strip().lower() in _OTHER_LIKE_CATEGORIES
-
-
 def recover_other_bucket_candidates(
     skill_output_dir: Path | str | None,
     existing_candidates: list[dict[str, Any]],
@@ -3751,6 +3634,26 @@ def recover_other_bucket_candidates(
     return out
 
 
+def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] | None) -> None:
+    """Stamp routing, backend, and category metadata onto a finalized candidate."""
+    reusable, skip_reason = classify_patchability(item)
+    item["reusable_native_kernel"] = reusable
+    item["skip_reason"] = skip_reason
+    item["benchmark_files"] = find_benchmark_files(
+        item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
+    )
+    item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
+    item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
+    item["recommended_backends"] = recommend_backends(item)
+    item["optimization_notes"] = build_notes(item)
+    if op_cat_map and not str(item.get("tracelens_category") or "").strip():
+        csv_cat = op_cat_map.get(str(item.get("name") or ""))
+        if csv_cat:
+            item["tracelens_category"] = csv_cat
+    item["kernel_category"] = derive_kernel_category(item)
+    item.setdefault("source_path", item.get("source_file", ""))
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]],
     *,
@@ -3832,22 +3735,7 @@ def _finalize_candidates(
             item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
             item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
             item["runtime_generated_kernel"] = False
-            reusable, skip_reason = classify_patchability(item)
-            item["reusable_native_kernel"] = reusable
-            item["skip_reason"] = skip_reason
-            item["benchmark_files"] = find_benchmark_files(
-                item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
-            )
-            item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
-            item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
-            item["recommended_backends"] = recommend_backends(item)
-            item["optimization_notes"] = build_notes(item)
-            if op_cat_map and not str(item.get("tracelens_category") or "").strip():
-                csv_cat = op_cat_map.get(str(item.get("name") or ""))
-                if csv_cat:
-                    item["tracelens_category"] = csv_cat
-            item["kernel_category"] = derive_kernel_category(item)
-            item.setdefault("source_path", item.get("source_file", ""))
+            _stamp_candidate_metadata(item, op_cat_map)
             continue
         if res is not None and res.status in {"non_rewritable", "no_kernel"}:
             # Curated verdict: not rewritable. Keep the .py launcher as context but
@@ -3894,26 +3782,7 @@ def _finalize_candidates(
             item["source_type"] = "vendor_binary"
             item["vendor_dispatch_wrapper"] = True
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
-        # One classify_patchability call yields both the routing bool and the audit skip_reason.
-        reusable, skip_reason = classify_patchability(item)
-        item["reusable_native_kernel"] = reusable
-        item["skip_reason"] = skip_reason
-        item["benchmark_files"] = find_benchmark_files(
-            item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
-        )
-        item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
-        # Collective kernels need real multi-GPU launches; default to 2, compute kernels stay at 1.
-        item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
-        item["recommended_backends"] = recommend_backends(item)
-        item["optimization_notes"] = build_notes(item)
-        # CSV category only fills in when tracelens_category wasn't already set (analysis.md path).
-        if op_cat_map and not str(item.get("tracelens_category") or "").strip():
-            csv_cat = op_cat_map.get(str(item.get("name") or ""))
-            if csv_cat:
-                item["tracelens_category"] = csv_cat
-        # Stable kernel_category for GEAK dispatch + source_path mirror for consumers.
-        item["kernel_category"] = derive_kernel_category(item)
-        item.setdefault("source_path", item.get("source_file", ""))
+        _stamp_candidate_metadata(item, op_cat_map)
     return top
 
 
@@ -4077,6 +3946,29 @@ def _raise_on_failed_deterministic_pipeline(
     )
 
 
+def _is_scriptable_framework(framework: str | None) -> bool:
+    """Return whether ``framework`` is a server-less scriptable image framework.
+
+    Scriptable frameworks (e.g. xDiT diffusion) have no LLM decode steady-state
+    phase, so trace analysis uses the plain pytorch perf report + skips the
+    steady-state splitter. Prefers the canonical ``framework_registry``; falls
+    back to a name check so the tool stays usable when run standalone (outside
+    an importable ``inference_optimizer`` package).
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for scriptable image frameworks.
+    """
+    try:
+        from inference_optimizer.framework_registry import is_scriptable
+
+        return is_scriptable(framework)
+    except Exception:
+        return str(framework or "").strip().lower() in {"xdit"}
+
+
 def _run_deterministic_tracelens_steps(
     trace_path: Path,
     output_dir: Path,
@@ -4113,22 +4005,40 @@ def _run_deterministic_tracelens_steps(
     csv_dir = output_dir / "perf_report_csvs"
     csv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: perf report
-    report_cmd = [
-        sys.executable,
-        "-m",
-        "TraceLens.Reporting.generate_perf_report_pytorch_inference",
-        "--profile_json_path",
-        str(trace_path),
-        "--output_csvs_dir",
-        str(csv_dir),
-        "--gpu_arch_platform",
-        platform,
-        "--include_call_stack",
-        "--enable_pseudo_ops",
-    ]
-    if capture_folder and capture_folder.exists():
-        report_cmd += ["--capture_folder", str(capture_folder)]
+    # Step 1: perf report. Serving frameworks use the inference report (adds
+    # steady-state phase columns, call stacks, pseudo-ops, graph-capture replay).
+    # Scriptable image frameworks (xDiT diffusion) have no steady-state decode
+    # phase and no capture sidecar, so use the plain pytorch report, which is
+    # the variant validated to produce a clean per-kernel roofline for diffusion
+    # traces; the inference-only flags are omitted.
+    if _is_scriptable_framework(framework):
+        report_cmd = [
+            sys.executable,
+            "-m",
+            "TraceLens.Reporting.generate_perf_report_pytorch",
+            "--profile_json_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(csv_dir),
+            "--gpu_arch_platform",
+            platform,
+        ]
+    else:
+        report_cmd = [
+            sys.executable,
+            "-m",
+            "TraceLens.Reporting.generate_perf_report_pytorch_inference",
+            "--profile_json_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(csv_dir),
+            "--gpu_arch_platform",
+            platform,
+            "--include_call_stack",
+            "--enable_pseudo_ops",
+        ]
+        if capture_folder and capture_folder.exists():
+            report_cmd += ["--capture_folder", str(capture_folder)]
     rc = run_command(report_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
     if rc != 0:
         return rc
@@ -4203,6 +4113,18 @@ def _run_deterministic_tracelens_steps(
     return rc
 
 
+def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
+    """Read all rows from ``perf_report_csvs/gpu_timeline.csv``, empty if absent."""
+    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
+    if not csv_path.exists():
+        return []
+    try:
+        with open(csv_path, encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return []
+
+
 def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
     """Read GPU idle percentage directly from gpu_timeline.csv.
 
@@ -4214,18 +4136,13 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
         The GPU idle percentage, or ``None`` when the CSV is absent or has no
         idle-time row.
     """
-    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
-    if not csv_path.exists():
-        return None
     try:
-        with open(csv_path, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                row_type = (row.get("type") or "").strip().lower()
-                if row_type == "idle_time":
-                    return float(row.get("percent", 0))
-    except (OSError, csv.Error, ValueError):
-        pass
+        for row in _load_gpu_timeline_rows(output_dir):
+            if (row.get("type") or "").strip().lower() == "idle_time":
+                return float(row.get("percent", 0))
+    except ValueError:
+        # malformed CSV numeric field; treat as absent
+        return None
     return None
 
 
@@ -4240,16 +4157,13 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
         The trace total time in microseconds, or ``None`` when the CSV is
         absent or has no total-time row.
     """
-    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
-    if not csv_path.exists():
-        return None
     try:
-        with open(csv_path, encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                if (row.get("type") or "").strip().lower() == "total_time":
-                    return float(row.get("time ms", 0)) * 1000.0
-    except (OSError, csv.Error, ValueError):
-        pass
+        for row in _load_gpu_timeline_rows(output_dir):
+            if (row.get("type") or "").strip().lower() == "total_time":
+                return float(row.get("time ms", 0)) * 1000.0
+    except ValueError:
+        # malformed CSV numeric field; treat as absent
+        return None
     return None
 
 
@@ -4608,14 +4522,7 @@ def generate_minimal_analysis_md(
         except (TypeError, ValueError):
             return default
 
-    gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
-    gpu_rows: list[dict[str, str]] = []
-    if gpu_timeline_path.exists():
-        try:
-            with open(gpu_timeline_path, encoding="utf-8") as fh:
-                gpu_rows = list(csv.DictReader(fh))
-        except (OSError, csv.Error):
-            pass
+    gpu_rows = _load_gpu_timeline_rows(output_dir)
 
     lines.append("# TraceLens Performance Analysis Report")
     lines.append("")
@@ -5116,21 +5023,8 @@ def build_kernel_roofline_payload(
 
 
 def kernel_roofline_path_for_run(run_dir: Path, filename: str = "kernel_roofline.json") -> Path:
-    """Return the session-level kernel roofline report path (stable dashboard pointer).
-
-    PR-C layout is ``.../runs/<session_id>/<ts>_<run_id>/``; the pre-PR-C
-    ``.../runs/<session_id>/`` layout is still handled by the fallback branch.
-
-    Args:
-        run_dir: The ``runs/<session_id>/`` root for the session.
-        filename: Report file name; use ``kernel_roofline_opt.json`` for the
-            post-kernel-opt snapshot so it does not overwrite the baseline.
-
-    Returns:
-        The stable session-level kernel roofline report path.
-    """
+    """Return the stable session-level kernel roofline report path."""
     try:
-        # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
         session_sub = run_dir.parent
         runs_dir = session_sub.parent
         kernel_agent_dir = runs_dir.parent
@@ -5139,7 +5033,7 @@ def kernel_roofline_path_for_run(run_dir: Path, filename: str = "kernel_roofline
     if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
         session_dir = kernel_agent_dir.parent
         return session_dir / "reports" / filename
-    # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
+    # Backward-compatible flat run-dir layout.
     try:
         runs_dir_legacy = run_dir.parent
         kernel_agent_dir_legacy = runs_dir_legacy.parent
@@ -5731,6 +5625,40 @@ def write_reports(
         except Exception as exc:  # pragma: no cover - guard against import cycles
             print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
 
+    # Diffusion / scriptable workload-level roofline. TraceLens produces a
+    # *per-kernel* roofline (each op vs its dtype ceiling); for diffusion we also
+    # aggregate it into an end-to-end *workload* roofline (kernel efficiency x
+    # GPU busy ratio + optional per-denoise-step timings), mirroring the LLM
+    # decode memory-bound ceiling. Best-effort sidecar: never blocks the
+    # per-kernel report.
+    diffusion_roofline_path = ""
+    if _is_scriptable_framework(getattr(args, "framework", "")):
+        try:
+            tools_dir = str(Path(__file__).resolve().parent)
+            if tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+            from diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
+
+            _num_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
+            _diff_report = _build_diffusion_roofline(
+                tracelens_dir / "perf_report_csvs",
+                _num_steps or None,
+                int(getattr(args, "top_k", 10) or 10),
+            )
+            out = run_dir / "diffusion_roofline.json"
+            atomic_write_json(out, _diff_report)
+            diffusion_roofline_path = str(out)
+            print(
+                "[diffusion_roofline] "
+                f"kernel_eff={_diff_report['totals']['kernel_roofline_efficiency']:.3f} "
+                f"gpu_busy_ratio={_diff_report.get('gpu_busy_ratio')} "
+                f"-> {out}"
+            )
+        except FileNotFoundError as exc:
+            print(f"[diffusion_roofline] skipped: {exc}")
+        except Exception as exc:  # noqa: BLE001 - best-effort sidecar
+            print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
+
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(kernel_candidates_path),
@@ -5740,6 +5668,8 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
+    if diffusion_roofline_path:
+        artifact_paths["diffusion_roofline"] = diffusion_roofline_path
     return artifact_paths
 
 
@@ -5832,6 +5762,16 @@ def main() -> int:
         "Leave empty for the open-source-only report.",
     )
     parser.add_argument("--roofline-json", default="")
+    parser.add_argument(
+        "--num-denoise-steps",
+        type=int,
+        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
+        help=(
+            "Denoise steps captured in the profiled window (scriptable/xDiT "
+            "diffusion only). Enables per-denoise-step timings in the workload "
+            "roofline sidecar. Env: HYPERLOOM_NUM_DENOISE_STEPS."
+        ),
+    )
     parser.add_argument(
         "--roofline-output-name",
         default="kernel_roofline.json",
@@ -5971,7 +5911,7 @@ def main() -> int:
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
-    # PR-C: per-invocation sub-directory ``<compact_timestamp>_<run_id>`` so each run keeps its own artifacts.
+    # Keep each TraceLens invocation's artifacts in its own run subdirectory.
     ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
     if not ts_compact.endswith("Z"):
         ts_compact = ts_compact + "Z"
@@ -6080,7 +6020,7 @@ def main() -> int:
                 log_path=log_path,
                 timeout_s=max(60, int(args.budget_minutes * 60)),
             )
-            # TraceLens v0.3 (#148): analysis-orchestrator.md under Agent/Analysis/, with the legacy path as fallback below.
+            # Prefer the v0.3 skill path, then fall back to the legacy layout.
             skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
                 skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
@@ -6400,19 +6340,15 @@ def main() -> int:
                 idle_pct_value = _extract_idle_pct_from_gpu_timeline(
                     tracelens_dir,
                 )
-                idle_pct_threshold = _resolve_idle_pct_threshold()
-                high_idle_detected = idle_pct_value is not None and idle_pct_value > idle_pct_threshold
-                if high_idle_detected:
+                idle_pct_threshold, high_idle_warning = _evaluate_high_idle_gate(
+                    idle_pct_value,
+                    tracelens_dir / "analysis.md",
+                )
+                if high_idle_warning is not None:
                     assert idle_pct_value is not None
                     agent_candidates = []
                     allow_empty_candidates = True
-                    trace_health_warnings.append(
-                        _build_high_idle_warning(
-                            idle_pct=idle_pct_value,
-                            threshold_pct=idle_pct_threshold,
-                            report_path=tracelens_dir / "analysis.md",
-                        )
-                    )
+                    trace_health_warnings.append(high_idle_warning)
                     append_log(
                         log_path,
                         f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
@@ -6502,19 +6438,15 @@ def main() -> int:
                     idle_pct_value = extract_idle_pct_from_analysis_md(
                         skill_result.report_path,
                     )
-                    idle_pct_threshold = _resolve_idle_pct_threshold()
-                    high_idle_detected = idle_pct_value is not None and idle_pct_value > idle_pct_threshold
-                    if high_idle_detected:
+                    idle_pct_threshold, high_idle_warning = _evaluate_high_idle_gate(
+                        idle_pct_value,
+                        skill_result.report_path,
+                    )
+                    if high_idle_warning is not None:
                         assert idle_pct_value is not None
                         agent_candidates = []
                         allow_empty_candidates = True
-                        trace_health_warnings.append(
-                            _build_high_idle_warning(
-                                idle_pct=idle_pct_value,
-                                threshold_pct=idle_pct_threshold,
-                                report_path=skill_result.report_path,
-                            )
-                        )
+                        trace_health_warnings.append(high_idle_warning)
                         report_source = "skipped:high_gpu_idle_pct"
                         append_log(
                             log_path,

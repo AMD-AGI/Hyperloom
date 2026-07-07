@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P0-0 scaffold smoke tests (package import, paths, storage schema + transactions)."""
+"""Scaffold smoke tests (package import, paths, storage schema + transactions)."""
 
 from __future__ import annotations
 

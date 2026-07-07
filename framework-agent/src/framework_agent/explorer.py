@@ -20,7 +20,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from .decision import candidate_score, winner_decision
+from .decision import candidate_score, prior_score, winner_decision
 from .isolation import (
     WorkspacePaths,
     cleanup_workspace,
@@ -28,6 +28,8 @@ from .isolation import (
     prepare_candidate_workspace,
     prepare_repo_cache,
 )
+from .kb import read_pr_ledger
+from .keywords import extract_keywords
 from .logging_setup import get_logger, stage_log
 from .models import Candidate, CandidateResult, ExploreRequest, Finding, PrFilter
 from .runtime.tools_api import _metric_float
@@ -373,6 +375,46 @@ def _enumerate_with_skipped(
             continue
         kept.append(cand)
     return kept, skipped
+
+
+def _apply_prior_scores(req: ExploreRequest, candidates: list[Candidate]) -> list[Candidate]:
+    """Attach KB prior scores and sort candidates before benchmarking.
+
+    Args:
+        req: The explore request carrying framework and gap context.
+        candidates: Enumerated candidate list in source order.
+
+    Returns:
+        Candidates with ``prior_score`` set. Non-zero scores sort first;
+        otherwise original source order is preserved.
+    """
+    if not candidates:
+        return candidates
+    ledger = read_pr_ledger()
+    gap_keywords = req.keywords or tuple(extract_keywords(req.gap_description))
+    scored: list[tuple[int, Candidate]] = []
+    for index, cand in enumerate(candidates):
+        enriched = replace(
+            cand,
+            framework=cand.framework or req.framework,
+            model_class=cand.model_class or req.model_class,
+            gpu_type=cand.gpu_type or req.gpu_type,
+            precision=cand.precision or req.precision,
+            gap_canonical_id=cand.gap_canonical_id or req.gap_canonical_id,
+            gap_description=cand.gap_description or req.gap_description,
+            gap_keywords=cand.gap_keywords or tuple(gap_keywords),
+        )
+        score = prior_score(
+            enriched,
+            gap_canonical_id=enriched.gap_canonical_id,
+            gap_keywords=enriched.gap_keywords,
+            ledger=ledger,
+        )
+        scored.append((index, replace(enriched, prior_score=score)))
+    if not any(c.prior_score > 0.0 for _, c in scored):
+        return [replace(c, prior_rank=i) for i, (_, c) in enumerate(scored, start=1)]
+    scored.sort(key=lambda item: (-item[1].prior_score, item[0]))
+    return [replace(c, prior_rank=i) for i, (_, c) in enumerate(scored, start=1)]
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -813,6 +855,7 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
 
     with stage_log(log, "enumerate") as ctx:
         candidates, skipped_candidates = _enumerate_with_skipped(req)
+        candidates = _apply_prior_scores(req, candidates)
         ctx["n_candidates"] = len(candidates)
         ctx["n_skipped"] = len(skipped_candidates)
 
@@ -875,6 +918,11 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
             "max_accuracy_drop": req.thresholds.max_accuracy_drop,
         },
         "ranking_mode": req.ranking_mode,
+        "prior_ranking": {
+            "enabled": True,
+            "ranked_candidates": sum(1 for c in candidates if c.prior_score > 0.0),
+            "top_prior_score": max((c.prior_score for c in candidates), default=0.0),
+        },
         "build_concurrency": req.build_concurrency,
         "keep_winner_only": req.keep_winner_only,
         "winner_ref": winner_result.candidate.ref if winner_result else None,

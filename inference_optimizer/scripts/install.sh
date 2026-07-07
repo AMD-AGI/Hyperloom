@@ -124,7 +124,13 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
 # (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
-MAGPIE_REF="${MAGPIE_REF:-b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7}"
+# Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
+# diffusion benchmark framework (#51); the previous pin
+# (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
+# rejects framework=xdit ("Unsupported framework: xdit"), breaking every
+# xDiT baseline. Still post the atomic-copy refactor, so the in-place patch
+# stays a no-op.
+MAGPIE_REF="${MAGPIE_REF:-e1be639428070e8d1e1ca21ca5414a84bc291d94}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at the same Magpie checkout. A single var keeps
 # the installer and runtime in lockstep; setting it never silently falls back to

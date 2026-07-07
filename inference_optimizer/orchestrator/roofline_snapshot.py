@@ -301,6 +301,9 @@ def build_roofline_snapshot(
     mem_ceiling_tok_per_sec: float = 0.0,
     cmp_ceiling_tok_per_sec: float = 0.0,
     bound_kind: str = "unknown",
+    framework: str = "",
+    e2e_mean_ms: float = 0.0,
+    roofline_ideal_ms: float = 0.0,
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
@@ -316,6 +319,16 @@ def build_roofline_snapshot(
         mem_ceiling_tok_per_sec: Memory-side roofline ceiling (tok/s).
         cmp_ceiling_tok_per_sec: Compute-side roofline ceiling (tok/s).
         bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
+        e2e_mean_ms: Scriptable/diffusion primary metric — measured per-image
+            end-to-end latency (ms). The compute-bound analogue of
+            ``achieved_tok_per_sec`` (which is a memory-bound tok/s throughput);
+            stored as a sibling so the renderer picks the metric by unit.
+        roofline_ideal_ms: Compute-roofline ideal per-image latency ceiling
+            (ms) — the analogue of ``theoretical_peak_tok_per_sec`` for
+            scriptable workloads. When both ``roofline_ideal_ms`` and
+            ``e2e_mean_ms`` are positive and no tok/s ceiling applies,
+            ``within_roofline_pct`` is derived from them (ideal / measured) so
+            the same within/gap fields stay populated across units.
 
     Returns:
         A snapshot dict with the ceiling, achieved throughput, derived
@@ -326,9 +339,20 @@ def build_roofline_snapshot(
         peak=theoretical_peak_tok_per_sec,
         achieved=achieved_tok_per_sec,
     )
+    # Unit-agnostic fallback: when there is no tok/s ceiling (scriptable
+    # diffusion has a compute-latency roofline, not a decode-throughput one),
+    # derive within/gap from the ms pair. For latency "closer to the ceiling"
+    # means the measured time approaches the ideal floor, so within = ideal /
+    # measured (mirrors serving's achieved / peak: higher = nearer the ceiling).
+    if within is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
+        within = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
+        gap = round(100.0 - within, 2)
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
+        # Framework tag so the report layer renders the achieved primary metric
+        # in the right unit (serving: tok/s; scriptable xDiT: per-image latency).
+        "framework": str(framework or ""),
         # sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
         "kernel_roofline_path": "",
         "compute_pct": None,
@@ -344,6 +368,10 @@ def build_roofline_snapshot(
         "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
         "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
         "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
+        # Scriptable/diffusion siblings (compute-latency roofline). None for
+        # serving; the renderer selects tok/s vs ms by framework/unit.
+        "e2e_mean_ms": (float(e2e_mean_ms) if e2e_mean_ms > 0 else None),
+        "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),
         "within_roofline_pct": within,
         "gap_to_roofline_pct": gap,
     }
@@ -456,17 +484,28 @@ def _fmt_delta(val: float | None) -> str:
     return f"{sign}{val:.1f}"
 
 
-def _fmt_tput(v: float | None) -> str:
-    """Format ``output_throughput`` cell; one decimal place + tok/s unit.
+def _fmt_tput(v: float | None, framework: str = "") -> str:
+    """Format the achieved primary-metric cell for the roofline table.
+
+    Serving frameworks render ``tok/s``; scriptable image frameworks (xDiT)
+    store an img/s value whose meaningful surface is per-image latency, so
+    defer to :func:`framework_registry.format_primary_metric` for the correct
+    unit (mirrors the session's primary-metric rendering after #799).
 
     Args:
-        v (float | None): The throughput value (tok/s).
+        v (float | None): The stored primary metric (tok/s for serving, img/s
+            for scriptable xDiT).
+        framework (str): Session framework name; selects the display unit.
 
     Returns:
         str: The formatted cell, or ``"—"`` when missing/non-positive.
     """
     if not isinstance(v, (int, float)) or v <= 0:
         return "—"
+    from .. import framework_registry
+
+    if framework_registry.is_scriptable(framework):
+        return framework_registry.format_primary_metric(framework, float(v))
     return f"{float(v):.1f} tok/s"
 
 
@@ -524,6 +563,20 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
             f"_(single-source ceiling; baseline / latest compared against it)_"
         )
         ceiling_lines.append("")
+    else:
+        # Scriptable/diffusion has no tok/s decode ceiling; surface the
+        # compute-roofline ideal per-image latency floor instead (same unit as
+        # the achieved e2e latency, so within/gap read as a latency roofline).
+        ideal_ms = baseline.get("roofline_ideal_ms")
+        if not isinstance(ideal_ms, (int, float)) or ideal_ms <= 0:
+            ideal_ms = latest.get("roofline_ideal_ms")
+        if isinstance(ideal_ms, (int, float)) and ideal_ms > 0:
+            ceiling_lines.append(
+                f"**Compute-roofline ideal (per-image latency floor):** "
+                f"{float(ideal_ms):.1f} ms  "
+                f"_(single-source ceiling; baseline / latest compared against it)_"
+            )
+            ceiling_lines.append("")
 
     lines: list[str] = list(ceiling_lines)
     if mode == "single_snapshot":
@@ -542,7 +595,9 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         lines.append(f"| Top kernel efficiency | {cell(tk.get('efficiency_pct'))} |")
         if tk.get("name"):
             lines.append(f"| Top kernel | `{tk.get('name')}` |")
-        lines.append(f"| Achieved output_throughput | {_fmt_tput(snap.get('achieved_tok_per_sec'))} |")
+        lines.append(
+            f"| Achieved output_throughput | {_fmt_tput(snap.get('achieved_tok_per_sec'), snap.get('framework') or '')} |"
+        )
         lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
         lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
         lines.append("")
@@ -575,8 +630,8 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         lines.append(f"| Top kernel | `{btk.get('name') or '—'}` | `{ltk.get('name') or '—'}` | — |")
     lines.append(
         f"| Achieved output_throughput | "
-        f"{_fmt_tput(baseline.get('achieved_tok_per_sec'))} | "
-        f"{_fmt_tput(latest.get('achieved_tok_per_sec'))} | — |"
+        f"{_fmt_tput(baseline.get('achieved_tok_per_sec'), baseline.get('framework') or '')} | "
+        f"{_fmt_tput(latest.get('achieved_tok_per_sec'), latest.get('framework') or '')} | — |"
     )
     lines.append(
         f"| Within roofline % | "

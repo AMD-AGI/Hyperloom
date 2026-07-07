@@ -359,7 +359,7 @@ async def test_close_sequencer_falls_back_to_time_exhausted(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
-    """P1 regression: sequencer derives the phase_history reason rather than blanket-stamping time_exhausted."""
+    """Regression: sequencer derives the phase_history reason rather than blanket-stamping time_exhausted."""
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "conc_sweep_done", "evidence": {}},
     ]

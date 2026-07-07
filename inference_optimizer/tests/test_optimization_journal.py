@@ -19,8 +19,10 @@ from inference_optimizer.orchestrator.optimization_journal import (
     KIND_OTHER,
     KIND_PARAM,
     OUTCOME_KEEP,
+    OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     classify_change_kind,
+    derive_journal_outcome,
     summarize_change,
 )
 
@@ -355,6 +357,53 @@ def test_summarize_change_prefers_variant_args_and_envs():
 def test_summarize_change_falls_back_to_task_kind():
     assert summarize_change("baseline") == "baseline"
     assert summarize_change("") == "(unknown)"
+
+
+# derive_journal_outcome — Problem 3: fix the "fake KEEP" bug.
+def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
+    """The core bug: a reverted integrate_patch is promotable (status != failed)
+    but must journal as REVERT, not KEEP."""
+    out = derive_journal_outcome(
+        "integrate_patch", {"status": "reverted", "delta_pct": -0.44}, promotable=True,
+    )
+    assert out == OUTCOME_REVERT
+
+
+def test_derive_journal_outcome_integrate_patch_kept_is_keep():
+    out = derive_journal_outcome(
+        "integrate_patch", {"status": "kept", "delta_pct": 7.5}, promotable=True,
+    )
+    assert out == OUTCOME_KEEP
+
+
+def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
+    out = derive_journal_outcome(
+        "integrate_patch",
+        {"status": "accuracy_unavailable_reject"},
+        promotable=True,
+    )
+    assert out == OUTCOME_REVERT
+
+
+def test_derive_journal_outcome_patch_failures_are_no_promote():
+    # A patch that never reached a KEEP/REVERT measurement is no_promote, even
+    # though the dispatcher may flag some of these promotable.
+    for status in ("apply_failed", "no_patch", "no_patches", "failed", "applied_no_bench", "rejected_by_critic", "skipped"):
+        out = derive_journal_outcome("integrate_patch", {"status": status}, promotable=True)
+        assert out == OUTCOME_NO_PROMOTE, status
+
+
+def test_derive_journal_outcome_framework_agent_follows_status():
+    assert derive_journal_outcome("framework_agent", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
+    assert derive_journal_outcome("framework_agent", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
+    assert derive_journal_outcome("framework_agent", {"status": "no_result_failed"}, promotable=False) == OUTCOME_NO_PROMOTE
+
+
+def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
+    # Non-patch kinds preserve the historical promotable→KEEP / else→REVERT map.
+    assert derive_journal_outcome("baseline", {"status": "succeeded"}, promotable=True) == OUTCOME_KEEP
+    assert derive_journal_outcome("explore", {}, promotable=False) == OUTCOME_REVERT
+    assert derive_journal_outcome("profile", {"status": "reverted"}, promotable=True) == OUTCOME_KEEP
 
 
 def test_operation_kind_for_maps_kind_and_action():

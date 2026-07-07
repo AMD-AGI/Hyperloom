@@ -10,9 +10,16 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# Sibling import works whether run as a script or loaded via importlib.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import kernel_row_matches  # noqa: E402
+
+sys.path.pop(0)
 
 
 FP_METRICS = (
@@ -29,14 +36,7 @@ SATURATION_PCT = 60.0
 
 
 def _safe_float(value: str) -> float | None:
-    """Parse a string to float, returning ``None`` on failure.
-
-    Args:
-        value: String to convert.
-
-    Returns:
-        The parsed float, or ``None`` when ``value`` is not numeric.
-    """
+    """Parse a string to float, returning ``None`` on failure."""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -44,14 +44,7 @@ def _safe_float(value: str) -> float | None:
 
 
 def _bound_type(bound: str) -> str:
-    """Classify a roofline bound description into a short category.
-
-    Args:
-        bound: Free-form bound text (e.g. ``"memory-bound ..."``).
-
-    Returns:
-        One of ``"memory"``, ``"compute"``, ``"latency"``, or ``"unknown"``.
-    """
+    """Classify a roofline bound description into a short category."""
     lower = (bound or "").lower()
     if lower.startswith("memory-bound"):
         return "memory"
@@ -63,14 +56,7 @@ def _bound_type(bound: str) -> str:
 
 
 def _resolve_rocprof_compute() -> str | None:
-    """Locate the ``rocprof-compute`` executable.
-
-    Checks the ``HYPERLOOM_ROCPROF_COMPUTE_PATH`` / ``ROCPROF_COMPUTE_PATH``
-    environment variables, then ``PATH``, then the default ROCm install path.
-
-    Returns:
-        The resolved executable path, or ``None`` when not found.
-    """
+    """Locate the ``rocprof-compute`` executable."""
     configured = (
         os.environ.get("HYPERLOOM_ROCPROF_COMPUTE_PATH", "").strip()
         or os.environ.get("ROCPROF_COMPUTE_PATH", "").strip()
@@ -89,12 +75,7 @@ def _resolve_rocprof_compute() -> str | None:
 
 
 def _check_rocprof_compute() -> str | None:
-    """Verify ``rocprof-compute`` runs and report its version.
-
-    Returns:
-        The detected version string (``"unknown"`` if unparsable), or ``None``
-        when the tool is missing or ``--version`` fails.
-    """
+    """Verify ``rocprof-compute`` runs and report its version."""
     tool = _resolve_rocprof_compute()
     if not tool:
         return None
@@ -115,22 +96,12 @@ class RocprofRooflineAnalyzer:
     """Small parser around rocprof-compute section 4 roofline output."""
 
     def __init__(self, output_path: str | Path | None = None):
-        """Initialize the analyzer.
-
-        Args:
-            output_path: Directory for rocprof-compute output; a temporary
-                directory is created when omitted.
-        """
+        """Initialize the analyzer with a persistent or temporary output path."""
         self.output_path = Path(output_path or tempfile.mkdtemp(prefix="rocprof_roofline_")).resolve()
         self.content = ""
 
     def parse_roofline_blocks(self) -> list[tuple[str, dict[str, tuple[float, float, str]]]]:
-        """Parse section 4.1 roofline rate metrics from the analyze output.
-
-        Returns:
-            A list of ``(kernel_name, rates)`` tuples, where ``rates`` maps a
-            metric name to ``(actual, peak, unit)``.
-        """
+        """Parse section 4.1 roofline rate metrics from analyze output."""
         blocks: list[tuple[str, dict[str, tuple[float, float, str]]]] = []
         current_name = "Unknown"
         rates: dict[str, tuple[float, float, str]] = {}
@@ -167,13 +138,7 @@ class RocprofRooflineAnalyzer:
         return blocks
 
     def parse_roofline_ai(self) -> list[dict[str, tuple[float, str]]]:
-        """Parse section 4.2 roofline AI plot points from the analyze output.
-
-        Returns:
-            A per-kernel list of metric maps, each mapping an AI/performance
-            metric name to ``(value, unit)`` (performance is normalized to
-            TFLOPS).
-        """
+        """Parse section 4.2 roofline AI plot points from analyze output."""
         out: list[dict[str, tuple[float, str]]] = []
         metrics: dict[str, tuple[float, str]] = {}
         in_section = False
@@ -209,11 +174,7 @@ class RocprofRooflineAnalyzer:
         return out
 
     def parse_real_hbm_peak(self) -> float | None:
-        """Extract the measured (real) HBM peak bandwidth from the output.
-
-        Returns:
-            The real HBM peak bandwidth in GB/s, or ``None`` when not present.
-        """
+        """Extract the measured HBM peak bandwidth in GB/s."""
         for line in self.content.splitlines():
             if "│" in line and "17.1.5" in line:
                 parts = [p.strip() for p in line.split("│")]
@@ -236,20 +197,7 @@ class RocprofRooflineAnalyzer:
         ai_metrics: dict[str, tuple[float, str]],
         real_hbm_peak: float | None,
     ) -> dict[str, Any]:
-        """Compute roofline efficiency and bottleneck classification.
-
-        Args:
-            rates: Section 4.1 rate metrics mapping name to
-                ``(actual, peak, unit)``.
-            ai_metrics: Section 4.2 AI metrics mapping name to ``(value, unit)``.
-            real_hbm_peak: Measured HBM peak bandwidth, or ``None`` to fall
-                back to the empirical peak.
-
-        Returns:
-            A dict of derived metrics including the bound description and type,
-            compute/bandwidth utilization, arithmetic intensity, and roofline
-            efficiency against both empirical and real peaks.
-        """
+        """Compute roofline efficiency and bottleneck classification."""
         hbm_actual = hbm_emp_peak = None
         if "HBM Bandwidth" in rates:
             hbm_actual, hbm_emp_peak, _ = rates["HBM Bandwidth"]
@@ -318,12 +266,7 @@ class RocprofRooflineAnalyzer:
         }
 
     def analyze_structured(self) -> dict[str, Any]:
-        """Parse the analyze output into a structured per-kernel result.
-
-        Returns:
-            A dict with ``schema_version``, ``source``, ``real_hbm_peak``, and
-            a ``results`` list of per-kernel roofline records.
-        """
+        """Parse analyze output into structured per-kernel results."""
         blocks = self.parse_roofline_blocks()
         ai_list = self.parse_roofline_ai()
         real_hbm_peak = self.parse_real_hbm_peak()
@@ -358,22 +301,7 @@ class RocprofRooflineAnalyzer:
         analyze_blocks: str = "0 1 2 4 7 10 11 16 17",
         timeout_sec: int = 21600,
     ) -> tuple[bool, str | None]:
-        """Profile and analyze a command with rocprof-compute.
-
-        Runs ``rocprof-compute profile`` followed by ``analyze``, storing the
-        analyze text on ``self.content``.
-
-        Args:
-            workdir: Working directory in which to run the command.
-            cmd: Benchmark command to profile.
-            target_kernel: Optional kernel name filter.
-            analyze_blocks: Space-separated analyze block ids to request.
-            timeout_sec: Timeout applied to each subprocess.
-
-        Returns:
-            A ``(success, error)`` tuple; ``error`` carries the captured output
-            on failure and is ``None`` on success.
-        """
+        """Profile a command with rocprof-compute and parse its analyze output."""
         tool = _resolve_rocprof_compute()
         if tool is None:
             return False, "rocprof-compute is not installed or not on PATH"
@@ -415,15 +343,7 @@ class RocprofRooflineAnalyzer:
 
 
 def recommended_actions(bound_type: str) -> list[str]:
-    """Return suggested optimization actions for a bottleneck type.
-
-    Args:
-        bound_type: Bottleneck category (``memory`` / ``compute`` / ``latency``).
-
-    Returns:
-        A list of human-readable optimization suggestions (empty for unknown
-        types).
-    """
+    """Return suggested optimization actions for a bottleneck type."""
     if bound_type == "memory":
         return [
             "Improve memory coalescing/locality",
@@ -442,14 +362,7 @@ def recommended_actions(bound_type: str) -> list[str]:
 
 
 def build_text_report(payload: dict[str, Any]) -> str:
-    """Render a structured roofline payload into a human-readable report.
-
-    Args:
-        payload: Structured payload from :meth:`RocprofRooflineAnalyzer.analyze_structured`.
-
-    Returns:
-        A multi-line text report summarizing each kernel's roofline metrics.
-    """
+    """Render a structured roofline payload into a text report."""
     lines = ["Below is the rocprof-compute roofline information of the kernel:"]
     for row in payload.get("results", []):
         roof = row.get("rocprof_roofline") or {}
@@ -473,12 +386,7 @@ def build_text_report(payload: dict[str, Any]) -> str:
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write JSON to ``path`` atomically via a temp file and rename.
-
-    Args:
-        path: Destination file path.
-        data: JSON-serializable data to write.
-    """
+    """Write JSON atomically via a temp file and rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -487,36 +395,12 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def _kernel_name_matches(row: dict[str, Any], target_kernel: str) -> bool:
-    """Return whether a result row matches the target kernel name.
-
-    Args:
-        row: A result row with ``matched_kernel_name`` / ``name`` fields.
-        target_kernel: Kernel name to match; an empty value matches any row.
-
-    Returns:
-        ``True`` if the row corresponds to ``target_kernel``.
-    """
-    if not target_kernel:
-        return True
-    target = target_kernel.strip()
-    names = (
-        str(row.get("matched_kernel_name") or "").strip(),
-        str(row.get("name") or "").strip(),
-    )
-    return any(name == target for name in names)
+# Shared row-vs-target-kernel matcher (see _io_utils.kernel_row_matches).
+_kernel_name_matches = kernel_row_matches
 
 
 def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") -> dict[str, Any]:
-    """Project the matching result row into a ``kernel_roofline.json`` row.
-
-    Args:
-        payload: The rocprof roofline payload with a ``results`` list.
-        target_kernel: Kernel name to match; empty selects the first row.
-
-    Returns:
-        The projected roofline row, or a status dict when no row matches.
-    """
+    """Project the matching result row into a ``kernel_roofline.json`` row."""
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list) or not rows:
         return {"status": payload.get("status", "failed") if isinstance(payload, dict) else "failed"}
@@ -556,20 +440,7 @@ def _generate_harness_for_candidate(
     out_dir: Path,
     log_fn: Any,
 ) -> tuple[str, str | None]:
-    """Generate a benchmark harness for a TraceLens hot-kernel candidate.
-
-    Best-effort: returns an empty command rather than raising when no
-    benchmark file resolves.
-
-    Args:
-        candidate: The hot-kernel candidate metadata.
-        out_dir: Directory to write the generated harness into.
-        log_fn: Logging callable for progress/diagnostics.
-
-    Returns:
-        A ``(test_command, error)`` tuple. ``test_command`` is empty when no
-        benchmark file resolves and ``error`` names the reason.
-    """
+    """Generate a best-effort benchmark harness for a TraceLens candidate."""
     bench_files = candidate.get("benchmark_files") or []
     if not isinstance(bench_files, list) or not bench_files:
         return "", "no_benchmark_files"
@@ -583,8 +454,6 @@ def _generate_harness_for_candidate(
 
     try:
         tools_dir = str(Path(__file__).resolve().parent)
-        import sys
-
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         from harness_generator import maybe_generate_harness  # noqa: WPS433
@@ -615,16 +484,7 @@ def _generate_harness_for_candidate(
 
 
 def _profile_workdir(candidate: dict[str, Any], fallback: Path) -> Path:
-    """Pick a working directory for profiling a candidate kernel.
-
-    Args:
-        candidate: Candidate metadata with ``kernel_repo`` / ``source_file``.
-        fallback: Directory to use when no candidate path resolves.
-
-    Returns:
-        The first existing directory derived from the candidate paths, else
-        ``fallback``.
-    """
+    """Pick a working directory for profiling a candidate kernel."""
     for raw in (candidate.get("kernel_repo"), candidate.get("source_file")):
         if not raw:
             continue
@@ -644,29 +504,7 @@ def enrich_kernel_roofline_sidecar(
     timeout_sec_per_kernel: int = 1800,
     log_fn: Any = None,
 ) -> dict[str, Any]:
-    """Run ``rocprof_roofline`` on every reusable hot-kernel candidate and
-    write the result back into ``reports/kernel_roofline.json``.
-
-    Best-effort:
-
-    * Skips candidates without ``reusable_native_kernel`` (vendor / aten / no source).
-    * Skips candidates without ``benchmark_files`` and tags them
-      ``status='skipped' reason='no_benchmark_files'`` so dashboards know
-      this row was considered (vs. silently ``null``).
-    * Per-kernel rocprof timeout / failure marks the row ``status='failed'``
-      but never aborts enrichment of remaining rows.
-
-    Args:
-        sidecar_path: Path to the ``kernel_roofline.json`` sidecar to update.
-        candidates_path: Path to the candidates JSON to read kernels from.
-        workdir: Optional working directory for profiling.
-        timeout_sec_per_kernel: Per-kernel rocprof timeout in seconds.
-        log_fn: Optional logging callable.
-
-    Returns:
-        A summary dict with ``matched``, ``skipped``, ``failed``, and ``rows``
-        counts suitable for caller logging.
-    """
+    """Best-effort rocprof enrichment for reusable hot-kernel candidates."""
     sidecar_p = Path(sidecar_path).expanduser()
     cand_p = Path(candidates_path).expanduser()
 
@@ -700,11 +538,7 @@ def enrich_kernel_roofline_sidecar(
     fallback_workdir = Path(workdir).expanduser() if workdir else sidecar_p.parent
 
     def _log(msg: str) -> None:
-        """Forward a message to ``log_fn`` if one was provided.
-
-        Args:
-            msg: Message to log; sink errors are swallowed.
-        """
+        """Forward a message to ``log_fn`` when provided."""
         if callable(log_fn):
             try:
                 log_fn(msg)
@@ -833,14 +667,7 @@ def enrich_kernel_roofline_sidecar(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: profile a command and write roofline JSON/text.
-
-    Args:
-        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
-
-    Returns:
-        Process exit code: ``0`` on success, ``1`` when profiling fails.
-    """
+    """Profile a command and write roofline JSON/text."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--cmd", required=True)

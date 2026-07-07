@@ -189,6 +189,8 @@ async def phase_discover(
     max_candidates: int = 5,
     batch_id: str = "",
     pr_states: list[str] | None = None,
+    excluded_candidate_ids: list[str] | None = None,
+    failed_candidate_context: list[dict[str, Any]] | None = None,
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """FRAMEWORK-phase batch discovery shim.
@@ -210,6 +212,14 @@ async def phase_discover(
             the legacy keyword extraction.
         max_candidates: Maximum number of candidate PRs to request.
         batch_id: Optional batch identifier.
+        pr_states: Optional PR-state filter (open / merged / closed).
+        excluded_candidate_ids: Candidate ids (pr_url / ref / ``PR:<n>``) the
+            session has already discovered or reached a terminal verdict on;
+            fa hard-filters these out of the batch (Step B hard-dedup).
+        failed_candidate_context: Compact ``{ref, status, gain_pct, why}`` rows
+            of candidates that already failed this session; fa uses them to
+            de-prioritise same-PR / equivalent candidates. Truncated to the
+            most recent 10 to keep the request bounded.
         timeout_sec: Subprocess wall-clock timeout in seconds.
 
     Returns:
@@ -226,6 +236,14 @@ async def phase_discover(
         "max_search_candidates": int(max_candidates),
         "batch_id": batch_id,
     }
+    excluded = [str(x).strip() for x in (excluded_candidate_ids or []) if str(x).strip()]
+    if excluded:
+        # Dedup preserving order for a deterministic request.
+        seen_ex: set[str] = set()
+        request["excluded_candidate_ids"] = [x for x in excluded if not (x in seen_ex or seen_ex.add(x))]
+    failed_ctx = [f for f in (failed_candidate_context or []) if isinstance(f, dict)]
+    if failed_ctx:
+        request["failed_candidate_context"] = failed_ctx[-10:]
     # Plumb the primus_cortex (PR-Monitor) base URL so the fa subprocess can
     # query internal primus PRs; without it phase-discover falls back to
     # GitHub-only. The PR-Monitor REST service IS the primus_cortex backend.
@@ -258,6 +276,8 @@ async def phase_audit(
     diff_url: str = "",
     diff_text: str = "",
     primus_cortex_url: str = "",
+    target_framework: str = "",
+    target_framework_source_roots: list[str] | None = None,
     use_llm: bool = False,
     model: str = "",
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
@@ -279,6 +299,14 @@ async def phase_audit(
         diff_url: Optional explicit unified-diff URL.
         diff_text: Optional inline unified diff (skips any fetch).
         primus_cortex_url: Optional Primus Cortex base URL for patch fetch.
+        target_framework: Optional cross-framework porting target; when it
+            differs from the candidate's source framework, the audit runs in
+            cross-framework mode (design #5).
+        target_framework_source_roots: Design §Q1 (adopted): explicit source
+            roots for ``target_framework`` (the porting destination). Cross-
+            framework audits prefer this over the ``framework_source_roots``
+            fallback so ``metrics.roots_source=="explicit"`` and the R6 risk
+            (source tree mistaken for target tree) is never raised.
         use_llm: Opt-in single chat-completion refine (default off).
         model: Optional LLM model slug for the refine layer.
         timeout_sec: Subprocess wall-clock timeout in seconds.
@@ -300,6 +328,10 @@ async def phase_audit(
         request["diff_text"] = diff_text
     if primus_cortex_url:
         request["primus_cortex_url"] = primus_cortex_url
+    if target_framework and target_framework.strip().lower() != request["framework"]:
+        request["target_framework"] = target_framework.strip().lower()
+        if target_framework_source_roots:
+            request["target_framework_source_roots"] = list(target_framework_source_roots)
     if model:
         request["model"] = model
     return await _invoke_fa_phase(
