@@ -38,12 +38,17 @@ log = logging.getLogger(__name__)
 # GPU-type resolution (folded back from cli_gpu.py; phase 6D). Pure helpers
 # that detect / normalize the AMD GPU type from args, env, and ``rocm-smi``.
 # ---------------------------------------------------------------------------
-_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
+_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x", "mi455x"})
 
 _GFX_TO_RUNNER: dict[str, str] = {
     # Mirror Magpie/modes/benchmark/image_selector.py:138-140 so we can log resolved value at session start.
     "gfx942":  "mi300x",
     "gfx950":  "mi355x",
+    # MI455 (gfx1250) is pre-silicon; the vLLM gfx1250 build reuses the
+    # gfx950/CDNA4 kernel paths, so it gets its own runner label with a
+    # dedicated benchmark script (vllm_mi455x.sh) rather than collapsing
+    # onto mi355x.
+    "gfx1250": "mi455x",
 }
 
 
@@ -52,6 +57,7 @@ def _gpu_runner_type(gpu_type: str) -> str:
 
     MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
     the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+    MI455X (gfx1250) keeps its own label and uses vllm_mi455x.sh.
 
     Args:
         gpu_type (str): The resolved real GPU type (e.g. ``mi325x``).
@@ -106,9 +112,16 @@ def _autodetect_gpu_type() -> str | None:
             ["rocm-smi", "--showproductname"],
             capture_output=True, text=True, timeout=5,
         ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
+        for tag in ("MI455X", "MI355X", "MI325X", "MI308X", "MI300X"):
             if tag in out:
                 return tag.lower()
+        # Pre-silicon / whitebox boards report only "GFX VERSION: GFXNNNN"
+        # (e.g. MI455 shows "AMD Radeon Graphics" + gfx1250, no MIxxx tag).
+        # Map the gfx string through _GFX_TO_RUNNER as a secondary rocm-smi
+        # signal before falling back to torch.
+        for gfx, runner in _GFX_TO_RUNNER.items():
+            if gfx.upper() in out:
+                return runner
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted — fall through to the torch
         # gcnArchName probe below (autodetect is best-effort).
