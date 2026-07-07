@@ -269,3 +269,96 @@ P2.3 分两个独立阶段执行,每阶段各自过一次全量非-e2e 门,分�
 **验收**: 147 个 orchestrator 子模块导入冒烟全绿;AST 级"每条 import 的目标模块必须磁盘上真实存在"校验零命中;`ruff check` 保持与阶段 A 相同的 14 个历史遗留错误(0 新增);`pytest --collect-only` 从 46 个 collection error 收敛到 0;全量非-e2e 门 `8498 passed, 3 skipped, 47 deselected`(与阶段 A 完成时完全一致,证明两阶段合计的 P2.3 是纯文件布局迁移,无行为变化)。`manifest.json`/`state.json`/`storage/coordinator.db`/`session_breakdown.json`/四个 role 的 subprocess JSON 桥等磁盘/进程观测契约,通过对应的既有测试套件(`test_refactor_golden_breakdown.py`、`*_e2e_mock.py`、`*runtime_bridge*`、`*critic_agent_backend*`、`*robustness_agent*` 等)间接验证不变。
 
 **给后续步骤(P2.4 inference_optimizer 瘦身 / P2.5 agents 归一)的前瞻**:P2.3 验证了"侦察 7 类扫描 + LibCST 双向 move-map codemod + tokenize 级字符串修复 + `--collect-only` 快速迭代"这一整套方法论在**跨包物理搬迁**场景下是可靠、可重复的,已经处理了"包提升"(阶段 A)和"包内重组"(阶段 B)两种子问题,P2.4/P2.5 的物理搬迁在方法论上是同一件事的重复应用(新增风险点是 P2.5 的 5 种异构打包约定统一,需要额外处理 `pyproject.toml`/`setup.py` 的声明式打包差异,而非本次遇到的纯 import 重写问题)。
+
+---
+
+## 11. P2.4 实战(五个提交,门绿)= inference_optimizer 瘦身 + 收尾补课
+
+P2.4 分五个提交完成:`d7dd3443`(阶段 A,物理提升到 `hyperloom.inference_optimizer`)、`ac764d01`(`compat/` 扁平化 + `kb/`→`data/`)、`6a0f01c2`(合并 `paths/session_paths/session_lock/manifest`→`session/`)、`80cb38b5`(拆 `launcher/`+`scripts/`→`tools/experiments/assets/references`)、`06dfc5ae`(拆 `cli.py`→`cli/` 子包)。前四个提交各自跑了与基线数字完全一致的全量非-e2e 门;第五个提交(`cli/` 拆分)因为跑到一半时发现有并发 agent 在改 `critic-agent/`,全仓库跑会把它的中间状态也测进去、产生噪音,改成只跑了 `inference_optimizer/tests/` 子集(6649 passed)——**这是一个明确的遗漏**:缺少像前四个 commit 那样"和基线数字完全一致"的强验证,也没有跑 `ruff check --fix` 前后对比、没有跑 `mypy`、没有跑 `pre-commit run --all-files`,且对 `cli/__init__.py` 的测试失败是"哪里报错修哪里"地处理的,没有先系统性建一遍 monkeypatch 清单再动手(该做但没做到 §3.3 的方法论)。本节补上这些遗漏,并记录补课过程中额外发现的两个真实回归 bug。
+
+### 11.1 `cli/` 拆分事后 monkeypatch 面重新扫描(§3.3 方法论的实际应用)
+
+对已经拆好的 `cli/__init__.py`(4748 行,`_preflight`/`_run_optimize`/`_build_parser` 三个巨型函数仍在里面)做了一次完整的 §3.3 四模式扫描:
+
+```
+setattr\(\s*(cli|cli_module|...)\s*,\s*"NAME"          # 危险:模块级裸名 patch
+setattr\(\s*(cli|...)\.\w+\s*,\s*"NAME"                # 安全:stdlib 子模块 patch(cli.shutil / cli.subprocess)
+(cli|...)\.\w+\s*=\s*...                               # 直接属性赋值(cli_mod.ClaudeBackend = ...)
+"hyperloom\.inference_optimizer\.cli\.[...]"           # 全限定字符串 patch
+```
+
+**结果**:只有 4 个符号被**危险模式**直接命中——`_load_dotenv_fallback`、`_load_kernel_agent_env_fallback`、`_clone_inferencex`、`_probe_llm_catalog`,全部集中在 `test_preflight_auth_override.py`。另有 `cli.shutil.which` / `cli.subprocess.run`(stdlib 子模块 patch,§2.3 安全)、`cli_mod.ClaudeBackend = ...`(已经在 P2.2 拆分时正确指向 `cli.executors` 而非 facade,安全)、以及一处 `importlib.reload(cli)` 期望 `DEFAULT_ROBUSTNESS_BACKEND` 常量随 env 重算。这次事后扫描印证了"拆分前必须先建 monkeypatch 清单"的价值:如果先扫再拆,4 个危险符号 + reload 依赖点会在设计阶段就被识别,而不是像这次靠事后补课才发现。
+
+**新增一类坑(`reload(pkg)` 的语义边界,§3.2/§2.3 都没覆盖到)**:用最小复现验证了 `importlib.reload(pkg)` **只重算 `pkg` 自己模块体里的顶层语句**,不会重新执行任何被 `pkg` re-export 的 sibling 子模块的模块体。即:
+
+```python
+# pkg/__init__.py: from .sub import HELPER; VALUE = os.environ.get(...)
+importlib.reload(pkg)   # VALUE 重算;pkg.HELPER 还是 sub.py 里的旧绑定,不变
+```
+
+**含义**:`DEFAULT_CRITIC_BACKEND`/`DEFAULT_ROBUSTNESS_BACKEND`(env 快照式模块级常量)+ 它们的 `_resolve_*_choice` 解析函数,**必须留在 `cli/__init__.py` 本体**,不能像其余 helper 一样搬到 sibling 模块再 re-export——否则 `test_resolve_robustness_choice_env_override_still_works` 的 `importlib.reload(cli)` 断言会静默失效(reload 后常量值不变,测试会真实失败,不是隐蔽 bug,但值得记录为"哪些符号不能参与后续的 `_run_optimize` 拆分"的负面清单)。
+
+### 11.2 `_build_parser` 簇的安全整体搬出(零 monkeypatch,验证性极简)
+
+`_build_parser`(1400 行)+ 6 个纯计算 helper(`_RetiredFlag`/`_default_gpu_specialist_capacity`/`_default_research_lane_capacity`/`_parse_conc_env_default`/`_parse_conc_sweep_default`/`_parse_conc_values`/`_positive_int_arg`)经 §3.3 扫描确认**零个**被 `setattr(cli, "...")` 或全限定字符串命中,是本次唯一可以"和 coordinator.py 的叶子协作者一样低风险"的整体搬移:直接剪切到新文件 `cli/parser.py`,`__init__.py` 用 `from .parser import X as X` 全部 re-export。**零调用点改写**,因为所有引用方式(`from hyperloom.inference_optimizer.cli import _build_parser`、`cli._build_parser()`、`optimizer_cli._build_parser()`)都经过包命名空间,re-export 后行为完全不变。
+
+**踩到的坑与 P2.2 §4.2 完全同构**:剪切后原地留下的函数间空洞用 `python3 -c` 脚本按行号切片删除(而不是逐段 `StrReplace`)——`_default_research_lane_capacity`/`_default_gpu_specialist_capacity`/`_build_parser` 三者在文件里紧邻,`StrReplace` 需要传入上千行文本做 exact-match,极易因为一次已生效的编辑导致行号偏移而"找不到旧字符串";改用"读整个文件为行数组、按 1-indexed 行号区间 slice 删除、写回"的脚本化方式,一次成功,且行号可以从 `callgraph.py` 的输出直接读取,不需要人工数。
+
+**另一坑(本次补做时才发现)**:`_positive_int_arg`/`_parse_conc_values`/`_parse_conc_env_default`/`_parse_conc_sweep_default` 除了在 `_build_parser` 内部被引用外,**还有一份独立的定义簇**紧邻 `_resolve_run_max_model_len` 之前(供 `_run_optimize`/`_export_workload_envs_for_optimize` 使用),与 `_build_parser` 簇里同名的定义是**两处完全重复的定义**(P2.2 拆分时遗留的重复,本就存在,不是本次引入)。只删 `_build_parser` 大块会漏删这处"卫星重复",`ruff F811`(redefinition)会精确指出;必须两处都删干净,只留 `parser.py` 里的单一实现。
+
+### 11.3 `_preflight` 簇的协作者式搬出(4 个危险符号,机制同 coordinator.py 的跨协作者调用)
+
+`_preflight`(259 行)+ 其上游 17 个纯 helper(`_load_dotenv_fallback`/`_load_kernel_agent_env_fallback`/`_clone_inferencex`/`_check_*`/`_emit_preflight_diagnostics`/`_run_ir3_preflight` 等)搬到 `cli/preflight.py`。核心难点是 §11.1 扫出的 4 个危险符号里,有 3 个(`_load_dotenv_fallback`、`_load_kernel_agent_env_fallback`、`_clone_inferencex`)被 `_preflight()` 自己以**裸名调用**在函数体内引用。
+
+**关键验证(比 coordinator.py 的场景更极端的一个变种)**:coordinator.py §3b-1 点 3 的教训是"同簇兄弟方法调用绕过 `__getattr__`",这里更进一步——**即使被调函数和调用者搬进了同一个新文件**,裸名调用仍然会绕过 monkeypatch。用最小复现验证:
+
+```python
+# pkg/sub2.py 定义 clone_it() 和 preflight()(同一个文件!),preflight() 内部裸名调用 clone_it()
+# pkg/__init__.py: from .sub2 import clone_it, preflight
+pkg.clone_it = lambda: "patched"
+pkg.preflight()   # 结果是 "original"，不是 "patched"！
+```
+
+**原因**:Python 函数体内的裸名引用在**定义时所在模块的全局命名空间**里解析(`sub2.py` 自己的 `__dict__`),与"该名字有没有被外部重新绑定到 package 的 `__init__.py`"无关。`monkeypatch.setattr(cli, "_clone_inferencex", fake)` 只改了 `cli`(package)`__dict__` 里的绑定,`sub2.py`(`preflight.py`)自己的 `__dict__` 里的 `_clone_inferencex` 名字岿然不动。
+
+**修法(与 coordinator.py §5c 点跨协作者调用同构)**:把这 3 处裸名调用改成函数体内**惰性、包限定的重新查找**:
+
+```python
+from . import _load_dotenv_fallback as _load_dotenv_fallback_current
+from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
+_load_dotenv_fallback_current()
+_load_kernel_agent_env_fallback_current()
+```
+
+这样每次调用都重新读一次 `cli`(package)当前的属性值,天然拾取任何时刻打上的 monkeypatch,且对未打 patch 的正常路径无行为变化(`from . import X` 惰性导入在包已加载完成后就是纯字典查找,无额外开销)。`_probe_llm_catalog`(第 4 个危险符号)恰好没有被 `_preflight`/`_validate_and_resolve_claude_model` 之外的函数在同一个新文件里裸名引用到,且它本身没有随 `_preflight` 一起搬(仍留在 `__init__.py`,因为 `_validate_and_resolve_claude_model`/`_smoke_test_codex_model`——这两个函数属于 `_run_optimize` 簇而非 `_preflight` 簇——才是它的调用方),故未受影响。
+
+**顺带修复的两个真实回归 bug(§3.3 扫描的副产品,不是本次目标但顺手修了)**:扫描 monkeypatch 面的同时人工通读了 `_preflight` 全文,发现两处 `Path(__file__)`-相对路径在 P2.4 `cli.py`→`cli/__init__.py` 的物理下沉(多一层目录)后从未跟着调整,与 P2.3 §10.1 点 1"相对 import 的解析基准点是文件的旧位置"是同一类坑的 `Path(__file__)` 变体:
+1. `preflight_kb.sh` 路径:`Path(__file__).resolve().parent / "assets" / "preflight_kb.sh"` 在 `cli.py` 是单文件时指向 `inference_optimizer/assets/`(正确),变成 `cli/__init__.py` 后指向不存在的 `cli/assets/`。改成 `.parent.parent`。
+2. `WORKSPACE_PATH` 默认值(critic-agent 静态资产根):`Path(__file__).resolve().parents[3]` 在旧 `cli.py`(`inference_optimizer/cli.py`)是 `parents[3]` = 仓库根,变成 `cli/__init__.py` 后同样的下标少算了一层,实际落在 `src/hyperloom/`。改成 `parents[4]`。
+
+两处都**没有被任何现有测试覆盖**(第一个的测试用 `monkeypatch.setenv("INFERENCEX_PATH", ...)` + `monkeypatch.setattr(cli, "_clone_inferencex", ...)` 短路掉了真实路径解析;第二个完全没测试),是典型的"改了但测试测不到、只有真实运行才会暴露"的静默 bug——多亏这次为了搞清楚 monkeypatch 面而通读全文,不然会一直潜伏到下次有人真的用 `--critic-agent` 跑一次全新会话。**教训**:任何 `git mv` 或"文件从扁平模块变成 package(多一层目录)"的操作,除了检查 import(P2.3 已有方法论),还必须**额外 grep 一遍 `Path(__file__)` 及其 `.parent`/`.parents[N]` 的使用**,因为这类路径推导对目录深度极其敏感,而且通常没有 lint 规则能抓到(它在语法上完全合法,只是运行时算出错误路径)。同一逻辑应推广到 P2.5(agents 归一)+ 任何未来的物理下沉操作。
+
+### 11.4 `_run_optimize` 未拆分(有意为之的范围收窄)
+
+`_run_optimize`(984 行)引用了 ~20 个仅存在于 `__init__.py` 本体的名字(`_preflight`、`_validate_and_resolve_claude_model`、`_smoke_test_codex_model`、`_resolve_critic_choice`、`_build_orchestration_prompt`、`DEFAULT_CRITIC_BACKEND` 等),且其中 `_validate_and_resolve_claude_model`/`_smoke_test_codex_model` 内部调用的 `_probe_llm_catalog` 本身就是危险符号之一。把 `_run_optimize` 真正拆出去需要:(a) 对 `DEFAULT_CRITIC_BACKEND`/`DEFAULT_ROBUSTNESS_BACKEND` 做 §11.1 发现的"不能搬"处理(拆分后 `_resolve_critic_choice`/`_resolve_robustness_choice` 若跟着 `_run_optimize` 一起搬到新文件,`importlib.reload(cli)` 语义会碎裂,除非把这两个常量单独留在 `__init__.py` 并让新文件里的解析函数改成 §11.3 同款惰性查找);(b) 对 `_probe_llm_catalog` 做和 `_load_dotenv_fallback` 一样的惰性化改造;(c) 对另外 ~15 个纯 helper 逐个判断跨文件调用点。这与 coordinator.py 3b-1/3b-2 的"跨协作者调用点改写是主要 churn"完全同构,量级也相当(coordinator.py 单个协作者批次约改 9-90 处调用点)。**本次选择不做**:一是范围已经超出用户本次要求的"系统性扫描 + 尽力拆分",二是 `_run_optimize` 本身**不被任何测试直接调用或 monkeypatch**(全仓库搜索确认),所以拆或不拆对测试面无风险差异,唯一的收益是文件行数,不值得在没有配套设计的情况下临时决定切分边界。留给下一个专门批次,且应该先补一份 `_run_optimize` 内部调用图(`callgraph.py --methods` 目前只支持类方法,需要扩展成支持模块级函数体内的裸名调用分析)。
+
+**验收**:`cli/__init__.py` 4748→2292 行,新增 `cli/parser.py`(1571 行)、`cli/preflight.py`(1046 行);`ruff check` 对三个文件全绿(新增 1 条 E402 per-file-ignore,原因与 `multi_node/cli.py` 同构:re-export 语句排在模块文档字符串+日志初始化之后);`mypy` 对 `cli/` 的报错数从改动前的 7 条(`__init__.py`)+ 0(新文件尚不存在)→ 现在 9 条,逐条比对与改动前**完全同构**(同错误信息,行号因代码物理搬家而漂移,`preflight.py:906` 与旧 `__init__.py:1806` 是同一行代码);`inference_optimizer/tests/` 全量 6752 passed, 2 skipped(与改动前一致);全仓库非-e2e 门排除本次改动前后均因**并发 kernel-agent→`hyperloom.agents.kernel` 迁移**导致的 3 个 collection error + 71 个 test 失败(逐一核实：均是 `kernel-agent/tools/*` 路径引用,与 `cli/` 拆分无关,`git stash` 前后行为完全一致)后,8453 passed / 71 failed(pre-existing)。
+
+### 11.5 事后教训:批处理任务的产物必须逐文件验证是否被并发操作误还原
+
+本节的 3 项工作(§11.1–§11.4 对应的 `cli/__init__.py` 编辑、`test_inferencex_preflight_clone.py` 编辑、本 §11 本身)在首次完成并汇报后,被发现 `cli/__init__.py`、`test_inferencex_preflight_clone.py`、本 lessons 文件都**回到了编辑前的状态**,而同一批次新建的 `cli/parser.py`/`cli/preflight.py` 两个文件却完好无损。**根因推断**:仓库里有并发 session 在做 P2.5(agents 归一)系列提交,过程中很可能对 `cli/__init__.py` 做了一次"以旧版本为基准的 `git checkout`/覆盖式改动"(该文件同时是 P2.5 critic-agent 改名提交touch 到的文件),而**新建的、未被任何其他提交触碰过的文件**天然不受影响。**教训**:①在多 agent 并发改同一仓库的场景下,"文件已保存到磁盘"不等于"改动会保持",批处理任务完成后如果间隔较长时间才 commit,应在 commit 前**重新 diff 一遍**每个被改动文件相对于"改动前 baseline"的差异,而不是想当然认为磁盘状态=自己最后一次编辑的状态;②**新建文件比编辑已有文件更抗并发覆盖**(除非另一个 session 恰好也在动同名新文件),这是"能拆成新文件就不要在原文件里改"的额外论据(不仅是代码整洁,也是并发安全);③本次修复方式:不需要重新做设计决策,直接重放同一套编辑序列即可(编辑内容本身没有争议,只是被误还原),但每一步都要重新跑 `ruff check` 而不是假设"和上次跑的结果一样"——因为不能排除并发提交同时改了同一批文件的其它部分(如本次 pyproject.toml 的 E402 忽略项被 P2.5 提交继承下来、内容碰巧一致,但不能想当然)。
+
+**根因更正(事后确认)**:实际根因并非另一个并发 session 的 `git checkout`,而是协调多个 P2.5 子任务的父 session 在**跨 commit 验证**(用 `git checkout <old-commit> -- .` 逐一核对某几个文件是否受迁移影响,再切回 HEAD)时,误用了 `git reset --hard HEAD` 来"还原"检查现场——`reset --hard` 会连带丢弃**当时所有已跟踪文件的未 commit 修改**(不只是被检查的那几个文件),而未跟踪的新文件(`cli/parser.py`、`cli/preflight.py`)因为从未被 git 跟踪过而不受 `reset --hard` 影响,这正好解释了"新建文件完好、已跟踪文件的编辑被回滚"这个观察到的不对称现象。**通用教训(比"并发覆盖"结论更根本)**:**任何验证/核对性质的 git 操作,只要涉及切换 commit 或重置工作区,必须先 `git status --short` 确认没有未提交的重要修改,且优先用不破坏工作区的方式做对比**(`git show <ref>:<path>` 读某个历史版本的文件内容到 stdout,或 `git diff <ref> -- <path>`,而不是 `checkout`/`reset` 真的切换整个工作区状态);如果确实需要临时切换,应先 `git stash`(可撤销)而不是依赖"改完再切回来"的手工纪律——`reset --hard` 没有撤销机制,一旦对着有未提交修改的工作区跑,后悔无门。
+
+## 12. P2.5 完整收尾(六个子步骤全部完成,门绿)= agents 归一
+
+P2.5 分六个子步骤执行,每个子步骤对应 tree-reform.MD §5.4–§5.6 描述的一个 sibling agent 的迁移(critic 因命名冲突风险最高而排在最前,§10 也明确要求),第七个子步骤(OOB)因仓库里不存在 `OOB/` 目录而跳过:
+
+1. **critic-agent → `hyperloom.agents.critic`**(commit `04e464ae`):最高风险项,因为顶层模块名是裸 `runtime`,会在 `pythonpath` 上全局遮蔽其它包的同名模块。迁移后 `CriticAgentBackend` 直接 `python -m hyperloom.agents.critic.runtime.cli`,删除了此前因"floating checkout"才需要的 `sys.path.insert` + 陈旧模块驱逐 hack。§5.4 详细记录。
+2. **robustness-agent + framework-agent → `hyperloom.agents.{robustness,framework}`**(commit `048ea470`):两者均已是良好 src-layout(参照模板),近乎平移。framework-agent 的迁移顺带删除了 `orchestrator/framework/client.py` 里"IO-only 测试环境"的 `_FRAMEWORK_TO_REPO_URL` 逐字节 fallback 拷贝(因为 framework-agent 现在总是随 orchestrator 一起装在同一个 distribution 里,不再需要 `except ImportError` 分支)。两者的 `[project.scripts]` 入口点(`robustness-agent`、`framework-agent`/`fa`)合并进根 `pyproject.toml`。
+3. **quantization_agent → `hyperloom.agents.quantization`**(commit `6823e364` + `e8feabf9` + `9989dc36`,分三次提交因为第一次漏提交了配置文件改动):全程零内部 import 改写(该包本来就用相对导入),纯粹是目录物理搬迁 + 两处外部调用点(`quantization_request_handlers.py` 的懒加载 import、测试的 monkeypatch 目标)的路径更新。
+4. **kernel-agent → `hyperloom.agents.kernel`**(commit `841634d2` + `83cd5871`):规模最大的子步骤(67 个源文件 + 40 个测试文件),核心工作是把混在 `tools/` 里的 33 个 `test_*.py` 移到独立 `tests/` 目录,同时逐个修正每个测试文件因为"假设脚本与被测模块同目录"而写的 `Path(__file__).resolve().parent` 路径计算(搬完不再指向 `tools/`,必须显式改成 `.parent.parent / "tools"`);`tools/*.py`(含 `backends/` 的 Ray-worker sys.path hack)本身保持不动,因为它们既要能被当包内模块调用、也要能被当独立 CLI 脚本 `python3 xxx.py` 直接跑。3 个已知 god-file(`tracelens_analysis.py`/`kernel_optimization.py`/`apply_kernel_patch.py`)只做整体搬迁,内部拆分是明确排除在本次范围外的独立任务。这一步之前把 26 个此前"游离"在 `testpaths` 之外的测试文件首次纳入默认收集范围,是本次迁移相对旧状态的一个真实功能性改进(不只是搬家)。
+
+**验收(六个子步骤累计,最终状态)**:`pytest --collect-only` 0 错误、9458 个测试;全量非-e2e 门 `9381 passed, 4 skipped, 47 deselected, 12 subtests passed`(外加 13 个 kernel-agent 预存失败 + 15 个预存 error,均通过 `git stash` A/B 对比确认是迁移前就存在的环境相关问题——例如 `ray` 模块未安装、`TraceLens-internal` 检出缺失——与本次搬迁无关,不阻塞 P2.5 完成)。相比 P2.5 开始前的基线(`8497 passed, 3 skipped, 47 deselected`),净增约 900 个测试收集,主要来自:critic/robustness/framework 三个包的 `tests/` 目录首次被 `testpaths` 收录(此前它们在各自独立的 `pytest.ini`/`pyproject.toml` 下跑,根目录跑全量测试不会碰到)、以及 kernel-agent 前述 26 个此前游离的测试文件首次被收集。
+
+**给 P2.6(ci/ 拆库改名)及以后步骤的前瞻**:P2.5 六个子步骤共同验证了"critic-agent 打了个样、后四个子步骤依样画瓢"的可复制性——每一步都是"git mv 物理搬迁 → grep 全仓库找 import/字符串/monkeypatch 引用点 → 改 pyproject.toml 的 testpaths/coverage/package-data/entry_points → 改 CI workflow → `--collect-only` 快速迭代 → 全量非-e2e 门 → 分批 commit"的同一套流程,唯一因包而异的是"该包原来的打包约定有多不规范"(critic 最不规范→最高风险,kernel-agent 因为 sys.path hack + 测试混放次之,quantization 因为纯相对导入几乎零风险)。P2.6 的 `ci/` 拆库(§5.7)会引入一个新维度——它不是简单的"整体搬迁",而是要把库代码和真 CI 脚本拆开、还要处理与顶层 `orchestrator` 的同名冲突(`ci/orchestrator.py` 必须改名),预期比 P2.5 的任何一步都更接近 P2.2/P2.3 的"内容级拆分"复杂度而非纯"目录搬迁"复杂度。
