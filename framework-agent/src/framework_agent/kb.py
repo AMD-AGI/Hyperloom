@@ -13,6 +13,7 @@ priority order is ``empirical_kb.md`` -> ``shared_pitfalls.md`` -> rest.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,8 +118,9 @@ class KBFile:
 def _resolve_kb_root() -> Path:
     """Resolve the active KB root each call (so tests can monkeypatch env).
 
-    Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) ``${FRAMEWORK_AGENT_ROOT}/kb``;
-    (3) ``${repo}/framework-agent/kb`` derived from this file's location.
+    Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) IO's
+    ``INFERENCE_OPTIMIZER_FA_KB_PATH`` compatibility override;
+    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``${repo}/framework-agent/kb``.
 
     Returns:
         The resolved KB root path.
@@ -126,6 +128,9 @@ def _resolve_kb_root() -> Path:
     explicit = os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip()
     if explicit:
         return Path(explicit).expanduser()
+    io_override = os.environ.get("INFERENCE_OPTIMIZER_FA_KB_PATH", "").strip()
+    if io_override:
+        return Path(io_override).expanduser()
     root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
     if root:
         return Path(root).expanduser() / "kb"
@@ -534,6 +539,239 @@ def search_kb(query: str, *, domains: list[str] | None = None) -> list[KBFile]:
     return hits
 
 
+def _normalise_keywords(keywords: Iterable[str] | None) -> set[str]:
+    """Normalize a keyword iterable for ledger association.
+
+    Args:
+        keywords: Candidate keyword strings; missing values are ignored.
+
+    Returns:
+        A lowercase set with blank keywords removed.
+    """
+    return {str(k).strip().lower() for k in (keywords or []) if str(k).strip()}
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    """Coerce a ledger numeric value while tolerating malformed rows."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
+    """Read the framework PR outcome ledger from ``lessons.jsonl``.
+
+    The reader is intentionally tolerant: missing files and malformed JSONL
+    rows return/skip rather than raising, preserving cold-start behavior.
+
+    Args:
+        kb_root: Optional KB root override. Defaults to :func:`_resolve_kb_root`.
+
+    Returns:
+        Parsed JSON objects from
+        ``<kb_root>/framework_optimization/lessons.jsonl``.
+    """
+    root = kb_root or _resolve_kb_root()
+    path = root / _FRAMEWORK_OPTIMIZATION_ROOT / "lessons.jsonl"
+    if not path.is_file():
+        return []
+    out: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def associate_prs_to_gap(
+    *,
+    gap_canonical_id: str = "",
+    gap_keywords: Iterable[str] | None = None,
+    ledger: list[dict] | None = None,
+    min_jaccard: float = 0.0,
+) -> list[dict]:
+    """Rank historical PR records associated with a gap.
+
+    Uses a two-channel association:
+    exact ``gap_canonical_id`` match first, plus keyword Jaccard as a fuzzy
+    fallback so historically useful PRs for nearby gaps can still surface.
+
+    Args:
+        gap_canonical_id: Canonical id for exact history matches.
+        gap_keywords: Current gap keywords used for fuzzy association.
+        ledger: Optional pre-read ledger; ``None`` reads the active ledger.
+        min_jaccard: Minimum fuzzy score for non-exact matches.
+
+    Returns:
+        Copies of matching records sorted by association score, with
+        ``_association_score`` and ``_association_reason`` annotations.
+    """
+    records = ledger if ledger is not None else read_pr_ledger()
+    current_gap = str(gap_canonical_id or "").strip()
+    current_keywords = _normalise_keywords(gap_keywords)
+    matches: list[dict] = []
+    for rec in records:
+        rec_gap = str(rec.get("gap_canonical_id") or "").strip()
+        rec_keywords = _normalise_keywords(rec.get("gap_keywords") or [])
+        exact = bool(current_gap and rec_gap and current_gap == rec_gap)
+        if current_keywords or rec_keywords:
+            union = current_keywords | rec_keywords
+            jaccard = (len(current_keywords & rec_keywords) / len(union)) if union else 0.0
+        else:
+            jaccard = 0.0
+        if not exact and jaccard < min_jaccard:
+            continue
+        if not exact and jaccard <= 0.0:
+            continue
+        score = (1.0 if exact else 0.0) + jaccard
+        item = dict(rec)
+        item["_association_score"] = round(score, 4)
+        item["_association_reason"] = "exact_gap" if exact else "keyword_jaccard"
+        matches.append(item)
+    matches.sort(key=lambda r: float(r.get("_association_score") or 0.0), reverse=True)
+    return matches
+
+
+def leaderboard_for_gap(
+    *,
+    framework: str = "",
+    gap_canonical_id: str = "",
+    gap_keywords: Iterable[str] | None = None,
+    model_class: str = "",
+    gpu_type: str = "",
+    precision: str = "",
+    ledger: list[dict] | None = None,
+    limit: int = 20,
+    min_jaccard: float = 0.0,
+) -> list[dict]:
+    """Build an aggregated PR quality leaderboard for one gap/workload.
+
+    Args:
+        framework: Optional framework filter.
+        gap_canonical_id: Canonical gap id for exact association.
+        gap_keywords: Keywords for fuzzy association.
+        model_class: Optional workload model class for parameter affinity.
+        gpu_type: Optional GPU type for parameter affinity.
+        precision: Optional precision for parameter affinity.
+        ledger: Optional preloaded ledger records.
+        limit: Maximum rows to return; ``<=0`` returns all rows.
+        min_jaccard: Minimum fuzzy score for non-exact associations.
+
+    Returns:
+        Aggregated leaderboard rows sorted by ``quality_score`` descending.
+    """
+    fw = str(framework or "").strip().lower()
+    records = associate_prs_to_gap(
+        gap_canonical_id=gap_canonical_id,
+        gap_keywords=gap_keywords,
+        ledger=ledger,
+        min_jaccard=min_jaccard,
+    )
+    groups: dict[str, dict] = {}
+    for rec in records:
+        rec_fw = str(rec.get("framework") or "").strip().lower()
+        if fw and rec_fw and fw != rec_fw:
+            continue
+        key = str(rec.get("pr_url") or rec.get("pr_sha") or rec.get("patch_path") or "").strip()
+        if not key:
+            continue
+        row = groups.setdefault(
+            key,
+            {
+                "pr_url": str(rec.get("pr_url") or ""),
+                "pr_sha": str(rec.get("pr_sha") or ""),
+                "framework": rec_fw,
+                "attempts": 0,
+                "integrated_count": 0,
+                "already_present_count": 0,
+                "reverted_count": 0,
+                "rejected_count": 0,
+                "_assoc_sum": 0.0,
+                "_gain_sum": 0.0,
+                "_param_hits": 0,
+                "best_tps_delta_pct": 0.0,
+                "last_outcome": "",
+                "last_ts": 0.0,
+                "gap_keywords": set(),
+                "changed_files": set(),
+            },
+        )
+        row["attempts"] += 1
+        outcome = str(rec.get("outcome") or "")
+        if outcome == "integrated":
+            row["integrated_count"] += 1
+        elif outcome == "already_present":
+            row["already_present_count"] += 1
+        elif outcome == "reverted_smoke_fail":
+            row["reverted_count"] += 1
+        elif outcome == "rejected_apply_fail":
+            row["rejected_count"] += 1
+        assoc = _safe_float(rec.get("_association_score"))
+        gain = _safe_float(rec.get("tps_delta_pct"))
+        row["_assoc_sum"] += assoc
+        row["_gain_sum"] += gain
+        row["best_tps_delta_pct"] = max(_safe_float(row["best_tps_delta_pct"]), gain)
+        row["gap_keywords"].update(_normalise_keywords(rec.get("gap_keywords") or []))
+        row["changed_files"].update(str(f).strip() for f in (rec.get("changed_files") or []) if str(f).strip())
+        ts = _safe_float(rec.get("ts"))
+        if ts >= _safe_float(row["last_ts"]):
+            row["last_ts"] = ts
+            row["last_outcome"] = outcome
+        param_hits = 0
+        param_total = 0
+        for field, wanted in (("model_class", model_class), ("gpu_type", gpu_type), ("precision", precision)):
+            wanted = str(wanted or "").strip().lower()
+            if not wanted:
+                continue
+            param_total += 1
+            if str(rec.get(field) or "").strip().lower() == wanted:
+                param_hits += 1
+        if param_total and param_hits == param_total:
+            row["_param_hits"] += 1
+
+    out: list[dict] = []
+    for row in groups.values():
+        attempts = max(1, int(row["attempts"]))
+        success = int(row["integrated_count"]) + int(row["already_present_count"])
+        apply_rate = success / attempts
+        avg_gain = float(row["_gain_sum"]) / attempts
+        avg_assoc = float(row["_assoc_sum"]) / attempts
+        gain_score = max(0.0, min(1.0, avg_gain / 20.0))
+        param_score = float(row["_param_hits"]) / attempts
+        quality = min(1.0, avg_assoc) * (0.45 * apply_rate + 0.35 * gain_score + 0.20 * param_score)
+        out.append(
+            {
+                "pr_url": row["pr_url"],
+                "pr_sha": row["pr_sha"],
+                "framework": row["framework"],
+                "attempts": attempts,
+                "integrated_count": row["integrated_count"],
+                "already_present_count": row["already_present_count"],
+                "reverted_count": row["reverted_count"],
+                "rejected_count": row["rejected_count"],
+                "apply_rate": round(apply_rate, 4),
+                "avg_tps_delta_pct": round(avg_gain, 4),
+                "best_tps_delta_pct": round(float(row["best_tps_delta_pct"]), 4),
+                "association_score": round(avg_assoc, 4),
+                "param_affinity": round(param_score, 4),
+                "quality_score": round(max(0.0, min(1.0, quality)), 4),
+                "last_outcome": row["last_outcome"],
+                "last_ts": row["last_ts"],
+                "gap_keywords": sorted(row["gap_keywords"]),
+                "changed_files": sorted(row["changed_files"]),
+            }
+        )
+    out.sort(key=lambda r: (_safe_float(r.get("quality_score")), _safe_float(r.get("last_ts"))), reverse=True)
+    return out if limit <= 0 else out[:limit]
+
+
 __all__ = [
     "KBFile",
     "DOMAIN_KEYWORDS",
@@ -546,4 +784,7 @@ __all__ = [
     "path_for_framework",
     "synthesize_findings",
     "search_kb",
+    "read_pr_ledger",
+    "associate_prs_to_gap",
+    "leaderboard_for_gap",
 ]

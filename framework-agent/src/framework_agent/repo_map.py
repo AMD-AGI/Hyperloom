@@ -16,6 +16,8 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "vllm": "https://github.com/ROCm/vllm.git",
     "atom": "https://github.com/ROCm/ATOM.git",
     "xdit": "https://github.com/xdit-project/xDiT.git",
+    # EAGLE cross-framework mappings are seeded in KB; repo registration waits
+    # until the source checkout/repo URL is confirmed.
 }
 
 
