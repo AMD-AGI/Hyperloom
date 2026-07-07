@@ -817,3 +817,13 @@ def test_context_lines_swallows_bottleneck_exception():
     text = "\n".join(lines)
     assert "CURRENT BOTTLENECK: unknown" in text
     assert "comm" in text
+
+
+def test_context_lines_uses_unknown_key_when_framework_blank():
+    s = _fake_self(
+        discovered_flags={"unknown": {"backend_flags": ["--foo"], "param_flags": []}}
+    )
+    lines = s._framework_config_generation_context_lines(
+        framework="", direction="", direction_pct=0.0
+    )
+    assert any("--foo" in ln for ln in lines)

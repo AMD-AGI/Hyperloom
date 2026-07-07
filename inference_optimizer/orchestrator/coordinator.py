@@ -13123,7 +13123,12 @@ class Coordinator:
                 "Prioritise variants that directly relieve THIS bottleneck.",
             ]
         discovered = getattr(state, "discovered_flags", None)
-        entry = discovered.get(framework) if isinstance(discovered, dict) else None
+        # Match record_discovered_flags key normalization (blank -> "unknown").
+        entry = (
+            discovered.get(framework or "unknown")
+            if isinstance(discovered, dict)
+            else None
+        )
         if isinstance(entry, dict):
             flag_names = [
                 str(f)
