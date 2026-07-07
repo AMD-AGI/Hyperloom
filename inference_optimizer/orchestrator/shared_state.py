@@ -1120,6 +1120,13 @@ class SharedState:
             session_dir (Path): The session root directory; created if it
                 does not already exist.
         """
+        # Source-of-truth backfill: scriptable/diffusion (xDiT) promotion paths
+        # store ``tput`` (img/s) but often leave ``e2el_mean_ms`` empty (the
+        # rebench/raw-result path drops it). Since the per-image e2e latency is
+        # exactly ``1000 / img_per_s`` for these single-stream workloads, derive
+        # it here so state.json current_best, the recorder ``final`` singleton,
+        # and the recipe KB all carry the primary latency metric. Best-effort.
+        self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
@@ -1172,6 +1179,34 @@ class SharedState:
             _lf_record_status(session_dir, self._langfuse_status_summary())
         except Exception:  # noqa: BLE001 — status mirror must never block save
             log.debug("langfuse status mirror failed", exc_info=True)
+
+    def _backfill_scriptable_latency(self) -> None:
+        """Derive ``current_best.e2el_mean_ms`` from ``tput`` for scriptable runs.
+
+        No-op for serving frameworks, when there is no current best, or when a
+        measured ``e2el_mean_ms`` is already present. For scriptable xDiT the
+        per-image e2e latency equals ``1000 / img_per_s`` (single-stream), so the
+        stored ``tput`` fully determines it. Never raises.
+        """
+        try:
+            from .. import framework_registry
+
+            fw = str(getattr(self, "framework", "") or "")
+            if not framework_registry.is_scriptable(fw):
+                return
+            cb = self.current_best
+            if not isinstance(cb, dict):
+                return
+            if cb.get("e2el_mean_ms") is not None:
+                return
+            tput = cb.get("tput")
+            if not isinstance(tput, (int, float)) or tput <= 0:
+                return
+            e2el = framework_registry.primary_metric_value(fw, float(tput))
+            if e2el is not None and e2el > 0:
+                cb["e2el_mean_ms"] = round(float(e2el), 4)
+        except Exception:  # noqa: BLE001 — derived backfill, never blocks save
+            pass
 
     def _langfuse_status_summary(self) -> dict[str, Any]:
         """Flatten the state into an OTEL-friendly scalar status snapshot.
