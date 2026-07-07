@@ -4606,7 +4606,7 @@ def generate_minimal_analysis_md(
 
     top_cat = ""
     if candidates:
-        top_cat = candidates[0].get("tracelens_category") or candidates[0].get("kernel_category") or ""
+        top_cat = candidates[0].get("kernel_category") or candidates[0].get("tracelens_category") or ""
 
     exec_summary = {
         "total_gpu_time_ms": total_ms,
@@ -4630,7 +4630,7 @@ def generate_minimal_analysis_md(
             "efficiency_percent": c.get("efficiency_percent"),
             "arithmetic_intensity": c.get("arithmetic_intensity") or c.get("flops_per_byte"),
             "bound_type": c.get("bound_type"),
-            "category": c.get("tracelens_category") or c.get("kernel_category"),
+            "category": c.get("kernel_category") or c.get("tracelens_category"),
             "source_file": c.get("source_file"),
         }
         for c in candidates
@@ -4640,7 +4640,9 @@ def generate_minimal_analysis_md(
     p_items: list[dict[str, Any]] = []
     for rank in sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates}):
         rank_cands = [x for x in candidates if int(x.get("tracelens_pitem_rank", 0)) == rank]
-        cat = rank_cands[0].get("tracelens_category", "") if rank_cands else ""
+        cat = ""
+        if rank_cands:
+            cat = rank_cands[0].get("kernel_category") or rank_cands[0].get("tracelens_category") or ""
         rows = [
             {
                 "name": rc.get("name"),

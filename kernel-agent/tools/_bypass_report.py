@@ -31,6 +31,7 @@ from _bypass_classify import classify_kernel
 from _bypass_fusion import analyze_fusion
 from _analysis_md import render_report as _render_canonical_report
 from _bypass_roofline import compute_roofline
+from _kernel_category import canonical_category as _canonical_category
 from _bypass_source_resolver import editable_trace_source, resolve_source
 from _idle_gate import resolve_idle_pct_threshold as _resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
@@ -855,7 +856,7 @@ def _render_bypass_extra_sections(
         L.append("| Rank | Category | GPU % | Time (ms) | Kernels |")
         L.append("|------|----------|-------|-----------|---------|")
         for i, r in enumerate(rollup, start=1):
-            L.append(f"| {i} | {r['category']} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
+            L.append(f"| {i} | {_canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
     else:
         L.append("_No GPU kernels found in trace._")
     L.append("")
@@ -883,7 +884,7 @@ def _render_bypass_extra_sections(
             eff = c.get("efficiency_percent")
             eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
             L.append(
-                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {c.get('kernel_category', '')} "
+                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {_canonical_category(c.get('kernel_category', ''))} "
                 f"| {float(c.get('gpu_pct') or 0.0):.2f}% | {c.get('bound_type', '')} | {ai_str} | {eff_str} "
                 f"| {float(c.get('optimization_priority') or 0.0):.2f} | {c.get('suggestion', '')} |"
             )
@@ -904,10 +905,11 @@ def _render_bypass_extra_sections(
         )
         L.append("")
         for i, c in enumerate(routable, start=1):
-            L.append(f"### P{i}: {c['name']} ({c['kernel_category']})")
+            _cat = _canonical_category(c["kernel_category"])
+            L.append(f"### P{i}: {c['name']} ({_cat})")
             L.append("")
             L.append(
-                f"**Insight**: {c['kernel_category']} kernel consuming "
+                f"**Insight**: {_cat} kernel consuming "
                 f"{c['gpu_pct']:.2f}% of GPU time across {c['call_count']} launches."
             )
             L.append("")
@@ -971,7 +973,7 @@ def _render_bypass_extra_sections(
     L.append("## Detailed Analysis")
     L.append("")
     for c in hot:
-        L.append(f"### {c['kernel_id']}: {c['name']} ({c['kernel_category']})")
+        L.append(f"### {c['kernel_id']}: {c['name']} ({_canonical_category(c['kernel_category'])})")
         L.append("")
         L.append(
             f"**Identification:** {c['gpu_pct']:.2f}% GPU time, {c['call_count']} launches, "

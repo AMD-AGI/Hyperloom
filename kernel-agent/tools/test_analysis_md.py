@@ -151,3 +151,19 @@ def test_both_routes_share_canonical_spine(tmp_path):
     # bypass carries its richer extras under the divider; deterministic does not
     assert "Additional route-specific detail below" in bypass_md
     assert "Additional route-specific detail below" not in det_md
+
+
+def test_category_vocabulary_canonical_and_consistent(tmp_path):
+    # Category display uses ONE canonical vocabulary on both routes: no raw
+    # lowercase leaks (e.g. "gemm"), and the shared spine before the bypass
+    # divider carries canonical TitleCase labels.
+    det_md = _deterministic_md(tmp_path)
+    # deterministic fed raw tracelens_category "gemm" -> must render canonical
+    assert "| GEMM |" in det_md
+    assert "| gemm |" not in det_md
+    assert "### P0: GEMM kernels" in det_md
+    # bypass Top Hot Kernels categories are canonical TitleCase too (fixture is
+    # SDPA + GEMM); "Others" would have collapsed to "Other" had it appeared.
+    bypass_spine = _bypass_md().split("Additional route-specific detail below")[0]
+    assert "| Others |" not in bypass_spine
+    assert "| GEMM |" in bypass_spine and "| SDPA |" in bypass_spine

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from _kernel_category import canonical_category
+
 #: Placeholder for a cell a route does not model (keeps every table shape aligned).
 DASH = "\u2014"
 
@@ -127,7 +129,9 @@ def render_report(
     lines.append(f"| GPU Busy % | {_pct(exec_summary.get('gpu_busy_pct'))} |")
     lines.append(f"| GPU Idle % | {_pct(exec_summary.get('gpu_idle_pct'))} |")
     lines.append(f"| GPU MemCpy | {_num(memcpy_ms, nd=3)} ms |")
-    lines.append(f"| Top Bottleneck Category | {_text(exec_summary.get('top_bottleneck_category'))} |")
+    lines.append(
+        f"| Top Bottleneck Category | {_text(canonical_category(exec_summary.get('top_bottleneck_category')))} |"
+    )
     lines.append(f"| Op-attribution Coverage | {_pct(exec_summary.get('attribution_pct'))} |")
     lines.append("")
 
@@ -160,7 +164,7 @@ def render_report(
             lines.append(
                 f"| {i} | {_text(k.get('name'))} | {_num(k.get('time_us'))} | {_pct(k.get('gpu_pct'))} "
                 f"| {_pct(k.get('efficiency_percent'))} | {_num(k.get('arithmetic_intensity'), nd=3)} "
-                f"| {_text(k.get('bound_type'))} | {_text(k.get('category'))} | {_text(k.get('source_file'))} |"
+                f"| {_text(k.get('bound_type'))} | {_text(canonical_category(k.get('category')))} | {_text(k.get('source_file'))} |"
             )
     else:
         lines.append("_No GPU kernels found in trace._")
@@ -169,7 +173,7 @@ def render_report(
     # Per-P-item Data tables (shared schema + reasoning-candidate marker).
     for item in p_items:
         rank = item.get("rank", 0)
-        lines.append(f"### P{rank}: {_text(item.get('category'))} kernels")
+        lines.append(f"### P{rank}: {_text(canonical_category(item.get('category')))} kernels")
         lines.append("")
         lines.append(f"<!-- reasoning-candidate tier=compute rank={rank} -->")
         lines.append("")
