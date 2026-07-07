@@ -32,7 +32,7 @@ from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
-from .protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
+from ..protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator

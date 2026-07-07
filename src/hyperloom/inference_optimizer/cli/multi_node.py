@@ -18,27 +18,27 @@ import sys
 import time
 from pathlib import Path
 
-from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+from .executors import (  # noqa: F401 - re-exported for callers/tests
     _NOOP_KINDS_KERNEL_ONLY,
     _REAL_EXECUTORS_FULL,
     _build_specialist_executor,
     _noop_prep,
     _register_executors,
 )
-from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+from .kb import (  # noqa: F401 - re-exported for callers/tests
     _bootstrap_cortex_kb,
     _bootstrap_knowledge_plane,
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+from .backends import (  # noqa: F401 - re-exported for callers/tests
     _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
+from .model_gate import (  # noqa: F401 - re-exported for callers/tests
     _AMD_GPU_TYPES,
     _AMD_UNSUPPORTED_ARCHITECTURES,
     _AMD_UNSUPPORTED_MODEL_TYPES,
@@ -96,11 +96,11 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
     _resolve_gpu_type,
     _resolve_max_model_len,
 )
-from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
     summarize_model_config,
 )
-from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
+from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
     _parse_conc_sweep_concs,
     _print_final_summary,
@@ -114,7 +114,7 @@ from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _snapshot_system_prompts,
     resolve_model_display_name,
 )
-from .session.paths import (
+from ..session.paths import (
     mn_profile_trace_root,
     session_dir as _session_dir_resolve,
 )
@@ -228,7 +228,7 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
         SystemExit: With code 2 when a required Dynamo image is not resolvable.
     """
     nodes = max(1, int(args.nodes))
-    from .multi_node.cli import cmd_create_dynamo, _load_state
+    from ..multi_node.cli import cmd_create_dynamo, _load_state
 
     state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
     image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
@@ -315,7 +315,7 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
     # later as a clear pod-side "geak CLI not found" rather than aborting
     # provisioning. Dynamo-only (the helper no-ops for other backends).
     if not getattr(args, "no_kernel", False):
-        from .multi_node.cli import install_kernel_tools_on_pods_best_effort
+        from ..multi_node.cli import install_kernel_tools_on_pods_best_effort
 
         install_kernel_tools_on_pods_best_effort()
 
@@ -345,7 +345,7 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         _provision_multi_node_dynamo_stack(args)
         return
 
-    from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
+    from ..multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
     state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))

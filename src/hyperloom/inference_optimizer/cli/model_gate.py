@@ -21,7 +21,7 @@ import struct
 import sys
 from pathlib import Path
 
-from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _config_architectures,
     _load_model_config_dict,
@@ -1337,7 +1337,7 @@ def _detect_incompatible_model_config(
     # RoPE / AMD-quant checks below still apply).
     skip_diffusers_check = False
     try:
-        from . import framework_registry as _fr
+        from .. import framework_registry as _fr
 
         skip_diffusers_check = _fr.is_scriptable(framework)
     except Exception:  # noqa: BLE001 — registry import must never block the gate
@@ -1532,7 +1532,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
             pushed to Langfuse.
     """
     try:
-        from .breakdown import patch_breakdown_langfuse
+        from ..breakdown import patch_breakdown_langfuse
         from hyperloom.orchestrator.trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
@@ -1592,7 +1592,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             _build_summary_dict,
             _format_md,
         )
-        from .session.session_paths import reports_dir
+        from ..session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
@@ -1615,7 +1615,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
     # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
     try:
-        from .breakdown import write_breakdown_json
+        from ..breakdown import write_breakdown_json
         write_breakdown_json(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
@@ -1673,7 +1673,7 @@ def _preflight_model_config_compat(
             _build_summary_dict,
             _format_md,
         )
-        from .session.session_paths import reports_dir
+        from ..session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
         state.set_stop_reason("model_config_incompatible")
@@ -1693,7 +1693,7 @@ def _preflight_model_config_compat(
             file=sys.stderr,
         )
     try:
-        from .breakdown import write_breakdown_json
+        from ..breakdown import write_breakdown_json
         write_breakdown_json(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
@@ -1792,7 +1792,7 @@ def _preflight_unsupported_model_arch(
             _build_summary_dict,
             _format_md,
         )
-        from .session.session_paths import reports_dir
+        from ..session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
         # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
@@ -1815,7 +1815,7 @@ def _preflight_unsupported_model_arch(
     # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
     # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
     try:
-        from .breakdown import write_breakdown_json
+        from ..breakdown import write_breakdown_json
         write_breakdown_json(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(

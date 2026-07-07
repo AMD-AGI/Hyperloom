@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.state.shared_state import SharedState
-from .session.paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
-from .session.session_paths import agent_prompt_snapshot
-from .cli_model_gate import _load_model_arch, _load_model_config_tags
-from .model_config_utils import summarize_model_config
+from ..session.paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
+from ..session.session_paths import agent_prompt_snapshot
+from .model_gate import _load_model_arch, _load_model_config_tags
+from ..model_config_utils import summarize_model_config
 
 log = logging.getLogger(__name__)
 
@@ -152,7 +152,7 @@ def _seed_shared_state(
         )
         if not framework:
             return ""
-        from .recipe_snapshot_constants import (
+        from ..recipe_snapshot_constants import (
             DEFAULT_FRAMEWORK_VERSION_SLUG,
             detect_framework_version,
         )
@@ -357,7 +357,7 @@ def _print_final_summary(
     print(f"  stop_reason          : {stop_reason}")
     print(f"  session_id           : {state.session_id}")
     print(f"  model                : {state.model_name}")
-    from . import framework_registry
+    from .. import framework_registry
 
     print(
         f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
@@ -419,7 +419,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
 
     # 2) reports/final.json — patch the single field in place if present.
     try:
-        from .session.session_paths import reports_dir
+        from ..session.session_paths import reports_dir
         final_json = reports_dir(session_dir) / "final.json"
         if final_json.exists():
             data = json.loads(final_json.read_text(encoding="utf-8"))
@@ -489,7 +489,7 @@ def _default_target_summary(args: argparse.Namespace) -> str:
             f"{args.max_hours}h."
         )
     if args.target_tput:
-        from . import framework_registry
+        from .. import framework_registry
 
         target = framework_registry.format_primary_metric(
             getattr(args, "framework", None), args.target_tput
@@ -524,7 +524,7 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
     root cause in the end-of-run summary on ``baseline_failed`` (#465).
     """
     try:
-        from .session.session_paths import reports_dir
+        from ..session.session_paths import reports_dir
         final_json = reports_dir(session_dir) / "final.json"
         data = json.loads(final_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
@@ -555,7 +555,7 @@ def _resolve_reference_recipe(
         return ("", {}, "", "")
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
-    from .reference_script import (
+    from ..reference_script import (
         discover_reference_script,
         parse_reference_script,
     )

@@ -14,27 +14,27 @@ import os
 import sys
 from pathlib import Path
 
-from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+from .executors import (  # noqa: F401 - re-exported for callers/tests
     _NOOP_KINDS_KERNEL_ONLY,
     _REAL_EXECUTORS_FULL,
     _build_specialist_executor,
     _noop_prep,
     _register_executors,
 )
-from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+from .kb import (  # noqa: F401 - re-exported for callers/tests
     _bootstrap_cortex_kb,
     _bootstrap_knowledge_plane,
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+from .backends import (  # noqa: F401 - re-exported for callers/tests
     _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
+from .model_gate import (  # noqa: F401 - re-exported for callers/tests
     _AMD_GPU_TYPES,
     _AMD_UNSUPPORTED_ARCHITECTURES,
     _AMD_UNSUPPORTED_MODEL_TYPES,
@@ -92,11 +92,11 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
     _resolve_gpu_type,
     _resolve_max_model_len,
 )
-from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
     summarize_model_config,
 )
-from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
+from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
     _parse_conc_sweep_concs,
     _print_final_summary,
@@ -216,7 +216,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         )
         return
 
-    from .session.paths import workspace_root
+    from ..session.paths import workspace_root
 
     source_model = str(args.model)
     workspace = workspace_root() / "quantization" / Path(source_model).name

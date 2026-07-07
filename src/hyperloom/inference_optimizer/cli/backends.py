@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import framework_registry
+from .. import framework_registry
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,

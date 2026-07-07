@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,9 @@ def test_inferencex_checkout_ok_requires_benchmark_lib(tmp_path):
 def test_preflight_detects_checkout_via_validity_not_isdir():
     """Detection and post-clone guards must use the validity helper, not a
     bare ``is_dir()`` that would accept a half-cloned stub."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    # tree-reform.MD P2.4 follow-up: _preflight (and its InferenceX detection
+    # loop) now lives in cli/preflight.py, not cli/__init__.py.
+    src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     assert "_inferencex_checkout_ok(candidate)" in src
     assert "_inferencex_checkout_ok(inferencex_path)" in src
 
@@ -148,7 +151,7 @@ def test_preflight_detects_checkout_via_validity_not_isdir():
 # ---------------------------------------------------------------------------
 def test_detection_candidates_exclude_wekafs_host_mounts():
     """The removed read-only fallbacks must not reappear in the source."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     # The preflight detection loop must not hard-code these read-only mounts.
     assert 'Path("/wekafs/hyperloom/InferenceX")' not in src
     assert 'Path("/opt/hyperloom/InferenceX")' not in src
@@ -162,7 +165,7 @@ def test_validated_inferencex_path_overwrites_env_not_setdefault():
     """A stale/broken INFERENCEX_PATH that triggers the clone must be
     overwritten with the validated path. ``setdefault`` would leave the bad
     value in place, so Magpie would still read the broken mount."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     # The final export must be an unconditional assignment, never setdefault.
     assert 'os.environ["INFERENCEX_PATH"] = inferencex_path' in src
     assert 'os.environ.setdefault("INFERENCEX_PATH"' not in src
@@ -170,6 +173,6 @@ def test_validated_inferencex_path_overwrites_env_not_setdefault():
 
 def test_auto_detected_inferencex_candidates_must_be_writable():
     """Auto-detected read-only checkouts are skipped so preflight can clone."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     assert "if os.access(candidate, os.W_OK):" in src
     assert "skipping non-writable auto-detected" in src
