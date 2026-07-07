@@ -171,6 +171,16 @@ class Candidate:
     updated_at: str = ""
     html_url: str = ""
     score: float = 0.0
+    framework: str = ""
+    model_class: str = ""
+    gpu_type: str = ""
+    precision: str = ""
+    gap_canonical_id: str = ""
+    gap_description: str = ""
+    gap_keywords: tuple[str, ...] = ()
+    prior_score: float = 0.0
+    prior_rank: int = 0
+    pr_kb_files_slug: str = ""
 
     @property
     def slug(self) -> str:
@@ -296,7 +306,7 @@ class PrFilter:
         )
 
 
-_VALID_SEARCH_MODES = frozenset({"primus_cortex", "github"})
+_VALID_SEARCH_MODES = frozenset({"gbrain_pr_kb", "primus_cortex", "github"})
 _VALID_PR_STATES = frozenset({"open", "merged", "closed", "all"})
 
 
@@ -402,6 +412,10 @@ class ExploreRequest:
     primus_cortex: PrimusCortexConfig | None = None
     pr_filter: PrFilter = field(default_factory=PrFilter)
     gap_description: str = ""
+    gap_canonical_id: str = ""
+    model_class: str = ""
+    gpu_type: str = ""
+    precision: str = ""
     # Explicit keyword override; non-empty bypasses extract_keywords() and is
     # used verbatim. See ``sources._resolve_keywords``.
     keywords: tuple[str, ...] = ()
@@ -482,6 +496,10 @@ class ExploreRequest:
             primus_cortex=primus_cortex,
             pr_filter=PrFilter.from_dict(raw.get("pr_filter")),
             gap_description=str(raw.get("gap_description") or "").strip(),
+            gap_canonical_id=str(raw.get("gap_canonical_id") or "").strip(),
+            model_class=str(raw.get("model_class") or raw.get("model") or "").strip(),
+            gpu_type=str(raw.get("gpu_type") or "").strip(),
+            precision=str(raw.get("precision") or "").strip(),
             keywords=_parse_keywords(raw.get("keywords")),
             search_modes=_parse_search_modes(raw.get("search_modes")),
             pr_states=_parse_pr_states(raw.get("pr_states")),
