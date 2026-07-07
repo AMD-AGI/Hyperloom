@@ -125,15 +125,18 @@ jobs:
           # ``agent_mcp_server`` and may be recorded as ``OOB/`` or absolute),
           # and never double-counts (unlike ``--include`` glob unions).
           # tree-reform.MD P2.5: critic-agent's ``runtime`` package,
-          # robustness-agent, framework-agent, and quantization_agent were all
-          # promoted into src/hyperloom/agents/{critic,robustness,framework,
-          # quantization} (measured as part of the "src/hyperloom" source tree
+          # robustness-agent, framework-agent, quantization_agent, and
+          # kernel-agent's tools/ were all promoted into
+          # src/hyperloom/agents/{critic,robustness,framework,quantization,
+          # kernel} (measured as part of the "src/hyperloom" source tree
           # below instead of standalone "critic-agent/runtime" /
-          # "robustness_agent" / "framework-agent/src" / "quantization_agent"
-          # entries).
+          # "robustness_agent" / "framework-agent/src" / "quantization_agent" /
+          # "kernel-agent/tools" entries). The "kernel-agent/tools" bucket key
+          # (used only as the Job Summary column header) is kept unchanged;
+          # only its path-segment value moves to the new in-tree location.
           _SOURCE_SEGMENTS = {
               "inference_optimizer": ["/inference_optimizer/"],
-              "kernel-agent/tools": ["/kernel-agent/tools/"],
+              "kernel-agent/tools": ["/hyperloom/agents/kernel/tools/"],
               "OOB": ["/OOB/", "/agent_mcp_server/"],
               "ci": ["/ci/"],
           }

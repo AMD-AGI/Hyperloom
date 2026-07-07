@@ -161,6 +161,19 @@ hyperloom = [
     "SKILL.md",
     "README.md",
 ]
+# tree-reform.MD P2.5: kernel-agent's skill assets + release-contract
+# installer, promoted alongside its package. ``tools/`` and
+# ``skills/unittest/`` are not listed here for .py sources (they're regular
+# package modules picked up by ``find_packages``); ``tools/data/`` is the one
+# non-Python data file the tools read at runtime.
+"hyperloom.agents.kernel" = [
+    "SKILL.md",
+    "scripts/*.sh",
+    "skills/unittest/SKILL.md",
+]
+"hyperloom.agents.kernel.tools" = [
+    "data/*.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -170,13 +183,14 @@ testpaths = [
     "src/hyperloom/agents/critic/runtime/tests",
     "src/hyperloom/agents/framework/tests",
     "src/hyperloom/agents/quantization/tests",
-    "kernel-agent/tools/test_tracelens_arch_benchmark.py",
-    "kernel-agent/tools/test_ray_fd_limit.py",
-    "kernel-agent/tools/test_gemm_tuning.py",
-    "kernel-agent/tools/test_rocprof_roofline.py",
-    "kernel-agent/tools/test_harness_generator.py",
-    "kernel-agent/tools/test_op_to_source_resolver.py",
-    "kernel-agent/tools/test_tracelens_selfheal.py",
+    # tree-reform.MD P2.5: kernel-agent's tools/ tests were previously
+    # "orphaned" outside testpaths (only 7 of 33 same-directory test_*.py
+    # files were explicitly listed; the rest were only collected when
+    # pytest was pointed directly at them). Promoted into
+    # src/hyperloom/agents/kernel/tests/ (all 33 tools/ tests + the 1
+    # backends/ test + the 6 already-standalone kernel-agent/tests/ tests
+    # = 40 files), this single entry now collects all of them.
+    "src/hyperloom/agents/kernel/tests",
     # ci/ inference-optimization pipeline: the genuine unit tests
     # (test_submit_body.py + the new test_ci_*.py suites) were never
     # collected before because ci/ was absent from testpaths. The two
@@ -199,6 +213,12 @@ testpaths = [
 # their standalone ``critic-agent`` / ``robustness-agent/src`` /
 # ``framework-agent/src`` / ``.`` (for bare ``quantization_agent``) pythonpath
 # entries are dropped here (all resolve via the single ``src`` entry now).
+# kernel-agent was also promoted into ``src/hyperloom/agents/kernel`` in the
+# same step, but it was never on ``pythonpath`` to begin with -- its tools/
+# modules import each other via ``sys.path.insert(0, str(Path(__file__)...))``
+# self-location hacks (so they keep working both as package members and as
+# directly-executed CLI scripts), not via a package-relative or pythonpath
+# import, so no pythonpath entry is added or removed for it here.
 pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
@@ -236,13 +256,13 @@ source = [
     # P2.4: inference_optimizer moved under src/hyperloom too (both were
     # previously counted under a standalone "inference_optimizer" entry).
     # tree-reform.MD P2.5: critic-agent's ``runtime`` package, robustness-agent,
-    # framework-agent, and quantization_agent were all promoted into
-    # src/hyperloom/agents/{critic,robustness,framework,quantization} (so
-    # they're now measured as part of the "src/hyperloom" tree instead of
-    # standalone "critic-agent/runtime" / "robustness_agent" /
-    # "framework-agent/src" / "quantization_agent" entries).
+    # framework-agent, quantization_agent, and kernel-agent's tools/ were all
+    # promoted into src/hyperloom/agents/{critic,robustness,framework,
+    # quantization,kernel} (so they're now measured as part of the
+    # "src/hyperloom" tree instead of standalone "critic-agent/runtime" /
+    # "robustness_agent" / "framework-agent/src" / "quantization_agent" /
+    # "kernel-agent/tools" entries).
     "src/hyperloom",
-    "kernel-agent/tools",
     "OOB",
     "ci",
 ]
@@ -264,27 +284,27 @@ omit = [
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Robustness-agent standalone reactor CLI wrapper.
     "src/hyperloom/agents/robustness/main.py",
-    # Stand-alone kernel-agent CLI tools.
-    "kernel-agent/tools/kernel_optimization.py",
-    "kernel-agent/tools/tracelens_analysis.py",
-    "kernel-agent/tools/tracelens_skill_runner.py",
-    "kernel-agent/tools/parallel_e2e_runner.py",
-    "kernel-agent/tools/apply_kernel_patch.py",
-    "kernel-agent/tools/geak_prompt_patcher.py",
+    # Stand-alone kernel-agent CLI tools (tree-reform.MD P2.5: promoted from
+    # the repo-root kernel-agent/tools/ into src/hyperloom/agents/kernel/tools/;
+    # test_*.py were moved out to the sibling tests/ dir and are now covered
+    # by the generic "*/tests/*" omit rule above, so that line is dropped).
+    "src/hyperloom/agents/kernel/tools/kernel_optimization.py",
+    "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
+    "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
+    "src/hyperloom/agents/kernel/tools/parallel_e2e_runner.py",
+    "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
+    "src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py",
     # Serve/bench/apply CLI primitives — subprocess + live-serving plumbing that
     # can't be unit-tested without reimplementing a server; same class as the
     # apply_kernel_patch / parallel_e2e_runner tools above. Their pure helpers
     # (e.g. _diff_unsupported_ops, _spread) ARE covered by test_apply_and_bench.py.
-    "kernel-agent/tools/apply_and_bench.py",
-    "kernel-agent/tools/geak_vs_forge_driver.py",
+    "src/hyperloom/agents/kernel/tools/apply_and_bench.py",
+    "src/hyperloom/agents/kernel/tools/geak_vs_forge_driver.py",
     # Backends within kernel-agent tools (subprocess submit).
-    "kernel-agent/tools/backends/*",
-    # Stand-alone in-tree CLI test scripts (live next to the tool they
-    # exercise; treated as test files for coverage purposes).
-    "kernel-agent/tools/test_*.py",
-    "kernel-agent/tools/_collective_names.py",
+    "src/hyperloom/agents/kernel/tools/backends/*",
+    "src/hyperloom/agents/kernel/tools/_collective_names.py",
     # kernel-agent skill harness validator — standalone operator script.
-    "kernel-agent/skills/unittest/validate_harness.py",
+    "src/hyperloom/agents/kernel/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB agent_mcp_server entrypoints / server-side runtime: CLI, HTTP

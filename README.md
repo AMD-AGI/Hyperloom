@@ -139,13 +139,13 @@ Hyperloom/
 │   └── agents/                           # Sibling skills, promoted into the hyperloom namespace
 │       ├── critic/                       # Critic subprocess runtime (proposal review)
 │       ├── robustness/                   # Robustness subprocess runtime (health/RCA)
-│       └── framework/                    # Framework-agent (PR/ref discovery + enablement)
-├── kernel-agent/                         # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
-│   ├── SKILL.md                          # Kernel-agent operation spec
-│   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
-│   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
-│   ├── scripts/                          # Runtime setup scripts: install.sh, etc.
-│   └── tests/                            # Kernel-agent tool tests
+│       ├── framework/                    # Framework-agent (PR/ref discovery + enablement)
+│       └── kernel/                       # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
+│           ├── SKILL.md                  # Kernel-agent operation spec
+│           ├── tools/                    # TraceLens analysis, kernel optimization, patch apply
+│           │   └── backends/             # GEAK/OOB submission (Ray-scheduled)
+│           ├── scripts/                  # Runtime setup scripts: install.sh, etc.
+│           └── tests/                    # Kernel-agent tool tests
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
 ├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts

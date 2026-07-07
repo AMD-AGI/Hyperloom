@@ -70,7 +70,7 @@ Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow a
 - Ruff:  
   `ruff check .`
 - Type checks (mypy):  
-  `mypy inference_optimizer kernel-agent robustness-agent`
+  `mypy src/hyperloom robustness-agent`
   - Adjust paths if you change package locations.
 - CI runs **Pylint** with **`--errors-only`** (fatal/error severity only, not style) on several first-party packages from [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error` today). Root **`[tool.pylint.main]`** in `pyproject.toml` holds minimal defaults (e.g. `jobs`); tighten or add message disables there as the backlog shrinks.
 

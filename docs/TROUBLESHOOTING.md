@@ -4,7 +4,7 @@ A consolidated symptom → cause → fix index for the failures Hyperloom
 users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md),
-[`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
+[`src/hyperloom/agents/kernel/SKILL.md`](../src/hyperloom/agents/kernel/SKILL.md),
 [`src/hyperloom/agents/critic/SKILL.md`](../src/hyperloom/agents/critic/SKILL.md),
 [`src/hyperloom/agents/robustness/SKILL.md`](../src/hyperloom/agents/robustness/SKILL.md).
 
@@ -27,7 +27,7 @@ gateway. Without it, every `claude` / `codex` CLI request 401s.
 **Fix.** Re-run the supervisor (idempotent — noop if healthy):
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"
 ```
 
 It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is
@@ -40,7 +40,7 @@ open but the probe times out (stuck proxy), it kills the existing
 * Verify nothing else is on port 4002:
   `ss -ltnp | grep :4002`.
 * Override the port if 4002 is occupied:
-  `AUTH_PROXY_PORT=4012 bash "$REPO_ROOT/kernel-agent/scripts/install.sh"`.
+  `AUTH_PROXY_PORT=4012 bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"`.
 
 See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §5 for proxy internals.
 
@@ -119,8 +119,8 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`kernel-agent/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`kernel-agent/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`src/hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
+`src/hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
@@ -174,9 +174,9 @@ installer continued.
 **Fix.**
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
@@ -197,7 +197,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -237,7 +237,7 @@ fast once `/tmp` is reaped.
    ```bash
    # remove any hard-coded old /tmp TRACELENS_ROOT from env/.env first
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
    The installer rewrites `kernel-agent.env.sh` with the `/opt` default and
    clones+pins TraceLens there.
@@ -247,7 +247,7 @@ fast once `/tmp` is reaped.
    ```bash
    export HYPERLOOM_OPEN_SOURCE_ROOT="$USER_DATA_PATH/open-source-repos"
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 3. **Keep an operator checkout** only if you deliberately maintain one — set
    `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no SHA pin,

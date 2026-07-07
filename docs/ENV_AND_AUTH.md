@@ -2,7 +2,7 @@
 
 > **Scope.** This is the single authoritative reference for credentials and
 > environment configuration in Hyperloom. If any other document
-> (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
+> (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`, `src/hyperloom/agents/kernel/SKILL.md`,
 > `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this page,
 > this page wins. Please open an issue against the contradicting file.
 
@@ -26,7 +26,7 @@ Hyperloom needs at most three classes of configuration:
 
 In the **single-gateway** setup, GEAK keys, OOB Claude/Codex keys, and
 Anthropic / OpenAI aliases are **derived** from `SAFE_API_KEY` and
-`OPENAI_BASE_URL` by `kernel-agent/scripts/install.sh` and
+`OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
 `src/hyperloom/inference_optimizer/cli/__init__.py` at preflight. You normally do not set those
 aliases by hand. Split-gateway and GEAK/OOB endpoint overrides are the
 exceptions (§2.3, §3.3).
@@ -44,7 +44,7 @@ Hyperloom reads credentials from two places, in this order:
 
 > **Hard rule.** Shell environment variables **always** win over `.env`.
 > Both `src/hyperloom/inference_optimizer/cli/__init__.py` (`_load_dotenv_fallback`) and
-> `kernel-agent/scripts/install.sh` honour this rule. Do **not**
+> `src/hyperloom/agents/kernel/scripts/install.sh` honour this rule. Do **not**
 > manually `source .env` from chat — it inverts the precedence and can
 > overwrite an exported key with a stale value from disk.
 
@@ -205,7 +205,7 @@ bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 ```
 
-`kernel-agent/scripts/install.sh` (invoked by preflight or manually) then
+`src/hyperloom/agents/kernel/scripts/install.sh` (invoked by preflight or manually) then
 installs runtime deps (Ray, GEAK, OOB CLIs, Magpie, etc.) and writes
 `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Source that too when driving
 kernel-agent tools directly.
@@ -268,7 +268,7 @@ At preflight, `src/hyperloom/inference_optimizer/cli/__init__.py`:
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
 2. Re-run preflight (any `inference_optimizer` CLI command) or
-   `bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only`.
+   `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway, not `127.0.0.1:4002`.
 

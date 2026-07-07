@@ -63,7 +63,7 @@ export OPENAI_API_KEY="YOUR_KEY"
 
 ```{note}
 Hyperloom installs GEAK for you. `src/hyperloom/inference_optimizer/assets/install.sh`
-chains into `kernel-agent/scripts/install.sh`, whose `ensure_geak()` step clones
+chains into `src/hyperloom/agents/kernel/scripts/install.sh`, whose `ensure_geak()` step clones
 GEAK under the pod-local open-source checkout root by default
 (`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`)
 and pip-installs it. Runtime config is written under
@@ -116,19 +116,19 @@ For the full CLI reference and examples, see the
 
 GEAK is wired in as a kernel-rewrite backend of the Kernel-agent:
 
-- `kernel-agent/tools/kernel_optimization.py` selects the backend ladder
+- `src/hyperloom/agents/kernel/tools/kernel_optimization.py` selects the backend ladder
   (defaulting to `forge,geak,claude,codex,cursor` (Forge-GEAK-OOB); `cursor` is
   auto-dropped when `CURSOR_API_KEY` is unset) and builds the GEAK task
   prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
   vocabulary and rendering the `--test-command` and budget.
-- `kernel-agent/tools/backends/geak_submit.py` is the GEAK submission backend.
+- `src/hyperloom/agents/kernel/tools/backends/geak_submit.py` is the GEAK submission backend.
   It locates the `geak` CLI on `PATH`, resolves `$GEAK_CONFIG`, assembles the
   argument vector (`geak -t <prompt> --yolo --output <dir> --gpu-ids <ids>
   --config <cfg> ...`), and dispatches it inside a `num_gpus`-pinned **Ray**
   remote task (`run_via_ray`), remapping visible GPUs to logical ids and
   isolating per-attempt compile caches so a co-running OOB ladder cannot clobber
   artifacts.
-- `kernel-agent/tools/geak_prompt_patcher.py` adapts the task prompt that GEAK
+- `src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py` adapts the task prompt that GEAK
   receives.
 
 This lets Hyperloom optimize hot kernels asynchronously and in parallel on the
@@ -136,7 +136,7 @@ cluster. See [How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORK
 
 ```{note}
 GEAK is distinct from the Kernel-Forge backend
-(`kernel-agent/tools/backends/forge_submit.py`), which is a separate
+(`src/hyperloom/agents/kernel/tools/backends/forge_submit.py`), which is a separate
 self-contained rewrite backend and does not depend on GEAK.
 ```
 
