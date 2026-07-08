@@ -1,0 +1,827 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Structured roofline snapshot extraction for final report / dashboards.
+
+Parses TraceLens ``analysis.md`` Executive Summary tables and
+``category_data/*_metrics.json`` for a compact before/after comparison
+shape consumed by ``report.py`` and downstream frontends.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+from hyperloom.common.jsonio import read_json
+
+log = logging.getLogger(__name__)
+
+_TABLE_ROW_RE = re.compile(
+    r"^\|\s*(?P<label>[^|]+?)\s*\|\s*(?P<value>[^|]+?)\s*\|",
+    re.MULTILINE,
+)
+_PCT_NUM_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)")
+DEFAULT_SATURATION_WITHIN_PCT: float = 95.0
+
+
+def saturation_within_threshold_pct() -> float:
+    """Return the configured roofline saturation threshold percentage."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT", "").strip()
+    if not raw:
+        return DEFAULT_SATURATION_WITHIN_PCT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SATURATION_WITHIN_PCT
+    return val if 0.0 < val <= 100.0 else DEFAULT_SATURATION_WITHIN_PCT
+
+
+def _parse_pct(raw: str | None) -> float | None:
+    """Extract a leading percentage number from a raw table cell.
+
+    Args:
+        raw (str | None): The raw cell text (e.g. ``"28.78%"``), or ``None``.
+
+    Returns:
+        float | None: The parsed number rounded to two decimals, or ``None``
+            when the input is missing or unparseable.
+    """
+    if raw is None:
+        return None
+    m = _PCT_NUM_RE.search(str(raw).replace(",", ""))
+    if not m:
+        return None
+    try:
+        return round(float(m.group(1)), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_executive_table(text: str) -> dict[str, str]:
+    """Parse a markdown Executive Summary table into a label→value map.
+
+    Skips header and separator rows.
+
+    Args:
+        text (str): The markdown text containing the two-column table.
+
+    Returns:
+        dict[str, str]: Mapping of row label to its raw value cell.
+    """
+    rows: dict[str, str] = {}
+    for m in _TABLE_ROW_RE.finditer(text):
+        label = m.group("label").strip()
+        value = m.group("value").strip()
+        if label.lower() in ("metric", "--------"):
+            continue
+        rows[label] = value
+    return rows
+
+
+def _parse_top_bottleneck(raw: str | None) -> str | None:
+    """Strip the trailing ``(pct%)`` annotation from a bottleneck label.
+
+    Args:
+        raw (str | None): Raw cell such as ``"MoE_fused (28.78%)"``.
+
+    Returns:
+        str | None: The bare category name, or ``None`` when empty.
+    """
+    if not raw:
+        return None
+    # ``MoE_fused (28.78%)`` -> ``MoE_fused``
+    name = raw.split("(")[0].strip()
+    return name or None
+
+
+def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
+    """Best-effort workload-level metrics from Executive Summary table.
+
+    Args:
+        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
+
+    Returns:
+        dict[str, Any]: Mapping with ``compute_pct`` / ``idle_pct`` /
+            ``comm_pct`` / ``top_bottleneck`` keys; values are ``None`` when
+            the file is missing or a metric cannot be parsed.
+    """
+    path = Path(analysis_md_path)
+    out: dict[str, Any] = {
+        "compute_pct": None,
+        "idle_pct": None,
+        "comm_pct": None,
+        "top_bottleneck": None,
+    }
+    if not path.is_file():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    rows = _parse_executive_table(text)
+    out["compute_pct"] = _parse_pct(rows.get("Compute %"))
+    out["idle_pct"] = _parse_pct(rows.get("Idle %"))
+    out["comm_pct"] = _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %"))
+    out["top_bottleneck"] = _parse_top_bottleneck(rows.get("Top Bottleneck Category"))
+    return out
+
+
+def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
+    """Return the TraceLens output directory containing an ``analysis.md``.
+
+    Args:
+        analysis_md_path (Path): Path to an ``analysis.md`` file.
+
+    Returns:
+        Path: The parent directory holding the TraceLens artifacts.
+    """
+    return analysis_md_path.parent
+
+
+def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
+    """Return the highest ``percent_of_total`` operation across category metrics.
+
+    Scans the sibling ``category_data/*_metrics.json`` files for the operation
+    with the largest share of total GPU time.
+
+    Args:
+        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
+
+    Returns:
+        dict[str, Any] | None: The top kernel descriptor (``name`` / ``gpu_pct``
+            / ``efficiency_pct`` / ``bound_type`` / ``category``), or ``None``
+            when no category data is available or no named op was found.
+    """
+    md_path = Path(analysis_md_path)
+    cat_dir = _tracelens_dir_for_analysis_md(md_path) / "category_data"
+    if not cat_dir.is_dir():
+        return None
+
+    best: dict[str, Any] | None = None
+    best_pct = -1.0
+
+    for metrics_path in sorted(cat_dir.glob("*_metrics.json")):
+        data = read_json(metrics_path, default=None, require_dict=True)
+        if data is None:
+            continue
+        category = str(data.get("category") or metrics_path.stem.replace("_metrics", ""))
+        for op in data.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            pct_raw = op.get("percent_of_total")
+            try:
+                pct = float(pct_raw)
+            except (TypeError, ValueError):
+                continue
+            if pct <= best_pct:
+                continue
+            eff = op.get("efficiency") if isinstance(op.get("efficiency"), dict) else {}
+            best_pct = pct
+            best = {
+                "name": str(op.get("name") or ""),
+                "gpu_pct": round(pct, 2),
+                "efficiency_pct": _parse_pct(
+                    str(eff.get("efficiency_percent")) if eff.get("efficiency_percent") is not None else None
+                ),
+                "bound_type": str(eff.get("bound_type") or op.get("bound_type") or ""),
+                "category": category,
+            }
+    if best and not best.get("name"):
+        return None
+    return best
+
+
+def within_roofline_pct(*, peak: float, achieved: float) -> float | None:
+    """``round(achieved/peak*100, 2)``, or None when either input is non-positive."""
+    if peak <= 0 or achieved <= 0:
+        return None
+    return round(achieved / peak * 100.0, 2)
+
+
+def _compute_within_and_gap(
+    *,
+    peak: float,
+    achieved: float,
+) -> tuple[float | None, float | None]:
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive.
+
+    Args:
+        peak: The theoretical peak throughput (tok/s).
+        achieved: The achieved throughput (tok/s).
+
+    Returns:
+        A ``(within_roofline_pct, gap_to_roofline_pct)`` tuple, both ``None``
+        when either input is non-positive.
+    """
+    within = within_roofline_pct(peak=peak, achieved=achieved)
+    if within is None:
+        return None, None
+    return within, round(100.0 - within, 2)
+
+
+def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
+    """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*.
+
+    Best-effort and in place: any failure leaves *snapshot* untouched.
+    """
+    try:
+        from .roofline_ceiling import (
+            apply_runtime_dtype,
+            compute_roofline_from_perfmodel,
+            load_model_meta,
+            resolve_compute_peak_provenance,
+            resolve_runtime_dtype,
+            resolve_runtime_workload,
+        )
+
+        runtime = resolve_runtime_workload(state, arm=arm)
+        meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+        if meta is None:
+            return
+        rt = resolve_runtime_dtype(state, meta, arm=arm)
+        meta = apply_runtime_dtype(meta, rt)
+        compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+        pm_bd = compute_roofline_from_perfmodel(
+            meta=meta,
+            gpu_type=runtime.gpu_type,
+            concurrency=runtime.concurrency,
+            isl=runtime.isl,
+            osl=runtime.osl,
+            num_gpus=runtime.tp,
+            precision_tag=compute_precision_tag,
+        )
+        snapshot["roofline_provenance"] = {
+            "formula": "perfmodel" if pm_bd is not None else "legacy",
+            # Compute-peak convention (achievable vs vendor-fallback) + value +
+            # source, so within%/gap is interpretable and single-convention.
+            **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+            "runtime_weight_dtype": rt.weight_dtype_tag,
+            "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+            "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+            "quantization": rt.quantization,
+            "dtype_source": rt.source,
+            "effective_concurrency": runtime.concurrency,
+            "runtime_tp": runtime.tp,
+            "runtime_isl": runtime.isl,
+            "runtime_osl": runtime.osl,
+            "runtime_precision": runtime.precision,
+            "runtime_framework": runtime.framework,
+        }
+        if pm_bd is not None:
+            snapshot["perfmodel_breakdown"] = {
+                "decode_tok_per_s": pm_bd.decode_tok_per_s,
+                "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+                "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+                "bound_kind": pm_bd.bound_kind,
+                "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+                "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+                "ops": [
+                    {
+                        "name": op.name,
+                        "flops": op.flops,
+                        "bytes_moved": op.bytes_moved,
+                        "ai": op.ai,
+                        "time_s": op.time_s,
+                        "bound": op.bound,
+                        "pct_time": op.pct_time,
+                    }
+                    for op in pm_bd.ops
+                ],
+            }
+    except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
+        pass
+
+
+def build_roofline_snapshot(
+    *,
+    snapshot_id: int | None,
+    ts: str,
+    analysis_md_path: str,
+    theoretical_peak_tok_per_sec: float = 0.0,
+    achieved_tok_per_sec: float = 0.0,
+    mem_ceiling_tok_per_sec: float = 0.0,
+    cmp_ceiling_tok_per_sec: float = 0.0,
+    bound_kind: str = "unknown",
+    throughput_unit: str = "tok/s",
+    framework: str = "",
+    e2e_mean_ms: float = 0.0,
+    roofline_ideal_ms: float = 0.0,
+) -> dict[str, Any]:
+    """Materialise one side (baseline or latest) of the comparison.
+
+    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
+
+    Args:
+        snapshot_id: The snapshot identifier, or ``None``.
+        ts: The capture timestamp string.
+        analysis_md_path: Path to the TraceLens ``analysis.md``; when empty the
+            workload/top-kernel fields are left unset.
+        theoretical_peak_tok_per_sec: Primary decode roofline ceiling (tok/s).
+        achieved_tok_per_sec: Snapshot-time ``output_throughput`` (tok/s).
+        mem_ceiling_tok_per_sec: Memory-side roofline ceiling (tok/s).
+        cmp_ceiling_tok_per_sec: Compute-side roofline ceiling (tok/s).
+        bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
+        e2e_mean_ms: Scriptable/diffusion primary metric — measured per-image
+            end-to-end latency (ms). The compute-bound analogue of
+            ``achieved_tok_per_sec`` (which is a memory-bound tok/s throughput);
+            stored as a sibling so the renderer picks the metric by unit.
+        roofline_ideal_ms: Compute-roofline ideal per-image latency ceiling
+            (ms) — the analogue of ``theoretical_peak_tok_per_sec`` for
+            scriptable workloads. When both ``roofline_ideal_ms`` and
+            ``e2e_mean_ms`` are positive and no tok/s ceiling applies,
+            ``within_roofline_pct`` is derived from them (ideal / measured) so
+            the same within/gap fields stay populated across units.
+
+    Returns:
+        A snapshot dict with the ceiling, achieved throughput, derived
+        within/gap percentages, and workload/top-kernel fields parsed from the
+        analysis.md when available.
+    """
+    within, gap = _compute_within_and_gap(
+        peak=theoretical_peak_tok_per_sec,
+        achieved=achieved_tok_per_sec,
+    )
+    # Unit-agnostic fallback: when there is no tok/s ceiling (scriptable
+    # diffusion has a compute-latency roofline, not a decode-throughput one),
+    # derive within/gap from the ms pair. For latency "closer to the ceiling"
+    # means the measured time approaches the ideal floor, so within = ideal /
+    # measured (mirrors serving's achieved / peak: higher = nearer the ceiling).
+    if within is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
+        within = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
+        gap = round(100.0 - within, 2)
+    snap: dict[str, Any] = {
+        "snapshot_id": snapshot_id,
+        "ts": ts or "",
+        # Framework tag so the report layer renders the achieved primary metric
+        # in the right unit (serving: tok/s; scriptable xDiT: per-image latency).
+        "framework": str(framework or ""),
+        # sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
+        "kernel_roofline_path": "",
+        "compute_pct": None,
+        "idle_pct": None,
+        "comm_pct": None,
+        "top_bottleneck": None,
+        "top_kernel": None,
+        # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
+        "theoretical_peak_tok_per_sec": (
+            float(theoretical_peak_tok_per_sec) if theoretical_peak_tok_per_sec > 0 else None
+        ),
+        "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
+        "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
+        "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
+        # Unit the *_tok_per_sec numeric fields are expressed in: "tok/s" for
+        # text-gen, "img/s" for diffusion (xDiT). Field names stay stable for
+        # wire compatibility; consumers should render using this unit.
+        "throughput_unit": (str(throughput_unit) if throughput_unit else "tok/s"),
+        "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
+        # Scriptable/diffusion siblings (compute-latency roofline). None for
+        # serving; the renderer selects tok/s vs ms by framework/unit.
+        "e2e_mean_ms": (float(e2e_mean_ms) if e2e_mean_ms > 0 else None),
+        "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),
+        "within_roofline_pct": within,
+        "gap_to_roofline_pct": gap,
+    }
+    if not analysis_md_path:
+        return snap
+    wl = extract_workload_summary(analysis_md_path)
+    snap["compute_pct"] = wl.get("compute_pct")
+    snap["idle_pct"] = wl.get("idle_pct")
+    snap["comm_pct"] = wl.get("comm_pct")
+    snap["top_bottleneck"] = wl.get("top_bottleneck")
+    top_k = extract_top_kernel(analysis_md_path)
+    if top_k:
+        snap["top_kernel"] = {
+            "name": top_k.get("name"),
+            "gpu_pct": top_k.get("gpu_pct"),
+            "efficiency_pct": top_k.get("efficiency_pct"),
+            "bound_type": top_k.get("bound_type") or None,
+        }
+    return snap
+
+
+def _num_delta(latest: float | None, baseline: float | None) -> float | None:
+    """Return ``latest - baseline`` rounded to two decimals.
+
+    Args:
+        latest (float | None): The latest value.
+        baseline (float | None): The baseline value.
+
+    Returns:
+        float | None: The rounded delta, or ``None`` if either input is
+            ``None``.
+    """
+    if latest is None or baseline is None:
+        return None
+    return round(latest - baseline, 2)
+
+
+def build_roofline_comparison_from_history(
+    snapshots: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point for building the comparison block from snapshot history).
+
+    Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
+    Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
+
+    Args:
+        snapshots: The append-only snapshot history, or ``None``.
+
+    Returns:
+        The ``roofline_comparison`` block (``mode`` / ``baseline`` / ``latest``
+        and, in before_after mode, a ``delta``), or ``None`` when the history
+        is empty.
+    """
+    snapshots = list(snapshots or [])
+    if not snapshots:
+        return None
+    baseline = dict(snapshots[0])
+    latest = dict(snapshots[-1])
+    base_id = baseline.get("snapshot_id")
+    latest_id = latest.get("snapshot_id")
+    same_snapshot = isinstance(base_id, int) and isinstance(latest_id, int) and base_id == latest_id
+    mode = "single_snapshot" if same_snapshot else "before_after"
+    out: dict[str, Any] = {
+        "mode": mode,
+        "baseline": baseline,
+        "latest": latest,
+    }
+    if mode == "before_after":
+        base_eff = (baseline.get("top_kernel") or {}).get("efficiency_pct")
+        lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
+        out["delta"] = {
+            "compute_pct": _num_delta(
+                latest.get("compute_pct"),
+                baseline.get("compute_pct"),
+            ),
+            "idle_pct": _num_delta(
+                latest.get("idle_pct"),
+                baseline.get("idle_pct"),
+            ),
+            "comm_pct": _num_delta(
+                latest.get("comm_pct"),
+                baseline.get("comm_pct"),
+            ),
+            "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
+            "within_roofline_pct": _num_delta(
+                latest.get("within_roofline_pct"),
+                baseline.get("within_roofline_pct"),
+            ),
+            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
+            "gap_to_roofline_pct": _num_delta(
+                latest.get("gap_to_roofline_pct"),
+                baseline.get("gap_to_roofline_pct"),
+            ),
+        }
+    return out
+
+
+def _fmt_delta(val: float | None) -> str:
+    """Format a signed delta cell with one decimal place.
+
+    Args:
+        val (float | None): The delta value, or ``None``.
+
+    Returns:
+        str: A signed string (e.g. ``"+1.2"``), or ``"—"`` when ``None``.
+    """
+    if val is None:
+        return "—"
+    sign = "+" if val > 0 else ""
+    return f"{sign}{val:.1f}"
+
+
+def _fmt_tput(v: float | None, framework: str = "") -> str:
+    """Format the achieved primary-metric cell for the roofline table.
+
+    Serving frameworks render ``tok/s``; scriptable image frameworks (xDiT)
+    store an img/s value whose meaningful surface is per-image latency, so
+    defer to :func:`framework_registry.format_primary_metric` for the correct
+    unit (mirrors the session's primary-metric rendering after #799).
+
+    Args:
+        v (float | None): The stored primary metric (tok/s for serving, img/s
+            for scriptable xDiT).
+        framework (str): Session framework name; selects the display unit.
+
+    Returns:
+        str: The formatted cell, or ``"—"`` when missing/non-positive.
+    """
+    if not isinstance(v, (int, float)) or v <= 0:
+        return "—"
+    from hyperloom.inference_optimizer import framework_registry
+
+    if framework_registry.is_scriptable(framework):
+        return framework_registry.format_primary_metric(framework, float(v))
+    return f"{float(v):.1f} tok/s"
+
+
+def _fmt_pct_cell(v: float | None) -> str:
+    """Format a percentage cell; ``—`` when missing.
+
+    Args:
+        v (float | None): The percentage value.
+
+    Returns:
+        str: The formatted cell, or ``"—"`` when not numeric.
+    """
+    if not isinstance(v, (int, float)):
+        return "—"
+    return f"{float(v):.1f}%"
+
+
+def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
+
+    Args:
+        cmp: The roofline-comparison dict built by
+            :func:`build_roofline_comparison_from_history`.
+
+    Returns:
+        The markdown table lines; ``single_snapshot`` mode renders a single
+        Metric/Value table while ``before_after`` renders Base/Opt/Δ columns.
+    """
+
+    def cell(v: float | None) -> str:
+        """Format a percentage value for a table cell.
+
+        Args:
+            v (float | None): The percentage value.
+
+        Returns:
+            str: The formatted cell, or ``"—"`` when not a float.
+        """
+        return f"{v:.1f}%" if isinstance(v, float) else "—"
+
+    baseline = cmp.get("baseline") or {}
+    latest = cmp.get("latest") or {}
+    delta = cmp.get("delta") or {}
+    mode = cmp.get("mode") or "single_snapshot"
+
+    # Ceiling is session-constant; surface once before the Base/Opt table.
+    peak = baseline.get("theoretical_peak_tok_per_sec")
+    if not isinstance(peak, (int, float)) or peak <= 0:
+        peak = latest.get("theoretical_peak_tok_per_sec")
+    ceiling_lines: list[str] = []
+    if isinstance(peak, (int, float)) and peak > 0:
+        ceiling_lines.append(
+            f"**Theoretical peak (decode memory-roofline ceiling):** "
+            f"{float(peak):.1f} tok/s  "
+            f"_(single-source ceiling; baseline / latest compared against it)_"
+        )
+        ceiling_lines.append("")
+    else:
+        # Scriptable/diffusion has no tok/s decode ceiling; surface the
+        # compute-roofline ideal per-image latency floor instead (same unit as
+        # the achieved e2e latency, so within/gap read as a latency roofline).
+        ideal_ms = baseline.get("roofline_ideal_ms")
+        if not isinstance(ideal_ms, (int, float)) or ideal_ms <= 0:
+            ideal_ms = latest.get("roofline_ideal_ms")
+        if isinstance(ideal_ms, (int, float)) and ideal_ms > 0:
+            ceiling_lines.append(
+                f"**Compute-roofline ideal (per-image latency floor):** "
+                f"{float(ideal_ms):.1f} ms  "
+                f"_(single-source ceiling; baseline / latest compared against it)_"
+            )
+            ceiling_lines.append("")
+
+    lines: list[str] = list(ceiling_lines)
+    if mode == "single_snapshot":
+        snap = baseline
+        lines.extend(
+            [
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| Compute % | {cell(snap.get('compute_pct'))} |",
+                f"| Idle % | {cell(snap.get('idle_pct'))} |",
+                f"| Comm % | {cell(snap.get('comm_pct'))} |",
+                f"| Top bottleneck | {snap.get('top_bottleneck') or '—'} |",
+            ]
+        )
+        tk = snap.get("top_kernel") or {}
+        lines.append(f"| Top kernel efficiency | {cell(tk.get('efficiency_pct'))} |")
+        if tk.get("name"):
+            lines.append(f"| Top kernel | `{tk.get('name')}` |")
+        lines.append(
+            f"| Achieved output_throughput | {_fmt_tput(snap.get('achieved_tok_per_sec'), snap.get('framework') or '')} |"
+        )
+        lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
+        lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
+        lines.append("")
+        return lines
+
+    lines.extend(
+        [
+            "| Metric | Base | Opt | Δ |",
+            "|--------|------|-----|---|",
+            f"| Compute % | {cell(baseline.get('compute_pct'))} | "
+            f"{cell(latest.get('compute_pct'))} | "
+            f"{_fmt_delta(delta.get('compute_pct'))} |",
+            f"| Idle % | {cell(baseline.get('idle_pct'))} | "
+            f"{cell(latest.get('idle_pct'))} | "
+            f"{_fmt_delta(delta.get('idle_pct'))} |",
+            f"| Comm % | {cell(baseline.get('comm_pct'))} | "
+            f"{cell(latest.get('comm_pct'))} | "
+            f"{_fmt_delta(delta.get('comm_pct'))} |",
+            f"| Top bottleneck | {baseline.get('top_bottleneck') or '—'} | {latest.get('top_bottleneck') or '—'} | — |",
+        ]
+    )
+    btk = baseline.get("top_kernel") or {}
+    ltk = latest.get("top_kernel") or {}
+    lines.append(
+        f"| Top kernel efficiency | {cell(btk.get('efficiency_pct'))} | "
+        f"{cell(ltk.get('efficiency_pct'))} | "
+        f"{_fmt_delta(delta.get('top_kernel_efficiency_pct'))} |"
+    )
+    if btk.get("name") or ltk.get("name"):
+        lines.append(f"| Top kernel | `{btk.get('name') or '—'}` | `{ltk.get('name') or '—'}` | — |")
+    lines.append(
+        f"| Achieved output_throughput | "
+        f"{_fmt_tput(baseline.get('achieved_tok_per_sec'), baseline.get('framework') or '')} | "
+        f"{_fmt_tput(latest.get('achieved_tok_per_sec'), latest.get('framework') or '')} | — |"
+    )
+    lines.append(
+        f"| Within roofline % | "
+        f"{_fmt_pct_cell(baseline.get('within_roofline_pct'))} | "
+        f"{_fmt_pct_cell(latest.get('within_roofline_pct'))} | "
+        f"{_fmt_delta(delta.get('within_roofline_pct'))} |"
+    )
+    lines.append(
+        f"| Gap to roofline % | "
+        f"{_fmt_pct_cell(baseline.get('gap_to_roofline_pct'))} | "
+        f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | "
+        f"{_fmt_delta(delta.get('gap_to_roofline_pct'))} |"
+    )
+    lines.append("")
+    return lines
+
+
+#: Dominant roofline direction → (specialist domain, kb tag). Shared by the
+#: profiler digest and the coordinator's bottleneck-redirect advisory so both
+#: name the same dispatch target for a saturated direction.
+BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
+    "comm": ("comm_specialist", "communication"),
+    "host_overhead": ("system_specialist", "systems"),
+    "idle": ("system_specialist", "systems"),
+    "compute": ("kernel_switch_specialist", "kernel_agent"),
+    "memory": ("serving_specialist", "framework"),
+}
+
+
+def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
+    """Return ``(direction, pct)`` for the most-saturated direction in one snapshot.
+
+    Reads compute/idle/comm percentages and folds a ``memory`` bound kind in as
+    a tie-breaker; returns ``("", 0.0)`` when no usable numbers are present.
+
+    Args:
+        snapshot: A single roofline snapshot dict, or ``None``.
+
+    Returns:
+        A ``(direction, pct)`` tuple for the most-saturated direction, or
+        ``("", 0.0)`` when no usable numbers are present.
+    """
+    if not isinstance(snapshot, dict):
+        return "", 0.0
+    candidates: dict[str, float] = {}
+    for direction, key in (
+        ("compute", "compute_pct"),
+        ("idle", "idle_pct"),
+        ("comm", "comm_pct"),
+    ):
+        val = snapshot.get(key)
+        if isinstance(val, (int, float)):
+            candidates[direction] = float(val)
+    bound_kind = str(snapshot.get("roofline_bound_kind") or "").strip().lower()
+    if bound_kind == "memory":
+        candidates["memory"] = max(candidates.get("compute", 0.0), 0.0) + 0.01
+    if not candidates:
+        return "", 0.0
+    best = max(candidates.items(), key=lambda kv: kv[1])
+    return best[0], best[1]
+
+
+def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """Classify whether the latest dominant roofline direction is near ceiling.
+
+    The decision uses the already-computed ``within_roofline_pct`` metric:
+    achieved throughput divided by the relevant roofline ceiling. Missing
+    percentages are treated as not saturated so incomplete TraceLens output never
+    forces convergence.
+    """
+    direction, pct = dominant_direction(snapshot)
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    within = snap.get("within_roofline_pct")
+    gap = snap.get("gap_to_roofline_pct")
+    threshold = saturation_within_threshold_pct()
+    saturated = isinstance(within, (int, float)) and float(within) >= threshold
+    hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
+    return {
+        "direction": direction,
+        "direction_pct": round(float(pct), 2),
+        "within_pct": float(within) if isinstance(within, (int, float)) else None,
+        "gap_pct": float(gap) if isinstance(gap, (int, float)) else None,
+        "saturated": bool(saturated),
+        "threshold_pct": threshold,
+        "bound_kind": snap.get("roofline_bound_kind"),
+        "domain_hint": {"domain": hint[0], "tag": hint[1]} if hint else {},
+    }
+
+
+def build_profiler_digest(
+    snapshots: list[dict[str, Any]] | None,
+    trace_analyze: dict[str, Any] | None,
+    *,
+    top_n: int = 3,
+) -> str:
+    """Render a compact, bottleneck-focused profiler block for prompt injection.
+
+    Surfaces the latest saturation mix, its per-direction delta against the
+    previous snapshot, the hottest kernels, a suggested specialist lever for the
+    dominant direction, and the reusable native kernel ids. Returns ``""`` when
+    no profiler data is available; never raises.
+
+    Args:
+        snapshots: The roofline snapshot history, or ``None``.
+        trace_analyze: The latest ``trace_analyze`` payload (hot kernels +
+            reusable kernel ids), or ``None``.
+        top_n: Maximum number of hot kernels to surface.
+
+    Returns:
+        The rendered profiler block, or ``""`` when no profiler data is
+        available.
+    """
+    try:
+        snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
+        ta = trace_analyze if isinstance(trace_analyze, dict) else {}
+        if not snaps and not ta:
+            return ""
+        latest = snaps[-1] if snaps else {}
+
+        def _pct(v: Any) -> str:
+            """Format a value as a one-decimal percentage, or ``—`` when not numeric.
+
+            Args:
+                v (Any): The candidate percentage value.
+
+            Returns:
+                str: The formatted percentage, or ``"—"`` when not numeric.
+            """
+            return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
+
+        bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
+        lines: list[str] = [
+            f"bound_kind={bound_kind}  "
+            f"compute={_pct(latest.get('compute_pct'))}  "
+            f"idle={_pct(latest.get('idle_pct'))}  "
+            f"comm={_pct(latest.get('comm_pct'))}"
+        ]
+
+        if len(snaps) >= 2:
+            prev = snaps[-2]
+            parts: list[str] = []
+            for label, key in (
+                ("compute", "compute_pct"),
+                ("idle", "idle_pct"),
+                ("comm", "comm_pct"),
+            ):
+                d = _num_delta(latest.get(key), prev.get(key))
+                if d is not None:
+                    parts.append(f"{label} {_fmt_delta(d)}pp")
+            if parts:
+                lines.append("delta_vs_prev: " + "  ".join(parts))
+
+        rows: list[str] = []
+        hot = ta.get("hot_kernels_top15") or []
+        if isinstance(hot, list):
+            for entry in hot[:top_n]:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or entry.get("kernel_id") or "?")
+                seg = f"  {name}  {_pct(entry.get('gpu_pct'))} gpu"
+                eff = entry.get("efficiency_percent")
+                if isinstance(eff, (int, float)):
+                    seg += f"  (eff {float(eff):.1f}%)"
+                rows.append(seg)
+        if not rows and latest.get("top_bottleneck"):
+            rows.append(f"  {latest.get('top_bottleneck')}")
+        if rows:
+            lines.append("top_bottlenecks:")
+            lines.extend(rows)
+
+        direction, _pct_val = dominant_direction(latest)
+        lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
+        if lever:
+            lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
+
+        reusable = ta.get("reusable_native_kernel_ids") or []
+        if isinstance(reusable, list) and reusable:
+            lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
+
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — prompt enrichment must never crash
+        log.debug("build_profiler_digest failed", exc_info=True)
+        return ""

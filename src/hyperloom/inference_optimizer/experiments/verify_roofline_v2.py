@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Roofline-v2 N7: baseline vs exp verification per design §10.5.
+
+Compares two Hyperloom session_dirs (typically a `main` baseline and
+a `feature/xiaofei/roofline-v2` experiment) and prints a side-by-side
+table covering the §10.2 main success criteria + §10.3 v2-specific
+cache-and-decision quality criteria.
+
+Usage::
+
+    python -m hyperloom.inference_optimizer.experiments.verify_roofline_v2 \\
+        --baseline /tmp/roofline-v2/qwen3-baseline \\
+        --exp      /tmp/roofline-v2/qwen3-exp
+
+Exit codes (machine-readable for CI):
+* ``0`` PASS    — delta gain ≥ +5.0% (design §10.2 main hard target met)
+* ``2`` PARTIAL — delta gain in (0%, +5.0%); positive but below target
+* ``1`` FAIL    — delta gain ≤ 0% or session metadata unreadable
+
+The script is read-only over ``state.json`` and pure-Python (no
+pandas / numpy) so it runs anywhere a session_dir is mounted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from hyperloom.inference_optimizer.experiments._roofline_audit_common import (
+    cache_hit_rate,
+    count_analysis_md_references,
+    extract_proposed_flags,
+    flatten_discovered_flag_names,
+    safe_load_state,
+)
+
+
+# ---------------------------------------------------------------------------
+# State extraction
+# ---------------------------------------------------------------------------
+@dataclass
+class SessionMetrics:
+    """Subset of SharedState surfaced in the comparison table."""
+
+    session_dir: Path
+    has_state_json: bool = False
+    error: str = ""
+
+    cumulative_gain_validated_pct: float = 0.0
+    wall_clock_min: float = 0.0
+    optimization_stack: list[dict[str, Any]] = field(default_factory=list)
+    pruned_families_raw: list[dict[str, Any]] = field(default_factory=list)
+
+    roofline_action_count: int = 0
+    profile_action_count: int = 0
+    snapshot_id: int = 0
+    analysis_md_text: str = ""
+
+    # Cache metrics (sum across all backend.calls if surfaced in
+    # state.json; otherwise 0 — the backend emits these to backend.calls
+    # only, so verify can't read them unless an audit hook pushes them
+    # to SharedState; tracked here for forward-compatibility).
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    # Decision quality (derived in derive())
+    analysis_md_referenced_count: int = 0
+    hallucinated_flag_count: int = 0
+    discovered_flag_names: set[str] = field(default_factory=set)
+    prune_branch_count_orchestration: int = 0
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into a datetime.
+
+    Accepts a trailing ``Z`` UTC designator by normalizing it to ``+00:00``.
+
+    Args:
+        value (Any): Candidate timestamp; only non-empty strings are parsed.
+
+    Returns:
+        datetime | None: Parsed datetime, or ``None`` when the value is not a
+        valid ISO-8601 string.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _wall_clock_min(state: dict[str, Any]) -> float:
+    """Approximate session duration from baseline ts → last validated gain ts.
+
+    The end time prefers ``cumulative_gain_validated_ts`` and otherwise falls
+    back to the latest timestamp across known action-attempt lists.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        float: Elapsed wall-clock minutes (>= 0.0), or ``0.0`` when start/end
+        timestamps cannot be determined.
+    """
+    starts: list[datetime] = []
+    baseline_attempts = state.get("baseline_attempts") or []
+    for entry in baseline_attempts:
+        if isinstance(entry, dict):
+            dt = _parse_iso(entry.get("ts"))
+            if dt is not None:
+                starts.append(dt)
+                break
+    end_dt = _parse_iso(state.get("cumulative_gain_validated_ts"))
+    if end_dt is None:
+        for action in ("validate_stack", "params", "backends", "sweep", "profile", "baseline"):
+            attempts = state.get(f"{action}_attempts") or []
+            if not attempts:
+                continue
+            last = attempts[-1]
+            if isinstance(last, dict):
+                dt = _parse_iso(last.get("ts"))
+                if dt is not None and (end_dt is None or dt > end_dt):
+                    end_dt = dt
+    if not starts or end_dt is None:
+        return 0.0
+    return max(0.0, (end_dt - min(starts)).total_seconds() / 60.0)
+
+
+def _count_action_attempts(state: dict[str, Any], action: str) -> int:
+    """Count entries in the ``<action>_attempts`` list within state.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+        action (str): Action name whose ``<action>_attempts`` key is counted.
+
+    Returns:
+        int: Length of the attempts list, or ``0`` when missing or not a list.
+    """
+    attempts = state.get(f"{action}_attempts") or []
+    return len(attempts) if isinstance(attempts, list) else 0
+
+
+def _count_orchestration_prune_branch(state: dict[str, Any]) -> int:
+    """Count `pruned_families` entries with source="orchestration".
+
+    `pruned_families` may be a list of dicts (`{family, reason,
+    source, ts}`) or a list of strings (legacy / Robustness inserts).
+    Strings are NOT counted as orchestration-emitted because the
+    source provenance is unknown.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        int: Number of ``pruned_families`` dict entries whose ``source`` is
+        ``"orchestration"``.
+    """
+    pruned = state.get("pruned_families") or []
+    if not isinstance(pruned, list):
+        return 0
+    count = 0
+    for entry in pruned:
+        if isinstance(entry, dict) and entry.get("source") == "orchestration":
+            count += 1
+    return count
+
+
+def extract(session_dir: Path) -> SessionMetrics:
+    """Read a session directory and derive its comparison metrics.
+
+    Loads ``state.json`` and populates a :class:`SessionMetrics` with gain,
+    timing, action counts, snapshot signal, and decision-quality fields. A
+    missing/unreadable state is reported via the result's ``error`` field
+    rather than raising.
+
+    Args:
+        session_dir (Path): Hyperloom session directory to inspect.
+
+    Returns:
+        SessionMetrics: Populated metrics for the session.
+    """
+    m = SessionMetrics(session_dir=session_dir)
+    state = safe_load_state(session_dir)
+    if state is None:
+        m.error = f"state.json not found / unreadable at {session_dir}"
+        return m
+    m.has_state_json = True
+    try:
+        m.cumulative_gain_validated_pct = float(state.get("cumulative_gain_validated", 0.0))
+    except (TypeError, ValueError):
+        m.cumulative_gain_validated_pct = 0.0
+    m.wall_clock_min = _wall_clock_min(state)
+
+    stack = state.get("optimization_stack") or []
+    m.optimization_stack = [s for s in stack if isinstance(s, dict)]
+    pruned = state.get("pruned_families") or []
+    m.pruned_families_raw = [p for p in pruned if isinstance(p, dict)]
+    m.prune_branch_count_orchestration = _count_orchestration_prune_branch(state)
+
+    # roofline action counter — derived from attempts_history (the
+    # roofline composite action joins the standard audit-attempts
+    # mechanism via cli registration).
+    m.roofline_action_count = _count_action_attempts(state, "roofline")
+    m.profile_action_count = _count_action_attempts(state, "profile")
+
+    # Snapshot signal
+    cached_ta = state.get("last_trace_analyze") or {}
+    if isinstance(cached_ta, dict):
+        snap_raw = cached_ta.get("roofline_snapshot_id")
+        if isinstance(snap_raw, int):
+            m.snapshot_id = snap_raw
+        m.analysis_md_text = str(cached_ta.get("analysis_md_text") or "")
+
+    # Decision quality
+    m.discovered_flag_names = flatten_discovered_flag_names(state)
+    proposed = extract_proposed_flags(state)
+    if m.discovered_flag_names:
+        m.hallucinated_flag_count = sum(1 for f in proposed if f not in m.discovered_flag_names)
+    m.analysis_md_referenced_count = count_analysis_md_references(state)
+
+    # Cache metrics — the backend surfaces these to backend.calls
+    # per-call. Coordinator does not aggregate to SharedState. For now
+    # read pre-aggregated values if a future hook writes them; otherwise
+    # leave at 0.
+    cache_metrics = state.get("tick_cache_metrics") or {}
+    if isinstance(cache_metrics, dict):
+        m.cache_creation_input_tokens = int(cache_metrics.get("cache_creation_input_tokens") or 0)
+        m.cache_read_input_tokens = int(cache_metrics.get("cache_read_input_tokens") or 0)
+        m.input_tokens = int(cache_metrics.get("input_tokens") or 0)
+        m.output_tokens = int(cache_metrics.get("output_tokens") or 0)
+    return m
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+def _format_action_seq(stack: list[dict[str, Any]]) -> str:
+    """Render an optimization stack as a compact ``kind:variant`` sequence.
+
+    Truncates to the first 12 entries and appends a ``...(+N more)`` suffix
+    when longer.
+
+    Args:
+        stack (list[dict[str, Any]]): Optimization stack entries.
+
+    Returns:
+        str: Comma-separated action sequence, or ``"(empty)"`` when empty.
+    """
+    parts: list[str] = []
+    for entry in stack[:12]:
+        kind = str(entry.get("kind") or entry.get("action") or "?")
+        variant = entry.get("variant_name") or entry.get("variant_id") or ""
+        parts.append(f"{kind}:{variant}" if variant else kind)
+    suffix = "" if len(stack) <= 12 else f" ...(+{len(stack) - 12} more)"
+    return ", ".join(parts) + suffix if parts else "(empty)"
+
+
+def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
+    """Build the human-readable baseline-vs-experiment comparison report.
+
+    Produces the side-by-side metrics table, action sequences, a §10.2
+    pass/partial/fail verdict on delta gain, and the informational §10.3 v2
+    quality criteria.
+
+    Args:
+        baseline (SessionMetrics): Metrics for the baseline session.
+        exp (SessionMetrics): Metrics for the experiment session.
+
+    Returns:
+        str: Multi-line report text suitable for printing to stdout.
+    """
+    delta_gain = exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
+    delta_wall = exp.wall_clock_min - baseline.wall_clock_min
+    exp_cache = cache_hit_rate(exp)
+    base_cache = cache_hit_rate(baseline)
+
+    out: list[str] = []
+    out.append("=" * 72)
+    out.append("Roofline-v2 N7 baseline vs experiment verification")
+    out.append("=" * 72)
+    out.append("")
+    out.append(f"  baseline session_dir: {baseline.session_dir}")
+    out.append(f"  exp      session_dir: {exp.session_dir}")
+    out.append("")
+    if baseline.error:
+        out.append(f"  baseline ERROR: {baseline.error}")
+    if exp.error:
+        out.append(f"  exp      ERROR: {exp.error}")
+    out.append("")
+    out.append("  " + "-" * 68)
+    out.append(f"  {'metric':36s} {'baseline':>12s} {'exp':>12s} {'delta':>8s}")
+    out.append("  " + "-" * 68)
+    rows: list[tuple[str, str, str, str]] = [
+        (
+            "cumulative_gain_validated_pct",
+            f"{baseline.cumulative_gain_validated_pct:>11.3f}%",
+            f"{exp.cumulative_gain_validated_pct:>11.3f}%",
+            f"{delta_gain:>+7.3f}%",
+        ),
+        (
+            "wall_clock_min",
+            f"{baseline.wall_clock_min:>11.2f} ",
+            f"{exp.wall_clock_min:>11.2f} ",
+            f"{delta_wall:>+7.2f} ",
+        ),
+        (
+            "roofline_action_count",
+            f"{baseline.roofline_action_count:>12d}",
+            f"{exp.roofline_action_count:>12d}",
+            f"{exp.roofline_action_count - baseline.roofline_action_count:>+8d}",
+        ),
+        (
+            "profile_action_count",
+            f"{baseline.profile_action_count:>12d}",
+            f"{exp.profile_action_count:>12d}",
+            f"{exp.profile_action_count - baseline.profile_action_count:>+8d}",
+        ),
+        (
+            "snapshot_id (last)",
+            f"{baseline.snapshot_id:>12d}",
+            f"{exp.snapshot_id:>12d}",
+            f"{exp.snapshot_id - baseline.snapshot_id:>+8d}",
+        ),
+        (
+            "prune_branch (orchestration)",
+            f"{baseline.prune_branch_count_orchestration:>12d}",
+            f"{exp.prune_branch_count_orchestration:>12d}",
+            f"{exp.prune_branch_count_orchestration - baseline.prune_branch_count_orchestration:>+8d}",
+        ),
+        (
+            "optimization_stack_size",
+            f"{len(baseline.optimization_stack):>12d}",
+            f"{len(exp.optimization_stack):>12d}",
+            f"{len(exp.optimization_stack) - len(baseline.optimization_stack):>+8d}",
+        ),
+        (
+            "cache_hit_rate",
+            f"{base_cache * 100:>11.1f}%",
+            f"{exp_cache * 100:>11.1f}%",
+            f"{(exp_cache - base_cache) * 100:>+7.1f}%",
+        ),
+        (
+            "analysis_md_referenced_count",
+            f"{baseline.analysis_md_referenced_count:>12d}",
+            f"{exp.analysis_md_referenced_count:>12d}",
+            f"{exp.analysis_md_referenced_count - baseline.analysis_md_referenced_count:>+8d}",
+        ),
+        (
+            "hallucinated_flag_count",
+            f"{baseline.hallucinated_flag_count:>12d}",
+            f"{exp.hallucinated_flag_count:>12d}",
+            f"{exp.hallucinated_flag_count - baseline.hallucinated_flag_count:>+8d}",
+        ),
+    ]
+    for metric, b, e, d in rows:
+        out.append(f"  {metric:36s} {b} {e} {d}")
+    out.append("  " + "-" * 68)
+    out.append("")
+    out.append("  action_seq (baseline):")
+    out.append(f"    {_format_action_seq(baseline.optimization_stack)}")
+    out.append("  action_seq (exp):")
+    out.append(f"    {_format_action_seq(exp.optimization_stack)}")
+    out.append("")
+
+    # Verdict — §10.2 main target
+    out.append("  " + "=" * 68)
+    if delta_gain >= 5.0:
+        verdict = "PASS — delta gain meets §10.2 hard target (≥ +5.0%)"
+    elif delta_gain > 0:
+        verdict = f"PARTIAL — delta gain {delta_gain:+.3f}% positive but below the +5% target"
+    else:
+        verdict = f"FAIL — delta gain {delta_gain:+.3f}% non-positive (experiment regression / no improvement)"
+    out.append(f"  VERDICT: {verdict}")
+    out.append("  " + "=" * 68)
+
+    # §10.3 v2-specific quality criteria — informational only
+    out.append("")
+    out.append("  §10.3 v2 quality criteria (informational):")
+    qual: list[tuple[str, bool, str]] = [
+        (
+            "cache_hit_rate ≥ 50%",
+            exp_cache >= 0.50,
+            f"{exp_cache * 100:.1f}%",
+        ),
+        (
+            "analysis_md_referenced_count ≥ 3",
+            exp.analysis_md_referenced_count >= 3,
+            str(exp.analysis_md_referenced_count),
+        ),
+        (
+            "hallucinated_flag_count = 0",
+            exp.hallucinated_flag_count == 0,
+            str(exp.hallucinated_flag_count),
+        ),
+        (
+            "roofline_action_count ≥ 1",
+            exp.roofline_action_count >= 1,
+            str(exp.roofline_action_count),
+        ),
+    ]
+    for name, passed, value in qual:
+        mark = "OK  " if passed else "MISS"
+        out.append(f"    [{mark}] {name:38s} = {value}")
+    return "\n".join(out)
+
+
+def _exit_code_for_delta(delta_gain: float) -> int:
+    """Map a delta-gain percentage to the CI exit code.
+
+    Args:
+        delta_gain (float): Experiment-minus-baseline cumulative gain percent.
+
+    Returns:
+        int: ``0`` (PASS, >= +5.0%), ``2`` (PARTIAL, in (0%, +5.0%)), or ``1``
+        (FAIL, <= 0%).
+    """
+    if delta_gain >= 5.0:
+        return 0
+    if delta_gain > 0:
+        return 2
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the verification CLI.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with ``baseline``, ``exp``, and
+        ``json`` attributes.
+    """
+    p = argparse.ArgumentParser(
+        description="Compare a baseline vs experiment Hyperloom session for Roofline-v2 verification (design §10.5).",
+    )
+    p.add_argument("--baseline", required=True, type=Path, help="Baseline session_dir (contains state.json)")
+    p.add_argument("--exp", required=True, type=Path, help="Experiment session_dir (contains state.json)")
+    p.add_argument("--json", action="store_true", help="Also emit a JSON summary on stderr (CI consumption)")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the baseline-vs-experiment verification and return an exit code.
+
+    Extracts metrics for both sessions, prints the comparison report, and
+    optionally writes a JSON summary to stderr when ``--json`` is given.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        int: CI exit code derived from the delta gain (see
+        :func:`_exit_code_for_delta`).
+    """
+    args = _parse_args(argv)
+    baseline = extract(args.baseline)
+    exp = extract(args.exp)
+    print(render(baseline, exp))
+    if args.json:
+        summary = {
+            "baseline": {
+                "session_dir": str(baseline.session_dir),
+                "cumulative_gain_validated_pct": baseline.cumulative_gain_validated_pct,
+                "wall_clock_min": baseline.wall_clock_min,
+                "roofline_action_count": baseline.roofline_action_count,
+                "cache_hit_rate": cache_hit_rate(baseline),
+            },
+            "exp": {
+                "session_dir": str(exp.session_dir),
+                "cumulative_gain_validated_pct": exp.cumulative_gain_validated_pct,
+                "wall_clock_min": exp.wall_clock_min,
+                "roofline_action_count": exp.roofline_action_count,
+                "cache_hit_rate": cache_hit_rate(exp),
+                "analysis_md_referenced_count": exp.analysis_md_referenced_count,
+                "hallucinated_flag_count": exp.hallucinated_flag_count,
+                "snapshot_id": exp.snapshot_id,
+                "prune_branch_count_orchestration": exp.prune_branch_count_orchestration,
+            },
+            "delta": {
+                "cumulative_gain_validated_pct": (
+                    exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
+                ),
+                "wall_clock_min": exp.wall_clock_min - baseline.wall_clock_min,
+            },
+        }
+        sys.stderr.write(json.dumps(summary, indent=2) + "\n")
+    return _exit_code_for_delta(exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -19,6 +19,9 @@ dependencies = [
     # load time even when CRITIC_WEB_TOOLS_ENABLED=false.
     "markdownify>=0.11",
     "cachetools>=5.3",
+    # tree-reform.MD P2.5: framework-agent's own base dependency, merged in
+    # verbatim after its promotion into hyperloom.agents.framework.
+    "jsonschema>=4.0",
 ]
 
 [project.urls]
@@ -38,6 +41,11 @@ test = [
     # (psutil stays an optional runtime dep — the probe degrades to None when
     # it is absent — but the test suite needs it to cover that path).
     "psutil>=5.9",
+    # tree-reform.MD P2.5: framework-agent's own ``test`` extra listed these
+    # so its ``ast``-extra code paths (patch-authoring / isolation) are
+    # exercised by the shared test suite too.
+    "libcst>=1.0",
+    "patch-ng>=1.18",
 ]
 # CI / local mirror of the coverage job: ``pip install -e ".[test,ci]"``.
 # ``tomli`` is only required on Python <3.11 when inline scripts read
@@ -53,83 +61,184 @@ ci = [
 trace = [
     "langfuse>=2.0",
 ]
+# tree-reform.MD P2.5: framework-agent's own optional extras, merged in
+# verbatim after its promotion into hyperloom.agents.framework. ``ast`` is
+# used by the (currently GPU-node-only) patch-authoring/isolation path;
+# ``claude`` is the optional ``synthesize --with-llm`` KB-distillation backend.
+ast = [
+    "libcst>=1.0",
+    "patch-ng>=1.18",
+]
+claude = [
+    "claude_agent_sdk>=0.1",
+]
 
 [project.scripts]
-inference_optimizer = "inference_optimizer.cli:main"
+inference_optimizer = "hyperloom.inference_optimizer.cli:main"
+# tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
+# (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
+# keep resolving after promotion into the single ``hyperloom`` distribution.
+# The orchestrator's ``framework/client.py._resolve_fa_binary()`` looks up
+# ``fa`` on PATH first (``shutil.which("fa")``), which these provide.
+framework-agent = "hyperloom.agents.framework.runtime.cli:main"
+fa = "hyperloom.agents.framework.runtime.cli:main"
+# tree-reform.MD P2.5: robustness-agent's own ``[project.scripts]`` entry,
+# preserved verbatim (standalone reactor CLI wrapper; the orchestrator itself
+# always shells out to ``python -m hyperloom.agents.robustness.runtime.cli``
+# directly, not via this console script).
+robustness-agent = "hyperloom.agents.robustness.main:main"
+# tree-reform.MD P2.5: quantization_agent previously had no console-script
+# entry point (only ``python -m quantization_agent.cli``); this is a new
+# convenience entry added during its promotion into hyperloom.agents.
+quantization-agent = "hyperloom.agents.quantization.cli:main"
 
-# Packages are provided by setup.py so editable installs use the same package
-# discovery as local source runs.
+# tree-reform.MD P2.8: package discovery is fully declarative now that the
+# whole ``hyperloom`` distribution lives under a single src-layout namespace
+# (setup.py used to carry find_packages(where="src") + an explicit
+# package_dir mapping; both are now expressed here and setup.py is deleted).
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-inference_optimizer = [
+# tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
+# orchestrator -> src/hyperloom/orchestrator promotion (stage A) and further
+# into orchestrator/prompts/ during the internal subpackage split (stage B).
+# tree-reform.MD P2.4: inference_optimizer.* entries moved here (from the
+# top-level ``inference_optimizer`` key) after inference_optimizer was
+# promoted from a repo-root flat-layout package to
+# src/hyperloom/inference_optimizer.
+hyperloom = [
+    "orchestrator/prompts/*.md",
+]
+"hyperloom.inference_optimizer" = [
     "SKILL.md",
     "README.md",
     "actions/*.md",
     "actions/_meta/*.yaml",
-    "benches/*.sh",
-    "benches/README.md",
-    "orchestrator/system_prompts/*.md",
-    "scripts/*",
-    "scripts/configs/*.yaml",
-    "kb/framework/*.md",
-    "kb/recipes/*.json",
+    # tree-reform.MD P2.4: scripts/ split three ways -- assets/ (release-
+    # contract shell installers + configs), tools/ (operator CLIs, .py so not
+    # package-data), experiments/ (A/B scripts, likewise not package-data).
+    "assets/*.sh",
+    "assets/*.example",
+    "assets/configs/*.yaml",
+    "references/*.md",
+    "tools/*.sh.example",
+    "data/framework/*.md",
+    "data/recipes/*.json",
+]
+# tree-reform.MD P2.5: critic-agent's LLM skill assets (mounted by the A2A /
+# Codex chat server host, not imported as Python) promoted alongside its
+# ``runtime`` package.
+"hyperloom.agents.critic" = [
+    "SKILL.md",
+    "AGENTS.md",
+    "actions/*.md",
+    "references/*.md",
+    "kb_contributions/*.json",
+]
+# tree-reform.MD P2.5: robustness-agent's SKILL.md, promoted alongside its
+# package (near-verbatim move; already good src-layout per tree-reform.MD).
+"hyperloom.agents.robustness" = [
+    "SKILL.md",
+]
+# tree-reform.MD P2.5: framework-agent's LLM skill assets (SKILL.md/AGENTS.md/
+# README.md, LLM prompt templates, protocol/schema references, and the
+# example request payloads used by its own tests), promoted alongside its
+# package. ``scripts/install.sh`` stays package-data too (chained from
+# ``src/hyperloom/inference_optimizer/assets/install.sh``).
+"hyperloom.agents.framework" = [
+    "SKILL.md",
+    "AGENTS.md",
+    "README.md",
+    "prompts/*.md",
+    "references/*.md",
+    "examples/*.json",
+    "examples/*.py",
+    "scripts/*.sh",
+]
+# tree-reform.MD P2.5: quantization_agent's skill assets, promoted alongside
+# its package (near-verbatim move; the package itself already used relative
+# imports throughout).
+"hyperloom.agents.quantization" = [
+    "SKILL.md",
+    "README.md",
+]
+# tree-reform.MD P2.5: kernel-agent's skill assets + release-contract
+# installer, promoted alongside its package. ``tools/`` and
+# ``skills/unittest/`` are not listed here for .py sources (they're regular
+# package modules picked up by ``find_packages``); ``tools/data/`` is the one
+# non-Python data file the tools read at runtime.
+"hyperloom.agents.kernel" = [
+    "SKILL.md",
+    "scripts/*.sh",
+    "skills/unittest/SKILL.md",
+]
+"hyperloom.agents.kernel.tools" = [
+    "data/*.json",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# tree-reform.MD P2.7: the six "src/hyperloom/**/tests" entries that used to
+# be listed individually here (inference_optimizer/tests,
+# agents/{robustness,critic/runtime,framework,quantization,kernel}/tests)
+# are collapsed into one recursive glob (pytest supports ``**`` glob
+# expansion in testpaths); ``ci`` stays a separate entry since it is not
+# under src/hyperloom (P2.6 "ci/ 拆库" has not been done). Collecting all of
+# kernel-agent's 40 test files here was itself a real fix landed in P2.5:
+# previously only 7 of the 33 files co-located with their source under
+# tools/ were explicitly listed, so 26 were "orphaned" and only ran when
+# pytest was pointed directly at them. ci/'s genuine unit tests
+# (test_submit_body.py + the test_ci_*.py suites) were never collected
+# before ci/ was added here; the two live smoke scripts (test_claw_flow.py /
+# test_tool4.py) define only a module-level main()/run_test() and no
+# ``test_`` functions, so pytest collects zero items from them and never
+# hits their network calls.
 testpaths = [
-    "inference_optimizer/tests",
-    "robustness-agent/tests",
-    "critic-agent/runtime/tests",
-    "quantization_agent/tests",
-    "kernel-agent/tools/test_tracelens_arch_benchmark.py",
-    "kernel-agent/tools/test_diffusion_flops.py",
-    "kernel-agent/tools/test_ray_fd_limit.py",
-    "kernel-agent/tools/test_gemm_tuning.py",
-    "kernel-agent/tools/test_io_utils.py",
-    "kernel-agent/tools/test_rocprof_roofline.py",
-    "kernel-agent/tools/test_harness_generator.py",
-    "kernel-agent/tools/test_op_to_source_resolver.py",
-    "kernel-agent/tools/test_tracelens_selfheal.py",
-    # Bypass analysis backend (HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass). These
-    # modules live under kernel-agent/tools (measured by coverage) but their
-    # tests were not collected, so the bypass code was unguarded by CI and
-    # counted as uncovered. Collecting them exercises the reader/classifier/
-    # report/source-resolver/CLI (self-contained; no GPU, no TraceLens).
-    "kernel-agent/tools/test_bypass_classify.py",
-    "kernel-agent/tools/test_bypass_reader.py",
-    "kernel-agent/tools/test_bypass_report.py",
-    "kernel-agent/tools/test_bypass_source_resolver.py",
-    "kernel-agent/tools/test_bypass_benchmark_resolver.py",
-    "kernel-agent/tools/test_bypass_roofline.py",
-    "kernel-agent/tools/test_bypass_fusion.py",
-    "kernel-agent/tools/test_bypass_trace_analysis.py",
-    "kernel-agent/tools/test_bypass_replay.py",
-    # ci/ inference-optimization pipeline: the genuine unit tests
-    # (test_submit_body.py + the new test_ci_*.py suites) were never
-    # collected before because ci/ was absent from testpaths. The two
-    # live smoke scripts (test_claw_flow.py / test_tool4.py) define only a
-    # module-level main()/run_test() and no ``test_`` functions, so pytest
-    # collects zero items from them and never hits their network calls.
+    "src/hyperloom/**/tests",
     "ci",
 ]
 # ``ci`` is on the import path and is now both collected for tests (see
 # ``testpaths``) and measured for coverage (see ``[tool.coverage.run].source``).
-pythonpath = [".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
+# Tree-reform transition (tree-reform.MD P2.0): ``src`` (new ``hyperloom.*``
+# namespace) is added alongside the legacy import roots so both resolve during
+# the migration window (dual-importable). Legacy roots are removed only in
+# P2.7. ``.`` is still required for the still-flat ``ci`` package
+# (tree-reform.MD P2.4 only promoted ``inference_optimizer``; ci src-layout
+# promotion is a later phase). tree-reform.MD P2.5: critic-agent,
+# robustness-agent, framework-agent, and quantization_agent were all promoted
+# into ``src/hyperloom/agents/{critic,robustness,framework,quantization}``
+# (bare/sibling module names -> package-qualified ``hyperloom.agents.*``), so
+# their standalone ``critic-agent`` / ``robustness-agent/src`` /
+# ``framework-agent/src`` / ``.`` (for bare ``quantization_agent``) pythonpath
+# entries are dropped here (all resolve via the single ``src`` entry now).
+# kernel-agent was also promoted into ``src/hyperloom/agents/kernel`` in the
+# same step, but it was never on ``pythonpath`` to begin with -- its tools/
+# modules import each other via ``sys.path.insert(0, str(Path(__file__)...))``
+# self-location hacks (so they keep working both as package members and as
+# directly-executed CLI scripts), not via a package-relative or pythonpath
+# import, so no pythonpath entry is added or removed for it here.
+pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
     "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
 ]
 filterwarnings = [
-    "ignore::DeprecationWarning:inference_optimizer.compat.payload_aliases",
+    # The DeprecationWarning for the extra_sglang_args -> extra_server_args
+    # rename is raised from this canonical module (tree-reform.MD P2.4
+    # flattened compat/payload_aliases.py into compat.py, which re-exported
+    # -- not re-wrapped -- hyperloom.common.payload_aliases; P2.7 then
+    # removed that transition shim entirely once every call site was updated
+    # to import hyperloom.common.payload_aliases directly).
+    "ignore::DeprecationWarning:hyperloom.common.payload_aliases",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
 # ``source`` trees. The ``ci/`` benchmark pipeline is now collected for tests
 # (see ``testpaths``) and measured for coverage (listed in ``source``), so it
-# DOES count toward the ``fail_under`` (90%) settlement. ``OOB/`` and
-# ``quantization_agent/`` are included and measured as well.
+# DOES count toward the ``fail_under`` (90%) settlement. ``OOB/`` is included
+# and measured as well.
 #
 # omit patterns exclude:
 #   * tests / __init__.py / __main__.py — non-source
@@ -145,62 +254,70 @@ filterwarnings = [
 [tool.coverage.run]
 branch = false
 source = [
-    "inference_optimizer",
-    "robustness_agent",
-    "critic-agent/runtime",
-    "framework-agent/src",
-    "kernel-agent/tools",
-    "quantization_agent",
-    "OOB",
+    # tree-reform.MD P2.3: orchestrator moved under src/hyperloom. tree-reform.MD
+    # P2.4: inference_optimizer moved under src/hyperloom too (both were
+    # previously counted under a standalone "inference_optimizer" entry).
+    # tree-reform.MD P2.5: critic-agent's ``runtime`` package, robustness-agent,
+    # framework-agent, quantization_agent, and kernel-agent's tools/ were all
+    # promoted into src/hyperloom/agents/{critic,robustness,framework,
+    # quantization,kernel} (so they're now measured as part of the
+    # "src/hyperloom" tree instead of standalone "critic-agent/runtime" /
+    # "robustness_agent" / "framework-agent/src" / "quantization_agent" /
+    # "kernel-agent/tools" entries).
+    "src/hyperloom",
+    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
     "ci",
 ]
 omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/__main__.py",
-    "setup.py",
     # CLI driver scripts (subprocess plumbing dominated).
-    "inference_optimizer/cli.py",
-    "inference_optimizer/multi_node/cli.py",
-    "inference_optimizer/multi_node/scripts/*",
-    "inference_optimizer/multi_node/_internal/*",
+    "src/hyperloom/inference_optimizer/cli/__init__.py",
+    "src/hyperloom/inference_optimizer/multi_node/cli.py",
+    "src/hyperloom/inference_optimizer/multi_node/scripts/*",
+    "src/hyperloom/inference_optimizer/multi_node/_internal/*",
     # Subprocess wrappers + multi-node server lifecycle.
-    "inference_optimizer/orchestrator/action_executors/_subprocess_kill.py",
-    "inference_optimizer/orchestrator/action_executors/_multi_node_server_lifecycle.py",
-    "inference_optimizer/orchestrator/action_executors/_multi_node_env.py",
+    "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
+    "src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py",
+    "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
-    "inference_optimizer/breakdown/reporters/llm_client.py",
+    "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Robustness-agent standalone reactor CLI wrapper.
-    "robustness-agent/src/robustness_agent/main.py",
-    # Stand-alone kernel-agent CLI tools.
-    "kernel-agent/tools/kernel_optimization.py",
-    "kernel-agent/tools/tracelens_analysis.py",
-    "kernel-agent/tools/tracelens_skill_runner.py",
-    "kernel-agent/tools/parallel_e2e_runner.py",
-    "kernel-agent/tools/apply_kernel_patch.py",
-    "kernel-agent/tools/geak_prompt_patcher.py",
+    "src/hyperloom/agents/robustness/main.py",
+    # Stand-alone kernel-agent CLI tools (tree-reform.MD P2.5: promoted from
+    # the repo-root kernel-agent/tools/ into src/hyperloom/agents/kernel/tools/;
+    # test_*.py were moved out to the sibling tests/ dir and are now covered
+    # by the generic "*/tests/*" omit rule above, so that line is dropped).
+    "src/hyperloom/agents/kernel/tools/kernel_optimization.py",
+    "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
+    "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
+    "src/hyperloom/agents/kernel/tools/parallel_e2e_runner.py",
+    "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
+    "src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py",
     # Serve/bench/apply CLI primitives — subprocess + live-serving plumbing that
     # can't be unit-tested without reimplementing a server; same class as the
     # apply_kernel_patch / parallel_e2e_runner tools above. Their pure helpers
     # (e.g. _diff_unsupported_ops, _spread) ARE covered by test_apply_and_bench.py.
-    "kernel-agent/tools/apply_and_bench.py",
-    "kernel-agent/tools/geak_vs_forge_driver.py",
+    "src/hyperloom/agents/kernel/tools/apply_and_bench.py",
+    "src/hyperloom/agents/kernel/tools/geak_vs_forge_driver.py",
     # Backends within kernel-agent tools (subprocess submit).
-    "kernel-agent/tools/backends/*",
-    # Stand-alone in-tree CLI test scripts (live next to the tool they
-    # exercise; treated as test files for coverage purposes).
-    "kernel-agent/tools/test_*.py",
-    "kernel-agent/tools/_collective_names.py",
+    "src/hyperloom/agents/kernel/tools/backends/*",
+    "src/hyperloom/agents/kernel/tools/_collective_names.py",
     # kernel-agent skill harness validator — standalone operator script.
-    "kernel-agent/skills/unittest/validate_harness.py",
+    "src/hyperloom/agents/kernel/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
-    "quantization_agent/cli.py",
+    "src/hyperloom/agents/quantization/cli.py",
     # OOB agent_mcp_server entrypoints / server-side runtime: CLI, HTTP
     # server, scheduler, auth proxy, and the subprocess agent backends are
     # network / long-running services exercised end-to-end, not by unit
     # tests. The unit-testable OOB logic (config, database, convergence_check,
     # tools/agent_tools, tools/benchmark_tools, task_manager) stays measured
-    # and is covered by ``inference_optimizer/tests/test_oob_units.py``.
+    # and is covered by
+    # ``src/hyperloom/inference_optimizer/tests/test_oob_units.py``.
+    # OOB is an optional component (not always present in a clone -- see
+    # CLAUDE.md); coverage silently ignores omit entries under a missing
+    # source tree, so these are harmless no-ops when OOB/ is absent.
     "OOB/cli.py",
     "OOB/server.py",
     "OOB/scheduler.py",
@@ -210,44 +327,43 @@ omit = [
     # ``ps`` / ``df`` / ``ray status``. Each shell-out has a unit test
     # through the provider/factory layers; the local_probe glue itself
     # is integration-only.
-    "robustness-agent/src/robustness_agent/sources/local_probe.py",
+    "src/hyperloom/agents/robustness/sources/local_probe.py",
     # InferenceX shell-script patcher — fcntl-based file locking and
     # benchmark_lib.sh rewriting that already has dedicated integration
     # coverage; the per-call IO error branches are not unit-testable
     # without monkeypatching open()/fcntl wholesale.
-    "inference_optimizer/orchestrator/action_executors/_inferencex_patcher.py",
+    "src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py",
     # TraceLens server patcher — large subprocess pipeline (`git apply`
     # / `patch --fuzz=2` fallback) covered by integration tests.
-    "inference_optimizer/orchestrator/action_executors/_server_patcher.py",
-    # breakdown/collectors.py is a 6k-line data-collection module
-    # exercised end-to-end by the breakdown reporter tests. Direct
-    # unit-testing every leaf path doubles the test surface for
-    # marginal value.
-    "inference_optimizer/breakdown/collectors.py",
+    "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
+    # breakdown/collectors/ (P2.2 split the former 6k-line collectors.py
+    # into this subpackage) is exercised end-to-end by the breakdown
+    # reporter tests. Direct unit-testing every leaf path doubles the
+    # test surface for marginal value.
+    "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Verification scripts — operator scripts, not library code.
-    "inference_optimizer/scripts/*",
+    # tree-reform.MD P2.4: scripts/ split three ways: tools/ (operator CLIs),
+    # experiments/ (A/B scripts), assets/ (shell installers + configs, not
+    # Python so not coverage-relevant anyway).
+    "src/hyperloom/inference_optimizer/tools/*",
+    "src/hyperloom/inference_optimizer/experiments/*",
     # Subprocess transport for the robustness-agent runtime CLI; the
     # in-process role contract is covered by the role/runtime/cli tests
-    # plus the e2e harness in inference_optimizer/tests/test_p2_robustness_agent_e2e.
-    "inference_optimizer/orchestrator/backends/robustness_agent.py",
-    # Legacy conductor SQLite bridge superseded by the M1 reactor / CLI
-    # transport. Kept for backwards compat; not unit-tested.
-    "robustness-agent/src/robustness_agent/conductor.py",
+    # plus the e2e harness in
+    # src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.
+    "src/hyperloom/orchestrator/roles/robustness_agent.py",
     # Critic agent backend talks to the critic-agent runtime via a real
     # subprocess transport; exercised end-to-end by the critic_agent_e2e
     # marker tests.
-    "inference_optimizer/orchestrator/backends/critic_agent.py",
+    "src/hyperloom/orchestrator/roles/critic_agent.py",
     # Profile / baseline executors are subprocess-heavy benchmark drivers
     # covered by the dedicated profile/baseline parametric test suites.
-    "inference_optimizer/orchestrator/action_executors/profile.py",
-    "inference_optimizer/orchestrator/action_executors/baseline.py",
-    # Legacy robustness-agent monitors superseded by the M1 reactor;
-    # provider-side tests exercise the GPU/disk/server probes today.
-    "robustness-agent/src/robustness_agent/monitors/server_health.py",
-    "robustness-agent/src/robustness_agent/monitors/log_tailer.py",
-    "robustness-agent/src/robustness_agent/providers/hybrid.py",
-    "robustness-agent/src/robustness_agent/providers/robust.py",
-    "robustness-agent/src/robustness_agent/providers/local.py",
+    "src/hyperloom/orchestrator/actions/executors/profile.py",
+    "src/hyperloom/orchestrator/actions/executors/baseline.py",
+    # NOTE: the legacy robustness-agent monitors/providers/conductor.py
+    # modules these paths used to point at (superseded by the M1 reactor)
+    # were already deleted from disk before tree-reform.MD P2.5; the ghost
+    # omit entries were dropped in this same step rather than rewritten.
     # ── ci/ inference-optimization pipeline ──
     # The measured ci/ set is the library-shaped logic modules
     # (generate_hf_matrix, generate_matrix, progress, build_rolling_pool,
@@ -260,7 +376,6 @@ omit = [
     "ci/optimize_submit.py",
     "ci/tiny_submit.py",
     "ci/orchestrator.py",
-    "ci/pipeline_run.py",
     "ci/import_session_breakdown.py",
     "ci/claw_client.py",
     "ci/post_perf_runs.py",
@@ -268,8 +383,6 @@ omit = [
     "ci/send_webhook.py",
     "ci/publish_results.py",
     "ci/publish_artifacts.py",
-    "ci/download_ab_stitched_session_logs.py",
-    "ci/run_llm_batch.py",
     "ci/build_candidates.py",
     "ci/build_production_hf_pool.py",
     # In-tree CLI test scripts / live smoke scripts (treated as test files).
@@ -371,8 +484,25 @@ ignore = ["E501", "E741"]
 "**/tests/**/*.py" = ["F811", "E402", "F841"]
 # Modules that intentionally place imports after a module docstring + early
 # constants / conditional setup (lazy or ordering-sensitive imports).
-"inference_optimizer/orchestrator/coordinator.py" = ["E402"]
-"inference_optimizer/orchestrator/specialist_runner.py" = ["E402"]
-"inference_optimizer/orchestrator/roofline_ceiling.py" = ["E402"]
-"inference_optimizer/orchestrator/system_prompts/specialist_prompt_builder.py" = ["E402"]
-"critic-agent/runtime/decision_reviewer.py" = ["E402"]
+# tree-reform.MD P2.3 stage B: path updated for the loop/ subpackage move.
+"src/hyperloom/orchestrator/loop/coordinator.py" = ["E402"]
+# tree-reform.MD P2.2: SharedState mixins are imported after the module-level
+# helpers/constants they close over (cycle-safe ordering), so the mixin import
+# sits below the top import block. P2.3 stage B: path updated for state/.
+"src/hyperloom/orchestrator/state/shared_state.py" = ["E402"]
+# tree-reform.MD P2.4 follow-up: cli/__init__.py re-exports parser.py's
+# _build_parser cluster after the module docstring + logging setup it closes
+# over (cycle-safe ordering), so the import sits below the top import block.
+"src/hyperloom/inference_optimizer/cli/__init__.py" = ["E402"]
+# tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,dynamo}.py
+# after the base helpers/constants they import back are already defined
+# (cycle-safe ordering), so the import sits below the top import block.
+"src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
+# tree-reform.MD P2.3 stage B: paths updated for the specialists/, kernel/,
+# and prompts/ subpackage moves.
+"src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
+"src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
+"src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
+"src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
