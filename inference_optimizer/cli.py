@@ -901,6 +901,31 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
     print(f"Preflight: updated ~/.claude/config.json customApiUrl -> {anthropic_base_url}")
 
 
+def _claude_native_enabled() -> bool:
+    """True when Claude-native mode is on (``--claude-native`` / ``HYPERLOOM_CLAUDE_NATIVE``).
+
+    In native mode Hyperloom authenticates Claude through the locally
+    logged-in ``claude`` CLI (``~/.claude`` credentials from ``claude login``)
+    instead of an LLM gateway. This bypasses the gateway credential gate, the
+    ``~/.claude`` ``customApiUrl`` rewrite, and the gateway model-catalog probe,
+    and it leaves ``ANTHROPIC_BASE_URL`` unset so the spawned ``claude``
+    subprocesses (which inherit ``os.environ``) reach the CLI's own endpoint.
+
+    ``main()`` mirrors the ``--claude-native`` flag into
+    ``HYPERLOOM_CLAUDE_NATIVE`` right after parsing, so this env-only check is
+    authoritative everywhere in preflight.
+
+    Returns:
+        bool: ``True`` when Claude-native mode is enabled.
+    """
+    return os.environ.get("HYPERLOOM_CLAUDE_NATIVE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
@@ -909,7 +934,16 @@ def _validate_credentials() -> None:
     one base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``) and at least
     one key (``SAFE_API_KEY`` / ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
     ``ANTHROPIC_AUTH_TOKEN``).
+
+    Claude-native mode has no gateway to validate — the locally logged-in
+    ``claude`` CLI carries its own credentials — so the gate is skipped.
     """
+    if _claude_native_enabled():
+        print(
+            "Preflight: claude-native mode — skipping gateway credential gate "
+            "(auth via the local `claude` CLI login)"
+        )
+        return
     has_url = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL"))
     has_key = bool(
         os.environ.get("SAFE_API_KEY")
@@ -1448,6 +1482,8 @@ def _emit_preflight_diagnostics(
         )
     if anthropic_base_url:
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
+    elif _claude_native_enabled():
+        print("  ANTHROPIC_BASE_URL  = <unset> — claude-native mode (auth via local `claude` CLI login)")
     else:
         print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
     if args is not None:
@@ -1632,6 +1668,16 @@ def _validate_and_resolve_claude_model(
             unreachable, or no acceptable model is present.
     """
     chosen = (args.claude_model or "").strip()
+    # Claude-native mode has no gateway /models catalog to probe, and the local
+    # `claude` CLI may serve models outside the AMD allowlist (e.g. a newer
+    # opus). Trust the operator-supplied id and let the CLI reject an unknown
+    # model at call time.
+    if _claude_native_enabled():
+        print(
+            f"Preflight: claude-native mode — skipping gateway model-catalog probe; "
+            f"trusting --claude-model={chosen!r} via the local `claude` CLI"
+        )
+        return None
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
     # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
     # an AMD-network safety default; an operator can opt out via
@@ -1946,7 +1992,14 @@ def _preflight(
     # known-stale 127.0.0.1:4002 leftovers so they can't reach the CLIs.
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    if anthropic_url or openai_url:
+    if _claude_native_enabled():
+        # Native mode: do NOT inject gateway base URLs or rewrite
+        # ~/.claude/config.json. Leaving ANTHROPIC_BASE_URL unset lets the
+        # spawned `claude` subprocesses (env = os.environ.copy()) authenticate
+        # against the CLI's own logged-in endpoint. resolved_urls stays None so
+        # the model-catalog probe is skipped downstream.
+        print("Preflight: claude-native mode — leaving ~/.claude and ANTHROPIC_BASE_URL untouched (native CLI auth)")
+    elif anthropic_url or openai_url:
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),
             ("OPENAI_BASE_URL", openai_url),
@@ -3196,7 +3249,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
     _validate_and_resolve_claude_model(args, resolved_urls)
     # Codex smoke probes the OpenAI side independently (split entrypoints).
-    _smoke_test_codex_model(args, resolved_urls)
+    # Claude-native mode is Claude-only — there is no OpenAI gateway to probe;
+    # codex-dependent backends (default critic-agent, codex kernel) require
+    # their own creds or a Claude/mock alternative (--kernel-claude, --critic-mock).
+    if _claude_native_enabled():
+        print("Preflight: claude-native mode — skipping codex/OpenAI smoke-test (Claude-only run)")
+    else:
+        _smoke_test_codex_model(args, resolved_urls)
 
     # `--resume-from <path>` implies `--resume` (operator convenience).
     if args.resume_from and not args.resume:
@@ -4522,6 +4581,20 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
     opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
     opt.add_argument(
+        "--claude-native",
+        action="store_true",
+        default=_claude_native_enabled(),
+        help=(
+            "Authenticate Claude via the locally logged-in `claude` CLI "
+            "(~/.claude from `claude login`) instead of an LLM gateway. Skips "
+            "the gateway credential gate, the ~/.claude customApiUrl rewrite, "
+            "the gateway model-catalog probe, and the codex/OpenAI smoke-test. "
+            "Claude-only: codex-dependent backends need their own creds or a "
+            "Claude/mock alternative (--kernel-claude, --critic-mock). Also "
+            "settable via HYPERLOOM_CLAUDE_NATIVE=1."
+        ),
+    )
+    opt.add_argument(
         "--allow-mm-text-fallback",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -5671,6 +5744,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
     )
     if args.command == "optimize":
+        # Mirror --claude-native into the env so the env-only
+        # _claude_native_enabled() check is authoritative across preflight
+        # (and inherited by spawned claude subprocesses).
+        if getattr(args, "claude_native", False):
+            os.environ["HYPERLOOM_CLAUDE_NATIVE"] = "1"
         # Resolve any --*-prompt that point at a file.
         for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
             v = getattr(args, attr)

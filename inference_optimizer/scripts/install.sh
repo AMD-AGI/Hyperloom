@@ -320,6 +320,15 @@ preflight_load_dotenv() {
 
 preflight_validate_credentials() {
   preflight_load_dotenv
+  # Claude-native mode authenticates through the local `claude` CLI login, so
+  # there is no gateway SAFE_API_KEY / OPENAI_BASE_URL to validate. Mirrors the
+  # CLI's _claude_native_enabled() bypass so `install.sh` + `optimize` agree.
+  case "$(printf '%s' "${HYPERLOOM_CLAUDE_NATIVE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      log "credentials preflight: claude-native mode — skipping gateway credential gate (auth via local \`claude\` CLI login)"
+      return 0
+      ;;
+  esac
   local missing=()
   [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
   [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
