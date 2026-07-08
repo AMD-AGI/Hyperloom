@@ -374,9 +374,11 @@ def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, 
         actual = _to_float(c.get("duration_us"))
         sigma_actual += actual
         src = str(c.get("roofline_source") or "")
-        eff = _to_float(c.get("efficiency_percent"))
-        if src not in ("", "placeholder") and eff > 0:
-            sigma_ideal += actual * (eff / 100.0)
+        # Binding-side attainment (cross-route comparable), not the compute-side
+        # efficiency_percent which reads ~0 for memory-bound kernels.
+        attain = _to_float(c.get("roofline_attainment_pct"))
+        if src not in ("", "placeholder") and attain > 0:
+            sigma_ideal += actual * (attain / 100.0)
             bound = str(c.get("bound_type") or "").upper()
             if "COMPUTE" in bound:
                 compute_us += actual
@@ -419,26 +421,32 @@ def build_report_from_bypass(
     *,
     dit_geometry: dict[str, Any] | None = None,
     achievable_tflops: float | None = None,
+    totals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the workload roofline report from the bypass candidate set.
 
     Produces an identically-shaped report to ``build_report`` (TraceLens CSV
     path) so downstream consumers read ``diffusion_roofline.json`` the same way
-    regardless of route. Stamps ``kernel_scope`` to keep it honest that bypass
-    aggregates over the analyzed candidate set rather than every device kernel.
+    regardless of route.
 
     Args:
-        hot_kernels: The bypass ``hot_kernels`` candidate dicts.
+        hot_kernels: The bypass ``hot_kernels`` candidate dicts (used for the
+            top-N summary block).
         timeline: The bypass ``analyze["timeline"]`` (``busy_pct``/``idle_pct``).
         num_denoise_steps: Effective denoise steps (enables the per-step split).
         top_k: How many hottest kernels to include in the summary.
         dit_geometry: Optional DiT geometry for the analytic compute ceiling.
         achievable_tflops: Optional achievable peak for the analytic ceiling.
+        totals: Pre-computed WORKLOAD totals over ALL analyzed kernels (from
+            ``_bypass_report.build_workload_roofline_totals``). When omitted,
+            falls back to aggregating the (top-k capped) ``hot_kernels`` only.
 
     Returns:
         The workload-roofline report dict.
     """
-    totals = aggregate_bypass_candidates(hot_kernels)
+    full_scope = totals is not None
+    if totals is None:
+        totals = aggregate_bypass_candidates(hot_kernels)
     timeline_pct: dict[str, float] = {}
     if isinstance(timeline, dict):
         if timeline.get("busy_pct") is not None:
@@ -454,7 +462,8 @@ def build_report_from_bypass(
         achievable_tflops=achievable_tflops,
         source="bypass_analytical",
     )
-    report["kernel_scope"] = "analyzed_candidates"
+    # ``all_device_kernels`` when totals cover every kernel; else the top-k subset.
+    report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
     report["kernels_aggregated"] = len(hot_kernels)
     return report
 

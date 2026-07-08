@@ -1038,6 +1038,75 @@ def _render_bypass_extra_sections(
     return "\n".join(L)
 
 
+def build_workload_roofline_totals(
+    analyze_out: dict[str, Any],
+    *,
+    target_platform: str,
+) -> dict[str, Any]:
+    """Aggregate the analytical roofline over ALL analyzed device kernels.
+
+    The per-kernel candidate list is capped at ``top_k``; the WORKLOAD roofline
+    (diffusion_roofline totals + kernel efficiency) must instead cover every
+    device kernel so it is not truncated to the hottest few (parity with the
+    TraceLens route, which aggregates its full perf CSV). Classifies + computes
+    the analytical roofline inline for each kernel and accumulates the same
+    totals shape as :func:`diffusion_roofline.aggregate_bypass_candidates`,
+    weighting ``sigma_ideal`` by the binding-side attainment.
+
+    Args:
+        analyze_out: Result of :func:`_bypass_trace_reader.analyze_trace`.
+        target_platform: GPU platform tag for the peak lookup.
+
+    Returns:
+        Workload totals keyed like ``aggregate_unified`` /
+        ``aggregate_bypass_candidates``.
+    """
+    sigma_actual = 0.0
+    sigma_ideal = 0.0
+    compute_us = 0.0
+    memory_us = 0.0
+    no_model_us = 0.0
+    for k in analyze_out.get("kernels") or []:
+        dur = float(k.get("gpu_time_us") or 0.0)
+        if dur <= 0:
+            continue
+        sigma_actual += dur
+        kc = classify_kernel(k.get("name", "") or "", op_name=k.get("op_name", "") or "")
+        shape_entries = _trace_shape_entries(k.get("op_shapes") or [], k.get("op_dtypes") or [], k.get("count") or 0)
+        rl = (
+            compute_roofline(
+                category=kc.category,
+                shape_str=shape_entries[0]["shape"] if shape_entries else "",
+                gpu_time_us=dur,
+                call_count=int(k.get("count") or 1),
+                gpu_type=target_platform,
+            )
+            if shape_entries
+            else None
+        )
+        attain = rl.get("roofline_attainment_pct") if rl else None
+        if rl and isinstance(attain, (int, float)) and attain > 0:
+            sigma_ideal += dur * (float(attain) / 100.0)
+            bound = str(rl.get("bound_type") or "").upper()
+            if "COMPUTE" in bound:
+                compute_us += dur
+            elif "MEMORY" in bound:
+                memory_us += dur
+            else:
+                no_model_us += dur
+        else:
+            no_model_us += dur
+    kernel_eff = (sigma_ideal / sigma_actual) if sigma_actual > 0 else 0.0
+    return {
+        "sigma_actual_kernel_us": round(sigma_actual, 3),
+        "sigma_ideal_roofline_us": round(sigma_ideal, 3),
+        "kernel_roofline_efficiency": kernel_eff,
+        "compute_bound_us": round(compute_us, 3),
+        "memory_bound_us": round(memory_us, 3),
+        "no_perf_model_us": round(no_model_us, 3),
+    }
+
+
 def build_kernel_roofline(
     candidates: dict[str, Any],
     *,

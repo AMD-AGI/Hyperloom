@@ -563,11 +563,18 @@ def main(argv: list[str] | None = None) -> int:
             # (trace-inferred, e.g. steady_window.step_count), NOT the requested
             # full schedule -- the mismatch is already surfaced as a warning.
             _diff_steps = resolve_perstep_divisor(inferred_denoise_steps, requested_denoise_steps)
+            # Workload totals cover ALL analyzed device kernels (not just the
+            # top-k candidate list) so the roofline is not truncated to the
+            # hottest few (parity with the TraceLens full-CSV aggregation).
+            _workload_totals = _report.build_workload_roofline_totals(
+                analyze, target_platform=args.target_platform
+            )
             _diff_report = build_report_from_bypass(
                 candidates.get("hot_kernels", []),
                 analyze.get("timeline") or {},
                 _diff_steps,
                 top_k,
+                totals=_workload_totals,
             )
             _diff_path = run_dir / "diffusion_roofline.json"
             _atomic_write_json(_diff_path, _diff_report)

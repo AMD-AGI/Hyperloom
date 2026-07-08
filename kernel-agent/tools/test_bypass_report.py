@@ -59,6 +59,24 @@ def test_build_candidates_routing():
     assert cands["skipped_kernels"] and cands["skipped_kernels"][0]["name"] == "aten::mm"
 
 
+def test_build_workload_roofline_totals_covers_all_kernels():
+    # 20 kernels > any top-k cap: the workload totals must sum EVERY device
+    # kernel (Q2), not just the top-k candidate list the diffusion roofline
+    # used to aggregate.
+    kernels = [
+        {"name": "aten::mm", "op_name": "aten::mm", "gpu_time_us": float(100 - i), "count": 1}
+        for i in range(20)
+    ]
+    analyze = _analyze([dict(k) for k in kernels])
+    totals = report.build_workload_roofline_totals(analyze, target_platform="MI300X")
+    assert totals["sigma_actual_kernel_us"] == round(sum(k["gpu_time_us"] for k in kernels), 3)
+    for key in (
+        "sigma_ideal_roofline_us", "kernel_roofline_efficiency",
+        "compute_bound_us", "memory_bound_us", "no_perf_model_us",
+    ):
+        assert key in totals
+
+
 def test_build_candidates_exposes_routable_subset():
     # Contract alignment (P0): hot_kernels stays the FULL ranked set; the reusable
     # dispatch subset is exposed separately as routable_kernels.

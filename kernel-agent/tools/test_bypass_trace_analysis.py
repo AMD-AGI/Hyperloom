@@ -199,10 +199,11 @@ def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
 def test_bypass_diffusion_aggregation_numerics():
     # aggregate_bypass_candidates: sigma_ideal = sum(actual * eff); placeholder
     # kernels (no analytical roofline) count only toward no_perf_model_us.
+    # sigma_ideal weights by the binding-side attainment (roofline_attainment_pct).
     hot = [
-        {"duration_us": 100.0, "efficiency_percent": 50.0, "bound_type": "compute_bound", "roofline_source": "analytical", "name": "gemm_k", "kernel_category": "GEMM"},
-        {"duration_us": 60.0, "efficiency_percent": 25.0, "bound_type": "memory_bound", "roofline_source": "analytical", "name": "attn_k", "kernel_category": "SDPA"},
-        {"duration_us": 40.0, "efficiency_percent": 0.0, "roofline_source": "placeholder", "name": "p_k", "kernel_category": "Other"},
+        {"duration_us": 100.0, "roofline_attainment_pct": 50.0, "bound_type": "compute_bound", "roofline_source": "analytical", "name": "gemm_k", "kernel_category": "GEMM"},
+        {"duration_us": 60.0, "roofline_attainment_pct": 25.0, "bound_type": "memory_bound", "roofline_source": "analytical", "name": "attn_k", "kernel_category": "SDPA"},
+        {"duration_us": 40.0, "roofline_attainment_pct": 0.0, "roofline_source": "placeholder", "name": "p_k", "kernel_category": "Other"},
     ]
     r = dr.build_report_from_bypass(hot, {"busy_pct": 80.0, "idle_pct": 20.0}, 4, 10)
     t = r["totals"]
@@ -217,6 +218,20 @@ def test_bypass_diffusion_aggregation_numerics():
     assert r["num_denoise_steps"] == 4
     assert r["per_step"]["actual_kernel_us"] == 50.0 and r["per_step"]["ideal_roofline_us"] == 16.25
     assert r["top_kernels"][0]["name"] == "gemm_k"
+
+
+def test_diffusion_report_totals_param_marks_full_scope():
+    # Q2: when workload totals (all device kernels) are supplied, the report uses
+    # them verbatim and marks kernel_scope=all_device_kernels (not the top-k set).
+    totals = {
+        "sigma_actual_kernel_us": 100.0, "sigma_ideal_roofline_us": 30.0,
+        "kernel_roofline_efficiency": 0.3, "compute_bound_us": 60.0,
+        "memory_bound_us": 40.0, "no_perf_model_us": 0.0,
+    }
+    r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, totals=totals)
+    assert r["kernel_scope"] == "all_device_kernels"
+    assert r["totals"]["sigma_actual_kernel_us"] == 100.0
+    assert r["per_step"]["actual_kernel_us"] == 100.0 / 8
 
 
 def test_bypass_diffusion_report_shape_without_steps():
