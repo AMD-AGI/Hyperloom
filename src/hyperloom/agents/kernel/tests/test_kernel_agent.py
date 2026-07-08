@@ -343,7 +343,7 @@ class KernelAgentToolTests(unittest.TestCase):
 
     def test_unittest_skill_is_self_contained(self) -> None:
         kernel_skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        inference_skill = (ROOT.parent / "inference_optimizer" / "SKILL.md").read_text(
+        inference_skill = (ROOT.parents[1] / "inference_optimizer" / "SKILL.md").read_text(
             encoding="utf-8",
         )
         combined = kernel_skill + "\n" + inference_skill

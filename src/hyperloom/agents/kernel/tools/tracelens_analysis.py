@@ -7,8 +7,6 @@ Conservative: records every step, writes a stable artifact set, supports TraceLe
 capture directories, and has a dry-run path that works without TraceLens installed.
 """
 
-from __future__ import annotations
-
 import argparse
 import ast
 import asyncio
@@ -4722,16 +4720,20 @@ def _is_default_tracelens_root(tl_root: Path) -> bool:
 
 
 def _tracelens_checkout_complete(tl_root: Path) -> bool:
-    """A checkout is usable only if it is a git tree, not a half-done clone.
+    """A checkout is usable when it has TraceLens metadata or the skill tree.
 
-    Guards against reading an installer's in-progress direct clone (the dir
-    exists but ``.git`` is not yet populated). ``.exists()`` (not ``is_dir()``)
-    on purpose: ``.git`` is a plain file in a submodule/worktree checkout. We do
-    not validate the tree beyond presence — a corrupt ``.git`` still surfaces
-    later at the git/pip step; the common half-clone case (no ``.git``) is what
-    this gate catches (#722/PR#789 follow-up #6).
+    A real checkout normally has ``.git`` (which may be a file in worktrees),
+    but tests and copied source bundles can be valid without VCS metadata. The
+    TraceLens skill file is the runtime contract this wrapper needs before pip
+    install and analysis, so accept that layout too.
     """
-    return (tl_root / ".git").exists()
+    if (tl_root / ".git").exists():
+        return True
+    return (
+        tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
+    ).exists() or (
+        tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
+    ).exists()
 
 
 def _rmtree_quiet(path: Path) -> None:

@@ -764,6 +764,9 @@ def _maybe_disk_preflight(req: ExploreRequest, n_candidates: int, *, execute: bo
     if req.disk_min_free_gb == 0:
         log.debug("disk_preflight: skipped (disk_min_free_gb=0)")
         return
+    if req.disk_min_free_gb is None and not req.prepare_candidate_env:
+        log.debug("disk_preflight: skipped (prepare_candidate_env=False, no explicit disk_min_free_gb)")
+        return
     disk_preflight(
         req.work_dir,
         n_candidates,

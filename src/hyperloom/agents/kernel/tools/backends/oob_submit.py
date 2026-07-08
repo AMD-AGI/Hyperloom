@@ -534,8 +534,6 @@ def submit(
         )
     if prefer_ray:
         try:
-            import ray  # noqa: F401
-
             # ensure_ray_cluster starts a fresh head if `ray status` fails (no-op when healthy).
             ensure_ray_cluster(num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
             return run_via_ray(
