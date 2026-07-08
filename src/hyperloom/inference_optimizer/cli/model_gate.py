@@ -1335,13 +1335,14 @@ def _detect_incompatible_model_config(
     # server-less image workloads whose intended input *is* a Diffusers
     # pipeline, so skip that specific check for them (all other config-corrupt /
     # RoPE / AMD-quant checks below still apply).
-    skip_diffusers_check = False
+    is_scriptable_fw = False
     try:
         from .. import framework_registry as _fr
 
-        skip_diffusers_check = _fr.is_scriptable(framework)
+        is_scriptable_fw = _fr.is_scriptable(framework)
     except Exception:  # noqa: BLE001 — registry import must never block the gate
-        skip_diffusers_check = str(framework or "").strip().lower() == "xdit"
+        is_scriptable_fw = str(framework or "").strip().lower() == "xdit"
+    skip_diffusers_check = is_scriptable_fw
     if not skip_diffusers_check:
         pipeline_reason = _detect_diffusers_pipeline_model(model_path)
         if pipeline_reason is not None:
@@ -1424,17 +1425,25 @@ def _detect_incompatible_model_config(
     vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
     if vocab_shape_reason is not None:
         return vocab_shape_reason
-    # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
-    # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
-    tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
-    if tokenizer_reason is not None:
-        return tokenizer_reason
-    mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
-    if mistral_tokenizer_reason is not None:
-        return mistral_tokenizer_reason
-    llama_tokenizer_reason = _detect_llama_sentencepiece_metadata_gap(model_path, data)
-    if llama_tokenizer_reason is not None:
-        return llama_tokenizer_reason
+    # Tokenizer-artifact checks are text-generation-server concerns: sglang/vLLM
+    # load a HF tokenizer and warm it up with a prompt. Scriptable diffusion
+    # frameworks (xDiT) are server-less image workloads that never take this
+    # path — their root config.json legitimately ships no tokenizer files — so
+    # the "missing tokenizer → degraded fallback → aiter M=0 SIGFPE" family is a
+    # false positive for them and is skipped. Serving frameworks (sglang/vllm/
+    # atom) and any unknown/empty framework still run these checks unchanged.
+    if not is_scriptable_fw:
+        # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
+        # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
+        tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
+        if tokenizer_reason is not None:
+            return tokenizer_reason
+        mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
+        if mistral_tokenizer_reason is not None:
+            return mistral_tokenizer_reason
+        llama_tokenizer_reason = _detect_llama_sentencepiece_metadata_gap(model_path, data)
+        if llama_tokenizer_reason is not None:
+            return llama_tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
@@ -1734,6 +1743,23 @@ def _preflight_unsupported_model_arch(
         bool: ``True`` when the model is vision-only (caller should exit),
             ``False`` for plain text or coercible-with-fallback models.
     """
+    # Scriptable diffusion frameworks (xDiT) are server-less image workloads,
+    # not decoder-only causal LMs. Their root config.json legitimately has no
+    # ``architectures``/``model_type`` (those live in per-component subfolders),
+    # so this "must be a text-generation model" gate is a false positive for
+    # them. Skip it for scriptable frameworks; serving frameworks (sglang/vllm/
+    # atom) — and any unknown/empty framework, which falls back to the serving
+    # default — still run the full gate unchanged.
+    framework = getattr(args, "framework", "") or ""
+    try:
+        from . import framework_registry as _fr
+
+        is_scriptable = _fr.is_scriptable(framework)
+    except Exception:  # noqa: BLE001 — registry import must never block the gate
+        is_scriptable = str(framework).strip().lower() == "xdit"
+    if is_scriptable:
+        return False
+
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
     if hit is None:

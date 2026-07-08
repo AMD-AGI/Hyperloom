@@ -173,11 +173,40 @@ def collect_roofline_progress(
         else None
     )
 
+    # Scriptable/diffusion (xDiT) image models have no tok/s decode ceiling; their
+    # roofline lives in the latency domain (ideal per-image compute floor vs the
+    # measured e2e latency). Surface it through DEDICATED ms fields + a
+    # ``ceiling_kind`` discriminator so the list page can render a roofline % for
+    # image models without overloading the tok/s fields (which stay null).
+    ceiling_kind = "throughput" if ceiling_available else "none"
+    latency_ceiling_ms: float | None = None
+    achieved_latency_ms: float | None = None
+    latency_ceiling_available = False
+    pct_of_latency_ceiling: float | None = None
+    if not ceiling_available and latest_snap:
+        ideal_ms = _to_float(latest_snap.get("roofline_ideal_ms"))
+        measured_ms = _to_float(latest_snap.get("e2e_mean_ms"))
+        if ideal_ms is not None and ideal_ms > 0 and measured_ms is not None and measured_ms > 0:
+            latency_ceiling_ms = round(ideal_ms, 4)
+            achieved_latency_ms = round(measured_ms, 4)
+            latency_ceiling_available = True
+            ceiling_kind = "latency"
+            # Latency "closer to the ceiling" means the measured e2e approaches
+            # the ideal floor, so the ratio is ideal/measured (higher = nearer,
+            # mirroring the serving achieved/peak semantics; caps well under 100).
+            pct_of_latency_ceiling = round(ideal_ms / measured_ms * 100.0, 4)
+
     out: dict[str, Any] = {
+        "ceiling_kind": ceiling_kind,
         "ceiling_tok_per_sec": ceiling_tok,
         "target_tok_per_sec": target_tok,
         "ceiling_ratio_target": DEFAULT_ROOFLINE_TARGET_RATIO,
         "ceiling_available": ceiling_available,
+        # Independent latency-domain ceiling for scriptable/diffusion models.
+        "latency_ceiling_ms": latency_ceiling_ms,
+        "achieved_latency_ms": achieved_latency_ms,
+        "latency_ceiling_available": latency_ceiling_available,
+        "current_best_pct_of_latency_ceiling": pct_of_latency_ceiling,
         "trajectory": trajectory,
         "baseline_tput": baseline_tput,
         "current_best_tput": current_best_tput,
@@ -239,6 +268,14 @@ def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
         "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
         "within_roofline_pct": _to_float(snap.get("within_roofline_pct")) or 0.0,
         "gap_to_roofline_pct": _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
+        # Scriptable/diffusion (xDiT) latency-roofline pair — the ms analogue of
+        # the tok/s ceiling. Preserved (was previously dropped) so the progress
+        # collector can surface an independent latency ceiling for image models.
+        "e2e_mean_ms": _to_float(snap.get("e2e_mean_ms")),
+        "roofline_ideal_ms": _to_float(snap.get("roofline_ideal_ms")),
+        "roofline_bound_kind": str(snap.get("roofline_bound_kind") or "unknown"),
+        "roofline_mem_ceiling_tok_per_sec": _to_float(snap.get("roofline_mem_ceiling_tok_per_sec")),
+        "roofline_cmp_ceiling_tok_per_sec": _to_float(snap.get("roofline_cmp_ceiling_tok_per_sec")),
         "compute_pct": _to_float(snap.get("compute_pct")) or 0.0,
         "idle_pct": _to_float(snap.get("idle_pct")) or 0.0,
         "comm_pct": _to_float(snap.get("comm_pct")) or 0.0,

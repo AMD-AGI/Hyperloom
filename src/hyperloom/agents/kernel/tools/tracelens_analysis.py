@@ -5646,6 +5646,49 @@ def write_reports(
                 _num_steps or None,
                 int(getattr(args, "top_k", 10) or 10),
             )
+            # A-priori analytic compute ceiling (approach-a, config/safetensors
+            # derived). Resolve the model dir from --model-path, else the local
+            # dir holding --model-name's config.json. When it resolves, the
+            # workload roofline carries an absolute ideal-ms floor that the
+            # session breakdown surfaces as roofline_ideal_ms (best-effort;
+            # never blocks the sidecar).
+            try:
+                _model_dir = str(getattr(args, "model_path", "") or "").strip()
+                if not _model_dir:
+                    _mn = str(getattr(args, "model_name", "") or "").strip()
+                    if _mn:
+                        for _cfg in _candidate_model_config_paths(_mn):
+                            if Path(_cfg).is_file():
+                                _model_dir = str(Path(_cfg).parent)
+                                break
+                if _model_dir and Path(_model_dir).is_dir():
+                    import diffusion_flops as _dflops  # noqa: WPS433
+
+                    _gpu = str(getattr(args, "target_platform", "") or "mi355x").strip() or "mi355x"
+                    _prec = str(getattr(args, "precision", "") or "bf16").strip() or "bf16"
+                    _h = int(getattr(args, "height", 0) or 0)
+                    _w = int(getattr(args, "width", 0) or 0)
+                    _cfg_batch = int(getattr(args, "cfg_batch", 0) or 0)
+                    _est = _dflops.analytic_ceiling(
+                        _model_dir,
+                        gpu_type=_gpu,
+                        precision=_prec,
+                        height=_h or 1024,
+                        width=_w or 1024,
+                        num_steps=_num_steps or None,
+                        cfg_batch=_cfg_batch or None,
+                    )
+                    if _est:
+                        _diff_report["analytic_ceiling"] = _est
+                        _actual_us = float(
+                            _diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0
+                        )
+                        if _est.get("ideal_ms") and _actual_us > 0:
+                            _diff_report["analytic_within_pct"] = round(
+                                _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
+                            )
+            except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
+                _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
             out = run_dir / "diffusion_roofline.json"
             atomic_write_json(out, _diff_report)
             diffusion_roofline_path = str(out)
@@ -5772,6 +5815,40 @@ def main() -> int:
             "diffusion only). Enables per-denoise-step timings in the workload "
             "roofline sidecar. Env: HYPERLOOM_NUM_DENOISE_STEPS."
         ),
+    )
+    parser.add_argument(
+        "--model-path",
+        default=os.environ.get("MODEL_PATH", ""),
+        help=(
+            "Local diffusers model directory (scriptable/xDiT diffusion only). "
+            "When set, an a-priori analytic compute ceiling (approach-a, "
+            "config/safetensors-derived) is written to the diffusion roofline "
+            "sidecar so the workload roofline reports an absolute ideal ms. "
+            "Falls back to resolving --model-name; env: MODEL_PATH."
+        ),
+    )
+    parser.add_argument(
+        "--precision",
+        default="",
+        help="Diffusion analytic-ceiling precision (bf16/fp8/fp16); default bf16.",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=0,
+        help="Diffusion image height for the analytic ceiling (0 = estimator default).",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=0,
+        help="Diffusion image width for the analytic ceiling (0 = estimator default).",
+    )
+    parser.add_argument(
+        "--cfg-batch",
+        type=int,
+        default=0,
+        help="Forwards per denoise step for the analytic ceiling (0 = family default).",
     )
     parser.add_argument(
         "--roofline-output-name",

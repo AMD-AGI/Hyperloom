@@ -137,6 +137,36 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
     assert "tokenizer" in reason.lower()
 
 
+def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
+    """xDiT (scriptable) is a server-less image workload that never loads a HF
+    tokenizer, so a missing-tokenizer config.json must NOT block it."""
+    m = tmp_path / "xdit_no_tok"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="qwen2",
+        max_position_embeddings=32768,
+    )
+    assert (
+        cli._detect_incompatible_model_config(str(m), framework="xdit") is None
+    )
+
+
+def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
+    """Regression guard: the skip is scoped to scriptable — an explicit serving
+    framework (sglang) must still block a missing-tokenizer checkpoint."""
+    m = tmp_path / "sglang_no_tok"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="qwen2",
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m), framework="sglang")
+    assert reason is not None
+    assert "tokenizer" in reason.lower()
+
+
 def test_detect_with_tokenizer_ok(tmp_path):
     m = tmp_path / "with_tok"
     _write_config(
