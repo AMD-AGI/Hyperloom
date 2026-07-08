@@ -87,6 +87,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         md_kv_list(
             [
                 ("throughput_tok_s_per_gpu", tput),
+                ("throughput_unit", b.get("throughput_unit") or None),
                 ("accuracy", acc),
                 ("ttft_mean_ms", ttft_display),
                 ("e2el_mean_ms", e2el),
