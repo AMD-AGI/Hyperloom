@@ -6,7 +6,7 @@ myst:
 ---
 # Hyperloom optimization loop
 
-This document describes the current Hyperloom optimizer loop from the
+This topic describes the current Hyperloom optimizer loop from the
 runtime contracts outward. It intentionally avoids retired action names
 and old DFS demo mechanics; the live action catalogue, phase allowlist,
 PolicyGate, and session artifacts are the source of truth.

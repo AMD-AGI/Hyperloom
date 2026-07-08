@@ -6,7 +6,7 @@ myst:
 ---
 # Run a Hyperloom optimization
 
-This guide assumes you have already completed installation. If you haven't:
+This topic assumes you have already completed installation. If you haven't:
 
 - **Hosted UI** — see [Quickstart — hosted UI](../install/quickstart.md). No
   local setup needed; launch directly from the browser.
