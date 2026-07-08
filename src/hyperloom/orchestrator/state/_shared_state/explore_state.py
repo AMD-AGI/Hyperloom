@@ -38,23 +38,17 @@ Fields::
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 
+log = logging.getLogger(__name__)
 
-from ..shared_state import (
-    _GAPS_ATTEMPTS_HISTORY,
-    _GAPS_MAX_ENTRIES,
-    _INTERVENTION_MIX_CAP,
-    _SEEN_PR_IDS_CAP,
-    _SPECIALIST_ROUNDS_CAP,
-    _WINNERS_HISTORY_CAP,
-    _cap_tested_ledger,
-    _now_iso,
-    _stamp_cycle_on_rejected,
-    _stamp_cycle_on_tested,
-    log,
-)
+def _shared_state_module():
+    """Import parent shared_state lazily to avoid a module-level cycle."""
+    from .. import shared_state
+
+    return shared_state
 
 
 class _ExploreStateMixin:
@@ -95,8 +89,9 @@ class _ExploreStateMixin:
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
-        if len(self.specialist_rounds) > _SPECIALIST_ROUNDS_CAP:
-            self.specialist_rounds = self.specialist_rounds[-_SPECIALIST_ROUNDS_CAP:]
+        cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
+        if len(self.specialist_rounds) > cap:
+            self.specialist_rounds = self.specialist_rounds[-cap:]
 
     def bump_specialist_domain_empty_streak(
         self,
@@ -280,7 +275,8 @@ class _ExploreStateMixin:
         cid = str(entry.get("canonical_id") or "").strip()
         if not cid:
             return {}
-        now = _now_iso()
+        ss = _shared_state_module()
+        now = ss._now_iso()
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
@@ -296,8 +292,8 @@ class _ExploreStateMixin:
                 "last_updated_ts": now,
                 "attempts": list(entry.get("attempts") or []),
             }
-            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
+            if len(merged["attempts"]) > ss._GAPS_ATTEMPTS_HISTORY:
+                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts`` (preserve oldest).
@@ -311,12 +307,12 @@ class _ExploreStateMixin:
             if incoming_attempts:
                 merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
                 # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
+                if len(merged_attempts) > ss._GAPS_ATTEMPTS_HISTORY:
+                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
                 existing["attempts"] = merged_attempts
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
-        if len(self.gaps) > _GAPS_MAX_ENTRIES:
+        if len(self.gaps) > ss._GAPS_MAX_ENTRIES:
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
@@ -332,7 +328,7 @@ class _ExploreStateMixin:
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
-            keep_count = _GAPS_MAX_ENTRIES - 1
+            keep_count = ss._GAPS_MAX_ENTRIES - 1
             others = others[-keep_count:] if keep_count > 0 else []
             self.gaps = others + [merged]
         return merged
@@ -357,11 +353,12 @@ class _ExploreStateMixin:
         if gap is None:
             return None
         attempts = list(gap.get("attempts") or [])
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or _now_iso())})
-        if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
-            attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
+        ss = _shared_state_module()
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
+        if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
+            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
         gap["attempts"] = attempts
-        gap["last_updated_ts"] = _now_iso()
+        gap["last_updated_ts"] = ss._now_iso()
         return gap
 
     def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
@@ -390,12 +387,14 @@ class _ExploreStateMixin:
         for cid in order:
             row = dedup[cid]
             attempts = list(row.get("attempts") or [])
-            if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
-                attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
+            ss = _shared_state_module()
+            if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
+                attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
             row["attempts"] = attempts
             new_list.append(row)
-        if len(new_list) > _GAPS_MAX_ENTRIES:
-            new_list = new_list[-_GAPS_MAX_ENTRIES:]
+        ss = _shared_state_module()
+        if len(new_list) > ss._GAPS_MAX_ENTRIES:
+            new_list = new_list[-ss._GAPS_MAX_ENTRIES:]
         self.gaps = new_list
 
     def record_intervention(
@@ -422,11 +421,12 @@ class _ExploreStateMixin:
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             "delta_pct": delta_pct,
-            "ts": _now_iso(),
+            "ts": _shared_state_module()._now_iso(),
         }
         self.intervention_mix.append(entry)
-        if len(self.intervention_mix) > _INTERVENTION_MIX_CAP:
-            self.intervention_mix = self.intervention_mix[-_INTERVENTION_MIX_CAP:]
+        cap = _shared_state_module()._INTERVENTION_MIX_CAP
+        if len(self.intervention_mix) > cap:
+            self.intervention_mix = self.intervention_mix[-cap:]
         if ct == "config":
             self.consecutive_config_only_rounds = int(self.consecutive_config_only_rounds or 0) + 1
         elif ct == "code_patch":
@@ -531,9 +531,10 @@ class _ExploreStateMixin:
             seen.add(pid)
             self.research_scout_seen_pr_ids.append(pid)
             added += 1
-        if len(self.research_scout_seen_pr_ids) > _SEEN_PR_IDS_CAP:
+        cap = _shared_state_module()._SEEN_PR_IDS_CAP
+        if len(self.research_scout_seen_pr_ids) > cap:
             # FIFO eviction of oldest-seen ids; re-surfacing a very old PR is low-harm.
-            self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-_SEEN_PR_IDS_CAP:]
+            self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
         return added
 
     def has_seen_pr_id(self, pr_id: Any) -> bool:
@@ -631,14 +632,15 @@ class _ExploreStateMixin:
         merged["schema_version"] = int(update.get("schema_version") or 1)
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
         cur_bottleneck = self.current_top_bottleneck()
-        merged["tested"] = _cap_tested_ledger(
-            _stamp_cycle_on_tested(
+        ss = _shared_state_module()
+        merged["tested"] = ss._cap_tested_ledger(
+            ss._stamp_cycle_on_tested(
                 dict(update.get("tested") or prior.get("tested") or {}),
                 cur_cycle,
                 cur_bottleneck,
             )
         )
-        merged["rejected"] = _stamp_cycle_on_rejected(
+        merged["rejected"] = ss._stamp_cycle_on_rejected(
             list(update.get("rejected") or prior.get("rejected") or []),
             cur_cycle,
             cur_bottleneck,
@@ -651,7 +653,7 @@ class _ExploreStateMixin:
         for entry in update.get("winners_history") or []:
             if isinstance(entry, dict):
                 wh.append(dict(entry))
-        merged["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
+        merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP:]
         sa: set[tuple[str, ...]] = set()
         for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):
             for c in src or []:
@@ -698,7 +700,7 @@ class _ExploreStateMixin:
             "gain_pct": variant.get("gain_pct"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-            "ts": str(variant.get("ts") or _now_iso()),
+            "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
             # R3: attribute the win to the macro-cycle it landed in.
             "cycle": int(getattr(self, "macro_cycle", 0) or 0),
@@ -732,7 +734,7 @@ class _ExploreStateMixin:
                 "cycle": entry["cycle"],
             }
         )
-        search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
+        search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
     # search-space expansion bookkeeping
@@ -763,6 +765,6 @@ class _ExploreStateMixin:
             entry["param_flags"] = sorted(set(str(f) for f in param_flags))
         if source_path:
             entry["source_path"] = str(source_path)
-        entry["ts"] = _now_iso()
+        entry["ts"] = _shared_state_module()._now_iso()
         self.discovered_flags[fw] = entry
 

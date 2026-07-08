@@ -60,8 +60,6 @@ async def test_sink_creates_subdirectories_when_missing(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_sink_is_resilient_to_io_errors(tmp_path: Path, caplog):
-    cfg = FindingSinkConfig(session_dir=tmp_path / "non-existent-mount")
-    sink = FindingSink(cfg)
     # Block creation by pre-creating a file where the parent dir would go
     blocker = tmp_path / "blocked"
     blocker.write_text("dummy")

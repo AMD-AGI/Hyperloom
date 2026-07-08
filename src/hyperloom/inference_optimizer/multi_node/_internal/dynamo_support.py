@@ -17,7 +17,6 @@ DYNAMO_FRONTEND_PORT = 8000
 
 # Substrings that mark a pod as the Dynamo worker (LWS) role vs the frontend.
 _WORKER_PODID_HINTS = ("worker", "-lws-", "lws-")
-_FRONTEND_PODID_HINTS = ("frontend",)
 
 
 def _service_roles_for(pd_mode: str) -> list[str]:

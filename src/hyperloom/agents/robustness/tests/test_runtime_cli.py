@@ -297,7 +297,7 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
         bundle = real_build(config, rca=rca, session_id=session_id)
         # Replace the rca engine with a stub that reports usage once.
         class _StubRca:
-            def drain_usage(self_inner):
+            def drain_usage(self):
                 return usage
         bundle.components.rca = _StubRca()
         return bundle

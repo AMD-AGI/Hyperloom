@@ -525,8 +525,8 @@ def _focus_static_recon_specialist(
     if inp.static_recon_checklist:
         checklist_lines = [
             "**Seed checklist (known un-bridged switches for this "
-            "(model, GPU, precision)) — verify each against the LIVE source; "
-            "do not assume it still applies:**",
+            + "(model, GPU, precision)) — verify each against the LIVE source; "
+            + "do not assume it still applies:**",
             inp.static_recon_checklist,
             "",
         ]
@@ -548,11 +548,11 @@ def _focus_static_recon_specialist(
             if has_shared:
                 shared_expert_advisory = [
                     "**Shared-expert fusion advisory**: this model has always-on shared "
-                    "experts. Confirm whether the shared expert still runs as a separate "
-                    "dense MLP per layer. If yes, investigate folding it into the routed "
-                    "grouped-GEMM path as an always-selected extra expert slot (code-path "
-                    "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
-                    "is unsupported until the expert-map behaviour is explicitly handled.",
+                    + "experts. Confirm whether the shared expert still runs as a separate "
+                    + "dense MLP per layer. If yes, investigate folding it into the routed "
+                    + "grouped-GEMM path as an always-selected extra expert slot (code-path "
+                    + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
+                    + "is unsupported until the expert-map behaviour is explicitly handled.",
                     "",
                 ]
         except Exception:  # noqa: BLE001 — advisory rendering only
@@ -812,11 +812,11 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "it is yours.",
         "",
         "Fan-out: to parallelize independent single-shot sub-tasks (e.g. bench "
-        "N candidates of one lever at once, or read several subsystems), you "
-        "MAY ``Task(subagent_type=\"hyperloom-leaf\")``. Leaves are single-turn, "
-        "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
-        "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
-        "multi-round depth (e.g. coordinate-descent autotune) yourself.",
+        + "N candidates of one lever at once, or read several subsystems), you "
+        + "MAY ``Task(subagent_type=\"hyperloom-leaf\")``. Leaves are single-turn, "
+        + "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
+        + "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
+        + "multi-round depth (e.g. coordinate-descent autotune) yourself.",
     ]
     # Per-domain expertise + focus blocks.
     rendered_focus_keys: set[str] = set()
@@ -898,39 +898,39 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "### On-GPU autonomy (your leased cards)",
         "",
         f"You exclusively own GPU card(s) [{cards}] for this task. On those "
-        "cards you are free to do whatever converges on a benched win:",
+        + "cards you are free to do whatever converges on a benched win:",
         "- For kernel/config autotune, search the installed framework/source "
-        "first for maintained benchmark/tuning entrypoints, config lookup "
-        "paths, and nearby config families; prefer those.",
+        + "first for maintained benchmark/tuning entrypoints, config lookup "
+        + "paths, and nearby config families; prefer those.",
         "- If the built-in path is missing or incomplete, write a small "
-        "source-derived harness around the framework primitive/config override "
-        "API. Use warmups, true-default/current/candidate baselines, "
-        "median/min-of-reps, and an accuracy guard.",
+        + "source-derived harness around the framework primitive/config override "
+        + "API. Use warmups, true-default/current/candidate baselines, "
+        + "median/min-of-reps, and an accuracy guard.",
         "- Write and run arbitrary scripts — autotune harnesses, "
-        "microbenchmarks, profilers (rocprof / torch.profiler / your own "
-        "breakdown).",
+        + "microbenchmarks, profilers (rocprof / torch.profiler / your own "
+        + "breakdown).",
         "- Start / restart a real server on your own cards (any port that is "
-        "NOT the production serving port 8888) and benchmark it however you "
-        "see fit.",
+        + "NOT the production serving port 8888) and benchmark it however you "
+        + "see fit.",
         "- Profile freely to get a fresh trace after a change — don't rely only "
-        "on the static roofline snapshot you were handed.",
+        + "on the static roofline snapshot you were handed.",
         "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
-        "Triton config JSONs) — a missing/untuned config is often the single "
-        "biggest lever.",
+        + "Triton config JSONs) — a missing/untuned config is often the single "
+        + "biggest lever.",
         "- Self-check accuracy (advisory ``max_abs_err`` / gsm8k) when you want "
-        "to — the Coordinator gate stays authoritative, so this is guidance, "
-        "not a requirement.",
+        + "to — the Coordinator gate stays authoritative, so this is guidance, "
+        + "not a requirement.",
         "",
         "Optional helper: a ``rebench`` convenience reuses the real Magpie "
-        "serving + benchmark path on your leased cards + a non-8888 port, so "
-        "you can get numbers directly comparable to the ``integrate_patch`` "
-        "gate in one call:",
+        + "serving + benchmark path on your leased cards + a non-8888 port, so "
+        + "you can get numbers directly comparable to the ``integrate_patch`` "
+        + "gate in one call:",
         "    python -m hyperloom.orchestrator.specialists.rebench \\",
         "        --config <magpie.yaml> --output ./scratch/rebench "
-        "[--extra-args '<server args>']",
+        + "[--extra-args '<server args>']",
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
-        "— you may instead write your own bench/autotune script. Throughput "
-        "does NOT have to come from rebench.",
+        + "— you may instead write your own bench/autotune script. Throughput "
+        + "does NOT have to come from rebench.",
     ]
 
 
@@ -1087,13 +1087,13 @@ def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
     rows.extend(
         [
             "- The Coordinator hard-kills your subprocess when this budget is "
-            "exhausted — turns are NOT the stop signal. Scope your work to "
-            "reach a deliverable conclusion inside the budget.",
+            + "exhausted — turns are NOT the stop signal. Scope your work to "
+            + "reach a deliverable conclusion inside the budget.",
             "- Self-throttle: check elapsed wall-clock with Bash "
-            "(``date -u +%s`` vs the start above), keep your "
-            "``specialist_done.partial.json`` checkpoint current, and write "
-            "the final ``specialist_done.json`` before the budget runs out so "
-            "your best work is never lost to a kill.",
+            + "(``date -u +%s`` vs the start above), keep your "
+            + "``specialist_done.partial.json`` checkpoint current, and write "
+            + "the final ``specialist_done.json`` before the budget runs out so "
+            + "your best work is never lost to a kill.",
         ]
     )
     return rows

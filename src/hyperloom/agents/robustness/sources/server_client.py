@@ -13,7 +13,6 @@ session" rather than an upstream outage.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,9 +20,6 @@ import httpx
 
 from .base import SourceData, SourceUnavailable
 from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
-
-
-log = logging.getLogger(__name__)
 
 
 @dataclass

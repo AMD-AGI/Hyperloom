@@ -294,38 +294,53 @@ def _needs_inplace(kernel_repo: str) -> bool:
     return False
 
 
-def _acquire_repo_lock(repo: str) -> int | None:
+class _RepoLock:
+    """Owned in-place repo lock; released explicitly after restore."""
+
+    def __init__(self, fh) -> None:
+        self._fh = fh
+
+    @property
+    def fd(self) -> int:
+        return self._fh.fileno()
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+def _acquire_repo_lock(repo: str) -> _RepoLock | None:
     """Take a non-blocking exclusive lock on the live repo for in-place editing.
 
     In-place mode mutates + ``reset --hard`` the shared live repo, so two
     concurrent forge sessions on the same repo would race (branch steal,
     cross-contaminated measurements). The lock serializes them; a caller that
     cannot get it must skip in-place (fall through to the next backend). Returns
-    the held fd (release with _release_repo_lock) or None when already held.
+    the held lock (release with _release_repo_lock) or None when already held.
     """
+    lock_path = os.path.join(repo, ".git", "forge_inplace.lock")
     try:
-        fd = os.open(os.path.join(repo, ".git", "forge_inplace.lock"),
-                     os.O_CREAT | os.O_RDWR, 0o600)
+        fh = open(lock_path, "a+", encoding="utf-8")
+        os.chmod(lock_path, 0o600)
     except OSError:
         return None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        os.close(fd)
+        fh.close()
         return None
-    return fd
+    return _RepoLock(fh)
 
 
-def _release_repo_lock(fd: int | None) -> None:
+def _release_repo_lock(lock: _RepoLock | None) -> None:
     """Release + close the in-place repo lock (best-effort)."""
-    if fd is None:
+    if lock is None:
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        fcntl.flock(lock.fd, fcntl.LOCK_UN)
     except OSError:
         pass
     try:
-        os.close(fd)
+        lock.close()
     except OSError:
         pass
 

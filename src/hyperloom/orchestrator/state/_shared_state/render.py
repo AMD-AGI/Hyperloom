@@ -44,10 +44,11 @@ from typing import Any
 
 
 
-from ..shared_state import (
-    _AUDIT_ACTIONS,
-    render_model_arch_compact,
-)
+def _shared_state_module():
+    """Import parent shared_state lazily to avoid a module-level cycle."""
+    from .. import shared_state
+
+    return shared_state
 
 
 class _RenderMixin:
@@ -502,7 +503,7 @@ class _RenderMixin:
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
         ]
         # Advisory architecture profile; prompt-context only (TraceLens analysis_md is ground truth). Omitted when no profile.
-        _arch_line = render_model_arch_compact(self.model_arch)
+        _arch_line = _shared_state_module().render_model_arch_compact(self.model_arch)
         if _arch_line:
             lines.append(f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}")
         lines += [
@@ -590,7 +591,7 @@ class _RenderMixin:
                 when no attempts exist.
         """
         parts: list[str] = []
-        for action in sorted(_AUDIT_ACTIONS):
+        for action in sorted(_shared_state_module()._AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
             history = getattr(self, attempts_attr, None) or []
             if not history:

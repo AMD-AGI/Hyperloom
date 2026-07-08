@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import signal
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,7 +143,6 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
 
 
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
     import hyperloom.orchestrator.trace.langfuse_emitter as emitter
@@ -152,7 +150,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -167,7 +165,11 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
 
     calls: list[str] = []
     monkeypatch.setattr(recover, "_session_recovery_status", lambda _s: {"looks_complete": False, "close_done": False, "breakdown_exists": False, "breakdown_recorded": False, "counts_final": False})
-    monkeypatch.setattr(breakdown_mod, "write_breakdown_json", lambda s: calls.append("write") or s / BREAKDOWN_FILENAME)
+    monkeypatch.setattr(
+        breakdown_mod,
+        "write_breakdown_json",
+        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+    )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(breakdown_mod, "package_session_artifacts", lambda s: calls.append("package") or s / "bundle.zip")
     monkeypatch.setattr(emitter, "flush_session", lambda s: calls.append("flush"))

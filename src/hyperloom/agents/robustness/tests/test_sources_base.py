@@ -132,7 +132,7 @@ async def test_router_degrades_after_three_failures(caplog):
 
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
-            snap = await router.collect(ctx=None)
+            _ = await router.collect(ctx=None)
         # After 3rd failure primary is DEGRADED. Subsequent tick skips primary
         # because clock has not advanced past recheck interval.
         snap_post = await router.collect(ctx=None)

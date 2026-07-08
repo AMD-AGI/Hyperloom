@@ -191,7 +191,7 @@ def _resolve_pd_args(
         raise ServerRestartFailed(
             f"pd_mode=disaggregated requires pd_prefill_nodes>0 and pd_decode_nodes>0; got pn={pn} dn={dn}"
         )
-    if state_nodes > 0 and pn + dn != state_nodes:
+    if pn + dn != state_nodes:
         raise ServerRestartFailed(
             f"pd_prefill_nodes ({pn}) + pd_decode_nodes ({dn}) must equal total nodes ({state_nodes})"
         )

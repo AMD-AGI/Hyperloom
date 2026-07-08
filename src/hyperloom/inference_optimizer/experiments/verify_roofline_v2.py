@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.experiments._roofline_audit_common import (
-    ANALYSIS_MD_KEYWORDS,
     cache_hit_rate,
     count_analysis_md_references,
     extract_proposed_flags,
