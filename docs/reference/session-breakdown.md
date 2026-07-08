@@ -6,6 +6,15 @@ myst:
 ---
 # `session_breakdown.json` integration in Hyperloom
 
+```{note}
+This page is for **integrators and downstream consumers** — teams building
+dashboards, reporting pipelines, or services (such as `claw-stats-service`)
+that read Hyperloom session output programmatically. If you just ran an
+optimization and want to check your results, read the three headline fields
+described in [Run a Hyperloom optimization](../how-to/optimize.md#output-and-artifacts)
+first.
+```
+
 `session_breakdown.json` is the single external contract between
 the `inference_optimizer` runtime (producer) and any downstream
 consumer (`claw-stats-service`, results service, notebooks, custom
@@ -203,7 +212,7 @@ One card per live capability (`geak`, `oob`, `explore`, `sweep`,
 `specialist`) with: `status`, `attempts`, `keeps`, `tested`,
 `best_gain_pct`, `reason`. Legacy `backends`, `params`, and
 `validate_stack` rows can appear when archived sessions are rebuilt.
-Drives the per-session UI cards in PrimusClaw.
+Drives the per-session UI cards in Primus-Claw.
 
 ---
 

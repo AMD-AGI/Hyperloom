@@ -18,7 +18,6 @@ Within Hyperloom, IntelliKit is not called directly. It sits underneath
 profiling primitives. Hyperloom therefore depends on IntelliKit transitively,
 through Magpie.
 
-- **Documentation**: <https://advanced-micro-devices-demo--131.com.readthedocs.build/projects/intellikit/en/131/index.html>
 - **Source**: <https://github.com/AMDResearch/intellikit>
 - **License**: MIT
 

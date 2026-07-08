@@ -23,35 +23,20 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
   .. grid-item-card:: Components
 
-    * :doc:`IntelliKit </components/intellikit>`
-    * :doc:`Magpie </components/magpie>`
-    * :doc:`TraceLens </components/tracelens>`
-    * :doc:`GEAK </components/geak>`
-    * :doc:`AgentKernelArena </components/agentkernelarena>`
+    * :doc:`Components </components/index>`
 
   .. grid-item-card:: How to
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
 
-
   .. grid-item-card:: Conceptual
 
     * :doc:`Hyperloom optimization loop <conceptual/optimization-loop>`
   
-  .. grid-item-card:: Examples
-
-    * :doc:`Case Study — DeepSeek-R1 </examples/deepseek-case-study>`
-    * :doc:`Case Study — GLM-5 </examples/glm5-case-study>`
-
   .. grid-item-card:: Reference
 
     * :doc:`API reference </reference/api-reference>`
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
-    * :doc:`Integrate a knowledge base </reference/integrate-kb>`
-    * :doc:`Upgrade Hyperloom version </reference/upgrade>`
-    * :doc:`Session breakdown integration </reference/session-breakdown>`
-    * :doc:`Self-hosting and operations </reference/operations>`
-    * :doc:`Operator scripts </reference/operator-scripts>`
     * :doc:`Troubleshooting <troubleshooting>`  
 

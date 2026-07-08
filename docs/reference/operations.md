@@ -12,7 +12,7 @@ disaster-recovery runbook.
 
 ```{note}
 This topic is intended for Site reliability and platform engineers self-hosting
-Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a managed platform as a service (PaaS)). For the hosted PrimusClaw experience ([core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/)) AMD owns operations; this document does not apply.
+Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a managed platform as a service (PaaS)). For the hosted [Primus-Claw experience](https://crusoe.primus-safe.amd.com/hyperloom/) AMD owns operations; this document does not apply.
 ```
 
 For application-level configuration see
@@ -101,8 +101,8 @@ Notes:
 
 * Ray workers are launched as child processes of the kernel-agent,
   not as separate pods. Hyperloom does not require Ray's Kubernetes
-  operator. (Hosted PrimusClaw deployments do use RayJob for multi-node
-  scale-out; that is internal to the PrimusClaw control plane.)
+  operator. (Hosted Primus-Claw deployments do use RayJob for multi-node
+  scale-out; that is internal to the Primus-Claw control plane.)
 * Pin the pod to a single node with `nodeSelector` matching your AMD
   GPU labels; Ray currently expects all GPUs visible to the head.
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network

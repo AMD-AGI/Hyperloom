@@ -68,7 +68,7 @@ Recommended locations:
 |-------|----------------|
 | Single-user pod | `$USER_DATA_PATH/kb` |
 | Shared persistent mount | `/wekafs/hyperloom/kb` |
-| Hosted PrimusClaw sandbox | Platform-managed; don't override unless instructed. |
+| Hosted Primus-Claw sandbox | Platform-managed; don't override unless instructed. |
 
 ---
 
@@ -130,14 +130,4 @@ Yes. Back up the directory selected by `--local-kb-root` or
 No. First-run correctness is unaffected. You might see less reuse of historical
 optimization knowledge until the local store accumulates data.
 
----
 
-## Related guides
-
-Use these resources for related configuration and reference information:
-
-* [Hyperloom authentication and credentials](authentication.md) — Credentials and path env.
-* [Environment variables](environment-variables.md) — All environment
-  variables, including the KB-related ones.
-* [Hyperloom optimization loop](../conceptual/optimization-loop.md) —
-  How warm-start context participates in the optimization loop.

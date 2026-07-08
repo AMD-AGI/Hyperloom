@@ -26,7 +26,7 @@ These variables configure LLM gateway access and optional backend credentials.
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `SAFE_API_KEY`         | Yes      | —       | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
-| `OPENAI_BASE_URL`      | Yes      | —       | LLM gateway URL. Production: `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
+| `OPENAI_BASE_URL`      | Yes      | —       | LLM gateway URL. Production: `https://crusoe.primus-safe.amd.com/hyperloom/`.                                                                                                                  |
 | `CURSOR_API_KEY`       | No       | Unset   | Cursor software development kit (SDK) key (prefix `crsr_...`) for the out-of-box (OOB) `cursor` kernel-opt backend. Never inherited from `SAFE_API_KEY`. When unset, Hyperloom auto-drops `cursor` from the default kernel-opt ladder.       |
 | `CURSOR_`<br>`DEFAULT`<br>`_MODEL` | No       | `claude-`<br>`opus-4-7` | Override the default Cursor model id.                                                                                                                                                          |
 | `CLAUDE_MODEL`         | No       | `claude-`<br>`opus-4-7` | Claude model ID for OOB Claude attempts.                                                                                                                                                       |
@@ -156,8 +156,8 @@ populate `session_breakdown.json` for downstream consumers
 
 | Variable          | Description                                                                                |
 |-------------------|--------------------------------------------------------------------------------------------|
-| `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the PrimusClaw sandbox; unset for local runs. |
-| `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
+| `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the Primus-Claw sandbox; unset for local runs. |
+| `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by Primus-Claw; unset for local runs.                                            |
 | `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. See details below. |
 
 **`HYPERLOOM_LANGFUSE_ENABLE`** details:
@@ -167,7 +167,7 @@ Master switch (default **off**) for live Langfuse trace push.
 - **SDK install**: when this flag is on, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, oob, robustness, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
-- **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session.
+- **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
@@ -259,5 +259,4 @@ detail rather than something you should tune.
 Use these resources for related configuration and reference information:
 
 * [Hyperloom authentication and credentials](authentication.md) — Credential precedence and the auth-proxy in detail.
-* [Integrate Recipe/Cortex knowledge base in Hyperloom](../reference/integrate-kb.md) — Local recipe KB and optional Cortex KB setup.
 * [Troubleshooting Hyperloom](../troubleshooting.md) — Symptom → variable reverse-lookup for common failures.

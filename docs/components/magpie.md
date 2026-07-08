@@ -17,7 +17,6 @@ collect traces, and emit a structured `benchmark_report.json`; those traces are
 the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on
 [IntelliKit](intellikit.md) for some low-level GPU profiling tools.
 
-- **Documentation**: <https://advanced-micro-devices-demo--50.com.readthedocs.build/projects/magpie/en/50/>
 - **Source**: <https://github.com/AMD-AGI/Magpie>
 - **License**: MIT
 

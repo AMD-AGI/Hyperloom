@@ -20,7 +20,19 @@ subtrees:
 - caption: Components
   entries:
   - file: components/index.md
-    title: Overview
+    title: Components
+    subtrees:
+    - entries:
+      - url: https://advanced-micro-devices-demo--131.com.readthedocs.build/projects/intellikit/en/131/index.html
+        title: IntelliKit
+      - url: https://advanced-micro-devices-demo--50.com.readthedocs.build/projects/magpie/en/50/
+        title: Magpie
+      - url: https://advanced-micro-devices-tracelens--772.com.readthedocs.build/en/772/
+        title: TraceLens
+      - url: https://advanced-micro-devices-demo--311.com.readthedocs.build/projects/geak/en/311/
+        title: GEAK
+      - url: https://advanced-micro-devices-agentkernelarena--55.com.readthedocs.build/en/55/
+        title: AgentKernelArena
 
 - caption: How to
   entries:
@@ -32,13 +44,6 @@ subtrees:
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
 
-- caption: Examples
-  entries:
-  - file: examples/deepseek-case-study.md
-    title: Case Study — DeepSeek-R1
-  - file: examples/glm5-case-study.md
-    title: Case Study — GLM-5
-
 - caption: Reference
   entries:
   - file: reference/api-reference.rst
@@ -47,16 +52,6 @@ subtrees:
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
-  - file: reference/integrate-kb.md
-    title: Integrate a knowledge base
-  - file: reference/upgrade.md
-    title: Upgrade Hyperloom version
-  - file: reference/session-breakdown.md
-    title: session_breakdown.json integration
-  - file: reference/operations.md
-    title: Self-hosting and operations
-  - file: reference/operator-scripts.md
-    title: Operator scripts
   - file: troubleshooting.md
     title: Troubleshooting
 

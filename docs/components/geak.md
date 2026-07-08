@@ -19,7 +19,6 @@ kernel-optimization path that uses Claude Code or OpenAI Codex). The kernel agen
 dispatches GEAK runs through Ray so multiple candidates can be explored in
 parallel on the cluster's GPUs.
 
-- **Documentation**: <https://advanced-micro-devices-demo--311.com.readthedocs.build/projects/geak/en/311/>
 - **Source**: <https://github.com/AMD-AGI/GEAK>
 - **License**: MIT
 

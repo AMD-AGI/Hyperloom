@@ -17,7 +17,6 @@ compare Hyperloom's kernel-optimization agents against other AI coding agents
 under identical, reproducible conditions. It is also used to validate that
 kernel tasks are correct and self-contained before they enter the leaderboard.
 
-- **Documentation**: <https://advanced-micro-devices-agentkernelarena--55.com.readthedocs.build/en/55/>
 - **Source**: <https://github.com/AMD-AGI/AgentKernelArena>
 - **License**: MIT
 

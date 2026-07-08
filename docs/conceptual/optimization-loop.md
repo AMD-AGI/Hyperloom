@@ -212,4 +212,4 @@ For a finished or interrupted session, start with:
 For reports and dashboards, `session_breakdown.json` is the external
 contract. Its producer code lives under `inference_optimizer/breakdown/`,
 and its consumer-facing shape is documented in
-[`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
+[`session_breakdown.json` integration in Hyperloom](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/session-breakdown.md).

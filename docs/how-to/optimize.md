@@ -1,66 +1,30 @@
 ---
 myst:
     html_meta:
-        "description": "Step-by-step guide to running a Hyperloom optimization. Covers the hosted UI and Local Mode with Cursor, from bootstrapping to monitoring and resuming runs."
-        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Local Mode, Cursor, PrimusClaw, GEAK, TraceLens, Magpie, Ray, session, throughput"
+        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Cursor, monitoring, resuming, and reading output artifacts."
+        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Local Mode, Cursor, GEAK, TraceLens, session, throughput"
 ---
 # Run a Hyperloom optimization
 
-This guide walks through a complete optimization run, end to end. It assumes you
-have already followed [Install Hyperloom](../install/hyperloom-installation.md) and have your API key.
+This guide assumes you have already completed installation. If you haven't:
 
-There are two ways to run Hyperloom: the hosted UI (no local setup) and
-Local Mode (driven from Cursor against a remote AMD GPU).
+- **Hosted UI** — see [Quickstart — hosted UI](../install/quickstart.md). No
+  local setup needed; launch directly from the browser.
+- **Local Mode or bare-metal** — see [Install Hyperloom](../install/hyperloom-installation.md)
+  first, then return here to launch your first run.
 
-## Option A — Hosted UI (PrimusClaw)
+## Launch from Cursor (Local Mode)
 
-1. Open [core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/).
-2. Select **Claw Agent** or **Get Started** to enter PrimusClaw.
-3. Pick the tab that matches your task:
-   - **Hyperloom** — end-to-end model performance optimization.
-   - **TraceLens-only** — performance and gap analysis and bridge planning.
-   - **GEAK-only** — kernel optimization.
-4. Provide your workload and launch. Jobs run in isolated sandboxes; multi-node
-   workloads fan out using RayJob.
+Open the workspace printed by `local_setup.sh` in Cursor, then paste the
+following prompt into Cursor Chat, filling in your workload details:
 
-## Option B — Local Mode (Cursor)
-
-Complete these steps to run Hyperloom in Local Mode.
-
-### 1. Bootstrap dependency checkouts
-
-In your prepared GPU environment (see [Install Hyperloom](../install/hyperloom-installation.md)):
-
-```bash
-git clone https://github.com/AMD-AGI/Hyperloom.git
-cd Hyperloom
-cp .env.template .env          # then edit credentials (SAFE_API_KEY, OPENAI_BASE_URL)
-export USER_DATA_PATH=/path/to/hyperloom-run
-bash inference_optimizer/scripts/local_setup.sh
+```{note}
+The prompt includes `install.sh`. This is intentional: Cursor runs in its own
+shell process, which does not inherit the environment you sourced during
+installation. The agent must re-source the env files and re-run `install.sh` in
+its own context before launching the optimizer. Because `install.sh` is
+idempotent, the second run is fast and safe.
 ```
-
-When `local_setup.sh` finishes it prints the workspace path to open in Cursor,
-the prompt template to paste, and the env file to source before launch.
-
-### 2. Install runtime dependencies
-
-Before launching the optimizer, run the install step in the same shell that will
-start `inference_optimizer optimize`:
-
-```bash
-source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-bash inference_optimizer/scripts/install.sh
-source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-```
-
-`local_setup.sh` prepares paths and checkouts. `install.sh` installs and verifies
-runtime dependencies such as Magpie, TraceLens, GEAK, Ray, and CLI auth/config
-files.
-
-### 3. Launch from Cursor
-
-Open the printed workspace in Cursor, then paste the generated prompt into
-Cursor Chat, filling in your workload:
 
 ```text
 @inference_optimizer/SKILL.md
@@ -87,10 +51,17 @@ Requirements:
 2. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
+| Field | Meaning | How to choose |
+|-------|---------|---------------|
+| `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (e.g. `8` for a single 8-GPU MI300X node) |
+| `CONC` | Concurrent requests — benchmark concurrency level | Start with `64`; Hyperloom sweeps other values during SWEEP phase |
+| `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
+| `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
+
 See the [README](https://github.com/AMD-AGI/Hyperloom/blob/main/README.md) for
 the full prompt field reference (every field maps to a CLI flag).
 
-### 4. Monitor the run
+## Monitor the run
 
 The agent reports a session ID, log path, and PID, then polls until the run
 completes. Under the hood it walks the phase chain
@@ -98,7 +69,7 @@ completes. Under the hood it walks the phase chain
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for what
 happens in each phase.
 
-### 5. Resume an interrupted session
+## Resume an interrupted session
 
 Paste this prompt into Cursor Chat to resume an existing session:
 
@@ -115,23 +86,22 @@ Requirements:
 5. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
-## Optimization output and artifacts
+## Output and artifacts
 
 When the loop exits, Hyperloom writes the final report, reproducible session
-artifacts, and `session_breakdown.json` for downstream consumers. Delivery
-systems can use those artifacts to package or review the optimized stack. For
-the shape of that artifact, see
-[`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
+artifacts, and `session_breakdown.json` to your session directory. The three
+fields to read first are:
 
-## Case studies
+| Field | What it tells you |
+|-------|-------------------|
+| `final.throughput_tok_s_per_gpu` | Validated end-of-session throughput — the headline number |
+| `final.cumulative_gain_pct_validated` | Validated gain over baseline |
+| `final.action_path` | Ordered list of changes that make up the final optimized stack |
 
-For full, real optimization runs with configs, patches, and measured gains, see
-the case studies:
-
-- [Case Study: GLM-5 — Discovering Optimizations That Are Hard to Spot Manually](../examples/glm5-case-study.md)
-- [Case Study: DeepSeek-R1 — Fast Scale-Up on a New Workload](../examples/deepseek-case-study.md)
+For the full schema — useful if you are building a dashboard, reporting
+pipeline, or downstream integration on top of this file — see
+[`session_breakdown.json` integration in Hyperloom](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/session-breakdown.md).
 
 ## Troubleshooting
 
-If a run fails on first launch (auth-proxy 401, Ray `--num-gpus`, VRAM issues),
-see [Troubleshooting Hyperloom](../troubleshooting.md).
+If a run fails on first launch, see [Troubleshooting Hyperloom](../troubleshooting.md).
