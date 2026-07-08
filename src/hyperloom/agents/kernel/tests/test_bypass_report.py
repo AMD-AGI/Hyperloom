@@ -56,7 +56,9 @@ def test_build_candidates_routing():
     gemm = by_name["aten::mm"]
     assert gemm["kernel_category"] == "GEMM"
     assert gemm["reusable_native_kernel"] is False
-    assert cands["skipped_kernels"] and cands["skipped_kernels"][0]["name"] == "aten::mm"
+    # Non-reusable vendor GEMM is always skipped (membership check: skipped is now
+    # the full complement of routable within hot, so position is not guaranteed).
+    assert any(c["name"] == "aten::mm" for c in cands["skipped_kernels"])
 
 
 def test_build_workload_roofline_totals_covers_all_kernels():
@@ -107,13 +109,57 @@ def test_build_candidates_exposes_routable_subset():
     assert not any(c["name"] == "aten::mm" for c in routable)  # non-reusable never routable
 
 
-def test_build_summary_counts():
+def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
+    # Repro (P0 partition): a reusable kernel whose source is UNRESOLVED is
+    # reusable-in-principle but NOT dispatchable, so it must land on the
+    # ``skipped_kernels`` side of the partition -- never in neither bucket.
+    # Before the fix it fell outside routable + skipped, hiding the #1 hotspot
+    # (e.g. paged_attention with no resolved source) from partition consumers.
+    # Force source resolution to fail so the reusable SDPA kernel is guaranteed
+    # source-less regardless of the ambient op_to_source table.
+    monkeypatch.setattr(report, "editable_trace_source", lambda *a, **k: "")
+    monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
+    cands = report.build_candidates(
+        _analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X"
+    )
+    hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
+    routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
+    skipped_ids = {c["kernel_id"] for c in cands["skipped_kernels"]}
+
+    # Guard: the fixture really did produce a reusable-but-source-less kernel.
+    gap = [
+        c
+        for c in cands["hot_kernels"]
+        if c.get("reusable_native_kernel") and not c.get("source_file")
+    ]
+    assert gap, "fixture must contain a reusable kernel with unresolved source"
+    # Such a kernel is dispatch-blocked -> skipped with an explicit reason.
+    assert all(c["kernel_id"] in skipped_ids for c in gap)
+    assert all(c["skip_reason"] == "source file not resolved" for c in gap)
+
+    # Partition invariant: hot == routable + skipped, no overlap, no leakage.
+    assert routable_ids | skipped_ids == hot_ids
+    assert routable_ids & skipped_ids == set()
+    assert len(cands["hot_kernels"]) == len(cands["routable_kernels"]) + len(
+        cands["skipped_kernels"]
+    )
+
+
+def test_build_summary_counts(monkeypatch):
+    # summary.json mirrors kernel_candidates.json's routable/skipped partition:
+    # tasks == routable (dispatchable), skipped == the rest. Resolve the reusable
+    # SDPA kernel's source so it is a task; the non-reusable GEMM stays skipped.
+    # Monkeypatched to stay hermetic wrt the ambient op_to_source table.
+    monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("/src/paged_attn.py", "op_to_source"))
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     summ = report.build_summary(cands, framework="vllm", target_platform="MI300X", generated_at="2026-01-01T00:00:00")
     assert summ["task_count"] == 1
     assert summ["skipped_count"] == 1
     assert summ["tasks"][0]["recommended_backends"]
     assert "skip_reason" in summ["skipped"][0]
+    # summary partition stays coherent with the kernel_candidates.json partition.
+    assert summ["task_count"] == len(cands["routable_kernels"])
+    assert summ["skipped_count"] == len(cands["skipped_kernels"])
 
 
 def test_build_kernel_roofline_shape():

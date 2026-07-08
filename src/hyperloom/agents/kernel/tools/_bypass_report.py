@@ -288,12 +288,13 @@ def build_candidates(
         top_k: Max number of hot-kernel candidates to emit.
 
     Returns:
-        A dict with ``hot_kernels`` (routable + non-routable, ranked), plus
-        ``skipped_kernels`` and ``task_groups`` mirrors, and aggregate counts.
+        A dict with ``hot_kernels`` (the FULL ranked hotspot set), plus
+        ``routable_kernels`` / ``skipped_kernels`` (a partition of ``hot_kernels``:
+        routable = reusable-with-resolved-source = dispatchable; skipped = the
+        rest) and ``task_groups``.
     """
     kernels = analyze_out.get("kernels") or []
     hot_kernels: list[dict[str, Any]] = []
-    skipped_kernels: list[dict[str, Any]] = []
     for idx, k in enumerate(kernels[: top_k if top_k and top_k > 0 else len(kernels)], start=1):
         kname = k.get("name", "") or ""
         op_name = k.get("op_name", "") or ""
@@ -363,7 +364,15 @@ def build_candidates(
             # Prefer the resolved source's extension; fall back to the op-name heuristic.
             "source_type": _source_type_from_path(source_file) or _source_type_for_op(op_name),
             "reusable_native_kernel": kc.reusable,
-            "skip_reason": "" if kc.reusable else kc.skip_reason,
+            # Non-reusable keeps the classifier reason. A reusable kernel with no
+            # resolved source is reusable-in-principle but NOT dispatchable, so it
+            # is skipped (see the partition below) with an explicit reason rather
+            # than an empty string.
+            "skip_reason": (
+                kc.skip_reason
+                if not kc.reusable
+                else ("" if source_file else "source file not resolved")
+            ),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
             # Seeds for the shared GEAK harness + rocprof roofline enrichment
             # (populated only when discover_benchmarks is set; else empty).
@@ -406,8 +415,6 @@ def build_candidates(
         cand["suggestion"] = suggestion
         cand["recommended_actions"] = [suggestion]
         hot_kernels.append(cand)
-        if not kc.reusable:
-            skipped_kernels.append(cand)
 
     # Group routable candidates that share an editable source so the optimizer
     # dispatches one job per source function (with all observed shapes) instead
@@ -433,6 +440,16 @@ def build_candidates(
     routable_kernels = [
         c for c in hot_kernels if c.get("reusable_native_kernel") and c.get("source_file")
     ]
+    # ``skipped_kernels`` is the complement of ``routable_kernels`` within
+    # ``hot_kernels`` so the on-disk contract ``hot_kernels == routable_kernels
+    # + skipped_kernels`` always holds (twin of the TraceLens ``write_reports``
+    # invariant locked in test_tracelens_csv). It captures BOTH non-reusable
+    # kernels AND reusable kernels whose source is unresolved (reusable-in-
+    # principle but not dispatchable): the latter previously fell into neither
+    # bucket, hiding real hotspots (e.g. paged_attention with no resolved
+    # source) from consumers iterating routable + skipped.
+    routable_ids = {c["kernel_id"] for c in routable_kernels}
+    skipped_kernels = [c for c in hot_kernels if c["kernel_id"] not in routable_ids]
     return {
         "source": "bypass",
         "framework": framework,
@@ -465,11 +482,14 @@ def build_summary(
     Returns:
         The ``summary.json`` payload dict.
     """
-    hot = candidates.get("hot_kernels") or []
-    tasks = []
-    skipped = []
-    for c in hot:
-        row = {
+    # ``tasks`` mirror the dispatchable (routable) partition and ``skipped`` its
+    # complement, consuming the SAME routable/skipped split build_candidates
+    # computed so summary.json never disagrees with kernel_candidates.json. A
+    # reusable kernel with no resolved source is reusable-in-principle but not
+    # dispatchable, so it is reported as skipped (with its reason) rather than as
+    # an actionable task.
+    def _audit_row(c: dict[str, Any]) -> dict[str, Any]:
+        return {
             "kernel_id": c["kernel_id"],
             "name": c["name"],
             "kernel_category": c["kernel_category"],
@@ -479,12 +499,17 @@ def build_summary(
             "source_type": c["source_type"],
             "reusable_native_kernel": c["reusable_native_kernel"],
         }
-        if c["reusable_native_kernel"]:
-            row["recommended_backends"] = c["recommended_backends"]
-            tasks.append(row)
-        else:
-            row["skip_reason"] = c["skip_reason"]
-            skipped.append(row)
+
+    tasks = []
+    for c in candidates.get("routable_kernels") or []:
+        row = _audit_row(c)
+        row["recommended_backends"] = c["recommended_backends"]
+        tasks.append(row)
+    skipped = []
+    for c in candidates.get("skipped_kernels") or []:
+        row = _audit_row(c)
+        row["skip_reason"] = c["skip_reason"]
+        skipped.append(row)
     # Compact task-group projection for the audit view (full rows live on
     # kernel_candidates.json's candidate[].task_group).
     group_entries = [
