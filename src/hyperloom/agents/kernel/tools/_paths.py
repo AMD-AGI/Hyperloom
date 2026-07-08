@@ -3,6 +3,20 @@
 """Workspace-root resolver for the standalone kernel-agent tools.
 
 Stdlib-only mirror of ``hyperloom.inference_optimizer.session.paths.workspace_root``.
+
+Kept as an independent, stdlib-only mirror (not a ``hyperloom.common.paths``
+re-export) because ``tools/`` scripts must run standalone on remote nodes
+without a ``hyperloom`` import: they are invoked as bare
+``python3 <root>/tools/<tool>.py --args`` subprocesses (see
+``HYPERLOOM_KERNEL_AGENT_ROOT`` in
+``hyperloom.orchestrator.kernel.request_handlers``), imported via the bare
+module name ``from _paths import workspace_root`` (not a package-relative
+``from ._paths import``), and some of their code paths execute inside Ray
+workers (``tools/backends/``) that do not inherit the driver's ``sys.path``.
+This mirrors the same, deliberate exception already made for
+``_payload_aliases.py`` (see tree-reform-lessons.MD §13) — do not "finish"
+this extraction by importing ``hyperloom.common`` or
+``hyperloom.inference_optimizer.session.paths`` here.
 """
 
 from __future__ import annotations
