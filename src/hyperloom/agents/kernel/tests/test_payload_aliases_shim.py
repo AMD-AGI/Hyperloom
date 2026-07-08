@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -54,3 +55,38 @@ def test_shim_canonical_wins_over_legacy_when_both_present():
         out = read_extra_server_args({CANONICAL_KEY: "new", LEGACY_KEY: "old"})
     assert out == "new"
     assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
+
+
+def test_shim_has_no_hyperloom_import():
+    """Static guard: the shim's source must not *import* ``hyperloom``.
+
+    A re-export (``from hyperloom.common... import ...``) would defeat the
+    standalone contract documented in tree-reform-lessons.MD §13 even though
+    the module technically still exists on disk. (Docstring/comment mentions
+    of ``hyperloom`` explaining the rationale are fine.)
+    """
+    source = (_TOOLS_DIR / "_payload_aliases.py").read_text(encoding="utf-8")
+    assert "import hyperloom" not in source
+
+
+def test_shim_importable_without_hyperloom_on_sys_path():
+    """End-to-end contract check: run in a fresh subprocess with only
+    ``tools/`` on ``sys.path`` and no ``hyperloom`` package importable,
+    mirroring a real standalone remote-node invocation
+    (``HYPERLOOM_KERNEL_AGENT_ROOT`` subprocesses / Ray workers)."""
+    code = (
+        "import sys; "
+        f"sys.path = [{str(_TOOLS_DIR)!r}] + [p for p in sys.path if p]; "
+        "import _payload_aliases as pa; "
+        "print(pa.read_extra_server_args({pa.CANONICAL_KEY: '--x'}))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.stdout.strip() == "--x"
+    assert "hyperloom" not in proc.stderr

@@ -17,13 +17,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 # Allowlist: repo-relative POSIX path -> justification. Meant to shrink, not grow.
 ALLOWED_FILES: dict[str, str] = {
     # Canonical compat helper (tree-reform.MD §7/P2.1): the single reader of
-    # the legacy key now lives in hyperloom.common; the sub-agent shims that
-    # still need to (kernel-agent's tools/ can't import hyperloom.common, see
-    # below) re-export it and no longer carry the literal themselves.
+    # the legacy key lives in hyperloom.common; every call site imports it
+    # directly except kernel-agent's tools/, which cannot import hyperloom
+    # (see below) and keeps its own stdlib-only mirror carrying the literal.
     # tree-reform.MD P2.7: hyperloom.inference_optimizer.compat (the P2.1-era
     # transition shim for this helper) has been removed -- all call sites now
     # import hyperloom.common.payload_aliases directly.
     "src/hyperloom/common/payload_aliases.py": "canonical payload-aliases compat helper (tree-reform.MD §7)",
+    # Standalone kernel-agent shim (tree-reform-lessons.MD §13): tools/ must
+    # run without a hyperloom import (remote nodes / Ray workers), so this is
+    # a stdlib-only self-contained mirror of hyperloom.common.payload_aliases,
+    # not a re-export -- it carries the legacy-key literal by design.
+    "src/hyperloom/agents/kernel/tools/_payload_aliases.py": "standalone kernel-agent shim keeps a stdlib-only self-contained "
+    "copy of the payload-aliases helper because tools/ cannot import hyperloom",
     # Sub-agent reader site (kernel-agent) that falls back to the legacy key.
     "src/hyperloom/agents/kernel/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
     # Back-compat injection points in production code (renamed kwarg
