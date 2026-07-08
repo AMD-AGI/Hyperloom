@@ -33,7 +33,12 @@ export NODE_TLS_REJECT_UNAUTHORIZED="${NODE_TLS_REJECT_UNAUTHORIZED:-0}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-. "$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh"
+# install.sh (IR-2) regenerates kernel-agent.env.sh under
+# $USER_DATA_PATH/runtime/ — there is no static "env.sh" under
+# $HYPERLOOM_KERNEL_AGENT_ROOT post tree-reform. Run install, then source
+# the generated file (both idempotent).
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH}/runtime/kernel-agent.env.sh}"
 
 # --- workload (override per run) ---
 export MODEL_PATH="${MODEL_PATH:?set MODEL_PATH before sourcing}"

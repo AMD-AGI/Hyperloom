@@ -555,8 +555,8 @@ ensure_inference_optimizer() {
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "${REPO_ROOT}[test]"
   fi
-  "$PYTHON" - <<'PY' || die "inference_optimizer not importable after install"
-import inference_optimizer  # noqa: F401
+  "$PYTHON" - <<'PY' || die "hyperloom.inference_optimizer not importable after install"
+import hyperloom.inference_optimizer  # noqa: F401
 PY
   if "$PYTHON" -c "import claude_agent_sdk" >/dev/null 2>&1; then
     log "claude_agent_sdk OK"
