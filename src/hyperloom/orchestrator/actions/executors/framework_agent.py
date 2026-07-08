@@ -93,6 +93,11 @@ from .integrate_patch import (
     _with_stash_restore,
     _resolve_framework_root,
 )
+from ._nogit_patch import (
+    _apply_patch_no_git,
+    _is_git_tree,
+    _revert_patches_no_git,
+)
 from ...knowledge.kb_writeback import (
     OUTCOME_INTEGRATED,
     OUTCOME_REVERTED_SMOKE_FAIL,
@@ -695,35 +700,51 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             }
 
+        git_tree = _is_git_tree(framework_root)
+        self._nogit_patch_backups: list[dict] = []
+
         # Capture HEAD before apply so REVERT/REJECT can reset cleanly;
         # prior KEEPs are committed past this sha and survive a reset.
-        pre_apply_sha, sha_err = _git_head_sha(framework_root)
-        if pre_apply_sha is None:
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "apply_failed",
-                "error_class": "no_pre_apply_sha",
-                "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "workspace": str(output_root),
-            })
+        # Non-git source trees skip this step entirely — revert uses
+        # backup-based _revert_patches_no_git instead of git reset.
+        pre_apply_sha: str | None = None
+        if git_tree:
+            pre_apply_sha, sha_err = _git_head_sha(framework_root)
+            if pre_apply_sha is None:
+                return _with_stash_restore(framework_root, stash_state, stash_note, {
+                    "status": "apply_failed",
+                    "error_class": "no_pre_apply_sha",
+                    "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "workspace": str(output_root),
+                })
 
-        # Stage 1: apply patches (with -3 fallback like integrate_patch).
+        # Stage 1: apply patches (with -3 fallback for git trees;
+        # backup-based apply for non-git roots like pip wheel installs).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
         for patch in patch_paths:
-            ok, err = _git_apply(framework_root, patch, three_way=False)
-            if not ok:
-                ok2, err2 = _git_apply(framework_root, patch, three_way=True)
-                if not ok2:
-                    apply_errors.append(
-                        {
-                            "patch": str(patch),
-                            "stderr": err + " | -3 retry: " + err2,
-                        }
-                    )
+            if git_tree:
+                ok, err = _git_apply(framework_root, patch, three_way=False)
+                if not ok:
+                    ok2, err2 = _git_apply(framework_root, patch, three_way=True)
+                    if not ok2:
+                        apply_errors.append(
+                            {
+                                "patch": str(patch),
+                                "stderr": err + " | -3 retry: " + err2,
+                            }
+                        )
+                        break
+            else:
+                nogit_backup_root = output_root / "patch_backups"
+                ok, err, backups = _apply_patch_no_git(framework_root, patch, nogit_backup_root)
+                self._nogit_patch_backups.extend(backups)
+                if not ok:
+                    apply_errors.append({"patch": str(patch), "stderr": err})
                     break
             applied.append(patch)
         if apply_errors:
@@ -876,33 +897,38 @@ class FrameworkAgentExecutor:
 
         # KEEP: commit the patches so they survive the next candidate's
         # REJECT (whose pre_apply_sha already includes this commit).
+        # Non-git source trees skip the commit step — the patches are kept
+        # in-place as working-tree edits (no git durability guarantee, but
+        # the same outcome as integrate_patch's non-git KEEP path).
         keep_message = f"framework KEEP {slug}"
-        keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
-        if keep_sha is None:
-            # Commit failed — reset to pre_apply_sha so the next candidate
-            # doesn't see a dirty baseline.
-            reverted = self._revert_patches(
-                framework_root,
-                applied,
-                pre_apply_sha=pre_apply_sha,
-            )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "apply_failed",
-                "error_class": "keep_commit_failed",
-                "error": commit_err or "git commit returned no sha",
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "accuracy_pass": accuracy_pass,
-                "base_tput": base_tput,
-                "keep_threshold_pct": keep_threshold_pct,
-                "reason": f"KEEP commit failed: {commit_err}",
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            })
+        keep_sha: str | None = None
+        if git_tree:
+            keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
+            if keep_sha is None:
+                # Commit failed — reset to pre_apply_sha so the next candidate
+                # doesn't see a dirty baseline.
+                reverted = self._revert_patches(
+                    framework_root,
+                    applied,
+                    pre_apply_sha=pre_apply_sha,
+                )
+                return _with_stash_restore(framework_root, stash_state, stash_note, {
+                    "status": "apply_failed",
+                    "error_class": "keep_commit_failed",
+                    "error": commit_err or "git commit returned no sha",
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "accuracy_pass": accuracy_pass,
+                    "base_tput": base_tput,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "reason": f"KEEP commit failed: {commit_err}",
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                })
 
         await self._write_kb_record(
             candidate=candidate,
@@ -1004,23 +1030,39 @@ class FrameworkAgentExecutor:
         framework_root: Path | None,
         applied: list[Path],
         *,
-        pre_apply_sha: str,
+        pre_apply_sha: str | None,
     ) -> list[Path]:
-        """Roll back this candidate's changes via ``git reset --hard
-        <pre_apply_sha>`` (prior KEEPs are committed past that sha, so they
-        survive). Returns the patches reverted (full ``applied`` on success,
-        empty on failure) for telemetry / schema compat.
+        """Roll back this candidate's changes.
+
+        For git trees: ``git reset --hard <pre_apply_sha>`` (prior KEEPs are
+        committed past that sha, so they survive).
+        For non-git trees: backup-based restore via
+        :func:`_revert_patches_no_git`.
+
+        Returns the patches reverted (full ``applied`` on success, empty on
+        failure) for telemetry / schema compat.
 
         Args:
-            framework_root: The git checkout to reset, or ``None`` (no-op).
+            framework_root: The source root to revert, or ``None`` (no-op).
             applied: The patches applied this candidate.
-            pre_apply_sha: The HEAD sha captured before this candidate applied.
+            pre_apply_sha: The HEAD sha captured before this candidate applied
+                (``None`` for non-git trees — backup revert is used instead).
 
         Returns:
             The reverted patches (full ``applied`` on success, ``[]`` on
             failure or no-op).
         """
         if framework_root is None or not applied:
+            return []
+        nogit_backups = getattr(self, "_nogit_patch_backups", None)
+        if nogit_backups is not None and not _is_git_tree(framework_root):
+            _revert_patches_no_git(nogit_backups)
+            return list(applied)
+        if not pre_apply_sha:
+            log.error(
+                "framework: cannot revert in %s: no pre_apply_sha and not a non-git tree",
+                framework_root,
+            )
             return []
         ok, err = _git_reset_hard(framework_root, pre_apply_sha)
         if not ok:
