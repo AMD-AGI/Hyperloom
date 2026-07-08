@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from hyperloom.inference_optimizer.recipe_kb import RecipeKB
+from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
 # Recipe snapshot severity tags (schema has no fixed enum).
 _SEVERITY_CRASH: str = "crash"

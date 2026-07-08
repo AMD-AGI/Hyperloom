@@ -1201,7 +1201,7 @@ def _arch_contains(recipe_arch: Any, query_arch: Any) -> bool:
     and raw lists (["LlamaForCausalLM"]). None / empty / default on either
     side is a wildcard so legacy recipes without architecture tags match.
     """
-    from ..recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
 
     query_slug = _normalize_arch_to_slug(query_arch)
     if not query_slug or query_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
@@ -1220,7 +1220,7 @@ def _model_type_matches(recipe_mt: Any, query_mt: Any) -> bool:
     None / empty / default on either side is treated as a wildcard
     so legacy recipes without model_type tags are still reachable.
     """
-    from ..recipe_snapshot_constants import DEFAULT_MODEL_TYPE_SLUG
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import DEFAULT_MODEL_TYPE_SLUG
 
     q = str(query_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
     if not q or q in (DEFAULT_MODEL_TYPE_SLUG, "none"):

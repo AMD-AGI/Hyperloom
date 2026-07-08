@@ -109,7 +109,7 @@ def _build_recipe_kb_dispatcher(
     Returns:
         Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
     """
-    from ..recipe_kb import LocalRecipeStore, RecipeKB
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
     local_root = _resolve_local_kb_root(args)
     local_store = LocalRecipeStore(root=local_root)
@@ -119,7 +119,7 @@ def _build_recipe_kb_dispatcher(
 
     # Read-side remote is gbrain only. Writes stay local-only; gbrain is
     # consulted for READS and (optionally) mirrored to on local write.
-    from ..recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
 
     gbrain_remote = build_gbrain_remote_from_env()
     if gbrain_remote is None or not gbrain_remote.enabled:
@@ -132,7 +132,7 @@ def _build_recipe_kb_dispatcher(
     # (local write stays authoritative).
     mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
     if mirror_mode == "inline":
-        from ..recipe_kb.gbrain_ingest import (
+        from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import (
             GbrainMirroringRecipeKB,
             build_mirror_mcp_from_env,
         )

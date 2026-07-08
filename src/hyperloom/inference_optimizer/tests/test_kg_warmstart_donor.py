@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.inference_optimizer.recipe_kb.kg_client import (
+from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import (
     Fact,
     generate_warmstart_donor_graph_guided,
 )
@@ -125,7 +125,7 @@ def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
             return [_knob_fact(fp="x", gain="+20%")]
 
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.recipe_kb.kg_client.get_kg_client", lambda: _SimKG()
+        "hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _SimKG()
     )
     out = cortex_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
@@ -149,7 +149,7 @@ def test_cortex_helper_returns_native_donor(monkeypatch) -> None:
             return []
 
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.recipe_kb.kg_client.get_kg_client", lambda: _NativeKG()
+        "hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _NativeKG()
     )
     out = cortex_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"

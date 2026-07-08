@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from hyperloom.inference_optimizer.recipe_kb import gbrain_ingest as gi
+from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
 
 
 class _FakeMcp:
@@ -208,7 +208,7 @@ def test_main_requires_local_kb_root(monkeypatch, capsys) -> None:
 
 def test_main_write_requires_creds(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.recipe_kb.local_store.LocalRecipeStore.list_recent",
+        "hyperloom.orchestrator.knowledge.recipe_kb.local_store.LocalRecipeStore.list_recent",
         lambda self, limit: [],
     )
     rc = gi.main(["--local-kb-root", str(tmp_path), "--write", "--gbrain-url", "", "--token", ""])
@@ -218,7 +218,7 @@ def test_main_write_requires_creds(tmp_path, monkeypatch, capsys) -> None:
 
 def test_main_dry_run_success(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.recipe_kb.local_store.LocalRecipeStore.list_recent",
+        "hyperloom.orchestrator.knowledge.recipe_kb.local_store.LocalRecipeStore.list_recent",
         lambda self, limit: [{"canonical_id": "a:b:c:d:e"}],
     )
     rc = gi.main(["--local-kb-root", str(tmp_path)])

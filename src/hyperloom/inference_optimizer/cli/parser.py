@@ -845,7 +845,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "(model -> hardware -> framework -> framework_version -> "
         "precision); each leaf holds recipe.json + history/ + "
         "attempts.ndjson + .lock. See "
-        "src/hyperloom/inference_optimizer/recipe_kb/local_store.py for the "
+        "src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py for the "
         "on-disk contract.",
     )
     opt.add_argument(

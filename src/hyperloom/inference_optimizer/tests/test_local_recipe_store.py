@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
     InvalidCanonicalIdError,
@@ -23,7 +23,7 @@ from hyperloom.inference_optimizer.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.inference_optimizer.recipe_kb.local_store import _matches_labels
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _matches_labels
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:

@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Mapping
 
-from .. import recipe_snapshot_constants as C
+from hyperloom.inference_optimizer import recipe_snapshot_constants as C
 from hyperloom.common.payload_aliases import CANONICAL_KEY
 from .canonical_id import recipe_canonical_id
 from .remote_client import RemoteRecipeClientError

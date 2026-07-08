@@ -8,7 +8,7 @@ E2E and was dropped from recipe.json; the ``kernel_optimizations`` array fixes i
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.recipe_kb.schema import KernelOptimization, Recipe
+from hyperloom.orchestrator.knowledge.recipe_kb.schema import KernelOptimization, Recipe
 
 
 def test_kernel_optimization_roundtrip() -> None:

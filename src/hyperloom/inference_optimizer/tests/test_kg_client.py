@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import GbrainRemoteError
-from hyperloom.inference_optimizer.recipe_kb.kg_client import (
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import GbrainRemoteError
+from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import (
     Fact,
     KGClient,
     format_fact_line,
@@ -708,7 +708,7 @@ def test_native_emit_returns_false_when_node_creation_fails() -> None:
 
 def test_native_graph_traverse_breadth_capped() -> None:
     # A high-fan-in hub must not blow up the foreground warm-start path.
-    from hyperloom.inference_optimizer.recipe_kb import kg_client as kgmod
+    from hyperloom.orchestrator.knowledge.recipe_kb import kg_client as kgmod
 
     hub = "hub"
     leaves = [f"leaf{i}" for i in range(kgmod._MAX_TRAVERSE_NODES + 50)]

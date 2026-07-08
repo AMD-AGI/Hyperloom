@@ -15,7 +15,7 @@ from hyperloom.orchestrator.knowledge.cortex_t0 import (
     _warm_recipe_source,
     run_t0_anchor,
 )
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
     recipe_canonical_id,

@@ -17,7 +17,7 @@ from pathlib import Path
 from hyperloom.orchestrator.knowledge.cortex_t0 import (
     _extract_patches_from_prs_tested,
 )
-from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import _json_list
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import _json_list
 
 
 # ─── C3: KEEP + REVERT same patch → REVERT wins ─────────────────────────
