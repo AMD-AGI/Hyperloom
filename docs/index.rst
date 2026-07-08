@@ -38,7 +38,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`API reference </reference/api-reference>`
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
-    * :doc:`Troubleshooting <troubleshooting>`  
+    * :doc:`Troubleshooting </reference/troubleshooting>`  
 
 To contribute to the documentation, see `Contributing to Hyperloom <https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md>`_.
 
