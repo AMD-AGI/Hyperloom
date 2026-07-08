@@ -53,7 +53,7 @@ Requirements:
 
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
-| `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (e.g. `8` for a single 8-GPU MI300X node) |
+| `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
 | `CONC` | Concurrent requests — benchmark concurrency level | Start with `64`; Hyperloom sweeps other values during SWEEP phase |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |

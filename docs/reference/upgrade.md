@@ -107,14 +107,14 @@ Earlier launchers may have waited for the Coordinator to emit a
 The default kernel-opt ladder is now `forge,geak`. Out-of-box (OOB) backends (`claude`,
 `codex`, `cursor`) run only when explicitly listed in `KERNEL_OPT_BACKEND_ORDER`
 and `cursor` still requires `$CURSOR_API_KEY`. If you had a custom order
-hard-coded (e.g. `claude,geak`), confirm it is still intentional.
+hard-coded (for example, `claude,geak`), confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
 When `--gpu-type` is set, Hyperloom pins
 `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native
 scripts from leaking `result.json` outside the session dir. If you
-intentionally use a model-specific script (e.g. `dsr1_fp8_mi300x.sh`),
+intentionally use a model-specific script (for example, `dsr1_fp8_mi300x.sh`),
 keep passing `benchmark_script=` explicitly — operator overrides
 still win against the generic-script pin. You might additionally want
 to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can

@@ -56,12 +56,37 @@ source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 
 Use `--quantize` when you want to optimize a model that is not already available
 in a quantized format (FP8 or MXFP4). Quantizing reduces VRAM consumption and
-typically increases throughput on AMD Instinct hardware.
+typically increases throughput on AMD Instinct hardware. The rest of Hyperloom
+works without it — only set this up if you need the quantization prelude.
 
-The optional `--quantize` prelude requires an [AMD Quark](https://quark.docs.amd.com/)
-checkout at runtime. Set `QUARK_ROOT` to point at it. See the Hyperloom README's
-[quantization section](https://github.com/AMD-AGI/Hyperloom/blob/main/README.md#quantization-optional-amd-quark-dependency)
-for more information.
+The `--quantize` prelude drives [AMD Quark](https://quark.docs.amd.com/) to
+produce a quantized model before the optimization loop runs. Hyperloom does not
+bundle Quark — it invokes Quark's published skills end-to-end.
+
+```{note}
+The public PyPI package (`pip install amd-quark`) does not include the
+`.claude/skills/quark-torch-*` skill entry points that Hyperloom drives. You
+must use an internal AMD Quark repository checkout until those skills are
+bundled in a public release.
+```
+
+Hyperloom resolves the Quark root in this order:
+
+1. The `--quark-root` CLI flag
+2. The `QUARK_ROOT` environment variable
+3. The built-in default (Core42 only): `/wekafs/hyperloom/Quark`
+
+Outside Core42, set `QUARK_ROOT` explicitly. The resolved path must contain
+`.claude/skills/quark-torch-ptq/SKILL.md`. If none of the above resolves to an
+existing directory, the run fails fast with `quark_root_missing` rather than
+silently optimizing the un-quantized model.
+
+Add this to your `.env` when your checkout lives elsewhere:
+
+```bash
+# Only needed for the --quantize prelude
+QUARK_ROOT=/workspace/Quark
+```
 
 ## Related guides
 

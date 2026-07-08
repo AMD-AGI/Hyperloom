@@ -162,7 +162,7 @@ conversation, so reasoning continuity is preserved between ticks.
   the accuracy gate, Robustness escalation, and PolicyGate's real
   invariants (path sandbox, resource leases, phase ordering, data
   dependencies, single-writer rules) apply exactly as before. Only the
-  compensatory anti-amnesia guards (e.g. the baseline same-fingerprint
+  compensatory anti-amnesia guards (for example, the baseline same-fingerprint
   self-loop deny) were removed, since a conversational agent remembers
   its own prior attempts. Robustness additionally surfaces a
   conversation no-progress signal as an external circuit-breaker.

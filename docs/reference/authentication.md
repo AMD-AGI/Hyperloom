@@ -13,13 +13,13 @@ environment configuration in Hyperloom. If any other document
 
 Hyperloom needs at most three classes of configuration:
 
-1. **LLM gateway credentials** — at least one upstream base URL and one API
+- **LLM gateway credentials** — at least one upstream base URL and one API
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-2. The **Cursor SDK** key (`CURSOR_API_KEY`) — optional, only needed if
+- The **Cursor SDK** key (`CURSOR_API_KEY`) — optional, only needed if
    you want the OOB `cursor` kernel-opt backend.
-3. **Path / workspace layout** — for local mode, run
+- **Path / workspace layout** — for local mode, run
    `inference_optimizer/scripts/local_setup.sh` once (credentials and the
    Hyperloom checkout are enough). It clones missing dependency repos under
    `HYPERLOOM_OPEN_SOURCE_ROOT`, writes

@@ -16,7 +16,7 @@ upstream SKILL file for the component you're touching:
 
 ---
 
-## Auth-proxy 401
+## 401 Unauthorized
 
 **Symptom**: A tool exits with one of:
 
@@ -25,30 +25,30 @@ upstream SKILL file for the component you're touching:
 * `Claude SDK exit code 1`
 * `OpenAI SDK: AuthenticationError`
 
-**Cause**: The OOB auth-proxy on `127.0.0.1:4002` is down or stuck.
-The proxy is what rewrites the upstream `x-api-key` header to
-`Authorization: Bearer <SAFE_API_KEY>` for the AMD primus-safe
-gateway. Without it, every `claude` or `codex` CLI request 401s.
+**Cause**: The LLM gateway credentials are missing, expired, or not
+propagated to `~/.claude/config.json`. Hyperloom talks directly to the
+upstream gateway — there is no local auth-proxy.
 
-**Fix**: Re-run the supervisor (idempotent — noop if healthy):
+**Fix**:
 
-```bash
-bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
-```
+1. Confirm `SAFE_API_KEY` is set and current:
+   ```bash
+   echo "$SAFE_API_KEY"
+   ```
+2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
+   `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
+   ```bash
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+   # If check-only reports issues, re-run without --check-only:
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   ```
+3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
+   upstream gateway (for example, `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`),
+   not `127.0.0.1:4002`. If it still shows the old proxy address, run
+   any `inference_optimizer` CLI command — preflight force-rewrites stale
+   legacy URLs automatically.
 
-It TCP-probes `:4002`, then HTTP-probes using `curl`. If the port is
-open but the probe times out (stuck proxy), it kills the existing
-`auth_proxy.py` process and relaunches.
-
-**Still failing?**
-
-* Verify `SAFE_API_KEY` is set: `echo "$SAFE_API_KEY"`.
-* Verify nothing else is on port 4002:
-  `ss -ltnp | grep :4002`.
-* Override the port if 4002 is occupied:
-  `AUTH_PROXY_PORT=4012 bash "$REPO_ROOT/kernel-agent/scripts/install.sh"`.
-
-See [Hyperloom authentication and credentials](reference/authentication.md) §5 for proxy internals.
+See [Hyperloom authentication and credentials](reference/authentication.md) for credential setup and gateway configuration.
 
 ---
 
@@ -102,7 +102,7 @@ ray status
 
 **Symptom**: During GEAK dispatch the raylet aborts on startup
 (`SIGABRT`), or `ray stop` reports it could not be stopped and leaves
-it behind, e.g.:
+it behind, for example:
 
 ```
 WARN scripts.py:1287 -- Stopped only 0 out of 391 Ray processes within
@@ -152,7 +152,7 @@ the baseline benchmark fails with VRAM allocation errors.
 1. Confirm no zombie inference server is holding VRAM:
    `rocm-smi --showmemuse` then kill stragglers with
    `pkill -f sglang.launch_server` (or `vllm`).
-2. Bump `TP` (e.g. 4 → 8) so weights and KV cache fit.
+2. Bump `TP` (for example, 4 → 8) so weights and KV cache fit.
 3. Lower `MAX_MODEL_LEN` to the smallest length your workload actually
    needs (default 8192 is often too generous).
 4. Lower `CONC` to reduce simultaneous KV cache pressure.
@@ -211,7 +211,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    explicit operator override — that skips both the clone and the SHA
    pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help
@@ -222,7 +222,46 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 ---
 
-## Cursor backend gets HTTP 401 (separate from auth-proxy)
+## TraceLens root dangling after the `/tmp` to `/opt` default move
+
+**Symptom**: `trace_analyze` fails with `TraceLens root not found` or
+`incomplete (not a git checkout)` even after re-running `install.sh`,
+and the runtime never self-heals the checkout.
+
+**Cause**: The open-source deps default moved from the ephemeral
+`${TMPDIR:-/tmp}/hyperloom/open-source-repos` to the pod-internal
+`/opt/hyperloom/open-source-repos`. A stale `kernel-agent.env.sh` or
+`.env` that still pins `TRACELENS_ROOT` to the old `/tmp/...` path is
+treated as an explicit operator override — self-heal is scoped to the
+installer-managed default only, so a non-default `/tmp` path is never
+auto-re-cloned and fails fast once `/tmp` is reaped.
+
+**Fix**: Pick one:
+
+1. **Re-run the installer (preferred).** Remove the stale pin so the
+   default is re-resolved to `/opt`, then reinstall:
+   ```bash
+   unset TRACELENS_ROOT   # remove any hard-coded /tmp path from env or .env first
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   ```
+   The installer rewrites `kernel-agent.env.sh` with the `/opt` default
+   and clones and pins TraceLens there.
+2. **Point the deps root at a writable directory** if the pod runs as
+   non-root or `/opt` is read-only (the installer `mkdir -p`s the root,
+   so it must be writable):
+   ```bash
+   export HYPERLOOM_OPEN_SOURCE_ROOT="$USER_DATA_PATH/open-source-repos"
+   unset TRACELENS_ROOT
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   ```
+3. **Keep an operator checkout** only if you deliberately maintain one —
+   set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
+   SHA pin, no self-heal), so you own keeping it present and on the right
+   ref.
+
+---
+
+## Cursor backend gets HTTP 401 (separate from gateway 401)
 
 **Symptom**: The OOB `cursor` backend specifically returns 401 even
 though `claude` / `codex` work fine.

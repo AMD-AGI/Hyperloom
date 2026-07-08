@@ -183,7 +183,7 @@ Master switch (default **off**) for live Langfuse trace push.
   (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
   scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
   `KEY=value`) but is not a complete data loss prevention (DLP) filter — bare keys without a
-  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. The artifact
+  recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
   default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
   for the Claw sync. If a session might contain customer code or secrets, define
@@ -222,7 +222,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / …).
 * `attribution` — `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
-  to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess
+  to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess
   turns) are attributed; orchestration / kernel / critic / proposal_scorer
   turns are LLM-internal and land in `unattributed` (this is expected, not a
   gap in the data).
