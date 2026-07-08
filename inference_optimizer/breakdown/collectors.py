@@ -1220,8 +1220,15 @@ def collect_baseline(
             "tried server.log + yaml"
         )
 
+    from .. import framework_registry
+
     return {
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
+        # Throughput unit is framework-dependent: serving frameworks report
+        # tok/s, scriptable xDiT diffusion reports img/s. The numeric field name
+        # is kept for backwards compatibility; this records the true unit so the
+        # value is not silently read as tokens/s.
+        "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
         "accuracy": _to_float(state.get("baseline_accuracy")) or 0.0,
         "ttft_mean_ms": ttft,
         "e2el_mean_ms": e2el,
@@ -1355,12 +1362,15 @@ def collect_final(
 
     ttft = _to_float(cb.get("ttft_mean_ms"))
     e2el = _to_float(cb.get("e2el_mean_ms"))
-    ttft_e2el_source = "current_best" if ttft is not None else "unavailable"
+    ttft_e2el_source = "current_best" if (ttft is not None or e2el is not None) else "unavailable"
 
     # Disk-walk reconstruction when ``current_best.ttft_mean_ms`` is unset:
     # validate_stack first (authoritative), then current_best, then stack top.
     reconstructed_report: Path | None = None
-    if ttft is None:
+    # Reconstruct from disk when EITHER latency metric is missing. For scriptable
+    # xDiT diffusion ttft is a meaningless 0.0/None and e2el is the meaningful
+    # signal, so gating only on ttft dropped e2el from the final section.
+    if ttft is None or e2el is None:
         reconstructed_report = _find_latest_validate_stack_report(session_dir)
         if reconstructed_report is not None:
             ttft_e2el_source = "validate_stack_disk"
@@ -1392,8 +1402,16 @@ def collect_final(
         warnings,
     )
 
+    from .. import framework_registry
+
     return {
         "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
+        # See collect_baseline: records the true throughput unit (tok/s vs img/s
+        # for scriptable xDiT) alongside the compat-named numeric field.
+        "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
+        # Which field holds the primary result: e2el_mean_ms (scriptable/xDiT)
+        # vs throughput_tok_s_per_gpu (serving). Lets consumers pick per model.
+        "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
         "validated_at_stack_len": val_stack_len,
@@ -4522,11 +4540,40 @@ def collect_roofline_progress(
         else None
     )
 
+    # Scriptable/diffusion (xDiT) image models have no tok/s decode ceiling; their
+    # roofline lives in the latency domain (ideal per-image compute floor vs the
+    # measured e2e latency). Surface it through DEDICATED ms fields + a
+    # ``ceiling_kind`` discriminator so the list page can render a roofline % for
+    # image models without overloading the tok/s fields (which stay null).
+    ceiling_kind = "throughput" if ceiling_available else "none"
+    latency_ceiling_ms: float | None = None
+    achieved_latency_ms: float | None = None
+    latency_ceiling_available = False
+    pct_of_latency_ceiling: float | None = None
+    if not ceiling_available and latest_snap:
+        ideal_ms = _to_float(latest_snap.get("roofline_ideal_ms"))
+        measured_ms = _to_float(latest_snap.get("e2e_mean_ms"))
+        if ideal_ms is not None and ideal_ms > 0 and measured_ms is not None and measured_ms > 0:
+            latency_ceiling_ms = round(ideal_ms, 4)
+            achieved_latency_ms = round(measured_ms, 4)
+            latency_ceiling_available = True
+            ceiling_kind = "latency"
+            # Latency "closer to the ceiling" means the measured e2e approaches
+            # the ideal floor, so the ratio is ideal/measured (higher = nearer,
+            # mirroring the serving achieved/peak semantics; caps well under 100).
+            pct_of_latency_ceiling = round(ideal_ms / measured_ms * 100.0, 4)
+
     out: dict[str, Any] = {
+        "ceiling_kind": ceiling_kind,
         "ceiling_tok_per_sec": ceiling_tok,
         "target_tok_per_sec": target_tok,
         "ceiling_ratio_target": DEFAULT_ROOFLINE_TARGET_RATIO,
         "ceiling_available": ceiling_available,
+        # Independent latency-domain ceiling for scriptable/diffusion models.
+        "latency_ceiling_ms": latency_ceiling_ms,
+        "achieved_latency_ms": achieved_latency_ms,
+        "latency_ceiling_available": latency_ceiling_available,
+        "current_best_pct_of_latency_ceiling": pct_of_latency_ceiling,
         "trajectory": trajectory,
         "baseline_tput": baseline_tput,
         "current_best_tput": current_best_tput,
@@ -4588,6 +4635,14 @@ def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
         "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
         "within_roofline_pct": _to_float(snap.get("within_roofline_pct")) or 0.0,
         "gap_to_roofline_pct": _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
+        # Scriptable/diffusion (xDiT) latency-roofline pair — the ms analogue of
+        # the tok/s ceiling. Preserved (was previously dropped) so the progress
+        # collector can surface an independent latency ceiling for image models.
+        "e2e_mean_ms": _to_float(snap.get("e2e_mean_ms")),
+        "roofline_ideal_ms": _to_float(snap.get("roofline_ideal_ms")),
+        "roofline_bound_kind": str(snap.get("roofline_bound_kind") or "unknown"),
+        "roofline_mem_ceiling_tok_per_sec": _to_float(snap.get("roofline_mem_ceiling_tok_per_sec")),
+        "roofline_cmp_ceiling_tok_per_sec": _to_float(snap.get("roofline_cmp_ceiling_tok_per_sec")),
         "compute_pct": _to_float(snap.get("compute_pct")) or 0.0,
         "idle_pct": _to_float(snap.get("idle_pct")) or 0.0,
         "comm_pct": _to_float(snap.get("comm_pct")) or 0.0,
