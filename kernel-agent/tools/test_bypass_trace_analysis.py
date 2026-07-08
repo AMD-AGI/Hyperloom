@@ -269,6 +269,22 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
     assert "per_step" in rep and "totals" in rep
 
 
+def test_bypass_cli_accepts_forwarded_diffusion_flags():
+    # Regression: kernel_request_handlers forwards --model-path/--precision to
+    # BOTH routes for scriptable (xDiT) workloads; the bypass parser MUST accept
+    # them (+ the diffusion-ceiling siblings, for CLI-surface parity with the
+    # TraceLens tool) or strict parse_args exits 2 -> trace_analyze_failed.
+    args = bta._build_arg_parser().parse_args([
+        "--trace-input", "/x", "--framework", "xdit",
+        "--model-path", "/models/flux", "--precision", "fp8",
+        "--height", "1024", "--width", "1024", "--cfg-batch", "2",
+    ])
+    assert args.model_path == "/models/flux"
+    assert args.precision == "fp8"
+    assert args.height == 1024 and args.width == 1024
+    assert args.cfg_batch == 2
+
+
 def test_non_xdit_omits_diffusion_roofline(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)

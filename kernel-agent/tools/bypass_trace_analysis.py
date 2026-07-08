@@ -247,6 +247,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # coordinator). Consumed for per-step diffusion roofline + step-count
     # validation; 0 means "infer from the trace".
     p.add_argument("--num-denoise-steps", type=int, default=0)
+    # Diffusion analytic-ceiling inputs the coordinator forwards to BOTH routes
+    # for scriptable/xDiT workloads (kernel_request_handlers). bypass ACCEPTS them
+    # so it shares the TraceLens tool's CLI surface (a missing --model-path /
+    # --precision would make strict parse_args exit 2 -> trace_analyze_failed).
+    # The per-architecture analytic_ceiling EMISSION on the bypass route is not
+    # wired yet (deferred to the roofline-convergence work); these are parsed and
+    # currently unused so the coordinator can forward a uniform CLI.
+    p.add_argument("--model-path", default=os.environ.get("MODEL_PATH", ""))
+    p.add_argument("--precision", default="")
+    p.add_argument("--height", type=int, default=0)
+    p.add_argument("--width", type=int, default=0)
+    p.add_argument("--cfg-batch", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     return p
 
