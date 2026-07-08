@@ -63,7 +63,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 export SAFE_API_KEY=ak-your-safe-apikey            # <-- paste your gateway key
 export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1  # <-- set to your gateway base URL (Primus-SaFE example)
 export USER_DATA_PATH=/workspace/hyperloom && mkdir -p "$USER_DATA_PATH"
-bash inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
 > **Tip:** Instead of exporting these variables each session, you can persist credentials in a `.env` file. See [Appendix — Environment configuration (.env)](#appendix-environment-configuration-env) for the basic recipe, or [Auth & Environment Guide](ENV_AND_AUTH.md) for the full reference.
 
@@ -97,7 +97,7 @@ Open this folder in Cursor as the workspace:
 
 Paste this into Cursor Chat and fill in your workload:
 
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model   # <-- replace with the path to your downloaded model
@@ -127,13 +127,13 @@ The fields you commonly edit:
 | `Goal` | `--target-gain` | Optional stop condition, such as a target throughput gain. | unset |
 | `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
 
-For the full list of workload fields, CLI flags, and defaults, see [Step 2 — Launch in `inference_optimizer/SKILL.md`](../inference_optimizer/SKILL.md). For first-launch errors, see that skill's §"Failure Handling".
+For the full list of workload fields, CLI flags, and defaults, see [Step 2 — Launch in `src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md). For first-launch errors, see that skill's §"Failure Handling".
 
 <details>
 <summary><strong>Resume an existing session</strong></summary>
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 
