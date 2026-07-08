@@ -364,8 +364,13 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 
 # Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
-_CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
-_CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+# Bumped catalog-probe timeout 5.0->30.0s and retries (1,3,5)->(2,5,10,20).
+# Over a reverse SSH tunnel the first (cold) connection's TLS+HTTP can take >5s,
+# so the original 5s timeout failed all 4 attempts even though the gateway was
+# reachable. Larger timeout + more retries tolerate the cold-start latency;
+# harmless on a direct/fast gateway.
+_CATALOG_RETRY_DELAYS_SEC = (2.0, 5.0, 10.0, 20.0)
+_CATALOG_REQUEST_TIMEOUT_SEC = 30.0
 
 # /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
