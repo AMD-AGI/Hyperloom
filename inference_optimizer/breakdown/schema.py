@@ -295,6 +295,7 @@ class Baseline(TypedDict, total=False):
     """
 
     throughput_tok_s_per_gpu: float
+    throughput_unit: str  # "tok/s" (serving) or "img/s" (scriptable xDiT)
     accuracy: float
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
@@ -336,6 +337,7 @@ class Final(TypedDict, total=False):
     """
 
     throughput_tok_s_per_gpu: float | None
+    throughput_unit: str  # "tok/s" (serving) or "img/s" (scriptable xDiT)
     cumulative_gain_pct_validated: float
     cumulative_gain_pct_per_round_sum: float
     validated_at_stack_len: int
