@@ -21,8 +21,8 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.inference_optimizer.storage import SqliteConnection
-from hyperloom.inference_optimizer.storage.schema import ensure_schema
+from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
 CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
 TASK_STATES = (

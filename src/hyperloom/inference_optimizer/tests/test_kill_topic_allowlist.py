@@ -20,7 +20,7 @@ from hyperloom.orchestrator.bus.message_bus import (
     MessageBus,
     TOPIC_ALLOWLIST,
 )
-from hyperloom.inference_optimizer.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 
 _COORDINATOR_SRC = (

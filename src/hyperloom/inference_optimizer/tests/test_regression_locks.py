@@ -60,7 +60,7 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     state = SharedState(session_id=sd.name, model_name="qwen3-8b", baseline_tput=800.0, cumulative_gain=2.5)
     state.save(sd)
     # Initialise the coordinator.db schema.
-    from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
     storage_dir = sd / "storage"
     storage_dir.mkdir()
@@ -87,7 +87,7 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     sd = tmp_path / "ctx-session"
     sd.mkdir()
     SharedState(session_id=sd.name, baseline_tput=600.0).save(sd)
-    from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
     (sd / "storage").mkdir()
     SqliteConnection(sd / "storage" / "coordinator.db").close()

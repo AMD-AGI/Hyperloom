@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+
+from .storage.connection import SqliteConnection
 
 
 TOPIC_ALLOWLIST = frozenset({

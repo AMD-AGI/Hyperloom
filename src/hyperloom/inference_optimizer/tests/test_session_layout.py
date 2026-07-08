@@ -33,7 +33,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     patches_dir,
     runs_dir,
 )
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
 # paths.session_dir + skeleton

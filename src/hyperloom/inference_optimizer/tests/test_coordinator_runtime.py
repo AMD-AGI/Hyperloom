@@ -36,7 +36,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
-from hyperloom.inference_optimizer.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 
 def _heartbeat() -> Intent:
