@@ -3187,13 +3187,21 @@ def _names_specific_kernel(payload: dict) -> bool:
 
 
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
-    """Load every candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
+    """Load every unique candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
+
+    Under the P0 contract ``hot_kernels`` is the FULL ranked hotspot set and
+    ``skipped_kernels`` is its non-routable subset, so the two on-disk lists
+    OVERLAP. Candidates are therefore de-duplicated by kernel identity
+    (``kernel_id`` then ``name``), keeping the first (``hot_kernels``) copy, so
+    ``kernels_considered`` counts each hotspot once instead of double-counting
+    every non-routable kernel. Rows carrying neither id nor name cannot be
+    identified and are always kept (never silently dropped).
 
     Args:
         payload: Request payload carrying ``candidates_path``.
 
     Returns:
-        Every candidate dict from the artifact, or an empty list when the
+        Every unique candidate dict from the artifact, or an empty list when the
         artifact is missing or unreadable.
     """
     candidates_path = payload.get("candidates_path")
@@ -3206,10 +3214,20 @@ def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for key in ("hot_kernels", "kernel_candidates", "skipped_kernels"):
         value = data.get(key)
-        if isinstance(value, list):
-            out.extend(item for item in value if isinstance(item, dict))
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            ident = str(item.get("kernel_id") or item.get("name") or "")
+            if ident:
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            out.append(item)
     return out
 
 
