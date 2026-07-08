@@ -303,7 +303,7 @@ async def test_resource_lock_heartbeat_and_stale_release(db):
 @pytest.mark.asyncio
 async def test_resource_lock_reap_expired_emits_event(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
-    lease = await locks.acquire_many(
+    await locks.acquire_many(
         ["workspace_mutation"],
         holder_id="h1",
         task_id="t1",
