@@ -643,11 +643,6 @@ class ExploreExecutor:
             )
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
-        if baseline_runtime_sec > 0 and overtime_kill_ratio > 0:
-            overtime_deadline_sec: float | None = baseline_runtime_sec * overtime_kill_ratio
-        else:
-            overtime_deadline_sec = None
-
         # Per-variant hard cap precedence: explicit
         # ``params['variant_timeout_sec']`` → auto-derive from baseline
         # runtime + kill ratio (see ``_compute_explore_variant_timeout``) →
