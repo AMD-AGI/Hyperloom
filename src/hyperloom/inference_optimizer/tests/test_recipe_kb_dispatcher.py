@@ -16,13 +16,13 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
     RemoteRecipeClientError,
     recipe_canonical_id,
 )
-from hyperloom.inference_optimizer.recipe_kb.dispatcher import _v2_to_arbor
+from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import _v2_to_arbor
 
 
 def test_v2_to_arbor_reads_legacy_framework_label() -> None:

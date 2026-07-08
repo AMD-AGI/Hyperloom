@@ -6,14 +6,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.inference_optimizer.recipe_kb.gbrain_ingest import (
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import (
     _best_config_split,
     _recipe_slug_prefix,
     _scalar,
     ingest_local_to_gbrain,
     recipe_to_page,
 )
-from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import _page_to_recipe
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import _page_to_recipe
 
 
 def _recipe(**over: Any) -> dict[str, Any]:
@@ -253,7 +253,7 @@ def test_ingest_dry_run_writes_nothing() -> None:
 
 
 def test_mirror_recipe_gates_and_writes(monkeypatch) -> None:
-    from hyperloom.inference_optimizer.recipe_kb.gbrain_ingest import mirror_recipe
+    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import mirror_recipe
 
     monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
     mcp = _FakeMcp()
@@ -277,7 +277,7 @@ class _RecordingInner:
 
 
 def test_mirroring_wrapper_local_first_then_mirror() -> None:
-    from hyperloom.inference_optimizer.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
+    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
 
     inner = _RecordingInner()
     mcp = _FakeMcp()
@@ -289,7 +289,7 @@ def test_mirroring_wrapper_local_first_then_mirror() -> None:
 
 
 def test_mirroring_wrapper_mirror_failure_is_swallowed() -> None:
-    from hyperloom.inference_optimizer.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
+    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
 
     class _BoomMcp:
         def call(self, *a, **k):

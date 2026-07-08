@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from hyperloom.inference_optimizer.recipe_kb import RecipeKB, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB, recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from hyperloom.inference_optimizer.session.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
@@ -367,7 +367,7 @@ def _kg_native_config_donor(
     if not archs:
         return None
     try:
-        from hyperloom.inference_optimizer.recipe_kb.kg_client import (
+        from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import (
             generate_warmstart_donor_graph_guided,
             get_kg_client,
         )
@@ -631,7 +631,7 @@ def _enhance_warm_start_with_kg(
     try:
         kg = kg_client
         if kg is None:
-            from hyperloom.inference_optimizer.recipe_kb.kg_client import get_kg_client
+            from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
 
             kg = get_kg_client()
         if kg is None or not kg.is_available():
@@ -732,7 +732,7 @@ def _enhance_warm_start_with_kg(
         # so they ride a separate ctx key and never mix with the patch-keyed
         # ``recommended_knobs`` above.
         if _kg_guided_enabled():
-            from hyperloom.inference_optimizer.recipe_kb.kg_client import generate_knob_candidates_graph_guided
+            from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import generate_knob_candidates_graph_guided
 
             knobs = generate_knob_candidates_graph_guided(
                 kg,

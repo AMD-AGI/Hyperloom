@@ -13,7 +13,7 @@ from hyperloom.inference_optimizer.cli import (
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
 )
@@ -166,7 +166,7 @@ def test_build_dispatcher_wires_gbrain_remote(
     class _Remote:
         enabled = True
 
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     args = _ns(local_kb_root=str(tmp_path))

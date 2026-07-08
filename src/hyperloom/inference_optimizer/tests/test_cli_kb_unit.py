@@ -53,7 +53,7 @@ def test_dispatcher_degraded_kb(tmp_path, monkeypatch) -> None:
 
 def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
@@ -65,7 +65,7 @@ def test_dispatcher_cortex_url_is_not_a_recipe_remote(tmp_path, monkeypatch) -> 
     # NOT wire a recipe-KB remote. Without gbrain configured, the dispatcher
     # stays local-only even when a cortex URL is supplied.
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args(cortex_kb_url="http://cortex"))
@@ -79,7 +79,7 @@ def test_dispatcher_gbrain_enabled(tmp_path, monkeypatch) -> None:
     class _Remote:
         enabled = True
 
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
@@ -93,8 +93,8 @@ def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
     class _Remote:
         enabled = True
 
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_ingest as gi
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     monkeypatch.setattr(gi, "build_mirror_mcp_from_env", lambda: object())
@@ -105,7 +105,7 @@ def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
 
 def test_dispatcher_gbrain_not_configured(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
@@ -116,7 +116,7 @@ def test_dispatcher_gbrain_not_configured(tmp_path, monkeypatch) -> None:
 def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     import json
 
-    from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
     from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
@@ -137,8 +137,8 @@ def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
     class _Remote:
         enabled = True
 
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_ingest as gi
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     monkeypatch.setattr(gi, "build_mirror_mcp_from_env", lambda: object())
@@ -150,7 +150,7 @@ def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
 
 
 def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
-    from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
     cli_kb._attach_recipe_audit_hook(kb, None)
@@ -256,7 +256,7 @@ def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
 
 def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch) -> None:
     """A write failure inside the hook is swallowed, not raised (L90-91)."""
-    from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
     from hyperloom.inference_optimizer.session import session_paths as sp
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)

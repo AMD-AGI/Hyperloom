@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb import local_store as ls
-from hyperloom.inference_optimizer.recipe_kb.canonical_id import canonical_id_from_components
+from hyperloom.orchestrator.knowledge.recipe_kb import local_store as ls
+from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import canonical_id_from_components
 
 
 def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:

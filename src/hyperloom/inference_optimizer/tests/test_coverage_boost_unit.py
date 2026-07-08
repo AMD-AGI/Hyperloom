@@ -181,7 +181,7 @@ def test_baseline_objective_invalid_dir() -> None:
 # recipe_kb.canonical_id                                                      #
 # --------------------------------------------------------------------------- #
 def test_canonical_id_roundtrip_and_errors() -> None:
-    from hyperloom.inference_optimizer.recipe_kb import canonical_id as cid
+    from hyperloom.orchestrator.knowledge.recipe_kb import canonical_id as cid
 
     with pytest.raises(cid.InvalidCanonicalIdError):
         cid.cid_to_path_components("")  # line 110
@@ -198,7 +198,7 @@ def test_canonical_id_roundtrip_and_errors() -> None:
 
 
 def test_canonical_id_for_path_errors(tmp_path) -> None:
-    from hyperloom.inference_optimizer.recipe_kb import canonical_id as cid
+    from hyperloom.orchestrator.knowledge.recipe_kb import canonical_id as cid
 
     # recipe_dir not under root (lines 187-188).
     with pytest.raises(cid.InvalidCanonicalIdError):
@@ -215,7 +215,7 @@ def test_canonical_id_for_path_errors(tmp_path) -> None:
 # recipe_kb.schema.Attempt                                                    #
 # --------------------------------------------------------------------------- #
 def test_attempt_from_dict_with_fitness() -> None:
-    from hyperloom.inference_optimizer.recipe_kb.schema import Attempt
+    from hyperloom.orchestrator.knowledge.recipe_kb.schema import Attempt
 
     a = Attempt.from_dict({"id": "7", "fitness": "1.5", "outcome": "win"})
     assert a.id == 7

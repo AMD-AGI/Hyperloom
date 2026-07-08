@@ -202,7 +202,7 @@ class PreludePhase(PhaseHandler):
                     log.info("warm-replay advisory block (conf>=%.2f): %s", threshold, p.get("patch_file"))
 
             if len(kept) >= 2:
-                from hyperloom.inference_optimizer.recipe_kb.kg_client import get_kg_client
+                from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
 
                 kg = get_kg_client()
                 if kg is not None and kg.is_available():

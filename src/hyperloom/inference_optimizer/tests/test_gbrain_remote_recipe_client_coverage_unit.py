@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
-from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import (
+from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
     GbrainRemoteError,
     GbrainRemoteRecipeClient,
     _as_float,
