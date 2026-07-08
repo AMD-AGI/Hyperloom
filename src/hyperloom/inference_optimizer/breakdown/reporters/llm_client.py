@@ -8,19 +8,28 @@ orchestrator's MCP-coupled backend), so this exposes
 :class:`NullClient`. :func:`build_client_from_env` picks one from
 ``HYPERLOOM_REPORT_LLM_BACKEND``, falling back to ``None``
 (deterministic-only) when config is missing.
+
+The underlying HTTP protocol skeleton (one POST, parse the response) is
+shared with the rest of the codebase via ``hyperloom.common.llm.http_client``
+(tree-reform.MD §4/§7); this module keeps the report-specific surface
+(``model``/``max_output_tokens`` field defaults, the
+``HYPERLOOM_REPORT_LLM_BACKEND``-driven env wiring) local.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger(__name__)
+from hyperloom.common.llm.http_client import (
+    LLMClientError,
+    call_anthropic_messages,
+    call_openai_chat_completions,
+)
 
-# httpx is imported lazily so offline users without it don't pay the cost.
+log = logging.getLogger(__name__)
 
 __all__ = [
     "LLMClientError",
@@ -29,10 +38,6 @@ __all__ = [
     "AnthropicHttpClient",
     "build_client_from_env",
 ]
-
-
-class LLMClientError(RuntimeError):
-    """Wraps any client-side error so compose can degrade gracefully."""
 
 
 @dataclass
@@ -72,33 +77,17 @@ class OpenAIHttpClient:
         Returns:
             The content of the first choice's message.
         """
-        import httpx  # local import (see module docstring)
-
-        url = self.base_url.rstrip("/") + "/chat/completions"
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": self.max_output_tokens,
-            "temperature": 0.2,  # narrative pass — keep prose stable but not robotic
-        }
-        try:
-            r = httpx.post(
-                url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                content=json.dumps(body),
-                timeout=self.timeout_sec,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as exc:  # noqa: BLE001
-            raise LLMClientError(f"openai chat-completions failed: {exc}") from exc
-        try:
-            return data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMClientError(f"unexpected openai response shape: {data!r}") from exc
+        return call_openai_chat_completions(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            system=system,
+            user=user,
+            max_output_tokens=self.max_output_tokens,
+            timeout_sec=self.timeout_sec,
+            # narrative pass — keep prose stable but not robotic
+            temperature=0.2,
+        )
 
 
 @dataclass
@@ -126,36 +115,15 @@ class AnthropicHttpClient:
             LLMClientError: If the HTTP request fails or the response shape is
                 unexpected.
         """
-        import httpx
-
-        url = self.base_url.rstrip("/") + "/v1/messages"
-        body = {
-            "model": self.model,
-            "max_tokens": self.max_output_tokens,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        }
-        try:
-            r = httpx.post(
-                url,
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                content=json.dumps(body),
-                timeout=self.timeout_sec,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as exc:  # noqa: BLE001
-            raise LLMClientError(f"anthropic messages failed: {exc}") from exc
-        try:
-            blocks = data.get("content") or []
-            text_parts = [b.get("text") or "" for b in blocks if b.get("type") == "text"]
-            return "".join(text_parts)
-        except Exception as exc:  # noqa: BLE001
-            raise LLMClientError(f"unexpected anthropic response shape: {data!r}") from exc
+        return call_anthropic_messages(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            system=system,
+            user=user,
+            max_output_tokens=self.max_output_tokens,
+            timeout_sec=self.timeout_sec,
+        )
 
 
 def build_client_from_env() -> Any | None:
