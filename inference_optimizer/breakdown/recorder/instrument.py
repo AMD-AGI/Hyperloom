@@ -288,11 +288,28 @@ def _snapshot_final(rec, st: Any) -> None:
     stack = getattr(st, "optimization_stack", None) or []
     if not cb and not stack:
         return
+    from ... import framework_registry
+
+    framework = str(getattr(st, "framework", "") or "")
+    tput = _to_float(cb.get("tput"))
+    # Latency is the primary result for scriptable/diffusion (xDiT) image models
+    # (throughput_tok_s_per_gpu is only ``1 / latency`` there and misleading as a
+    # headline). Emit e2el/ttft alongside the throughput-unit + primary-metric
+    # markers so consumers pick the right result field per framework. e2el falls
+    # back to the tput-derived per-image latency when no measured value exists.
+    e2el = _to_float(cb.get("e2el_mean_ms"))
+    if e2el is None and framework_registry.is_scriptable(framework) and tput is not None and tput > 0:
+        derived = framework_registry.primary_metric_value(framework, tput)
+        e2el = round(float(derived), 4) if derived is not None and derived > 0 else None
     rec.record_singleton(
         "final",
         {
             "current_best_action": str(cb.get("action") or ""),
-            "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
+            "throughput_tok_s_per_gpu": tput,
+            "throughput_unit": framework_registry.throughput_unit(framework),
+            "primary_metric": framework_registry.primary_metric_name(framework),
+            "e2el_mean_ms": e2el,
+            "ttft_mean_ms": _to_float(cb.get("ttft_mean_ms")),
             "cumulative_gain_pct_validated": _to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
             "cumulative_gain_pct_per_round_sum": _to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
             "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),

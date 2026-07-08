@@ -531,6 +531,74 @@ def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
     assert state["stop_reason"] == "unsupported_model_arch"
 
 
+# 4b. scriptable diffusion (xDiT) frameworks skip this text-LM gate entirely
+def _xdit_args(model: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        model=model,
+        allow_mm_text_fallback=True,
+        framework="xdit",
+    )
+
+
+def test_preflight_scriptable_xdit_skips_gate(tmp_path, monkeypatch):
+    """A scriptable (xDiT) session must bypass the causal-LM gate even when its
+    root config.json looks nothing like a text-generation model — diffusion
+    checkpoints legitimately lack architectures/model_type at the root."""
+    model = tmp_path / "hunyuan_image"
+    _write_config(model, {"_class_name": "HunyuanDiTPipeline"})
+    sd = tmp_path / "session_xdit"
+    _seed_state(sd, monkeypatch)
+
+    blocked = cli._preflight_unsupported_model_arch(_xdit_args(str(model)), sd)
+
+    assert blocked is False
+    assert not (sd / "reports" / "final.json").exists()
+    state = json.loads((sd / "state.json").read_text())
+    assert state.get("stop_reason", "") in ("", None)
+
+
+def test_preflight_scriptable_xdit_skips_even_vlm_config(tmp_path, monkeypatch):
+    """The scriptable skip is framework-driven, so it fires before detection —
+    even a config that would otherwise read as vision_only must not block xDiT."""
+    model = tmp_path / "diffusion_vlm_like"
+    _write_config(
+        model,
+        {
+            "architectures": ["LlavaForConditionalGeneration"],
+            "model_type": "llava",
+        },
+    )
+    sd = tmp_path / "session_xdit_vlm"
+    _seed_state(sd, monkeypatch)
+
+    assert cli._preflight_unsupported_model_arch(_xdit_args(str(model)), sd) is False
+    assert not (sd / "reports" / "final.json").exists()
+
+
+def test_preflight_serving_framework_still_blocks_vlm(tmp_path, monkeypatch):
+    """Regression guard: an explicit serving framework (sglang) must still run
+    the gate and block a true VLM — the skip is scoped to scriptable only."""
+    model = tmp_path / "llava_sglang"
+    _write_config(
+        model,
+        {
+            "architectures": ["LlavaForConditionalGeneration"],
+            "model_type": "llava",
+        },
+    )
+    sd = tmp_path / "session_sglang_vlm"
+    _seed_state(sd, monkeypatch)
+
+    args = argparse.Namespace(
+        model=str(model),
+        allow_mm_text_fallback=True,
+        framework="sglang",
+    )
+    assert cli._preflight_unsupported_model_arch(args, sd) is True
+    state = json.loads((sd / "state.json").read_text())
+    assert state["stop_reason"] == "unsupported_model_arch"
+
+
 # 5. report rendering of the degraded-mode section
 def test_report_renders_degraded_mode_section():
     from inference_optimizer.orchestrator.action_executors import report
