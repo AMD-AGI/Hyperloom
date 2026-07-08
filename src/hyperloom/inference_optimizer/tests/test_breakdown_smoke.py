@@ -446,7 +446,6 @@ def test_session_metadata(fixture_session: Path) -> None:
 def test_session_user_data_path_env_fallback(fixture_session: Path, monkeypatch) -> None:
     """When the manifest predates the field, the session section falls back to
     the in-process ``USER_DATA_PATH`` env so the SBD still carries the root."""
-    import json
 
     mpath = fixture_session / "manifest.json"
     m = json.loads(mpath.read_text(encoding="utf-8"))
@@ -3063,7 +3062,6 @@ def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
 """v0.8 §3.12 — observability / breakdown schema v2 tests (KB_design §3.12, Inv-12.1/12.2)."""
 
 
-import json
 from pathlib import Path
 
 import pytest

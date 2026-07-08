@@ -472,7 +472,6 @@ def test_materialize_profile_window_sglang_skill_formula(
     monkeypatch,
 ):
     """SGLang path writes the same window into PROFILE_EXTRA_BODY."""
-    import json
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1000,7 +999,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
 
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
-    import hyperloom.orchestrator.actions.executors.profile as profile_mod
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
 
     # The symbols must be re-exportable for monkey-patching.
     assert profile_mod.ensure_benchmark_lib_patched is not None
@@ -1228,7 +1227,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     rexec = RooflineExecutor(shared_state=SimpleNamespace())
 
     # Sentinel: prove the lazy import / sub-step orchestration is reached.
-    import hyperloom.orchestrator.actions.executors.profile as profile_mod
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
 
     async def _explode(_ctx):
         raise AssertionError("profile_executor must not be invoked under atom")
