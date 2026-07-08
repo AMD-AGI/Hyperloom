@@ -711,7 +711,6 @@ async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None
     await coord._warm_specialist_params(params)
     assert params["gpu_type"] == "mi300x"
     assert params["tp"] == 1
-    assert "pr_feed" in params
     assert "kb_subgraph" in params
 
 

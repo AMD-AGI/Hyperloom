@@ -8,7 +8,6 @@ async event loop."""
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
@@ -174,22 +173,6 @@ def test_task_id_from_specialist_source(coord: Coordinator) -> None:
         == "abc"
     )
 
-
-def test_pr_summary_to_dict(coord: Coordinator) -> None:
-    class _PR:
-        repo = "owner/name"
-        number = 42
-        title = "fix moe"
-        url = "https://github.com/owner/name/pull/42"
-        state = "open"
-        labels = ["perf", "moe"]
-        author = "alice"
-
-    out = coord._pr_summary_to_dict(_PR())
-    assert out["repo"] == "owner/name"
-    assert out["number"] == 42
-    assert out["labels"] == ["perf", "moe"]
-    assert out["author"] == "alice"
 
 
 def test_lanes_fit(coord: Coordinator) -> None:

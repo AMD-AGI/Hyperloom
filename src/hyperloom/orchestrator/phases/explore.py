@@ -427,7 +427,7 @@ class ExplorePhase(PhaseHandler):
         _kill_stale_servers()
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """Warm ``KnowledgePlane.pr_feed`` across specialist domains (best-effort) on EXPLORE entry. Roofline lives in PRELUDE, not here (except the per-cycle forced reprofile below).
+        """Run EXPLORE-entry housekeeping. Roofline lives in PRELUDE, not here (except the per-cycle forced reprofile below).
 
         Args:
             from_phase: The phase being left; a SWEEP origin in cyclic mode
@@ -456,23 +456,6 @@ class ExplorePhase(PhaseHandler):
                 log.exception(
                     "cycle EXPLORE entry: forced reprofile enqueue failed",
                 )
-        plane = self.knowledge_plane
-        if plane is None:
-            return
-        try:
-            results = plane.pr_feed_warm_all_domains()
-            total_prs = sum(len(prs) for prs, _w in results.values())
-            log.info(
-                "EXPLORE entry (from=%s): warmed pr_feed across %d domains (total PRs cached=%d)",
-                from_phase or "<unknown>",
-                len(results),
-                total_prs,
-            )
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.warning(
-                "EXPLORE entry: pr_feed_warm_all_domains failed: %r",
-                exc,
-            )
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Hard-trigger: force-dispatch a domain specialist for a
@@ -837,32 +820,7 @@ class ExplorePhase(PhaseHandler):
 
         domain = str(params.get("domain") or "").strip()
         # Knowledge-domain tags drive multi-anchor prompt assembly; a single ``domain`` is the legacy single-tag alias.
-        tags = normalize_dispatch_tags(params)
-
-        # PR feed (Gap-02 ↔ Gap-01 contract): fetch + merge the warm cache per domain when the plane is wired; failures fall back to empty.
-        if plane is not None and "pr_feed" not in params:
-            pr_domains = [domain] if domain else list(tags)
-            merged_prs: list[dict[str, Any]] = []
-            seen_pr_keys: set[str] = set()
-            for pr_dom in pr_domains:
-                try:
-                    prs, _warnings = plane.pr_feed_warm(domain=pr_dom)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(
-                        "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
-                        pr_dom,
-                        exc,
-                    )
-                    continue
-                for p in prs:
-                    pd = self._pr_summary_to_dict(p)
-                    key = str(pd.get("url") or pd.get("title") or id(pd))
-                    if key not in seen_pr_keys:
-                        seen_pr_keys.add(key)
-                        merged_prs.append(pd)
-            params["pr_feed"] = merged_prs
-        else:
-            params.setdefault("pr_feed", [])
+        normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:
             params["pr_monitor_available"] = bool(plane is not None and getattr(plane, "pr_monitor_enabled", True))
@@ -1047,27 +1005,6 @@ class ExplorePhase(PhaseHandler):
         )
 
         params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
-
-    @staticmethod
-    def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
-        """Flatten a PRSummary into the dict SpecialistPromptBuilder expects.
-
-        Args:
-            pr: A PRSummary-like object exposing repo/number/title/url/state/
-                labels/author attributes.
-
-        Returns:
-            A flat dict of the PR's summary fields.
-        """
-        return {
-            "repo": str(getattr(pr, "repo", "")),
-            "number": int(getattr(pr, "number", 0) or 0),
-            "title": str(getattr(pr, "title", "")),
-            "url": str(getattr(pr, "url", "")),
-            "state": str(getattr(pr, "state", "")),
-            "labels": list(getattr(pr, "labels", ()) or ()),
-            "author": str(getattr(pr, "author", "")),
-        }
 
     # gaps[] ledger refresh
     async def _refresh_gaps(self, *, reason: str) -> None:
