@@ -2466,8 +2466,9 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
     """
     nodes = max(1, int(args.nodes))
     from .multi_node.cli import cmd_create_dynamo, _load_state
+    from .multi_node.state_paths import resolve_state_file
 
-    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    state_path = resolve_state_file()
     image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
         "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
     ).strip()
@@ -2546,15 +2547,20 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
         os.environ["MAGPIE_RUN_PHASE"] = "client"
         print(f"multi-node(dynamo): BENCHMARK_BASE_URL={su} (frontend :8000)")
 
-    # Install GEAK on the GPU pods over SSH (one-time, idempotent) so the
-    # kernel-agent SSH placement finds `geak` on PATH. Skipped when the run
-    # opted out of the kernel phase. Best-effort: a failure here surfaces
-    # later as a clear pod-side "geak CLI not found" rather than aborting
-    # provisioning. Dynamo-only (the helper no-ops for other backends).
-    if not getattr(args, "no_kernel", False):
-        from .multi_node.cli import install_kernel_tools_on_pods_best_effort
+    # Deliver OOB credentials to the GPU pods regardless of the kernel phase:
+    # multi-node inference still needs API keys even with --no-kernel. GEAK
+    # kernel tooling (SSH-installed so the kernel-agent finds `geak` on PATH) is
+    # skipped when the run opted out of the kernel phase. Both are best-effort
+    # (failures surface later as clear pod-side errors) and Dynamo-only (the
+    # helpers no-op for other backends).
+    from .multi_node.cli import (
+        install_geak_on_pods_best_effort,
+        install_oob_on_pods_best_effort,
+    )
 
-        install_kernel_tools_on_pods_best_effort()
+    if not getattr(args, "no_kernel", False):
+        install_geak_on_pods_best_effort()
+    install_oob_on_pods_best_effort()
 
 
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
@@ -2584,9 +2590,10 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         return
 
     from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
+    from .multi_node.state_paths import resolve_state_file
     from .orchestrator.action_executors._multi_node_env import export_ray_address_to_os
 
-    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    state_path = resolve_state_file()
     image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
         "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
     ).strip()
@@ -2648,6 +2655,12 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         rc_boot = cmd_bootstrap(ns_boot)
         if rc_boot != 0:
             sys.exit(rc_boot)
+
+    # OOB credential delivery must run even with --no-kernel: multi-node pods
+    # still need API keys for inference. RayJob has no GEAK kernel step to gate.
+    from .multi_node.cli import install_oob_on_pods_best_effort
+
+    install_oob_on_pods_best_effort()
 
     export_ray_address_to_os()
     ra = os.environ.get("RAY_ADDRESS", "")
@@ -3178,8 +3191,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if v:
                 os.environ[env_key] = v
 
-    await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
-
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = _clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
@@ -3617,7 +3628,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 cortex_client=cortex_client,
                 session_dir=session_dir,
             )
-        )
+            )
+
+    from .multi_node.state_paths import bind_state_file_to_session
+
+    bind_state_file_to_session(session_dir)
+    if nodes_resolved >= 2:
+        await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
 
     objective = build_objective(
         {
@@ -4554,6 +4571,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "for a baseline -> kernel-only run, or to validate "
         "the current recipe via SWEEP without a serving-"
         "param search. Default: explore enabled.",
+    )
+    opt.add_argument(
+        "--enable-framework-config-exploration",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_EXPLORATION",
+            "0",
+        ).strip()
+        in ("1", "true", "True", "TRUE", "yes"),
+        help="(Stage-1, default OFF) Let the FRAMEWORK_AGENT phase run "
+        "explore-style config-grid exploration (reusing the ExploreExecutor) "
+        "before it advances, giving FRAMEWORK the EXPLORE config-search "
+        "capability. The EXPLORE phase and overall phase flow are unchanged; "
+        "results share the explore_search dedup ledger. Also read from "
+        "$INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_EXPLORATION=1.",
     )
     opt.add_argument(
         "--launch-info-file",
