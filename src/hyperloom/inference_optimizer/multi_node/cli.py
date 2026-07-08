@@ -735,7 +735,8 @@ def install_oob_on_pods_best_effort() -> int:
     backend = str(state.get("backend") or "").strip().lower()
     if backend not in ("dynamo", "rayjob"):
         return 0
-    if not (os.environ.get("OOB_SRC", "") or "").strip():
+    oob_src = (os.environ.get("OOB_SRC", "") or "").strip()
+    if not oob_src:
         warn("install-oob skipped: $OOB_SRC unset")
         return 0
     ns = argparse.Namespace(
@@ -745,7 +746,20 @@ def install_oob_on_pods_best_effort() -> int:
         poll_timeout=_resolve_poll_timeout_s(),
     )
     try:
-        rc = cmd_install_oob(ns)
+        if backend == "rayjob":
+            head_ip = (state.get("head_pod_ip") or "").strip()
+            if not head_ip:
+                err("install-oob (rayjob): head_pod_ip missing in state; run create-rayjob first")
+                return 0
+            rc = _rayjob_install_oob(
+                state,
+                oob_src=oob_src,
+                poll_interval=ns.poll_interval,
+                poll_timeout=ns.poll_timeout,
+                print_logs=ns.print_logs,
+            )
+        else:
+            rc = cmd_install_oob(ns)
         if rc == EXIT_CONFIG_ERROR:
             return 0
         return rc

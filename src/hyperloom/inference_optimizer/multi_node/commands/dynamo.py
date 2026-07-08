@@ -33,6 +33,7 @@ from .._internal import ssh_client, dynamo_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from ..state_paths import resolve_state_file
 
 import logging
 log = logging.getLogger(__name__)
@@ -126,7 +127,7 @@ from .rayjob import (
 # Session-scoped SSH key dir (sandbox-local, next to the state file).
 # Computed once at import time for backward-compat callers of this symbol;
 # prefer :func:`_dynamo_ssh_dir` when the session may have changed since import.
-_DYNAMO_SSH_DIR = _dynamo_ssh_dir()
+_DYNAMO_SSH_DIR = resolve_state_file().parent / "mn_ssh"
 
 
 def _validate_extra_server_args(raw: str, *, context: str) -> None:
