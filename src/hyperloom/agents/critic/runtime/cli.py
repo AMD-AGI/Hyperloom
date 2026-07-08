@@ -27,11 +27,12 @@ adapter bugs that should propagate back to the SKILL caller.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-from pathlib import Path
 from typing import Any
+
+from hyperloom.common.subprocess_bridge import emit_json as _emit_json
+from hyperloom.common.subprocess_bridge import read_json as _read_json
 
 from .cortex_kb_client import CortexKBClient
 from .dead_letter import DeadLetter
@@ -45,34 +46,10 @@ from .session_memory import SessionMemory
 
 
 # ---------------------------------------------------------------------------
-def _read_json(path: str | Path) -> Any:
-    """Read a UTF-8 JSON file, returning ``None`` for an empty file.
-
-    Args:
-        path (str | Path): Path to the JSON file.
-
-    Returns:
-        Any: The decoded JSON value, or ``None`` if the file is blank.
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    return json.loads(text) if text.strip() else None
-
-
-def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialise ``obj`` to JSON, writing to a file and/or stdout.
-
-    Always writes to stdout; additionally writes to ``out`` when it is a path
-    other than ``"-"``.
-
-    Args:
-        obj (Any): A JSON-serialisable value.
-        out (str | None): Output path, ``"-"``/``None`` for stdout only.
-    """
-    serialised = json.dumps(obj, ensure_ascii=False, indent=2)
-    if out and out != "-":
-        Path(out).write_text(serialised + "\n", encoding="utf-8")
-    sys.stdout.write(serialised + "\n")
-    sys.stdout.flush()
+# _read_json / _emit_json are re-exported from hyperloom.common.subprocess_bridge
+# (tree-reform.MD §7) above; kept as module-level bindings so any
+# `setattr(cli_module, "_read_json"/"_emit_json", fake)`-style monkeypatch
+# still resolves through this module's own __dict__ for the callers below.
 
 
 def _resolve_kb_client() -> KBClient:

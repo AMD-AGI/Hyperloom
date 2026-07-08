@@ -5,13 +5,16 @@
 The errors are deliberately granular so the CLI / SKILL can map them to
 deterministic recovery paths (e.g. dead-letter, fall back to
 ``needs_review``, or surface ``required_context`` to the caller).
+
+``RuntimeAdapterError`` itself is re-exported from
+``hyperloom.common.subprocess_bridge`` (tree-reform.MD §7 — shared with the
+robustness/framework runtime bridges); this module keeps ownership of the
+~12 granular subclasses below.
 """
 
 from __future__ import annotations
 
-
-class RuntimeAdapterError(RuntimeError):
-    """Base class for all Critic runtime errors."""
+from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
 
 
 class RequestValidationError(RuntimeAdapterError):
