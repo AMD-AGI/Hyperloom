@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for :mod:`hyperloom.inference_optimizer.storage.schema`.
+"""Unit tests for :mod:`hyperloom.orchestrator.bus.storage.schema`.
 
 Focus on the migration / capacity / error-rollback branches that the
 end-to-end resource-lane tests do not exercise: the legacy leases PK
@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from hyperloom.inference_optimizer.storage import schema
+from hyperloom.orchestrator.bus.storage import schema
 
 
 def _conn() -> sqlite3.Connection:

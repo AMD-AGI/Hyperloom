@@ -15,12 +15,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
-from hyperloom.inference_optimizer.recipe_kb.canonical_id import (
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
+from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import (
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
     GbrainRemoteRecipeClient,
 )
 
@@ -275,7 +275,7 @@ def test_gbrain_best_config_is_warm_replay_consumable(tmp_path) -> None:
 
 def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
     """A gbrain MCP failure degrades to the local store via the ``GbrainRemoteError -> RemoteRecipeClientError`` subclassing."""
-    from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import (
+    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
         GbrainRemoteError,
         GbrainRemoteRecipeClient,
     )

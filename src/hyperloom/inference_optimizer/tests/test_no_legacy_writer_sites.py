@@ -132,7 +132,7 @@ ALLOWED_FILES: dict[str, str] = {
     # back to the legacy key); dispatcher comment names the alias.
     "src/hyperloom/orchestrator/knowledge/cortex_t0.py": "warm-start config extraction reads legacy extra_sglang_args "
     "via read_extra_server_args fallback for older recipe rows",
-    "src/hyperloom/inference_optimizer/recipe_kb/dispatcher.py": "v2-to-arbor projection reads body.extra_sglang_args for "
+    "src/hyperloom/orchestrator/knowledge/recipe_kb/dispatcher.py": "v2-to-arbor projection reads body.extra_sglang_args for "
     "legacy kb-extract recipes that lack body.best_config",
 }
 

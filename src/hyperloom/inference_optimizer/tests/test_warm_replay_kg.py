@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.orchestrator.knowledge.cortex_t0 import _build_warm_start_context
-from hyperloom.inference_optimizer.recipe_kb.kg_client import KGClient
+from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import KGClient
 
 _FACTS_PAGE = """# KG
 
@@ -249,7 +249,7 @@ class _RecordingKG:
 def _emit_decision(monkeypatch: Any, kg: Any, **kwargs: Any) -> None:
     from types import SimpleNamespace
 
-    import hyperloom.inference_optimizer.recipe_kb.kg_client as kgmod
+    import hyperloom.orchestrator.knowledge.recipe_kb.kg_client as kgmod
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     monkeypatch.setattr(kgmod, "get_kg_client", lambda: kg)

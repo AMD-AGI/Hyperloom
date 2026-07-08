@@ -32,14 +32,17 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
+
 if TYPE_CHECKING:
     from ..models import ExploreRequest
 
 
-class RuntimeAdapterError(RuntimeError):
-    """Raised when CLI input or runtime adaptation fails."""
-
-
+# _emit_json intentionally does NOT delegate to
+# hyperloom.common.subprocess_bridge.emit_json: this copy additionally
+# creates --out's parent directory before writing, which the shared
+# implementation does not do (see subprocess_bridge.py's module docstring
+# for the divergence rationale, per tree-reform-lessons.MD §2.1).
 def _emit_json(obj: Any, out: str | None) -> None:
     """Serialize obj as JSON to stdout or a file path.
 

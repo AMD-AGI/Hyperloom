@@ -19,7 +19,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
     recipe_canonical_id,

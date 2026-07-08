@@ -19,8 +19,8 @@ from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.inference_optimizer.storage import SqliteConnection
-from hyperloom.inference_optimizer.storage.schema import (
+from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.schema import (
     DEFAULT_LANE_CAPACITIES,
     SCHEMA_VERSION,
     ensure_schema,

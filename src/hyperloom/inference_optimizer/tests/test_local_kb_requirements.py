@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.cli import (
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RemoteRecipeClientError,
     cid_to_path_components,
@@ -162,7 +162,7 @@ def test_item4_central_kb_reads_central_writes_local(
         def close(self) -> None:
             pass
 
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _FakeGbrain())
     kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
@@ -215,7 +215,7 @@ def test_item5_unreachable_central_falls_back_to_local(
         def close(self) -> None:
             pass
 
-    from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _BoomGbrain())
     kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))

@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import _load_model_config_tags
 from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
-from hyperloom.inference_optimizer.recipe_kb import (
+from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
     recipe_canonical_id,

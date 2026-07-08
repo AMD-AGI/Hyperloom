@@ -13,7 +13,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
 
 def _make_coordinator(tmp_path: Path) -> Coordinator:

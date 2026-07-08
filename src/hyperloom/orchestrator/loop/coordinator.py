@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from hyperloom.inference_optimizer.recipe_kb import RecipeKB
+from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
 # Recipe snapshot severity tags (schema has no fixed enum).
 _SEVERITY_CRASH: str = "crash"
@@ -61,11 +61,11 @@ _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 from ..actions.registry import ActionRegistry
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult
 from ..bus.cursor_store import CursorStore
+from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import Message, MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
@@ -704,7 +704,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
-            from hyperloom.inference_optimizer.storage.schema import set_lane_capacity as _set_lane_capacity
+            from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
 
             cap = int(self.shared_state.research_lane_capacity or 0)
             if cap >= 0:

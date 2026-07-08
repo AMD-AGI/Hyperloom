@@ -9,15 +9,15 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_kb import gbrain_remote_client as grc
-from hyperloom.inference_optimizer.recipe_kb import recipe_canonical_id
-from hyperloom.inference_optimizer.recipe_kb.gbrain_remote_client import (
+from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
+from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
     GbrainRemoteError,
     GbrainRemoteRecipeClient,
     _page_to_recipe,
     build_gbrain_remote_from_env,
 )
-from hyperloom.inference_optimizer.recipe_kb.remote_client import RemoteRecipeClientError
+from hyperloom.orchestrator.knowledge.recipe_kb.remote_client import RemoteRecipeClientError
 
 
 def test_page_to_recipe_reads_legacy_framework_attr() -> None:

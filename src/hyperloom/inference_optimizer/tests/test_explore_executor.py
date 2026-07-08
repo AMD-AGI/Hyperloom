@@ -38,7 +38,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.inference_optimizer.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_capability_summary,
 )

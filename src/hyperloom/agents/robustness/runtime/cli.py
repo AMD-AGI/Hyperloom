@@ -48,13 +48,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
+from hyperloom.common.subprocess_bridge import emit_json as _emit_json
+from hyperloom.common.subprocess_bridge import read_json as _read_json
 
 from ..config import Config
 from ..factory import build_reactor_components
@@ -73,41 +76,11 @@ log = logging.getLogger("robustness_agent.runtime.cli")
 COORDINATOR_INBOX = "coordinator_inbox"
 REQUEST_KINDS: frozenset[str] = frozenset({COORDINATOR_INBOX})
 
-
-class RuntimeAdapterError(RuntimeError):
-    """Raised on contract violations the host should surface as exit 2."""
-
-
-def _read_json(path: str | Path) -> Any:
-    """Read and parse a JSON file.
-
-    Args:
-        path (str | Path): Path to the JSON file to read.
-
-    Returns:
-        Any: The parsed JSON value, or ``None`` if the file is empty or
-        contains only whitespace.
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    return json.loads(text) if text.strip() else None
-
-
-def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialise an object to JSON and emit it.
-
-    The serialised JSON is always written to stdout; when ``out`` is a
-    real path it is additionally written to that file.
-
-    Args:
-        obj (Any): JSON-serialisable object to emit.
-        out (str | None): Destination path, or ``"-"``/``None`` to write
-            only to stdout.
-    """
-    serialised = json.dumps(obj, ensure_ascii=False, indent=2)
-    if out and out != "-":
-        Path(out).write_text(serialised + "\n", encoding="utf-8")
-    sys.stdout.write(serialised + "\n")
-    sys.stdout.flush()
+# RuntimeAdapterError / _read_json / _emit_json are re-exported from
+# hyperloom.common.subprocess_bridge (tree-reform.MD §7) above; kept as
+# module-level bindings so any `setattr(cli_module, "_read_json"/"_emit_json"/
+# "RuntimeAdapterError", fake)`-style monkeypatch still resolves through this
+# module's own __dict__ for the callers below.
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:

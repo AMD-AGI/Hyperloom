@@ -2115,7 +2115,7 @@ class FrameworkPhase(PhaseHandler):
         if not patch_file or not archs:
             return
         try:
-            from hyperloom.inference_optimizer.recipe_kb.kg_client import get_kg_client
+            from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
 
             kg = get_kg_client()
             if kg is None or not getattr(kg, "_native", False) or not kg.is_available():

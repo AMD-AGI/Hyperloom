@@ -173,7 +173,7 @@ async def test_report_executor_renders_external_baseline_section(tmp_path: Path,
     """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
     from hyperloom.orchestrator.actions.executors import ReportExecutor
     from hyperloom.orchestrator.state.shared_state import SharedState
-    from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
     sd = tmp_path / "sess-report"
     sd.mkdir()

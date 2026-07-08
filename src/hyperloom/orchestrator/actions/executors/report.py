@@ -23,9 +23,9 @@ from typing import Any
 from hyperloom.common import io as _common_io
 
 from ...bus.message_bus import MessageBus
+from ...bus.storage.connection import SqliteConnection
 from ...state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import db_path_for
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
 
 
 log = logging.getLogger(__name__)

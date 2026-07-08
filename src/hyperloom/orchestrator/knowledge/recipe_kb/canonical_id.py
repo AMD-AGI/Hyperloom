@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..recipe_snapshot_constants import (
+from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_ARCHITECTURES_SLUG,
     DEFAULT_FRAMEWORK_SLUG,
     DEFAULT_FRAMEWORK_VERSION_SLUG,

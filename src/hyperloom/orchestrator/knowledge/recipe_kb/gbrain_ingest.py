@@ -426,7 +426,7 @@ def build_mirror_mcp_from_env() -> _GbrainMcp | None:
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
     if not base_url or not token:
         return None
-    from .. import recipe_snapshot_constants as C
+    from hyperloom.inference_optimizer import recipe_snapshot_constants as C
 
     return _GbrainMcp(base_url, token, C.DEFAULT_HTTP_TIMEOUT_SEC)
 
@@ -524,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.gbrain_url or not args.token:
             print("--write requires GBRAIN_BASE_URL + GBRAIN_TOKEN")
             return 2
-        from .. import recipe_snapshot_constants as C
+        from hyperloom.inference_optimizer import recipe_snapshot_constants as C
 
         mcp = _GbrainMcp(args.gbrain_url, args.token, C.DEFAULT_HTTP_TIMEOUT_SEC)
 
