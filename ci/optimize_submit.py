@@ -1012,7 +1012,6 @@ class SafeOptimizeClient:
             # provide displayName. SaFE feeds it into GenerateName → K8s
             # metadata.name, which must satisfy RFC 1123 (lowercase [a-z0-9-.],
             # 1-63 chars); sanitize here since the backend doesn't.
-            import re
 
             raw = repo_id.split("/")[-1] or repo_id
             cleaned = re.sub(r"[^a-z0-9.-]+", "-", raw.lower()).strip(".-") or "model"
@@ -3749,7 +3748,6 @@ def wait_and_collect_one(
                 items = safe.list_artifacts(rec.task_id)
                 wanted = [it for it in items if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
                 wanted_paths = [it.get("path", "").lower() for it in wanted]
-                has_safe_breakdown = any(p.endswith("session_breakdown.json") for p in wanted_paths)
                 current_session_hints.update(_session_hints_from_artifact_items(items))
                 log.info(
                     "[task %s] safe artifacts after NFS grace wait: %d total, %d to download",

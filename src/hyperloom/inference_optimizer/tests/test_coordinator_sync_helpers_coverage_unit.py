@@ -8,8 +8,6 @@ async event loop."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from hyperloom.orchestrator.roles import (

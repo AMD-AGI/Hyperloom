@@ -244,8 +244,7 @@ def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import hyperloom.inference_optimizer.breakdown.session_package as sp
-
+    from hyperloom.inference_optimizer.breakdown import session_package as sp
     # Force a tiny byte cap so the bundle truncates after the first file.
     monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
     sd = tmp_path / "session"
