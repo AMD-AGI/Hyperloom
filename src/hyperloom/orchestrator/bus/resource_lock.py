@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
-from hyperloom.inference_optimizer.storage.schema import DEFAULT_LANE_CAPACITIES
+
+from .storage.connection import SqliteConnection
+from .storage.schema import DEFAULT_LANE_CAPACITIES
 
 
 log = logging.getLogger(__name__)

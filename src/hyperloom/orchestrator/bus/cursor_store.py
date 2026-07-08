@@ -11,7 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.storage.connection import SqliteConnection
+
+from .storage.connection import SqliteConnection
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso

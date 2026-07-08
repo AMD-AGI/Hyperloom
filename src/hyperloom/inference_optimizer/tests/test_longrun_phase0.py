@@ -28,8 +28,8 @@ from hyperloom.orchestrator.bus.cursor_store import CursorStore
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
-from hyperloom.inference_optimizer.storage import SqliteConnection
-from hyperloom.inference_optimizer.storage.schema import ensure_schema
+from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
 # --------------------------------------------------------------------------

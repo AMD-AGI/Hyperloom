@@ -281,7 +281,7 @@ def _collect_lane_timeline(
             capacities = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
         except _sqlite3.OperationalError:
             # Older DB without lane_capacity — fall back to defaults.
-            from ...storage.schema import DEFAULT_LANE_CAPACITIES as _DEFAULT
+            from hyperloom.orchestrator.bus.storage.schema import DEFAULT_LANE_CAPACITIES as _DEFAULT
 
             capacities = dict(_DEFAULT)
         try:

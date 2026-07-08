@@ -33,7 +33,7 @@ from hyperloom.orchestrator.state.task_registry import (
     TERMINAL_STATES,
     TaskRegistry,
 )
-from hyperloom.inference_optimizer.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 
 @pytest.fixture
