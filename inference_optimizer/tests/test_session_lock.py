@@ -9,6 +9,7 @@ spawn a duplicate optimizer that corrupts the shared leases / ``state.json``.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
@@ -128,3 +129,103 @@ def test_pid_fallback_takes_over_dead_owner(tmp_path, monkeypatch):
         assert owner is not None and owner["pid"] == os.getpid()
     finally:
         lock.release()
+
+
+def test_pid_alive_edge_cases(monkeypatch):
+    """_pid_alive covers None/non-positive, ProcessLookup, Permission, OSError."""
+    from inference_optimizer.session_lock import _pid_alive
+
+    assert _pid_alive(None) is False
+    assert _pid_alive(0) is False
+    assert _pid_alive(-5) is False
+    assert _pid_alive(os.getpid()) is True
+
+    def raise_perm(_pid, _sig):
+        raise PermissionError()
+
+    monkeypatch.setattr(session_lock.os, "kill", raise_perm)
+    assert _pid_alive(12345) is True  # exists but owned by another user
+
+    def raise_oserror(_pid, _sig):
+        raise OSError("weird")
+
+    monkeypatch.setattr(session_lock.os, "kill", raise_oserror)
+    assert _pid_alive(12345) is False
+
+
+def test_read_owner_empty_and_malformed(tmp_path):
+    """read_owner returns None for blank / non-JSON / non-dict bodies."""
+    lock_path = session_paths.optimizer_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_path.write_text("   \n", encoding="utf-8")
+    assert session_lock.read_owner(tmp_path) is None
+
+    lock_path.write_text("not json {{{", encoding="utf-8")
+    assert session_lock.read_owner(tmp_path) is None
+
+    lock_path.write_text("[1, 2, 3]", encoding="utf-8")
+    assert session_lock.read_owner(tmp_path) is None
+
+
+def test_read_owner_fd_empty_and_malformed(tmp_path):
+    """_read_owner_fd handles blank / non-JSON / non-dict bodies and OSError."""
+    lock_path = session_paths.optimizer_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_path.write_text("", encoding="utf-8")
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        assert SessionLock._read_owner_fd(fd) is None
+    finally:
+        os.close(fd)
+
+    lock_path.write_text("garbage }{", encoding="utf-8")
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        assert SessionLock._read_owner_fd(fd) is None
+    finally:
+        os.close(fd)
+
+    lock_path.write_text('["not", "a", "dict"]', encoding="utf-8")
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        assert SessionLock._read_owner_fd(fd) is None
+    finally:
+        os.close(fd)
+
+    # A closed fd triggers the OSError branch.
+    fd2 = os.open(lock_path, os.O_RDWR)
+    os.close(fd2)
+    assert SessionLock._read_owner_fd(fd2) is None
+
+
+def test_heartbeat_refreshes_body(tmp_path):
+    """heartbeat rewrites the lock body while held; no-op when not held."""
+    lock = SessionLock(tmp_path)
+    # Not held yet -> no-op, no raise.
+    lock.heartbeat()
+    lock.acquire()
+    try:
+        before = session_lock.read_owner(tmp_path)
+        lock.heartbeat()
+        after = session_lock.read_owner(tmp_path)
+        assert before is not None and after is not None
+        assert after["pid"] == os.getpid()
+    finally:
+        lock.release()
+
+
+@pytest.mark.skipif(
+    session_lock.fcntl is None,
+    reason="flock error-path requires POSIX fcntl",
+)
+def test_acquire_reraises_non_contention_oserror(tmp_path, monkeypatch):
+    """A flock OSError that is not EAGAIN/EACCES/EWOULDBLOCK propagates."""
+
+    def raise_eio(_fd, _op):
+        raise OSError(errno.EIO, "io error")
+
+    monkeypatch.setattr(session_lock.fcntl, "flock", raise_eio)
+    with pytest.raises(OSError):
+        SessionLock(tmp_path).acquire()

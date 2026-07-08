@@ -137,6 +137,36 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
     assert "tokenizer" in reason.lower()
 
 
+def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
+    """xDiT (scriptable) is a server-less image workload that never loads a HF
+    tokenizer, so a missing-tokenizer config.json must NOT block it."""
+    m = tmp_path / "xdit_no_tok"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="qwen2",
+        max_position_embeddings=32768,
+    )
+    assert (
+        cli._detect_incompatible_model_config(str(m), framework="xdit") is None
+    )
+
+
+def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
+    """Regression guard: the skip is scoped to scriptable — an explicit serving
+    framework (sglang) must still block a missing-tokenizer checkpoint."""
+    m = tmp_path / "sglang_no_tok"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="qwen2",
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m), framework="sglang")
+    assert reason is not None
+    assert "tokenizer" in reason.lower()
+
+
 def test_detect_with_tokenizer_ok(tmp_path):
     m = tmp_path / "with_tok"
     _write_config(
@@ -366,10 +396,11 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
 
 
 def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
-    # The Qwen3.6 wrapper exposes text_config.model_type=qwen3_5_moe_text. The
-    # current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and vLLM
-    # ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested type
-    # is no longer gated and falls through to the text_coercible degraded path.
+    # The Qwen3.5-MoE wrapper exposes text_config.model_type=qwen3_5_moe_text.
+    # The current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and
+    # vLLM ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested
+    # type is no longer gated and falls through to the text_coercible degraded
+    # path.
     m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
     _write_config(
         m,

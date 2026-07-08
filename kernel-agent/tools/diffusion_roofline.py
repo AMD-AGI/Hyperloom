@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
-"""Workload-level (end-to-end) roofline for diffusion / scriptable traces.
+"""Workload-level roofline for diffusion/scriptable traces.
 
-TraceLens' ``generate_perf_report_pytorch`` produces a *per-kernel* roofline
-(each op vs its dtype ceiling). For LLM decode, hyperloom also models a
-*workload-level* memory-bandwidth roofline (``roofline_ceiling.py``). Diffusion
-is the compute-bound dual of that: the DiT forward runs once per denoise step,
-dominated by large batched GEMMs + attention.
-
-This tool aggregates the per-kernel report into a single workload roofline:
-
-    - kernel roofline efficiency = Sigma(ideal kernel time) / Sigma(actual kernel time)
-    - gpu busy ratio             = busy_time / wall_time            (from gpu_timeline)
-    - end-to-end efficiency      ~ kernel_eff * gpu_busy_ratio
-    - per denoise-step timings   = totals / num_denoise_steps       (when provided)
-
-The two efficiency gaps it surfaces are complementary:
-  1. scheduling gap  (gpu_busy_ratio < 1): GPU idle / exposed comm / launch gaps.
-  2. kernel gap      (kernel_eff  < 1):    kernels below their roofline ceiling.
-
-Input is the ``--output_csvs_dir`` produced by generate_perf_report_pytorch
-(``unified_perf_summary.csv`` + optional ``gpu_timeline.csv``), so the workload
-roofline stays numerically consistent with the per-kernel roofline.
+Aggregates per-kernel roofline CSVs into kernel-efficiency and GPU-busy gaps.
 """
 
 from __future__ import annotations
@@ -34,6 +15,10 @@ from typing import Any
 
 UNIFIED_CSV = "unified_perf_summary.csv"
 GPU_TIMELINE_CSV = "gpu_timeline.csv"
+
+# torch.compile fuses ops into single kernels with very long generated names,
+# which can exceed csv's default 128 KiB field limit; lift it to the platform max.
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
 # Column names as emitted by generate_perf_report_pytorch's unified summary.
 COL_KERNEL_TIME_SUM = "Kernel Time (\u00b5s)_sum"
@@ -511,6 +496,19 @@ def print_summary(report: dict[str, Any]) -> None:
             f" {ac['total_flops'] / 1e12:.1f} TFLOP @ {ac['achievable_tflops']:.0f} TFLOPS"
             f" -> ideal {ac['ideal_compute_us'] / 1e3:.2f} ms"
         )
+    if "analytic_ceiling" in report:
+        ac = report["analytic_ceiling"]
+        line = (
+            "analytic absolute ceiling (approach a):"
+            f" {ac['total_flops'] / 1e12:.1f} TFLOP/img"
+            f" [{ac['family']} h={ac['hidden']} L={ac['layers']}"
+            f" {ac['num_steps']}stepx{ac['cfg_batch']}]"
+        )
+        if "ideal_ms" in ac:
+            line += f" -> ideal {ac['ideal_ms']:.1f} ms @ {ac['peak_tflops']:.0f} TFLOPS ({ac['precision']})"
+        print(line)
+        if "analytic_within_pct" in report:
+            print(f"  analytic within-roofline (ideal/actual-kernel): {report['analytic_within_pct']:.1f}%")
     if "reconciliation" in report:
         rc = report["reconciliation"]
         if "analytic_vs_trace_ideal_ratio" in rc:
@@ -538,6 +536,13 @@ def main() -> int:
     )
     parser.add_argument("--top-k", type=int, default=10, help="Hottest kernels to list.")
     parser.add_argument("--output", default="", help="Optional path to write the report JSON.")
+    # Approach-a absolute analytic ceiling: resolve per-architecture forward
+    # FLOPs from the model's own diffusers config (no hand-passed geometry).
+    parser.add_argument("--model-dir", default="", help="Local diffusers model dir; enables the per-architecture analytic ceiling (diffusion_flops).")
+    parser.add_argument("--height", type=int, default=1024, help="Output image height (px) for the analytic ceiling.")
+    parser.add_argument("--width", type=int, default=1024, help="Output image width (px) for the analytic ceiling.")
+    parser.add_argument("--precision", default="bf16", help="Runtime precision for the peak-TFLOPS ceiling (bf16 / fp8 / mxfp4).")
+    parser.add_argument("--cfg-batch", type=int, default=0, help="Forwards per denoise step (0 = family default; 2 = classifier-free guidance).")
     # Optional a-priori DiT ceiling cross-check (all four geometry flags + a
     # ceiling source required to activate).
     parser.add_argument("--dit-hidden-size", type=int, default=0, help="DiT hidden dim h (analytic ceiling).")
@@ -582,6 +587,33 @@ def main() -> int:
         dit_geometry=dit_geometry,
         achievable_tflops=achievable,
     )
+
+    # Approach-a absolute analytic ceiling (per-architecture, config-derived).
+    if args.model_dir:
+        try:
+            import diffusion_flops as _dflops
+
+            gpu = args.target_platform or "mi355x"
+            est = _dflops.analytic_ceiling(
+                args.model_dir,
+                gpu_type=gpu,
+                precision=args.precision,
+                height=args.height,
+                width=args.width,
+                num_steps=args.num_denoise_steps or None,
+                cfg_batch=args.cfg_batch or None,
+            )
+            if est:
+                report["analytic_ceiling"] = est
+                # reconcile against the trace-measured actual kernel time.
+                actual_us = report["totals"].get("sigma_actual_kernel_us", 0.0)
+                if est.get("ideal_ms") and actual_us > 0:
+                    report["analytic_within_pct"] = round(
+                        est["ideal_ms"] / (actual_us / 1e3) * 100.0, 2
+                    )
+        except Exception as exc:  # noqa: BLE001 — analytic ceiling is best-effort
+            report["analytic_ceiling_error"] = f"{type(exc).__name__}: {exc}"
+
     print_summary(report)
     if args.output:
         out_path = Path(args.output).expanduser().resolve()

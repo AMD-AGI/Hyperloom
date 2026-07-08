@@ -461,12 +461,47 @@ class SharedState:
     baseline_arg_error_streak: int = 0
     # Combined backstop: ANY baseline failure (regardless of error_class) counts
     # here. Mixed classes split the per-class streaks above so neither hits its
-    # threshold; this total catches that and fast-fails (P5 anti time-exhaustion).
+    # threshold; this total catches that and fast-fails (anti time-exhaustion).
     baseline_total_failures: int = 0
     # One-shot: cuda-graph capture failure asks the next baseline to retry
     # by disabling cuda-graph capture (framework-correct flag injected by the
     # BaselineExecutor). Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Enablement path (framework-agent) state.
+    # ``enablement_launch_log``: captured launch/traceback text when baseline
+    #   cannot launch.
+    # ``enablement_dispatched``: in-flight guard that an authoring attempt is
+    #   queued/running; cleared when the attempt REVERTs.
+    # ``enablement_attempts``: number of dispatches (drives candidate rotation
+    #   and idempotency).
+    # ``enablement_succeeded``: terminal KEEP guard.
+    enablement_launch_log: str = ""
+    enablement_dispatched: bool = False
+    enablement_attempts: int = 0
+    enablement_succeeded: bool = False
+    # ``enablement_kept_patches``: ordered, deduped list of patch file paths
+    #   from prior enablement rounds that made *forward progress* (cleared the
+    #   previous crash but revealed a new, deeper gap). These are re-applied as
+    #   a base before the next round's patch so serial gaps stack instead of
+    #   being reverted and re-derived. See ``_maybe_rearm_enablement``.
+    enablement_kept_patches: list = field(default_factory=list)
+    # ``enablement_setup_commands``: ordered, deduped list of allowlisted
+    #   environment-setup shell commands (e.g. ``pip install transformers>=5.12``,
+    #   ``apt-get install -y gh``) that prior enablement rounds ran to make the
+    #   combo buildable/runnable. Re-run (idempotently) by integrate_patch before
+    #   applying patches + booting, so an install a specialist relied on is
+    #   durable and reproducible across re-bench / pod restarts rather than an
+    #   ephemeral side effect of one specialist session. Stacked like
+    #   ``enablement_kept_patches``.
+    enablement_setup_commands: list = field(default_factory=list)
+    # ``enablement_stall_streak``: consecutive enablement rounds that neither
+    #   became runnable nor advanced to a new failure signature. When it reaches
+    #   ``_ENABLEMENT_MAX_STALL`` the loop stops with stop_reason
+    #   ``enablement_stalled`` instead of spinning on the same gap forever.
+    enablement_stall_streak: int = 0
+    # Launch-log hashes already recorded as needs_human_review (UNKNOWN /
+    # non-actionable failures); at most one review record per distinct log.
+    enablement_human_review_logged: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
@@ -567,6 +602,11 @@ class SharedState:
     framework_agent_phase_done: bool = False
     # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_agent_discover_failures: int = 0
+    # Consecutive empty-but-valid ``fa phase-discover`` batches within the current
+    # FRAMEWORK phase; tolerate up to DISCOVER_FAILURE_RETRY_LIMIT before exiting so a
+    # transient upstream blip (cortex/PR-Monitor/GitHub) doesn't skip the phase.
+    # Reset to 0 on any non-empty batch.
+    framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates
     # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
     # reset whenever a phase completes having tested >=1 candidate.
@@ -579,6 +619,31 @@ class SharedState:
     )
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
+    # (Stage-1, default OFF) When True the Coordinator may run explore-style
+    # config-grid exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor)
+    # before the phase advances, giving FRAMEWORK the EXPLORE config-search
+    # capability. Absent from PHASE_LLM_PROPOSABLE_ACTIONS; the Coordinator
+    # drives it, never the LLM. Default False keeps the standard
+    # PRELUDE -> FRAMEWORK_AGENT -> EXPLORE flow unchanged bit-for-bit.
+    framework_config_exploration_enabled: bool = False
+    # Compact records of framework config-exploration rounds (task id, variant
+    # count, kept count, best gain). Kept separate from
+    # framework_agent_phase_progress so it never perturbs the source-candidate
+    # plateau gate.
+    framework_config_exploration_results: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # Stage-2a FRAMEWORK config-exploration subphase state machine:
+    # "" (not started) -> "running" -> "done". Drives the advance-time hold.
+    framework_config_lane_state: str = ""
+    # Rounds dispatched in the current FRAMEWORK config-exploration subphase;
+    # capped by _framework_config_max_rounds(). Reset on macro-cycle reloop.
+    framework_config_lane_round: int = 0
+    # Config variant grid harvested from the last generation specialist,
+    # awaiting an explore round. Consumed by _maybe_hold_for_framework_config_lane.
+    framework_config_pending_grid: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id
     # (PR URL). The downstream integrate_patch task only carries
     # ``specialist_task_id``, so the authored-outcome bridge resolves the real
@@ -590,6 +655,14 @@ class SharedState:
     )
     # Re-author rounds per candidate id (capped); needs_review verdicts increment.
     specialist_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
+    # P0-4 backstop: per-candidate-key count of Critic-review submissions. If a
+    # candidate is submitted for review more than the abort threshold (a
+    # terminal-row leak somewhere let it be re-selected), the pump force-stamps
+    # ``repeated_review_abort`` and stops re-selecting it, so no single candidate
+    # can burn the whole phase budget even if a new path forgets its terminal row.
+    framework_agent_review_counts: dict[str, int] = field(
         default_factory=dict,
     )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
@@ -1120,6 +1193,13 @@ class SharedState:
             session_dir (Path): The session root directory; created if it
                 does not already exist.
         """
+        # Source-of-truth backfill: scriptable/diffusion (xDiT) promotion paths
+        # store ``tput`` (img/s) but often leave ``e2el_mean_ms`` empty (the
+        # rebench/raw-result path drops it). Since the per-image e2e latency is
+        # exactly ``1000 / img_per_s`` for these single-stream workloads, derive
+        # it here so state.json current_best, the recorder ``final`` singleton,
+        # and the recipe KB all carry the primary latency metric. Best-effort.
+        self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
@@ -1160,6 +1240,91 @@ class SharedState:
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
             log.debug("current_setting.sh render failed", exc_info=True)
+        # Live status mirror: reflect the just-persisted state.json snapshot into
+        # Langfuse so external consumers get structured, real-time status
+        # (phase / stop_reason / gain / streak / lifecycle) without waiting for
+        # the session-end flush. Runs only after the atomic replace succeeded;
+        # the emitter throttles (on-change or slow refresh) and swallows any
+        # failure, so a Langfuse hiccup never blocks or slows the save path.
+        try:
+            from .trace.langfuse_emitter import record_status as _lf_record_status
+
+            _lf_record_status(session_dir, self._langfuse_status_summary())
+        except Exception:  # noqa: BLE001 — status mirror must never block save
+            log.debug("langfuse status mirror failed", exc_info=True)
+
+    def _backfill_scriptable_latency(self) -> None:
+        """Derive ``current_best.e2el_mean_ms`` from ``tput`` for scriptable runs.
+
+        No-op for serving frameworks, when there is no current best, or when a
+        measured ``e2el_mean_ms`` is already present. For scriptable xDiT the
+        per-image e2e latency equals ``1000 / img_per_s`` (single-stream), so the
+        stored ``tput`` fully determines it. Never raises.
+        """
+        try:
+            from .. import framework_registry
+
+            fw = str(getattr(self, "framework", "") or "")
+            if not framework_registry.is_scriptable(fw):
+                return
+            cb = self.current_best
+            if not isinstance(cb, dict):
+                return
+            if cb.get("e2el_mean_ms") is not None:
+                return
+            tput = cb.get("tput")
+            if not isinstance(tput, (int, float)) or tput <= 0:
+                return
+            e2el = framework_registry.primary_metric_value(fw, float(tput))
+            if e2el is not None and e2el > 0:
+                cb["e2el_mean_ms"] = round(float(e2el), 4)
+        except Exception:  # noqa: BLE001 — derived backfill, never blocks save
+            pass
+
+    def _langfuse_status_summary(self) -> dict[str, Any]:
+        """Flatten the state into an OTEL-friendly scalar status snapshot.
+
+        Only top-level scalars (str/bool/int/float) are emitted so each key
+        lands as a directly-filterable Langfuse trace-metadata attribute
+        (nested values would be JSON-stringified). Float gains/throughput are
+        rounded so tiny per-tick deltas don't defeat the emitter's on-change
+        throttle. Best-effort: any field access is defensive.
+
+        Returns:
+            dict[str, Any]: The flat scalar status summary to mirror.
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        last = self.lifecycle[-1] if self.lifecycle else {}
+        summary: dict[str, Any] = {
+            "phase": self.phase or "",
+            "stop_reason": self.stop_reason or "",
+            "closing_phase": bool(self.closing_phase),
+            "degraded_mode": bool(self.degraded_mode),
+            "cumulative_gain": round(float(self.cumulative_gain or 0.0), 2),
+            "cumulative_gain_validated": round(
+                float(self.cumulative_gain_validated or 0.0), 2,
+            ),
+            "baseline_failure_streak": int(self.baseline_failure_streak or 0),
+            "macro_cycle": int(self.macro_cycle or 0),
+            "session_id": self.session_id or "",
+            "model_name": self.model_name or "",
+            "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
+        }
+        tput = cb.get("tput") if isinstance(cb, dict) else None
+        if isinstance(tput, (int, float)) and not isinstance(tput, bool):
+            summary["current_best_tput"] = round(float(tput), 1)
+        if isinstance(last, dict):
+            if last.get("seq") is not None:
+                summary["last_seq"] = last.get("seq")
+            if last.get("status"):
+                summary["last_lifecycle_status"] = str(last.get("status"))
+            if last.get("phase"):
+                summary["last_lifecycle_phase"] = str(last.get("phase"))
+        return {
+            k: v
+            for k, v in summary.items()
+            if isinstance(v, (str, bool, int, float))
+        }
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1298,6 +1463,35 @@ class SharedState:
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = _now_iso()
         return hint
+
+    def enablement_close_guard_active(self) -> bool:
+        """True while a not-yet-enabled run must be protected from premature close.
+
+        Until a baseline can be *established*, the entire optimization loop is
+        blocked on it — you cannot run EXPLORE/KERNEL/SWEEP without a baseline.
+        So a ``skip_to_close`` (whether the Orchestration LLM or Robustness emits
+        it) is *premature* here: giving up before the model even runs is not a
+        legitimate finish. While this guard is active the ``skip_to_close`` hint
+        is dropped; the only ways a not-yet-enabled run may terminate are the
+        *honest* ones that do not route through ``skip_to_close``:
+
+        * ``enablement_stalled`` — the enablement loop's own stall cap
+          (:data:`_ENABLEMENT_MAX_STALL` consecutive no-progress rounds),
+        * ``prelude_baseline_failed`` — repeated baseline failures with no
+          enablement engaged,
+        * the wall-clock deadline / time-exhausted exits,
+        * hard aborts (crash threshold, signal, emergency, user stop).
+
+        Returns:
+            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
+            has never gone positive and enablement has not yet succeeded.
+        """
+        phase = (self.phase or "").strip().upper()
+        return (
+            phase in ("PRELUDE", "FRAMEWORK_AGENT")
+            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
+            and not bool(getattr(self, "enablement_succeeded", False))
+        )
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(
@@ -1854,6 +2048,44 @@ class SharedState:
         """
         return _first_positive_tput(self.current_best)
 
+    def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
+        """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.
+
+        The sidecar sits at the TraceLens run-dir root
+        (``<session>/kernel-agent/runs/<ts>/<ts>_tl-*/diffusion_roofline.json``).
+        Diffusion/xDiT trace_analyze emits ONLY this sidecar (no
+        ``kernel_roofline.json``), so ``kernel_roofline_path`` is empty and the
+        run-dir cannot be derived from it. Resolve, in order:
+
+          1. ``kernel_roofline_path`` run-dir root (serving/kernel path, when set).
+          2. Newest sidecar under ``<session>/kernel-agent/runs`` (diffusion path).
+
+        Args:
+            kernel_roofline_path: Path to ``reports/kernel_roofline.json`` when
+                present; empty for diffusion sessions.
+
+        Returns:
+            The resolved sidecar path, or ``None`` when none is found.
+        """
+        krp = str(kernel_roofline_path or "").strip()
+        if krp:
+            cand = Path(krp).parent.parent / "diffusion_roofline.json"
+            if cand.is_file():
+                return cand
+        session_dir = getattr(self, "_session_dir", None)
+        if session_dir:
+            try:
+                sidecars = [
+                    p
+                    for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json")
+                    if p.is_file()
+                ]
+                if sidecars:
+                    return max(sidecars, key=lambda p: p.stat().st_mtime)
+            except OSError:
+                return None
+        return None
+
     def _scriptable_latency_roofline(
         self, framework: str, achieved_tput: float, kernel_roofline_path: Any
     ) -> tuple[float, float]:
@@ -1884,21 +2116,28 @@ class SharedState:
             e2e_mean_ms = float(
                 framework_registry.primary_metric_value(framework, achieved_tput) or 0.0
             )
-            # Ideal per-image latency floor from the diffusion roofline sidecar
-            # (run_dir/diffusion_roofline.json; kernel_roofline is run_dir/reports/).
+            # Ideal per-image latency floor from the diffusion roofline sidecar.
             roofline_ideal_ms = 0.0
-            try:
-                sidecar = Path(str(kernel_roofline_path)).parent.parent / "diffusion_roofline.json"
-                if sidecar.is_file():
+            sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
+            if sidecar is not None:
+                try:
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
-                    analytic = data.get("analytic_dit_ceiling") if isinstance(data, dict) else None
-                    totals = data.get("totals") if isinstance(data, dict) else None
-                    if isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
+                    data = data if isinstance(data, dict) else {}
+                    # Priority: a-priori approach-a analytic ceiling (full
+                    # pipeline, config/safetensors-derived, already in ms) >
+                    # DiT-only analytic ceiling (us) > trace-summed per-kernel
+                    # ideal (us; 0 under torch.compile fusion).
+                    approach_a = data.get("analytic_ceiling")
+                    analytic = data.get("analytic_dit_ceiling")
+                    totals = data.get("totals")
+                    if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
+                        roofline_ideal_ms = float(approach_a["ideal_ms"])
+                    elif isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
                         roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
                     elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
                         roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                roofline_ideal_ms = 0.0
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    roofline_ideal_ms = 0.0
             return e2e_mean_ms, roofline_ideal_ms
         except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
             return 0.0, 0.0

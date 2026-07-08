@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cover the P2.b fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
+"""Cover the retry fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
 
 Tests ``_discover_next_framework_batch`` (bumps the failure counter, resets
 on success) and ``_pump_framework_agent_phase`` (flips done after the retry limit
@@ -52,6 +52,15 @@ class _CoordinatorStub:
     """
 
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
+    _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
+    _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
+    _stamp_framework_progress = Coordinator._stamp_framework_progress
+    # #5-P2 cross-framework discovery lane is default-on; the real discovery merge
+    # calls this reverse-lookup on every repo (here it resolves to "sglang" == the
+    # session framework, so nothing is tagged — same-framework path is unchanged).
+    _framework_agent_repo_url_origin_framework = staticmethod(
+        Coordinator._framework_agent_repo_url_origin_framework
+    )
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
@@ -185,7 +194,7 @@ def test_discover_timeout_default_used_when_override_zero(
     assert _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC == 180.0
 
 
-# P2.e — enqueue failure records progress row.
+# Enqueue failure records progress row.
 class _TasksStub:
     """Mimics ``Coordinator.tasks.create_or_return_existing``; raises to simulate an enqueue failure."""
 
@@ -205,7 +214,7 @@ async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
-    """Regression for P2.e: a registry failure records an ``enqueue_failed`` progress row so the next tick skips the candidate."""
+    """Regression: a registry failure records an ``enqueue_failed`` progress row so the next tick skips the candidate."""
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
     cand = {

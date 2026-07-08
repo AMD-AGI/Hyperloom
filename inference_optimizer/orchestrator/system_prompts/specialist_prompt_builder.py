@@ -150,6 +150,52 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+def _focus_cross_framework_rewrite_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for cross-framework feature porting (#5-P2).
+
+    Static porting methodology only (cacheable in the system prompt). The
+    per-task landing data (source diff, symbol-level landing points, target
+    module current source) is injected separately via the Coordinator seed.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs (unused; the block is
+            framework-agnostic methodology).
+
+    Returns:
+        list[str]: Markdown lines for the cross-framework rewrite focus block.
+    """
+    return [
+        "You **PORT a feature across frameworks** (e.g. SGLang <-> vLLM). This",
+        "is a REWRITE task, NOT a `git apply`.",
+        "",
+        "**Hard rules**",
+        "- The upstream diff targets a DIFFERENT framework's repo layout / API.",
+        "  It can NEVER be applied directly. Re-implement the EQUIVALENT feature",
+        "  against the TARGET framework's live source in your worktree.",
+        "- Land ONLY at the provided symbol-level landing points and their direct",
+        "  dependencies. Do not refactor unrelated modules (blast-radius control).",
+        "- Match the target framework's abstractions, naming and error handling;",
+        "  translate SEMANTICS, not syntax.",
+        "",
+        "**Method**",
+        "1. Read the source diff as INSPIRATION for the feature's intent.",
+        "2. Read the target module's current source (in the seed) to learn its",
+        "   API surface, data structures and call-order contracts.",
+        "3. Re-implement the feature at the landing points using the target API.",
+        "4. SELF-CHECK before finishing: the touched modules must import / compile",
+        "   cleanly (`python -c 'import ...'` / `py_compile`). A patch that fails",
+        "   self-check is NOT a deliverable — fix it or report blocked.",
+        "",
+        "**Deliverable**",
+        "- A unified-diff source patch (`patches_written`) against the TARGET",
+        "  framework source. A pure config-lever proposal is NOT sufficient for a",
+        "  cross-framework port.",
+        "- Echo `source_framework` / `target_framework` in your proposal and set",
+        "  the `provenance` exactly as instructed in the task seed so the KB",
+        "  ledger records the cross-framework outcome.",
+    ]
+
+
 def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """Build the domain-focus block for the kernel-switch specialist.
 
@@ -555,8 +601,47 @@ def _focus_static_recon_specialist(
     ]
 
 
+def _focus_enablement_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    """Build the enablement-specialist focus by delegating to ``build_mandate``.
+
+    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
+    renders the mandate's ``task_description`` verbatim from
+    ``framework_agent.enablement_authoring.build_mandate``.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines rendered from the enablement mandate.
+    """
+    from framework_agent.enablement import EnablementRequest
+    from framework_agent.enablement_authoring import build_mandate
+
+    model = str((inp.gap_evidence or {}).get("model") or "").strip()
+    req = EnablementRequest(
+        framework=(inp.framework or "").strip().lower(),
+        model=model or "(target model)",
+        repo_url="",
+        launch_log=inp.gap_symptom or "",
+        gpu_type=(inp.gpu_type or "").strip().lower(),
+    )
+    mandate = build_mandate(req)
+    lines = [
+        "You are the **enablement specialist** — an AUTHORING sub-agent whose",
+        "single deliverable is a bridging patch that makes a currently",
+        "non-runnable (model, backend) combo *boot and pass a minimal",
+        "inference*. The gate is RUNNABILITY, not throughput.",
+        "",
+    ]
+    lines.extend(mandate.task_description.splitlines())
+    return lines
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
+    "cross_framework_rewrite_specialist": _focus_cross_framework_rewrite_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
@@ -564,6 +649,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "pr_intel_specialist": _focus_pr_intel_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
+    "enablement_specialist": _focus_enablement_specialist,
 }
 
 

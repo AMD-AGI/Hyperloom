@@ -55,11 +55,38 @@ implemented in current scope.
 
 - No NATS / PostgreSQL / Ray / TraceLens / GEAK / OOB dependency.
 - No coupling with kernel-agent / critic-agent / robustness-agent.
-- No agentic LLM backend / worktree authoring: patch authoring is owned by
-  the Hyperloom `specialist → integrate_patch` path, not this package.
 
 LLM credentials, if used by callers running in Library mode, are owned
 by the outer runtime (Hyperloom / TBO / etc.), not by this package.
+
+## Two objectives: perf optimisation vs enablement
+
+The package serves two distinct objectives, gated differently:
+
+- **Perf** — discover / audit / apply an existing PR and KEEP it
+  only if throughput improves. Patch authoring for perf is owned by the
+  Hyperloom `specialist → integrate_patch` path; this package does the
+  discovery + static audit + git-apply/bench execution.
+- **Enablement** (opt-in) — make a currently **non-runnable**
+  `(model, backend)` combo *run at all*. This path DOES author bridging
+  patches (via the `enablement_specialist` domain / `SpecialistRunner`
+  worktree authoring) and is gated on **runnability** (server boots + minimal
+  correctness), not throughput. Pure, GPU-free building blocks live in this
+  package:
+  - `framework_agent.enablement` — failure-signature classifier
+    (`classify_failure`) + `EnablementRequest` + the `runnable_decision` gate.
+  - `framework_agent.enablement_discovery` — bridging-repo selection
+    (framework + ROCm/HIP/aiter via `repo_map.bridge_repo_urls`) and
+    enablement-intent ranking.
+  - `framework_agent.enablement_authoring` — the authoring `EnablementMandate`
+    (allowed source roots + task description + patch invariants) handed to the
+    specialist runner.
+
+  Editing ROCm/HIP source (`/opt/rocm`) is a first-class, **default-on** part
+  of the enablement path: `orchestrator/framework_paths.resolve_rocm_hip_source_roots`
+  is always merged into the IO-side allowlist (alongside the always-allowed
+  `aiter`). Authored patches must still pass `git apply --check` grounding and
+  the forbidden-numeric-claim guard.
 
 ### Optional LLM use (`fa phase-audit --request ... use_llm=true`)
 

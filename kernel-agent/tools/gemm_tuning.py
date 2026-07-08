@@ -18,23 +18,12 @@ from typing import Any
 
 
 def _json_line(payload: dict[str, Any]) -> None:
-    """Emit one JSON object as a single flushed line on stdout.
-
-    Args:
-        payload (dict[str, Any]): The structured result to serialize.
-            Keys are sorted for deterministic output.
-    """
+    """Emit one sorted JSON object as a flushed stdout line."""
     print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _safe_cleanup_clause() -> str:
-    """Return the safety preamble forbidding global process cleanup.
-
-    Returns:
-        str: A task-prompt clause instructing the GEAK sub-agent not to
-            run ``ps aux | grep | kill``-style global cleanup that could
-            terminate a co-resident Hyperloom optimizer's server.
-    """
+    """Return the prompt clause forbidding global process cleanup."""
     return (
         "SAFETY: do NOT run global process cleanup. In particular, never run "
         "`ps aux | grep ... | xargs kill`, `pgrep -f ... | xargs kill`, "
@@ -48,22 +37,7 @@ def _safe_cleanup_clause() -> str:
 
 
 def _build_task(args: argparse.Namespace, workspace: Path) -> str:
-    """Render the full GEAK FP8 GEMM tuning task prompt.
-
-    Interpolates the workload knobs, model/benchmark paths, baseline
-    throughput, and safety clauses into the fixed PR #228 contract text.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args supplying knobs such
-            as ``benchmark_script``, ``tp``, ``conc``, ``isl``, ``osl``,
-            ``model_path``, ``framework``, ``gpu_type``, ``precision``,
-            and ``baseline_tput``.
-        workspace (Path): The session workspace root advertised to the
-            sub-agent as its working directory.
-
-    Returns:
-        str: The complete multi-line task prompt.
-    """
+    """Render the GEAK FP8 GEMM tuning task prompt."""
     baseline = (
         f"Baseline output_throughput is already known: {args.baseline_tput:g} tok/s."
         if args.baseline_tput and args.baseline_tput > 0

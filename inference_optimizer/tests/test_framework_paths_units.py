@@ -53,7 +53,10 @@ class TestNormalizeRoot:
 class TestResolveSourceFileAllowlist:
     def test_default_when_env_empty(self, monkeypatch):
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        assert fp.resolve_source_file_allowlist() == fp._DEFAULT_SOURCE_ROOTS
+        # The enablement ROCm/HIP roots are always merged (default-on capability).
+        assert fp.resolve_source_file_allowlist() == (
+            fp._DEFAULT_SOURCE_ROOTS + fp._ROCM_HIP_SOURCE_ROOTS
+        )
 
     def test_merges_discovered_roots(self, monkeypatch):
         monkeypatch.setattr(
@@ -142,6 +145,8 @@ class TestProbeFrameworkSourceRootsForEnv:
             ),
         )
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        # Isolate from the always-on enablement ROCm/HIP root (may exist on disk).
+        monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{present}/"
 
@@ -172,6 +177,7 @@ class TestProbeFrameworkSourceRootsForEnv:
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
+        monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{shared}/"
 
@@ -392,6 +398,26 @@ class TestAtomPathPresentInAllThreeLocations:
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
         assert ka_atom, "tracelens reusable roots carry no atom entry"
         assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
+
+
+# ROCm/HIP enablement source roots (default-on)
+
+
+class TestRocmHipSourceRoots:
+    """The ROCm/HIP source-edit capability is always on (enablement path)."""
+
+    def test_always_returns_rocm_root(self):
+        """No opt-in gate: the ROCm/HIP roots are always surfaced."""
+        assert fp.resolve_rocm_hip_source_roots() == ("/opt/rocm/",)
+
+    def test_merged_into_allowlist_by_default(self, monkeypatch):
+        """/opt/rocm/ is always present in the resolved allowlist."""
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        assert "/opt/rocm/" in fp.resolve_source_file_allowlist()
+
+    def test_aiter_allowed(self):
+        """aiter stays in the default allowlist too."""
+        assert any("/aiter/" in r for r in fp._DEFAULT_SOURCE_ROOTS)
 
 
 # Source-root resolution + prompt injection (was test_framework_source_roots.py)

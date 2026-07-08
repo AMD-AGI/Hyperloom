@@ -9,6 +9,7 @@ import pytest
 from framework_agent.repo_map import (
     KNOWN_FRAMEWORKS,
     _FRAMEWORK_TO_REPO_URL,
+    bridge_repo_urls,
     repo_url_for_framework,
 )
 
@@ -47,6 +48,41 @@ def test_repo_url_for_xdit():
 def test_repo_map_known_frameworks():
     """The canonical dict must enumerate exactly the supported frameworks (pinned so future additions update this test intentionally)."""
     assert set(_FRAMEWORK_TO_REPO_URL.keys()) == {"sglang", "vllm", "atom", "xdit"}
+
+
+# ---------------------------------------------------------------------------
+# Enablement bridge repos (separate from serving frameworks)
+# ---------------------------------------------------------------------------
+def test_bridge_repos_for_rocm_hip_layer():
+    """rocm_hip failures scout aiter/HIP/ROCm for an enabling PR."""
+    urls = bridge_repo_urls("rocm_hip")
+    assert "https://github.com/ROCm/aiter.git" in urls
+    assert "https://github.com/ROCm/HIP.git" in urls
+    assert "https://github.com/ROCm/ROCm.git" in urls
+
+
+def test_bridge_repos_build_layer_is_aiter():
+    """build-layer failures scout aiter."""
+    assert bridge_repo_urls("build") == ("https://github.com/ROCm/aiter.git",)
+
+
+def test_bridge_repos_framework_layer_is_empty():
+    """The framework layer needs no bridge repos (caller has the framework repo)."""
+    assert bridge_repo_urls("framework") == ()
+    assert bridge_repo_urls("") == ()
+    assert bridge_repo_urls("nonsense") == ()
+
+
+def test_bridge_repos_case_insensitive():
+    """Layer lookup is case-insensitive / whitespace-tolerant."""
+    assert bridge_repo_urls("  ROCM_HIP ") == bridge_repo_urls("rocm_hip")
+
+
+def test_bridge_repos_do_not_pollute_known_frameworks():
+    """Bridge repos must NOT leak into the serving-framework set."""
+    assert "aiter" not in KNOWN_FRAMEWORKS
+    assert "hip" not in KNOWN_FRAMEWORKS
+    assert "rocm" not in KNOWN_FRAMEWORKS
 
 
 def test_known_frameworks_constant_matches_dict():
