@@ -6348,7 +6348,10 @@ def main() -> int:
                         f"alternate modes with higher busy_ratio: "
                         f"{low_quality_warning['non_empty_modes']}. "
                         "Refusing to analyze (would yield misleading "
-                        "high-idle Executive Summary).",
+                        "high-idle Executive Summary). "
+                        "The roofline executor will auto-retry trace_analyze "
+                        "with an adjusted steady-state window — this is a "
+                        "self-healing step on the same captured trace, not a hang.",
                     )
                     raise RuntimeError(
                         f"steady_state_chunk_low_quality: requested "

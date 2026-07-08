@@ -1087,6 +1087,7 @@ class ExploreExecutor:
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=round1_lifecycle,
                         preclean_before_run=not use_warm_decision,
+                        server_already_ready=use_warm_decision,
                     )
                     if not results:
                         # Defensive — run_grid returns one result per grid entry.
@@ -1335,6 +1336,8 @@ class ExploreExecutor:
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
                                 preclean_before_run=not lifecycle_eligible,
+                                soft_deadline_sec=decision_deadline_sec,
+                                server_already_ready=lifecycle_eligible,
                             )
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
