@@ -268,6 +268,9 @@ fi
 # propagates Environment block vars from the prompt into sandbox env, so
 # operators can flip this per-task without editing this script).
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
+# Explicit alias for operators who want to skip the final model/index load
+# step during install (e.g. Docker builds without visible GPUs).
+KERNEL_AGENT_SKIP_MODEL_LOAD_VAL="${KERNEL_AGENT_SKIP_MODEL_LOAD:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -305,6 +308,13 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 # not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
+# Optional build-time escape hatch: skip Ray daemon startup while still
+# installing Ray itself and all downstream dependencies (TraceLens/GEAK/OOB).
+# Useful in Docker image builds where launching background daemons is fragile.
+case "${SKIP_RAY_START:-0}" in
+  1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
+  *) SKIP_RAY_START=0 ;;
+esac
 # The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
 # session sets ``KERNEL_OPT_BACKEND_ORDER=perfskills``. The default runtime
 # optimizer is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
@@ -330,12 +340,17 @@ Options:
   --dry-run          Print actions without running installs
   --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
                      (only needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
+  --skip-model-load  Skip the final GEAK RAG model/index build step.
   -h, --help         Show this help
 
 Environment (optional):
+  SKIP_RAY_START=1                      Skip `ray start --head` during install (default 0).
+                                        Installs ray/click but defers daemon startup to runtime.
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
+                                        Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
   INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
                                         Equivalent to --with-perfskills. Default native users skip it.
 EOF
@@ -346,6 +361,7 @@ while [ "$#" -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --with-perfskills) INSTALL_PERFSKILLS=1 ;;
+    --skip-model-load) KERNEL_AGENT_SKIP_MODEL_LOAD_VAL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -752,6 +768,10 @@ ensure_ray_started() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
+  if [ "$SKIP_RAY_START" -eq 1 ]; then
+    log "skipping ray head startup (SKIP_RAY_START=1)"
+    return 0
+  fi
   if ! command -v ray >/dev/null 2>&1; then
     warn "ray CLI missing; cannot start ray head"
     return 0
@@ -796,12 +816,73 @@ _pip_install_editable() {
     fi
     die "${label} checkout not found: ${root}"
   fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    local project_name
+    project_name="$(_project_name_from_pyproject "$root")"
+    if [ -n "$project_name" ] && _local_install_matches_root "$project_name" "$root"; then
+      log "${label} already installed from ${root}; skipping reinstall"
+      return 0
+    fi
+  fi
   log "ensuring ${label} editable install from ${root}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
     run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
   fi
   return 0
+}
+
+_project_name_from_pyproject() {
+  local root="$1"
+  local pyproject="${root%/}/pyproject.toml"
+  [ -f "$pyproject" ] || return 0
+  python3 - "$pyproject" <<'PY' 2>/dev/null || true
+import sys
+path = sys.argv[1]
+try:
+    import tomllib
+except Exception:
+    import tomli as tomllib  # py<3.11 fallback
+with open(path, "rb") as f:
+    data = tomllib.load(f)
+name = (((data.get("project") or {}).get("name")) or "").strip()
+print(name)
+PY
+}
+
+_local_install_matches_root() {
+  local project_name="$1"
+  local root="$2"
+  [ -n "$project_name" ] || return 1
+  python3 - "$project_name" "$root" <<'PY' >/dev/null 2>&1
+import importlib.metadata
+import json
+import os
+import sys
+from urllib.parse import urlparse, unquote
+
+project = sys.argv[1]
+root = os.path.realpath(sys.argv[2])
+try:
+    dist = importlib.metadata.distribution(project)
+except importlib.metadata.PackageNotFoundError:
+    raise SystemExit(1)
+direct = dist.read_text("direct_url.json")
+if not direct:
+    raise SystemExit(1)
+try:
+    payload = json.loads(direct)
+except Exception:
+    raise SystemExit(1)
+url = payload.get("url") or ""
+if not url.startswith("file:"):
+    raise SystemExit(1)
+parsed = urlparse(url)
+installed_root = os.path.realpath(unquote(parsed.path))
+if os.path.normcase(installed_root) != os.path.normcase(root):
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
 }
 
 # Internal extension is opt-in: enabled iff $TRACELENS_INTERNAL_ROOT is set.
@@ -974,7 +1055,11 @@ ensure_geak() {
     if [ -n "${GEAK_PIP_CONSTRAINT_FILE:-}" ] && [ -f "${GEAK_PIP_CONSTRAINT_FILE}" ]; then
       _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
     fi
-    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"
+    if _local_install_matches_root "mini-swe-agent" "${GEAK_ROOT}"; then
+      log "GEAK already installed from ${GEAK_ROOT}; skipping pip reinstall"
+    else
+      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"
+    fi
     # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -990,8 +1075,12 @@ ensure_geak() {
     # break install with "File ... does not exist".
     for _geak_mcp in rag-mcp profiler-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
-      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
-        "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"
+      if _local_install_matches_root "${_geak_mcp}" "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"; then
+        log "${_geak_mcp} already installed from ${GEAK_ROOT}/mcp_tools/${_geak_mcp}; skipping pip reinstall"
+      else
+        run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
+          "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"
+      fi
     done
     # Patch GEAK's bundled prompt YAML to remove the misleading
     # ``task_runner.py performance`` example that causes sub-agent
@@ -1218,6 +1307,12 @@ PY
 }
 
 ensure_rag_index() {
+  case "$KERNEL_AGENT_SKIP_MODEL_LOAD_VAL" in
+    1|true|TRUE|yes|YES|on|ON)
+      log "skipping GEAK model/index load step (KERNEL_AGENT_SKIP_MODEL_LOAD=$KERNEL_AGENT_SKIP_MODEL_LOAD_VAL)"
+      return 0
+      ;;
+  esac
   case "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL" in
     0|false|FALSE|no|NO|off|OFF)
       log "skipping GEAK RAG index build (KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL)"
