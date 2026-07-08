@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P7: roofline profile retry falls back to eager on a cuda-graph capture crash.
+"""Roofline profile retry falls back to eager on a cuda-graph capture crash.
 
 sglang's torch profiler collides with HIP CUDA-graph stream capture
 (hipErrorStreamCaptureUnsupported). The roofline retry must then boot the

@@ -467,7 +467,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     baseline_arg_error_streak: int = 0
     # Combined backstop: ANY baseline failure (regardless of error_class) counts
     # here. Mixed classes split the per-class streaks above so neither hits its
-    # threshold; this total catches that and fast-fails (P5 anti time-exhaustion).
+    # threshold; this total catches that and fast-fails (anti time-exhaustion).
     baseline_total_failures: int = 0
     # One-shot: cuda-graph capture failure asks the next baseline to retry
     # by disabling cuda-graph capture (framework-correct flag injected by the
@@ -625,6 +625,31 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     )
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
+    # (Stage-1, default OFF) When True the Coordinator may run explore-style
+    # config-grid exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor)
+    # before the phase advances, giving FRAMEWORK the EXPLORE config-search
+    # capability. Absent from PHASE_LLM_PROPOSABLE_ACTIONS; the Coordinator
+    # drives it, never the LLM. Default False keeps the standard
+    # PRELUDE -> FRAMEWORK_AGENT -> EXPLORE flow unchanged bit-for-bit.
+    framework_config_exploration_enabled: bool = False
+    # Compact records of framework config-exploration rounds (task id, variant
+    # count, kept count, best gain). Kept separate from
+    # framework_agent_phase_progress so it never perturbs the source-candidate
+    # plateau gate.
+    framework_config_exploration_results: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # Stage-2a FRAMEWORK config-exploration subphase state machine:
+    # "" (not started) -> "running" -> "done". Drives the advance-time hold.
+    framework_config_lane_state: str = ""
+    # Rounds dispatched in the current FRAMEWORK config-exploration subphase;
+    # capped by _framework_config_max_rounds(). Reset on macro-cycle reloop.
+    framework_config_lane_round: int = 0
+    # Config variant grid harvested from the last generation specialist,
+    # awaiting an explore round. Consumed by _maybe_hold_for_framework_config_lane.
+    framework_config_pending_grid: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id
     # (PR URL). The downstream integrate_patch task only carries
     # ``specialist_task_id``, so the authored-outcome bridge resolves the real

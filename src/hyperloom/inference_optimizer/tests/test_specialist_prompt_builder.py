@@ -94,3 +94,23 @@ def test_specialist_focus_renders_non_empty_for_all_frameworks(
     text = _render(domain_key, framework=framework)
     assert "**What to read first**" in text
     assert "**Pitfalls" in text
+
+
+# 4. #5-P2 Option A: dedicated cross-framework rewrite domain + porting focus.
+def test_cross_framework_rewrite_domain_registered():
+    domain = get_domain("cross_framework_rewrite_specialist")
+    assert domain is not None
+    assert domain.kb_anchor == "framework"
+
+
+@pytest.mark.parametrize("framework", ["", "sglang", "vllm"])
+def test_cross_framework_rewrite_focus_renders_porting_methodology(framework):
+    text = _render("cross_framework_rewrite_specialist", framework=framework)
+    lower = text.lower()
+    # Rewrite (not git apply) methodology + self-check + unified-diff deliverable.
+    assert "port" in lower
+    assert "git apply" in lower
+    assert "self-check" in lower
+    assert "unified-diff" in lower or "unified diff" in lower
+    # Provenance echo so the KB ledger records the cross-framework outcome.
+    assert "provenance" in lower

@@ -129,6 +129,11 @@ class _CoordinatorStub:
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
+    # #5-P2 cross-framework discovery lane is now default-on; the real discovery
+    # merge calls this reverse-lookup on every repo, so the stub must carry it.
+    _framework_agent_repo_url_origin_framework = staticmethod(
+        Coordinator._framework_agent_repo_url_origin_framework
+    )
 
     def __init__(self, tmp_path: Path, *, framework: str = "sglang") -> None:
         self.session_dir = tmp_path

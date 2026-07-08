@@ -1143,6 +1143,23 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_enablement_safely": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
+        "_framework_agent_repo_url_origin_framework": "phase_framework",
+        "_build_framework_config_grid": "phase_framework",
+        "_framework_config_explore_params": "phase_framework",
+        "_run_framework_config_exploration": "phase_framework",
+        "_framework_config_exploration_inflight": "phase_framework",
+        "_framework_config_max_rounds": "phase_framework",
+        "_framework_config_new_variants": "phase_framework",
+        "_finish_framework_config_lane": "phase_framework",
+        "_framework_config_generation_context_lines": "phase_framework",
+        "_dispatch_framework_config_generation_specialist": "phase_framework",
+        "_framework_config_generation_inflight": "phase_framework",
+        "_framework_config_grid_from_proposals": "phase_framework",
+        "_ingest_framework_config_generation": "phase_framework",
+        "_start_framework_config_generation": "phase_framework",
+        "_framework_config_lane_should_engage": "phase_framework",
+        "_maybe_hold_for_framework_config_lane": "phase_framework",
+        "_record_framework_config_exploration_result": "phase_framework",
         "_orchestration_conversational": "conversation",
         "_reset_orchestration_conversation": "conversation",
         "_conversation_progress_signal": "conversation",
@@ -1606,7 +1623,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
+        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
 
         Args:
             n: Number of full reactor+dispatcher passes to run (default 1).

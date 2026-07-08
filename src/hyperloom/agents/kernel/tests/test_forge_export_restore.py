@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression test for forge in-place export/restore covering ALL changed files.
-
-Reproduces the run6 bug (Issue 5): the agent's winning change landed in a
-SIBLING tracked file (a *_config.py defaults module), not in source_file. The
-old code only exported/restored source_file, so:
-  - the exported artifact was byte-identical to the original (no optimization),
-  - the sibling file was left dirty in the live repo.
-
-These tests drive forge_submit's _prepare_inplace / _export_best_artifacts /
-_restore_inplace against a synthetic git repo (no GPU / no claude) and assert:
-  1. export captures the sibling file + a non-empty forge.patch,
-  2. restore reverts BOTH the kernel and the sibling file to pre-forge content,
-  3. a pre-existing dirty tracked file is preserved (still dirty) after restore,
-  4. an untracked file is never touched,
-  5. the repo ends on its original branch with no forge/* temp branch.
-"""
+"""Regression tests for forge export/restore across all changed files."""
 
 from __future__ import annotations
 

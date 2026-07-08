@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.orchestrator.framework import paths as _framework_paths
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
@@ -115,6 +116,9 @@ class _Stub:
     _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
+    _framework_agent_repo_url_origin_framework = staticmethod(
+        Coordinator._framework_agent_repo_url_origin_framework
+    )
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
     _framework_agent_authoring_inflight = Coordinator._framework_agent_authoring_inflight
@@ -855,6 +859,163 @@ def test_audit_candidate_calls_phase_audit_when_uncached(
     assert cand["_audit"]["recommended_next_step"] == "direct_framework"  # cached on candidate
 
 
+def test_audit_candidate_same_framework_omits_target_framework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate framework == session framework (the common case, incl. blank
+    candidate.framework) -> phase_audit called without target_framework, exactly
+    as before the #5-P1 wiring (design doc L0 guard: same-framework is unaffected)."""
+    captured: dict[str, Any] = {}
+
+    async def _phase_audit(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"recommended_next_step": "direct_framework", "semantic_status": "not_present"}
+
+    monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
+    stub = _Stub(tmp_path, authoring=True)
+    cand = dict(_CANDIDATE)  # framework="sglang", matches _StateStub.framework
+
+    asyncio.run(Coordinator._audit_framework_agent_candidate(stub, cand))  # type: ignore[arg-type]
+    assert captured["framework"] == "sglang"
+    assert captured["target_framework"] == ""
+    assert captured["target_framework_source_roots"] is None
+
+
+def test_audit_candidate_blank_framework_omits_target_framework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate with no framework stamp at all (most same-repo discoveries) ->
+    resolves to session framework, same as before this wiring existed."""
+    captured: dict[str, Any] = {}
+
+    async def _phase_audit(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"recommended_next_step": "direct_framework", "semantic_status": "not_present"}
+
+    monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
+    stub = _Stub(tmp_path, authoring=True)
+    cand = dict(_CANDIDATE)
+    cand["framework"] = ""
+
+    asyncio.run(Coordinator._audit_framework_agent_candidate(stub, cand))  # type: ignore[arg-type]
+    assert captured["framework"] == "sglang"  # falls back to session framework
+    assert captured["target_framework"] == ""
+
+
+def test_audit_candidate_cross_framework_sets_target_framework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design #5-P1 wiring: a candidate discovered from a DIFFERENT framework's
+    repo must be audited in cross-framework mode against this session's own
+    (target) framework, with the target's own live source roots attached."""
+    captured: dict[str, Any] = {}
+
+    async def _phase_audit(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"recommended_next_step": "author_via_specialist", "layer": "cross_framework"}
+
+    monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
+    monkeypatch.setattr(_framework_paths, "resolve_source_file_allowlist", lambda: ["/src/sglang"])
+    stub = _Stub(tmp_path, authoring=True)  # _StateStub.framework == "sglang"
+    cand = dict(_CANDIDATE)
+    cand["framework"] = "vllm"
+
+    out = asyncio.run(Coordinator._audit_framework_agent_candidate(stub, cand))  # type: ignore[arg-type]
+    assert captured["framework"] == "vllm"  # candidate's own source framework
+    assert captured["target_framework"] == "sglang"  # this session's framework
+    assert captured["target_framework_source_roots"] == ["/src/sglang"]
+    assert out["layer"] == "cross_framework"
+
+
+def test_framework_agent_repo_url_origin_framework_known() -> None:
+    """Reverse-lookup resolves each repo_map-known framework's canonical repo URL."""
+    assert Coordinator._framework_agent_repo_url_origin_framework(
+        "https://github.com/ROCm/vllm.git"
+    ) == "vllm"
+    assert Coordinator._framework_agent_repo_url_origin_framework(
+        "https://github.com/sgl-project/sglang.git"
+    ) == "sglang"
+
+
+def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> None:
+    """Kernel-level pr_intel_specialist repos (aiter/triton/rccl) have no framework mapping."""
+    assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/aiter.git") == ""
+    assert Coordinator._framework_agent_repo_url_origin_framework("") == ""
+    assert Coordinator._framework_agent_repo_url_origin_framework("not-a-url") == ""
+
+
+def test_discover_batch_tags_cross_repo_candidates_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design #5-P2 mesh-coordinator lane (default ON): a candidate discovered from
+    a DIFFERENT framework's repo (already queried via the pr_intel_specialist
+    cross-repo set) gets tagged with its origin framework WITHOUT any env opt-in;
+    the session's own-repo candidates are left untagged, exactly as before."""
+    monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
+    sglang_url = _fa_client.repo_url_for_framework("sglang")
+    vllm_url = _fa_client.repo_url_for_framework("vllm")
+
+    async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
+        if repo_url == vllm_url:
+            return {
+                "batch_id": "b1",
+                "candidates": [
+                    {"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}
+                ],
+            }
+        return {
+            "batch_id": "b1",
+            "candidates": [dict(_CANDIDATE)],  # already framework="sglang"
+        }
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    monkeypatch.setattr(stub, "_framework_agent_discover_repo_urls", lambda framework: [sglang_url, vllm_url])
+
+    ok = asyncio.run(Coordinator._discover_next_framework_batch(stub))  # type: ignore[arg-type]
+    assert ok
+    candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
+    by_ref = {c["ref"]: c for c in candidates}
+    assert by_ref["PR:9"]["framework"] == "vllm"
+    assert by_ref["perf/moe"]["framework"] == "sglang"
+
+
+def test_discover_batch_does_not_tag_cross_repo_candidates_when_kill_switch_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill switch (FRAMEWORK_AGENT_CROSS_DISCOVER_TAG=0): cross-repo candidates keep
+    whatever framework fa returned (blank in practice) — a full revert to the
+    pre-wiring behaviour for rollback/safety."""
+    monkeypatch.setenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "0")
+    sglang_url = _fa_client.repo_url_for_framework("sglang")
+    vllm_url = _fa_client.repo_url_for_framework("vllm")
+
+    async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
+        if repo_url == vllm_url:
+            return {
+                "batch_id": "b1",
+                "candidates": [
+                    {"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}
+                ],
+            }
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    monkeypatch.setattr(stub, "_framework_agent_discover_repo_urls", lambda framework: [sglang_url, vllm_url])
+
+    ok = asyncio.run(Coordinator._discover_next_framework_batch(stub))  # type: ignore[arg-type]
+    assert ok
+    candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
+    by_ref = {c["ref"]: c for c in candidates}
+    assert by_ref["PR:9"].get("framework") in (None, "")
+
+
 def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -878,3 +1039,49 @@ def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["framework_agent"]
+
+
+# --- #5-P2: cross-framework authoring seed / provenance --------------------
+
+
+def test_authoring_specialist_cross_framework_seed(tmp_path: Path):
+    """A cross_framework audit seeds the specialist with rewrite contract + provenance."""
+    stub = _Stub(tmp_path)
+    stub.shared_state.framework = "vllm"  # session (target) framework
+    audit = {
+        "layer": "cross_framework",
+        "metrics": {"src_framework": "sglang", "dst_framework": "vllm"},
+        "evidence": [
+            {
+                "dst_module": "vllm/core/block/prefix_caching_block.py",
+                "src_path": "python/sglang/srt/mem_cache/radix_cache.py",
+                "feature": "radix_prefix_cache",
+            }
+        ],
+        "recommended_next_step": "author_via_specialist",
+    }
+    tid = asyncio.run(
+        Coordinator._enqueue_framework_agent_authoring_specialist(stub, dict(_CANDIDATE), audit)  # type: ignore[arg-type]
+    )
+    assert tid
+    params = stub.tasks.created[-1]["params"]
+    assert params.get("cross_framework") is True
+    assert params.get("source_framework") == "sglang"
+    assert params.get("target_framework") == "vllm"
+    notes = params.get("notes") or ""
+    assert "CROSS-FRAMEWORK PORT" in notes
+    assert "specialist:serving:framework:cross_framework:sglang->vllm" in notes
+    assert "prefix_caching_block.py" in notes
+
+
+def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
+    """A non-cross audit must NOT stamp cross-framework params."""
+    stub = _Stub(tmp_path)
+    audit = {"recommended_next_step": "author_via_specialist"}  # no cross_framework layer
+    tid = asyncio.run(
+        Coordinator._enqueue_framework_agent_authoring_specialist(stub, dict(_CANDIDATE), audit)  # type: ignore[arg-type]
+    )
+    assert tid
+    params = stub.tasks.created[-1]["params"]
+    assert "cross_framework" not in params
+    assert "CROSS-FRAMEWORK PORT" not in (params.get("notes") or "")

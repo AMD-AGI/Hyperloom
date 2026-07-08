@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-7 CodexBackend tests (mock OpenAI client — no network)."""
+"""CodexBackend tests (mock OpenAI client — no network)."""
 
 from __future__ import annotations
 

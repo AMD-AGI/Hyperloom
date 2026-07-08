@@ -1,20 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for issue #432: GEAK Ray dispatch must auto-recover
-from a *foreign* Ray cluster started under a different Python/Ray than the
-submitter (the bug: cluster py3.10 vs submitter py3.12). Previously
-``ray.init`` raised a "Version mismatch" RuntimeError in ~0.8s and the whole
-GEAK attempt was recorded as a "compile failed" REVERT despite valid kernel
-candidates.
-
-``quiet_ray_init`` must now:
-  1. detect the "Version mismatch" RuntimeError,
-  2. tear the foreign cluster down + start a fresh LOCAL head under this
-     interpreter (``force_restart_local_cluster`` -> ray stop/start), and
-  3. retry ``ray.init`` exactly once.
-
-A non-version-mismatch error must propagate unchanged (no restart, no retry).
-"""
+"""Regression tests for Ray version-mismatch recovery before GEAK dispatch."""
 
 from __future__ import annotations
 

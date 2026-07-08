@@ -28,6 +28,16 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+# patch_path_safety.py is shipped beside this script on RayJob pods.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from patch_path_safety import (  # noqa: E402
+    assert_backup_dir_allowed,
+    assert_revert_paths_allowed,
+    assert_target_path_allowed,
+)
+
 
 def _log(msg: str) -> None:
     """Stderr-only timestamped log line (stdout is reserved for the final JSON).
@@ -109,6 +119,8 @@ def _apply_remote(
     """
     host = socket.gethostname()
     target = Path(target_path)
+    assert_target_path_allowed(target, must_exist=True)
+    assert_backup_dir_allowed(Path(backup_dir))
     if not target.is_file():
         raise FileNotFoundError(f"target_path does not exist on pod {host}: {target}")
 
@@ -168,6 +180,7 @@ def _revert_remote(
             "backup_path": str(backup),
             "status": "noop_missing_backup",
         }
+    assert_revert_paths_allowed(target, backup)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, target)
     return {

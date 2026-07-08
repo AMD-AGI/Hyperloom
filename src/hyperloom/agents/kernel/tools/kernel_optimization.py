@@ -15,40 +15,24 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 # Sibling import: kernel name → multi-GPU collective detection (torchrun vs python).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+from _io_utils import (  # noqa: E402
+    append_log,
+    atomic_write_json,
+    kernel_row_matches,
+    read_last_lines,
+    safe_float,
+    source_text_looks_complete,
+    utc_now,
+)
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
-
-
-def utc_now() -> str:
-    """Return the current UTC time as an ISO8601 string.
-
-    Returns:
-        str: The current UTC timestamp in ISO-8601 format.
-    """
-    return datetime.now(timezone.utc).isoformat()
-
-
-def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write JSON to ``path`` using a temp file then rename.
-
-    Args:
-        path (Path): Destination JSON file; parent dirs are created.
-        data (dict[str, Any]): JSON-serializable payload to write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
-        json.dump(data, tmp, indent=2, sort_keys=True)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
@@ -61,36 +45,6 @@ def append_jsonl(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
-
-
-def append_log(log_path: Path, message: str) -> None:
-    """Append a log line to ``log_path`` (ensuring parent dirs exist).
-
-    Args:
-        log_path (Path): Log file to append to.
-        message (str): Text to append; trailing whitespace is stripped and a
-            newline is added.
-    """
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(message.rstrip() + "\n")
-
-
-def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
-    """Return the last ``limit`` lines of a log file, empty if missing.
-
-    Args:
-        log_path (Path): Log file to read.
-        limit (int): Maximum number of trailing lines to return.
-
-    Returns:
-        list[str]: The trailing lines, or an empty list when the file does
-            not exist.
-    """
-    if not log_path.exists():
-        return []
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return lines[-limit:]
 
 
 def update_status(
@@ -135,34 +89,7 @@ def update_status(
 
 
 def resolve_candidates_path(run_dir: Path) -> Path:
-    """Locate the ``kernel_candidates.json`` TraceLens wrote for this session.
-
-    PR-C (``tracelens_analysis.py``) moved every TraceLens invocation's
-    outputs into a per-run sub-directory
-    ``runs/<session_id>/<compact_ts>_<run_id>/`` so successive watermark
-    refreshes no longer overwrite each other. ``kernel_optimization.py``
-    still keys its own artifacts off the flat ``runs/<session_id>/`` root,
-    so the candidates file is no longer where the pre-PR-C lookup expected
-    it. Resolve it here with the same "latest pointer" semantics the
-    roofline sidecar uses:
-
-    * honour the flat legacy path (``run_dir/kernel_candidates.json``) when
-      present so pre-PR-C sessions / callers that drop the file at the
-      session root keep working;
-    * otherwise descend into the newest ``<ts>_<run_id>`` sub-directory that
-      actually carries a ``kernel_candidates.json`` — the compact-timestamp
-      prefix sorts chronologically, so ``max()`` is the most recent run.
-
-    Falls back to the flat path (which ``load_candidates`` will surface as a
-    clean ``FileNotFoundError``) when nothing matches, preserving the
-    "no fabricated target" failure mode for genuinely missing analyses.
-
-    Args:
-        run_dir: The ``runs/<session_id>/`` root for the session.
-
-    Returns:
-        The resolved ``kernel_candidates.json`` path (possibly non-existent).
-    """
+    """Resolve the latest per-run ``kernel_candidates.json`` or the flat fallback."""
     flat = run_dir / "kernel_candidates.json"
     if flat.is_file():
         return flat
@@ -1313,27 +1240,8 @@ def _build_priority_block(candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Mirror of ``tracelens_skill_runner._safe_float`` — coerce
-    ``int / float / numeric str`` to ``float``; everything else (None,
-    empty string, malformed) → ``default``. Used by hypothesis-block
-    helpers so per-row impact numbers from ``all_pitem_prose`` survive
-    JSON round-trips that may have already converted them to strings.
-
-    Args:
-        value (Any): Value to coerce to ``float``.
-        default (float): Fallback returned when ``value`` is None/empty or
-            cannot be parsed.
-
-    Returns:
-        float: The parsed float, or ``default`` on any failure.
-    """
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+# Shared numeric coercion (see _io_utils.safe_float).
+_safe_float = safe_float
 
 
 def _format_impact_range(
@@ -2555,24 +2463,8 @@ def _run_rocprof_roofline(
     }
 
 
-def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
-    """Return whether a roofline result row matches the target kernel.
-
-    Args:
-        row: Result row with ``matched_kernel_name`` / ``name`` fields.
-        target_kernel: Kernel name to match; empty matches any row.
-
-    Returns:
-        ``True`` if the row corresponds to ``target_kernel``.
-    """
-    if not target_kernel:
-        return True
-    target = target_kernel.strip()
-    names = (
-        str(row.get("matched_kernel_name") or "").strip(),
-        str(row.get("name") or "").strip(),
-    )
-    return any(name == target for name in names)
+# Shared row-vs-target-kernel matcher (see _io_utils.kernel_row_matches).
+_rocprof_kernel_matches = kernel_row_matches
 
 
 def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_path: str) -> dict[str, Any]:
@@ -3030,21 +2922,9 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # GEAK is dispatched PROMPT-ONLY. It owns harness construction in its
-            # preprocess_v3 orchestrator: it discovers the op and builds the harness
-            # from the dispatch prompt (device source + captured serving shapes +
-            # #703 WORKLOAD CONTEXT) alone. HL does NOT pass a test_command/op_test
-            # to GEAK -- a hardcoded op->test map (tracelens_analysis) can mis-pick
-            # (e.g. test_pa.py for paged attention) and seed a wrong harness. The
-            # canonical baseline run dispatched with no test_command and GEAK's
-            # preprocess produced the correct harness + 1.2647x. The prompt is the
-            # only interface. (common_test_command is still computed above solely
-            # for the rocprof before-snapshot, never handed to GEAK.)
+            # GEAK owns harness construction from the prompt; HL never passes
+            # common_test_command to avoid stale op->test mappings.
             is_multigpu = is_multigpu_common
-            # Prompt-only: do NOT copy a test_command/op_test into the workspace (the
-            # block main had here is intentionally dropped — GEAK builds its own harness
-            # from the prompt). Keep main's updated _apply_geak_env_overrides signature
-            # (now takes `candidate`).
             previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(
@@ -3066,24 +2946,18 @@ def invoke_backend(
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
                 result["geak_final_report"] = str(final_report)
-                # Primary salvage: final_report.json already carries the verified
-                # best speedup + patch (best_speedup / best_patch / best_task).
-                # Read it directly — one small file — so a real win survives even
-                # when the results/ rglob below is SIGKILLed mid-scan on a huge
-                # worktree (the round-2 timeout that lost a verified 4.33x).
+                # Prefer the small final_report fast-path before scanning large
+                # results/ worktrees for partial artifacts.
                 try:
                     _fr = json.loads(final_report.read_text(encoding="utf-8"))
                     _fr_sp = float(_fr.get("best_speedup_verified") or _fr.get("best_speedup") or 0.0)
                     if _fr_sp > 0:
-                        result["geak_per_task_best_speedup"] = _fr_sp
-                        if _fr.get("best_task"):
-                            result["geak_per_task_best_task"] = str(_fr["best_task"])
-                        _fr_patch = str(_fr.get("best_patch") or "")
-                        if _fr_patch:
-                            result["geak_per_task_best_patch"] = _fr_patch
-                            _fr_wt = _geak_best_worktree(_fr_patch)
-                            if _fr_wt:
-                                result["geak_per_task_best_worktree"] = str(_fr_wt)
+                        _surface_geak_per_task_best(
+                            result,
+                            speedup=_fr_sp,
+                            task=str(_fr.get("best_task") or ""),
+                            patch_path=str(_fr.get("best_patch") or ""),
+                        )
                 except (ValueError, OSError, TypeError) as exc:
                     # Non-fatal: final_report.json salvage is best-effort. Fall
                     # through to the results/ rglob below, but record why the
@@ -3095,11 +2969,7 @@ def invoke_backend(
                             f"({type(exc).__name__}: {exc}); falling back to results/ scan",
                         )
             results_dir = out_dir / "results"
-            # The results/ rglobs walk the per-round worktrees, which can hold
-            # 100k+ JIT/cache files — on a SIGTERM'd run the scan itself can be
-            # SIGKILLed before it returns. Skip it entirely when final_report.json
-            # already gave us the verified best speedup + patch above; only fall
-            # back to scanning when that primary salvage was absent.
+            # Fall back to scanning results/ only when final_report lacked a win.
             if results_dir.is_dir() and not result.get("geak_per_task_best_speedup"):
                 # Any *.patch under results/ is evidence of partial work.
                 patches = sorted(results_dir.rglob("*.patch"))
@@ -3127,15 +2997,12 @@ def invoke_backend(
                             best_task = bj.parent.name
                             best_patch_path = str(d.get("best_patch_file") or "")
                     if best_speedup > 0:
-                        result["geak_per_task_best_speedup"] = best_speedup
-                        result["geak_per_task_best_task"] = best_task
-                        if best_patch_path:
-                            result["geak_per_task_best_patch"] = best_patch_path
-                        # Surface the worktree dir with the rewritten files, so the artifact
-                        # extractor can recover a real .py source (not just the .patch diff).
-                        wt = _geak_best_worktree(best_patch_path)
-                        if wt:
-                            result["geak_per_task_best_worktree"] = str(wt)
+                        _surface_geak_per_task_best(
+                            result,
+                            speedup=best_speedup,
+                            task=best_task,
+                            patch_path=best_patch_path,
+                        )
             return result
         if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
@@ -3466,6 +3333,32 @@ def _count_auth_failures(text: str) -> int:
     return total
 
 
+def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str | None:
+    """Read a text file, returning ``None`` when missing or unreadable."""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        if errors is None:
+            return p.read_text(encoding="utf-8")
+        return p.read_text(encoding="utf-8", errors=errors)
+    except Exception:
+        return None
+
+
+def _read_json_file(path: str | Path) -> Any | None:
+    """Read a JSON file, returning ``None`` when missing or unparseable."""
+    text = _read_text_file(path, errors=None)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     """Scan an OOB ``optimization_report.md`` for a speedup figure.
 
@@ -3478,14 +3371,8 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
         The estimated speedup, or ``None`` when the report is missing or no
         plausible figure is found.
     """
-    if not report_path:
-        return None
-    p = Path(report_path)
-    if not p.is_file():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    text = _read_text_file(report_path)
+    if text is None:
         return None
     found: list[float] = []
     for pat in _SPEEDUP_PATTERNS:
@@ -3515,16 +3402,13 @@ def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
         float | None: The reported ``best_speedup`` when positive, else None
             (also None when the file is missing or unparseable).
     """
-    if not final_report_path:
-        return None
-    p = Path(final_report_path)
-    if not p.is_file():
+    d = _read_json_file(final_report_path)
+    if not isinstance(d, dict):
         return None
     try:
-        d = json.loads(p.read_text(encoding="utf-8"))
         v = float(d.get("best_speedup") or 0.0)
         return v if v > 0 else None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -3541,14 +3425,8 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
         bool | None: True/False when a correctness signal is found, or None
             when the file is missing/unreadable or no signal is present.
     """
-    if not report_path:
-        return None
-    p = Path(report_path)
-    if not p.is_file():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    text = _read_text_file(report_path)
+    if text is None:
         return None
     lower = text.lower()
     marker = re.search(r"(?im)^\s*\[correctness\]\s*(pass|passed|fail|failed)\b", text)
@@ -3658,14 +3536,8 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
         bool | None: False if any correctness key is falsy, True if only
             truthy ones are found, or None when nothing relevant is present.
     """
-    if not final_report_path:
-        return None
-    p = Path(final_report_path)
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    data = _read_json_file(final_report_path)
+    if data is None:
         return None
 
     found: list[bool] = []
@@ -3719,48 +3591,8 @@ _FENCE_RE = re.compile(
 )
 
 
-def _source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically decide whether ``text`` is a complete source file.
-
-    For ``.py`` it must parse and contain Python markers; for C/C++/CUDA
-    suffixes it must contain typical source markers. Text containing a code
-    fence is rejected (handled by :func:`_extract_source_block` instead).
-
-    Args:
-        text (str): Candidate file contents.
-        suffix (str): File suffix that selects the language heuristic.
-
-    Returns:
-        bool: True when ``text`` plausibly is a complete source file for the
-            given suffix; False otherwise.
-    """
-    stripped = text.strip()
-    if not stripped or "```" in stripped:
-        return False
-    if suffix == ".py":
-        try:
-            compile(stripped + "\n", "<optimized_kernel>", "exec")
-        except SyntaxError:
-            return False
-        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
-    if suffix in {".cu", ".cuh", ".hip", ".cpp", ".cc", ".c", ".h", ".hpp"}:
-        return any(
-            marker in stripped
-            for marker in (
-                "#include",
-                "__global__",
-                "__device__",
-                "extern ",
-                "namespace ",
-                "template",
-                "void ",
-                "int ",
-                "float ",
-                "half",
-                "torch::",
-            )
-        )
-    return False
+# Shared source-completeness heuristic (see _io_utils.source_text_looks_complete).
+_source_text_looks_complete = source_text_looks_complete
 
 
 def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path) -> str:
@@ -3836,6 +3668,26 @@ def _geak_best_worktree(best_patch_path: str) -> Path | None:
     if not worktree.is_dir():
         return None
     return worktree
+
+
+def _surface_geak_per_task_best(
+    result: dict[str, Any],
+    *,
+    speedup: float,
+    task: str = "",
+    patch_path: str = "",
+) -> None:
+    """Expose GEAK's best per-task speedup artifacts on the backend result."""
+    if speedup <= 0:
+        return
+    result["geak_per_task_best_speedup"] = speedup
+    if task:
+        result["geak_per_task_best_task"] = str(task)
+    if patch_path:
+        result["geak_per_task_best_patch"] = patch_path
+        worktree = _geak_best_worktree(patch_path)
+        if worktree:
+            result["geak_per_task_best_worktree"] = str(worktree)
 
 
 def _worktree_source_paths(

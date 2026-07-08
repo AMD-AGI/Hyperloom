@@ -498,6 +498,121 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
     assert calls["pr_url"] == "https://example/pr/1"
 
 
+@pytest.mark.asyncio
+async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, monkeypatch):
+    """A same-framework config-lever deliverable has no ``specialist:serving:
+    framework`` provenance on its own (only the cross-framework prompt path
+    emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB
+    write still fires. Regression test for the #3 leaderboard's real-run gap
+    where config-lever KEEPs never reached ``lessons.jsonl``.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    # No provenance / fa_pr_url on the proposal — mirrors real specialist output.
+    proposal = {"name": "cfg", "extra_envs": {"SGLANG_USE_AITER": "1"}}
+    _write_workspace(session, "spec", proposal_set=[proposal])
+
+    calls = {}
+
+    async def _fake_write(**kwargs):
+        calls.update(kwargs)
+        return "/tmp/lessons.jsonl"
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
+        _fake_write,
+    )
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+                "config_changes": {"SGLANG_USE_AITER": "1"},
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/1",
+            },
+        )
+    )
+    assert res["status"] == "kept"
+    assert calls["outcome"] == "integrated"
+    assert calls["pr_url"] == "https://github.com/ROCm/aiter/pull/1"
+
+
+class _FakeSharedState:
+    def __init__(self, framework: str = "sglang") -> None:
+        self.framework = framework
+
+
+def test_stamp_framework_kb_provenance_config_lever():
+    payload: dict[str, Any] = {"proposal_set": [{"extra_envs": {"X": "1"}}]}
+    ip._stamp_framework_kb_provenance(
+        payload,
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
+        shared_state=_FakeSharedState("sglang"),
+    )
+    entry = payload["proposal_set"][0]
+    assert entry["provenance"] == "specialist:serving:framework:sglang"
+    assert entry["fa_pr_url"] == "https://x/pr/9"
+    assert entry["framework"] == "sglang"
+
+
+def test_stamp_framework_kb_provenance_noop_when_not_framework_dispatch():
+    payload: dict[str, Any] = {"proposal_set": [{"extra_envs": {"X": "1"}}]}
+    ip._stamp_framework_kb_provenance(payload, params={}, shared_state=_FakeSharedState())
+    assert "provenance" not in payload["proposal_set"][0]
+
+
+def test_stamp_framework_kb_provenance_noop_when_no_candidate_id():
+    payload: dict[str, Any] = {"proposal_set": [{}]}
+    ip._stamp_framework_kb_provenance(
+        payload, params={"framework_agent_authoring": True}, shared_state=_FakeSharedState()
+    )
+    assert "provenance" not in payload["proposal_set"][0]
+
+
+def test_stamp_framework_kb_provenance_leaves_cross_framework_tag_alone():
+    payload: dict[str, Any] = {
+        "proposal_set": [{"provenance": "specialist:serving:framework:cross_framework:sglang->vllm"}]
+    }
+    ip._stamp_framework_kb_provenance(
+        payload,
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
+        shared_state=_FakeSharedState("sglang"),
+    )
+    assert payload["proposal_set"][0]["provenance"] == "specialist:serving:framework:cross_framework:sglang->vllm"
+    assert "fa_pr_url" not in payload["proposal_set"][0]
+
+
+def test_stamp_framework_kb_provenance_synthesizes_missing_proposal_set():
+    payload: dict[str, Any] = {}
+    ip._stamp_framework_kb_provenance(
+        payload,
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
+        shared_state=_FakeSharedState("vllm"),
+    )
+    assert payload["proposal_set"][0]["provenance"] == "specialist:serving:framework:vllm"
+    assert payload["proposal_set"][0]["fa_pr_url"] == "https://x/pr/9"
+
+
+def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
+    ip._stamp_framework_kb_provenance(
+        None,
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
+        shared_state=_FakeSharedState(),
+    )  # must not raise
+
+
 # ---- _maybe_write helpers directly ----
 @pytest.mark.asyncio
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):

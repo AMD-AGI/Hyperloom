@@ -8,8 +8,9 @@ Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
 idempotent), ``kill-inference``, ``stop-rayjob``.
 
-State lives in ``/tmp/multi_node_state.json`` (rayjob_id / workspace /
-head_pod_ip / urls / pid file / ray_address). Wait loops use many short
+State lives in ``$MULTI_NODE_STATE_FILE`` (default:
+``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
+when the session is pinned, else legacy ``/tmp/multi_node_state.json``).
 HTTP polls under the sandbox's 120s ceiling (ADDENDUM-09) and surface
 progress on stderr. Credentials must already be in sandbox env
 (ADDENDUM-13); this module never invents URLs or keys.
@@ -29,7 +30,9 @@ from typing import Any
 
 from .._internal import safe_client, workload_spec
 from .._internal import ssh_client, dynamo_support
+from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
+from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 
 import logging
 log = logging.getLogger(__name__)
@@ -38,8 +41,14 @@ log = logging.getLogger(__name__)
 # (also used by rayjob.py and the rest of cli.py); imported back here. Safe
 # partial-module cycle: cli.py imports this module only after all of these
 # names are already defined (see the comment at that import site).
+from .. import cli as _mn_cli
 from ..cli import (
-    STATE_FILE,
+    _state_file,
+    _dynamo_ssh_dir,
+    _dynamo_known_hosts_path,
+    _refresh_dynamo_known_hosts,
+    _dynamo_ssh_run_script,
+    _dynamo_ssh_bash_with_env,
     EXIT_CONFIG_ERROR,
     EXIT_TRANSIENT,
     _load_state,
@@ -48,7 +57,9 @@ from ..cli import (
     _poll_timeout_from_args,
     _normalize_extra_args,
     _read_pod_script,
+    _read_bundled_pod_python_script,
     _extract_pod_json,
+    _DEFAULT_POLL_INTERVAL_S,
 )
 # rayjob.py is imported by cli.py first (see the re-export site), so its
 # symbols are already resolvable by the time this module loads.
@@ -61,8 +72,25 @@ from .rayjob import (
     _summarize_workload_failure,
 )
 
+
 # Session-scoped SSH key dir (sandbox-local, next to the state file).
-_DYNAMO_SSH_DIR = STATE_FILE.parent / "mn_ssh"
+# Computed once at import time for backward-compat callers of this symbol;
+# prefer :func:`_dynamo_ssh_dir` when the session may have changed since import.
+_DYNAMO_SSH_DIR = _dynamo_ssh_dir()
+
+
+def _validate_extra_server_args(raw: str, *, context: str) -> None:
+    """Validate server args before fan-out to Dynamo pods.
+
+    Args:
+        raw: Extra server CLI flags string.
+        context: Label for error messages.
+
+    Raises:
+        ServerArgsRejected: When a denied flag is present.
+    """
+    validate_server_args(raw, context=context)
+
 
 def cmd_create_dynamo(args: argparse.Namespace) -> int:
     """Create an idle multi-node DynamoDeployment, then poll for Running.
@@ -99,7 +127,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
 
     # Session SSH keypair: public key authorises the controller on every pod.
-    priv_key, pub_key = ssh_client.generate_session_keypair(_DYNAMO_SSH_DIR)
+    priv_key, pub_key = ssh_client.generate_session_keypair(_dynamo_ssh_dir())
 
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     body = workload_spec.build_dynamo_workload_body(
@@ -251,12 +279,31 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     )
     _save_state(merged)
 
+    # Record pod SSH host keys (Dynamo-only control plane).
+    if gpu_ips:
+        try:
+            kh = _refresh_dynamo_known_hosts(gpu_ips, args.ssh_port, state=merged)
+            merged["ssh_known_hosts"] = str(kh)
+            _save_state(merged)
+        except RuntimeError as exc:
+            warn(f"ssh-keyscan failed (non-fatal): {exc}")
+
     # Best-effort SSH reachability probe (non-fatal: pods may still be booting).
     if gpu_ips:
-        reachable = sum(1 for ip in gpu_ips if ssh_client.probe_ssh(ip, key_path=priv_key, port=args.ssh_port))
+        kh_path = _dynamo_known_hosts_path(merged)
+        reachable = sum(
+            1
+            for ip in gpu_ips
+            if ssh_client.probe_ssh(
+                ip,
+                key_path=priv_key,
+                known_hosts=kh_path,
+                port=args.ssh_port,
+            )
+        )
         info(f"ssh reachable GPU pods: {reachable}/{len(gpu_ips)}")
 
-    info(f"state written to {STATE_FILE}")
+    info(f"state written to {_state_file()}")
     print(json.dumps(merged, indent=2, sort_keys=True))
     return 0
 
@@ -325,7 +372,7 @@ def _collect_forward_env() -> dict[str, str]:
                     fwd[str(k)] = str(v)
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
-    return fwd
+    return filter_forward_env(fwd, warn_on_drop=True)
 
 def _dynamo_fanout_launch(
     state: dict[str, Any],
@@ -355,23 +402,20 @@ def _dynamo_fanout_launch(
         non-zero if any pod's launcher failed.
     """
     script = _read_pod_script("launch_dynamo_node.py")
-    key_path = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
     forward_env = _collect_forward_env()
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
     rc_total = 0
     for ip in worker_ips:
-        info(f"{label}: ssh -> {ip}:{port}")
+        info(f"{label}: ssh -> {ip}:{int(state.get('ssh_port') or ssh_client.DEFAULT_SSH_PORT)}")
         try:
-            cp = ssh_client.ssh_run_script(
+            cp = _dynamo_ssh_run_script(
+                state,
                 ip,
                 script,
                 "python3",
                 launch_args,
-                key_path=key_path,
-                port=port,
                 timeout=poll_timeout,
                 env=forward_env,
             )
@@ -413,6 +457,22 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     framework = (args.framework or state.get("framework") or "sglang").lower()
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {framework!r}")
+    shared_extra = getattr(args, "extra_args", "") or ""
+    try:
+        _validate_extra_server_args(shared_extra, context="dynamo restart-server --extra-args")
+        if getattr(args, "pd_prefill_extra_args", ""):
+            _validate_extra_server_args(
+                getattr(args, "pd_prefill_extra_args", "") or "",
+                context="dynamo restart-server --pd-prefill-extra-args",
+            )
+        if getattr(args, "pd_decode_extra_args", ""):
+            _validate_extra_server_args(
+                getattr(args, "pd_decode_extra_args", "") or "",
+                context="dynamo restart-server --pd-decode-extra-args",
+            )
+    except ServerArgsRejected as exc:
+        err(str(exc))
+        return EXIT_CONFIG_ERROR
     # The deployment topology is fixed at create time, so state.pd_mode is
     # authoritative: a PD deployment must restart in PD mode even if the
     # caller's --pd-mode defaulted to colocated/aggregated.
@@ -612,17 +672,14 @@ def _dynamo_ssh_node_op(
         tuple[dict | None, dict]: ``(parsed_json_or_None, transport)`` where
         ``transport`` carries the ssh rc / stderr.
     """
-    script = _read_pod_script("kernel_node_ops.py")
-    key = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
+    script = _read_bundled_pod_python_script("kernel_node_ops.py")
     try:
-        cp = ssh_client.ssh_run_script(
+        cp = _dynamo_ssh_run_script(
+            state,
             ip,
             script,
             "python3",
             op_args,
-            key_path=key,
-            port=port,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -664,8 +721,6 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
         err("apply-tracelens-patch (dynamo): no GPU pod IPs in state")
         return EXIT_CONFIG_ERROR
     script = _read_pod_script("apply_tracelens_patch_multinode.py")
-    key_path = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
     pin = getattr(args, "sglang_version_pin", None) or ""
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
     if pin:
@@ -681,13 +736,12 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     for ip in gpu_ips:
         info(f"apply-tracelens-patch (dynamo): ssh -> {ip}")
         try:
-            cp = ssh_client.ssh_run_script(
+            cp = _dynamo_ssh_run_script(
+                state,
                 ip,
                 script,
                 pod_python,
                 op_args,
-                key_path=key_path,
-                port=port,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
@@ -909,8 +963,6 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
         err("install-geak: cannot resolve GEAK source dir; pass --geak-src or set $HYPERLOOM_ROOT / $USER_DATA_PATH")
         return EXIT_CONFIG_ERROR
     script = _read_pod_script("install_geak_node.sh")
-    key = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
     gpu_ips = _dynamo_all_gpu_ips(state)
     info(f"install-geak (dynamo): geak_src={geak_src} pods={len(gpu_ips)}")
     results: list[dict] = []
@@ -918,13 +970,12 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     for ip in gpu_ips:
         info(f"install-geak: ssh -> {ip}")
         try:
-            cp = ssh_client.ssh_run_script(
+            cp = _dynamo_ssh_run_script(
+                state,
                 ip,
                 script,
                 "bash",
                 shlex.quote(str(geak_src)),
-                key_path=key,
-                port=port,
                 timeout=_poll_timeout_from_args(args),
             )
         except subprocess.TimeoutExpired:
@@ -949,26 +1000,44 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     return rc_total
 
 def cmd_install_oob(args: argparse.Namespace) -> int:
-    """Install the OOB backend (oob/claude/codex/@cursor) on every Dynamo GPU
-    pod over SSH (idempotent). Mirrors install.sh ensure_node + ensure_oob so
-    claude/codex/cursor kernel-agent backends work on the Dynamo backend.
+    """Install the OOB backend on inference pods (RayJob Dashboard or Dynamo SSH).
 
-    OOB python CLI installs from the shared-NFS ``$OOB_SRC`` checkout; the npm
-    CLIs (claude/codex/@cursor-sdk) install per pod. Credentials are forwarded
-    over SSH stdin (never argv). Dynamo-only.
+    RayJob: one-shot Dashboard job on the head pod with credentials in
+    ``runtime_env`` (no workload env fanout). Dynamo: SSH fan-out to every GPU
+    pod with credentials on stdin.
 
     Args:
         args (argparse.Namespace): Parsed ``install-oob`` arguments.
 
     Returns:
-        int: ``0`` when every pod installed / skipped, non-zero on any failure
+        int: ``0`` when install succeeded or was skipped, non-zero on failure
         (or ``EXIT_CONFIG_ERROR`` when the OOB source is missing).
     """
-    state = _dynamo_require_state()
+    state = _load_state()
+    backend = str(state.get("backend") or "rayjob").strip().lower()
     oob_src = (getattr(args, "oob_src", None) or os.environ.get("OOB_SRC", "")).strip()
     if not oob_src:
         err("install-oob: no OOB source; pass --oob-src or set $OOB_SRC")
         return EXIT_CONFIG_ERROR
+
+    if backend == "rayjob":
+        head_ip = (state.get("head_pod_ip") or "").strip()
+        if not head_ip:
+            err("install-oob (rayjob): head_pod_ip missing in state; run create-rayjob first")
+            return EXIT_CONFIG_ERROR
+        return _mn_cli._rayjob_install_oob(
+            state,
+            oob_src=oob_src,
+            poll_interval=int(getattr(args, "poll_interval", _DEFAULT_POLL_INTERVAL_S) or _DEFAULT_POLL_INTERVAL_S),
+            poll_timeout=_poll_timeout_from_args(args),
+            print_logs=bool(getattr(args, "print_logs", False)),
+        )
+
+    if backend != "dynamo":
+        err(f"install-oob: unsupported backend {backend!r}")
+        return EXIT_CONFIG_ERROR
+
+    state = _dynamo_require_state()
     script = _read_pod_script("install_oob_node.sh")
     env: dict[str, str] = {"OOB_SRC": oob_src}
     for k in ("OOB_BASE_URL", "OOB_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
@@ -980,8 +1049,6 @@ def cmd_install_oob(args: argparse.Namespace) -> int:
         sk = os.environ.get("SAFE_API_KEY", "").strip()
         if sk:
             env["OOB_API_KEY"] = sk
-    key = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
     gpu_ips = _dynamo_all_gpu_ips(state)
     # node+npm+pip installs are slow; allow a generous timeout (npm registry).
     timeout = max(_poll_timeout_from_args(args), 1800)
@@ -991,12 +1058,11 @@ def cmd_install_oob(args: argparse.Namespace) -> int:
     for ip in gpu_ips:
         info(f"install-oob: ssh -> {ip}")
         try:
-            cp = ssh_client.ssh_run_bash_with_env(
+            cp = _dynamo_ssh_bash_with_env(
+                state,
                 ip,
                 script,
                 env,
-                key_path=key,
-                port=port,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:

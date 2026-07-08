@@ -869,7 +869,9 @@ def test_apply_patch_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeyp
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     sp = tmp_path / "s.json"
-    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)  # module-level const
+    sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     monkeypatch.setattr(mn_cli, "_dynamo_apply_patch", lambda a: 4242)
 
     ns = argparse.Namespace(
@@ -883,9 +885,11 @@ def test_apply_patch_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeyp
         poll_timeout=110,
     )
     sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
     assert mn_cli.cmd_apply_patch(ns) == 4242  # routed to dynamo
 
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
     assert mn_cli.cmd_apply_patch(ns) == mn_cli.EXIT_CONFIG_ERROR  # legacy path
 
 
@@ -893,7 +897,9 @@ def test_kernel_bench_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkey
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     sp = tmp_path / "s.json"
-    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)
+    sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     monkeypatch.setattr(mn_cli, "_dynamo_kernel_bench", lambda a: 7777)
 
     ns = argparse.Namespace(
@@ -907,8 +913,10 @@ def test_kernel_bench_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkey
         poll_timeout=110,
     )
     sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
     assert mn_cli.cmd_kernel_bench(ns) == 7777
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
     assert mn_cli.cmd_kernel_bench(ns) == mn_cli.EXIT_CONFIG_ERROR
 
 
@@ -917,19 +925,65 @@ def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     sp = tmp_path / "s.json"
-    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
-def test_install_oob_and_kernel_tools_noop_for_rayjob(tmp_path, monkeypatch):
-    # OOB + combined kernel-tools install hooks must no-op (0) for non-dynamo.
+def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
+    # GEAK SSH install is Dynamo-only; RayJob kernel-agent uses the Ray runtime.
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     sp = tmp_path / "s.json"
-    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
+    assert mn_cli.install_geak_on_pods_best_effort() == 0
+
+
+def test_install_oob_skips_rayjob_when_oob_src_unset(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    sp.write_text('{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3"}', encoding="utf-8")
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
+    monkeypatch.delenv("OOB_SRC", raising=False)
     assert mn_cli.install_oob_on_pods_best_effort() == 0
+
+
+def test_install_oob_rayjob_delegates_to_dashboard_helper(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    sp.write_text(
+        '{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3","ray_dashboard_token":"tok"}',
+        encoding="utf-8",
+    )
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
+    monkeypatch.setenv("OOB_SRC", "/weka/oob")
+    calls: list[str] = []
+
+    def _fake_install(state, *, oob_src, poll_interval, poll_timeout, print_logs=False):
+        calls.append(oob_src)
+        assert state["head_pod_ip"] == "10.1.2.3"
+        return 0
+
+    monkeypatch.setattr(mn_cli, "_rayjob_install_oob", _fake_install)
+    assert mn_cli.install_oob_on_pods_best_effort() == 0
+    assert calls == ["/weka/oob"]
+
+
+def test_install_kernel_tools_geak_noop_oob_runs_for_rayjob(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    sp.write_text('{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3"}', encoding="utf-8")
+    sp.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
+    monkeypatch.delenv("OOB_SRC", raising=False)
     assert mn_cli.install_kernel_tools_on_pods_best_effort() == 0
 
 
@@ -942,6 +996,7 @@ def _write_mn_state(tmp_path, monkeypatch, payload):
 
     sp = tmp_path / "mn_state.json"
     sp.write_text(_json.dumps(payload), encoding="utf-8")
+    sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     return sp
 
@@ -1121,6 +1176,7 @@ def test_ray_gcs_address_from_state_prefers_ray_address(tmp_path: Path, monkeypa
         json.dumps({"ray_address": "10.1.2.3:6379", "head_pod_ip": "10.9.9.9"}),
         encoding="utf-8",
     )
+    p.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
     assert mne.ray_gcs_address_from_state() == "10.1.2.3:6379"
 
@@ -1128,6 +1184,7 @@ def test_ray_gcs_address_from_state_prefers_ray_address(tmp_path: Path, monkeypa
 def test_ray_gcs_address_from_state_fallback_head(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "state.json"
     p.write_text(json.dumps({"head_pod_ip": "10.1.2.4"}), encoding="utf-8")
+    p.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
     assert mne.ray_gcs_address_from_state() == "10.1.2.4:6379"
 
@@ -1135,6 +1192,7 @@ def test_ray_gcs_address_from_state_fallback_head(tmp_path: Path, monkeypatch: p
 def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     p = tmp_path / "state.json"
     p.write_text(json.dumps({"head_pod_ip": "10.0.0.5"}), encoding="utf-8")
+    p.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)

@@ -6,7 +6,8 @@ Lives in the executors package (called by ``baseline.py`` / ``_grid_runner.py``
 before they launch Magpie) so the dependency edge stays one-way: executors
 import this; ``multi_node/`` knows nothing about them.
 
-Reads ``$INFERENCE_OPTIMIZER_NODES`` + ``/tmp/multi_node_state.json``. Single
+Reads ``$INFERENCE_OPTIMIZER_NODES`` + ``$MULTI_NODE_STATE_FILE`` (session-scoped
+under ``<session_dir>/runtime/`` when pinned, else legacy ``/tmp/``). Single
 node (< 2): returns ``{}`` (single-pod path preserved). Multi-node (>= 2) with
 a ``service_url``: returns ``MAGPIE_RUN_PHASE=client`` +
 ``BENCHMARK_BASE_URL=<service_url>`` so Magpie skips its own server launch and
@@ -23,21 +24,22 @@ import os
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
+from hyperloom.inference_optimizer.multi_node.state_paths import (
+    legacy_state_file,
+    resolve_state_file,
+    state_file_safe_to_read,
+)
 
-# Mirror of the multi_node/cli.py constant; duplicated (not imported) to avoid
-# pulling httpx into the single-node import path.
-_DEFAULT_STATE_PATH = "/tmp/multi_node_state.json"
+log = logging.getLogger(__name__)
 
 
 def _state_path() -> Path:
     """Resolve where the multi_node CLI dropped its state file.
 
     Returns:
-        Path: The state-file path from ``$MULTI_NODE_STATE_FILE`` or the
-            default ``/tmp/multi_node_state.json``.
+        Path: The state-file path from :func:`resolve_state_file`.
     """
-    return Path(os.environ.get("MULTI_NODE_STATE_FILE", _DEFAULT_STATE_PATH))
+    return resolve_state_file()
 
 
 def _read_state() -> dict[str, Any]:
@@ -49,6 +51,14 @@ def _read_state() -> dict[str, Any]:
     """
     p = _state_path()
     if not p.is_file():
+        legacy = legacy_state_file()
+        if p != legacy and legacy.is_file() and state_file_safe_to_read(legacy):
+            log.warning("multi_node state file %s missing; reading legacy %s", p, legacy)
+            p = legacy
+        else:
+            return {}
+    if not state_file_safe_to_read(p):
+        log.warning("multi_node state file %s failed ownership/permission check", p)
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -62,8 +72,8 @@ def is_multi_node() -> bool:
     """True iff the optimizer is operating on a >=2-node RayJob cluster.
 
     State file wins over env so ``--resume`` works (manifest.json doesn't
-    persist ``nodes``): ``/tmp/multi_node_state.json`` ``nodes`` >= 2 wins;
-    else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
+    persist ``nodes``): session-scoped ``multi_node_state.json`` ``nodes`` >= 2
+    wins; else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
 
     Returns:
         True when operating on a >=2-node RayJob cluster, else False.

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P0-1 protocol-layer tests (intent envelope, MessageBus, ResourceLockManager, TaskRegistry, CursorStore)."""
+"""Protocol-layer tests (intent envelope, MessageBus, ResourceLockManager, TaskRegistry, CursorStore)."""
 
 from __future__ import annotations
 

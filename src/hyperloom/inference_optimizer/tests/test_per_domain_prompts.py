@@ -45,15 +45,16 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domain_keys_covers_all_active_domains():
-    """The active set covers the full catalogue (nine entries: seven legacy
-    domains + static_recon_specialist + enablement_specialist).
+    """The active set covers the full catalogue (ten entries: seven legacy
+    domains + static_recon_specialist + enablement_specialist +
+    cross_framework_rewrite_specialist).
 
     tree-reform.MD P2.7: ``SPECIALIST_DOMAINS_M5`` was a misleading alias that
     had become byte-for-byte identical to ``SPECIALIST_DOMAIN_KEYS`` (the
     catalogue had grown to fully cover the once-narrower M5 active set), so it
     was removed and every reference switched to the canonical constant.
     """
-    assert len(SPECIALIST_DOMAIN_KEYS) == 9
+    assert len(SPECIALIST_DOMAIN_KEYS) == 10
 
 
 # 2. Per-domain content checks — each template mentions its signature
@@ -429,9 +430,10 @@ def _valid_done_payload(
 
 
 # 1. specialist_domains catalogue
-def test_specialist_domains_catalogue_has_nine_entries():
-    """Nine entries: seven legacy domains + static_recon_specialist + enablement_specialist."""
-    assert len(SPECIALIST_DOMAINS) == 9
+def test_specialist_domains_catalogue_has_ten_entries():
+    """Ten entries: seven legacy domains + static_recon_specialist +
+    enablement_specialist + cross_framework_rewrite_specialist (#5-P2)."""
+    assert len(SPECIALIST_DOMAINS) == 10
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 

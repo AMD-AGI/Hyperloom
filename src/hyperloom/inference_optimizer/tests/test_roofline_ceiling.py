@@ -632,7 +632,7 @@ class TestResolveEffectiveConcurrency:
         self,
         tmp_path,
     ):
-        """P0 fix: the materialized baseline yaml's ``CONC`` wins over ``state.conc`` (session 095726Z: state stayed at default 8 while the run used 64)."""
+        """The materialized baseline yaml's ``CONC`` wins over ``state.conc`` (session 095726Z: state stayed at default 8 while the run used 64)."""
         from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
@@ -736,7 +736,7 @@ class TestResolveEffectiveConcurrency:
 
 
 class TestMoEBatchSaturation:
-    """P1 fix: the MoE weight-read term grows with batch as activated experts saturate toward all experts (a constant active_weight_bytes over-amortizes at high batch)."""
+    """The MoE weight-read term grows with batch as activated experts saturate toward all experts (a constant active_weight_bytes over-amortizes at high batch)."""
 
     _COMMON = dict(
         gpu_type="mi355x",
@@ -1222,7 +1222,7 @@ class TestPhysicalInterpretation095726Z:
             gpu_type="mi355x",
             tp=1,
             precision="bf16",
-            conc=8,  # stale SharedState default; yaml CONC=64 wins (P0).
+            conc=8,  # stale SharedState default; yaml CONC=64 wins.
             isl=256,
             osl=256,
             last_baseline={"extras": {"materialized_config": str(yaml_path)}},

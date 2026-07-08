@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P3 bug-fix regression tests (PR #130).
+"""Bug-fix regression tests.
 
 Bug A: ReportExecutor session_dir resolution via $USER_DATA_PATH.
 Bug B: programmatic handler advances the target-agent cursor to suppress

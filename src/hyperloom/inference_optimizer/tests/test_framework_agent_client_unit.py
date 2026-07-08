@@ -222,3 +222,70 @@ async def test_phase_discover_omits_exclusion_keys_when_empty(tmp_path, monkeypa
     req = captured["request"]
     assert "excluded_candidate_ids" not in req
     assert "failed_candidate_context" not in req
+
+
+# -- phase_audit (design #5: cross-framework target_framework wiring) ------
+@pytest.mark.asyncio
+async def test_phase_audit_same_framework_omits_target_framework(tmp_path, monkeypatch) -> None:
+    captured: dict = {}
+
+    async def _fake_invoke(*, subcommand, request, session_dir, timeout_sec):
+        captured["request"] = request
+        return {"recommended_next_step": "skip"}
+
+    monkeypatch.setattr(fac, "_invoke_fa_phase", _fake_invoke)
+    await fac.phase_audit(
+        candidate={"repo": "sgl-project/sglang"},
+        framework="sglang",
+        framework_source_roots=["/src/sglang"],
+        target_framework="sglang",  # same as framework -> not cross-framework
+        session_dir=tmp_path,
+    )
+    req = captured["request"]
+    assert "target_framework" not in req
+    assert "target_framework_source_roots" not in req
+
+
+@pytest.mark.asyncio
+async def test_phase_audit_cross_framework_sets_target_and_roots(tmp_path, monkeypatch) -> None:
+    captured: dict = {}
+
+    async def _fake_invoke(*, subcommand, request, session_dir, timeout_sec):
+        captured["request"] = request
+        return {"recommended_next_step": "author_via_specialist", "layer": "cross_framework"}
+
+    monkeypatch.setattr(fac, "_invoke_fa_phase", _fake_invoke)
+    await fac.phase_audit(
+        candidate={"repo": "sgl-project/sglang"},
+        framework="sglang",
+        framework_source_roots=["/src/sglang"],
+        target_framework="vllm",
+        target_framework_source_roots=["/src/vllm"],
+        session_dir=tmp_path,
+    )
+    req = captured["request"]
+    assert req["target_framework"] == "vllm"
+    assert req["target_framework_source_roots"] == ["/src/vllm"]
+
+
+@pytest.mark.asyncio
+async def test_phase_audit_cross_framework_without_explicit_roots_omits_key(tmp_path, monkeypatch) -> None:
+    """No target_framework_source_roots passed -> key absent (fa falls back to
+    framework_source_roots per design Q1, flagged roots_source=="fallback")."""
+    captured: dict = {}
+
+    async def _fake_invoke(*, subcommand, request, session_dir, timeout_sec):
+        captured["request"] = request
+        return {}
+
+    monkeypatch.setattr(fac, "_invoke_fa_phase", _fake_invoke)
+    await fac.phase_audit(
+        candidate={"repo": "sgl-project/sglang"},
+        framework="sglang",
+        framework_source_roots=["/src/sglang"],
+        target_framework="vllm",
+        session_dir=tmp_path,
+    )
+    req = captured["request"]
+    assert req["target_framework"] == "vllm"
+    assert "target_framework_source_roots" not in req

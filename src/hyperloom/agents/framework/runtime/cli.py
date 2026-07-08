@@ -108,7 +108,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
                 "phase-audit",
             ],
             "subcommands_planned": [],
-            "search_modes_supported": ["primus_cortex", "github"],
+            "search_modes_supported": ["gbrain_pr_kb", "primus_cortex", "github"],
             "modes": {
                 "plan": "drop audit material only (pr.patches + pr_files.json)",
                 "execute": "additionally create worktree+venv and run build/bench commands",
@@ -295,7 +295,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     Output shape:
         {"batch_id": str, "framework": str, "excluded_count": int,
          "candidates": [{"pr_url", "repo", "ref", "pr_number", "title",
-                          "summary", "score", "diff_url",
+                          "summary", "score", "prior_score", "diff_url",
                           "gap_canonical_id"}, ...]}
 
     Args:
@@ -307,6 +307,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     import uuid as _uuid
     from dataclasses import asdict as _asdict
 
+    from ..decision import prior_score
+    from ..kb import read_pr_ledger
+    from ..keywords import extract_keywords
     from ..models import ExploreRequest
     from ..sources import enumerate_candidates
 
@@ -356,6 +359,17 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         search_modes = ["github"]
         primus_block = {}
 
+    # gbrain PR KB is the primary discovery backend when enabled + configured;
+    # prepend it so it ranks ahead of primus_cortex/github, which stay as
+    # fallbacks (design D6 degradation chain).
+    pr_kb_enabled = (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0"
+    pr_kb_configured = bool(
+        (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
+        and (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
+    )
+    if pr_kb_enabled and pr_kb_configured and "gbrain_pr_kb" not in search_modes:
+        search_modes = ["gbrain_pr_kb", *search_modes]
+
     seen_refs: set[tuple[str, str]] = set()
     out_cands: list[dict[str, Any]] = []
     for gap in gaps:
@@ -363,6 +377,13 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             continue
         gap_id = str(gap.get("gap_canonical_id") or "")
         gap_desc = str(gap.get("gap_description") or "")
+        raw_gap_keywords = gap.get("gap_keywords") or request.get("keywords") or []
+        if isinstance(raw_gap_keywords, list):
+            gap_keywords = [str(k).strip().lower() for k in raw_gap_keywords if str(k).strip()]
+        else:
+            gap_keywords = []
+        if not gap_keywords and gap_desc.strip():
+            gap_keywords = extract_keywords(gap_desc)
         req = ExploreRequest.from_dict(
             {
                 "framework": framework,
@@ -370,6 +391,10 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "work_dir": work_dir,
                 "baseline": {"throughput": 1.0},
                 "gap_description": gap_desc,
+                "gap_canonical_id": gap_id,
+                "model_class": str(request.get("model_class") or request.get("model") or ""),
+                "gpu_type": str(request.get("gpu_type") or ""),
+                "precision": str(request.get("precision") or ""),
                 # search_perf_prs MUST be True here: enumerate_candidates
                 # short-circuits to explicit-refs-only (empty for phase-discover)
                 # when it is False, so omitting it made FRAMEWORK discovery
@@ -378,6 +403,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "search_modes": search_modes,
                 "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
+                "keywords": gap_keywords,
                 **primus_block,
             }
         )
@@ -438,9 +464,32 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                     "diff_url": diff_url,
                     "labels": [str(l) for l in labels] if labels else [],
                     "author": str(entry.get("author") or ""),
+                    "framework": framework,
+                    "model_class": str(request.get("model_class") or request.get("model") or ""),
+                    "gpu_type": str(request.get("gpu_type") or ""),
+                    "precision": str(request.get("precision") or ""),
                     "gap_canonical_id": gap_id,
+                    "gap_description": gap_desc,
+                    "gap_keywords": gap_keywords,
+                    "changed_files": [str(f) for f in (entry.get("changed_files") or [])],
                 }
             )
+    ledger = read_pr_ledger()
+    scored_cands: list[tuple[int, dict[str, Any]]] = []
+    for index, candidate in enumerate(out_cands):
+        candidate["prior_score"] = prior_score(
+            candidate,
+            gap_canonical_id=str(candidate.get("gap_canonical_id") or ""),
+            gap_keywords=candidate.get("gap_keywords") or [],
+            ledger=ledger,
+        )
+        scored_cands.append((index, candidate))
+    if any(float(c.get("prior_score") or 0.0) > 0.0 for _, c in scored_cands):
+        scored_cands.sort(key=lambda item: (-float(item[1].get("prior_score") or 0.0), item[0]))
+        out_cands = [c for _, c in scored_cands]
+    for rank, candidate in enumerate(out_cands, start=1):
+        candidate["prior_rank"] = rank
+
     _emit_json(
         {
             "batch_id": batch_id,
@@ -450,6 +499,11 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             "gpu_type": str(request.get("gpu_type") or ""),
             "candidate_count": len(out_cands),
             "excluded_count": excluded_count,
+            "prior_ranking": {
+                "enabled": bool(out_cands),
+                "ledger_records": len(ledger),
+                "ranked_candidates": sum(1 for c in out_cands if float(c.get("prior_score") or 0.0) > 0.0),
+            },
             "candidates": out_cands,
         },
         args.out,

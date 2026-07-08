@@ -252,6 +252,8 @@ async def phase_audit(
     diff_url: str = "",
     diff_text: str = "",
     primus_cortex_url: str = "",
+    target_framework: str = "",
+    target_framework_source_roots: list[str] | None = None,
     use_llm: bool = False,
     model: str = "",
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
@@ -273,6 +275,14 @@ async def phase_audit(
         diff_url: Optional explicit unified-diff URL.
         diff_text: Optional inline unified diff (skips any fetch).
         primus_cortex_url: Optional Primus Cortex base URL for patch fetch.
+        target_framework: Optional cross-framework porting target; when it
+            differs from the candidate's source framework, the audit runs in
+            cross-framework mode (design #5).
+        target_framework_source_roots: Design §Q1 (adopted): explicit source
+            roots for ``target_framework`` (the porting destination). Cross-
+            framework audits prefer this over the ``framework_source_roots``
+            fallback so ``metrics.roots_source=="explicit"`` and the R6 risk
+            (source tree mistaken for target tree) is never raised.
         use_llm: Opt-in single chat-completion refine (default off).
         model: Optional LLM model slug for the refine layer.
         timeout_sec: Subprocess wall-clock timeout in seconds.
@@ -294,6 +304,10 @@ async def phase_audit(
         request["diff_text"] = diff_text
     if primus_cortex_url:
         request["primus_cortex_url"] = primus_cortex_url
+    if target_framework and target_framework.strip().lower() != request["framework"]:
+        request["target_framework"] = target_framework.strip().lower()
+        if target_framework_source_roots:
+            request["target_framework_source_roots"] = list(target_framework_source_roots)
     if model:
         request["model"] = model
     return await _invoke_fa_phase(

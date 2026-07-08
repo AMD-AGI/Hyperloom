@@ -8,8 +8,9 @@ Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
 idempotent), ``kill-inference``, ``stop-rayjob``.
 
-State lives in ``/tmp/multi_node_state.json`` (rayjob_id / workspace /
-head_pod_ip / urls / pid file / ray_address). Wait loops use many short
+State lives in ``$MULTI_NODE_STATE_FILE`` (default:
+``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
+when the session is pinned, else legacy ``/tmp/multi_node_state.json``).
 HTTP polls under the sandbox's 120s ceiling (ADDENDUM-09) and surface
 progress on stderr. Credentials must already be in sandbox env
 (ADDENDUM-13); this module never invents URLs or keys.
@@ -21,12 +22,14 @@ import argparse
 import datetime
 import json
 import os
+import secrets
 import time
 from typing import Any
 
 from ...session.paths import mn_profile_trace_root
 from .._internal import safe_client, ray_dashboard, workload_spec
 from .._internal.log import info, warn
+from .._internal.rayjob_credentials import rayjob_credential_fanout
 
 import logging
 log = logging.getLogger(__name__)
@@ -36,7 +39,7 @@ log = logging.getLogger(__name__)
 # partial-module cycle: cli.py imports this module only after all of these
 # names are already defined (see the comment at that import site).
 from ..cli import (
-    STATE_FILE,
+    _state_file,
     _load_state,
     _save_state,
     _parse_kv_list,
@@ -90,7 +93,7 @@ def _checkpoint_create_rayjob_state(
         state.setdefault("ray_dashboard_url", "")
     state.setdefault("ray_address", "")
     _save_state(state)
-    info(f"checkpointed rayjob_id={wid} to {STATE_FILE}")
+    info(f"checkpointed rayjob_id={wid} to {_state_file()}")
 
 def _write_rayjob_meta(
     *,
@@ -156,32 +159,8 @@ def ray_gcs_address(head_pod_ip: str) -> str:
     return f"{ip}:6379"
 
 def _credential_fanout() -> dict[str, str]:
-    """Return the *_API_KEY / *_BASE_URL env to inject into the RayJob (keys fall back to SAFE_API_KEY per ADDENDUM-13).
-
-    Returns:
-        dict[str, str]: The present credential / base-URL env vars, with API
-        keys defaulting to ``SAFE_API_KEY`` when their own var is unset.
-    """
-    safe_key = os.environ.get("SAFE_API_KEY", "").strip()
-    out: dict[str, str] = {}
-    for name in (
-        "OOB_API_KEY",
-        "AMD_LLM_API_KEY",
-        "LLM_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "SAFE_API_KEY",
-    ):
-        v = os.environ.get(name, "").strip()
-        if not v and safe_key:
-            v = safe_key
-        if v:
-            out[name] = v
-    for name in ("OOB_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS"):
-        v = os.environ.get(name, "").strip()
-        if v:
-            out[name] = v
-    return out
+    """Backward-compat alias for :func:`rayjob_credential_fanout`."""
+    return rayjob_credential_fanout()
 
 def _is_safe_get_workload_404(exc: BaseException) -> bool:
     """Check whether an exception is a transient SaFE GET-workload 404.
@@ -310,8 +289,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     """
     extra_env = _parse_kv_list(args.extra_env)
     extra_labels = _parse_kv_list(args.extra_label)
-    # User extra_env wins over the credential fanout (bar reserved keys).
-    env = {**_credential_fanout(), **extra_env}
+    pending_dashboard_token: str | None = None
 
     # ownerId: --owner-id > $WORKLOAD_ID (the sandbox workload, for SaFE GC
     # cascade); omitted when neither is set.
@@ -339,21 +317,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     if session_id:
         info(f"sessionId derived from $CLAW_SESSION_ID: {session_id}")
 
-    body = workload_spec.build_rayjob_workload_body(
-        workspace=workspace,
-        display_name=display_name,
-        image=args.image,
-        nodes=args.nodes,
-        gpus_per_node=args.gpus_per_node,
-        cpus_per_node=args.cpus_per_node,
-        mem_gi_per_node=args.mem_per_node,
-        ephemeral_gi_per_node=args.ephemeral_per_node,
-        description=args.description,
-        owner_id=owner_id,
-        session_id=session_id,
-        extra_env=env,
-        extra_labels=extra_labels,
-    )
+    body: dict[str, Any] | None = None
 
     with safe_client.from_env() as safe:
         # Idempotency guard: reuse a state ``rayjob_id`` that's still
@@ -385,6 +349,24 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
                     wid = prior_wid
 
         if wid is None:
+            pending_dashboard_token = secrets.token_urlsafe(32)
+            env = {**_credential_fanout(), **extra_env}
+            env["RAY_DASHBOARD_TOKEN"] = pending_dashboard_token
+            body = workload_spec.build_rayjob_workload_body(
+                workspace=workspace,
+                display_name=display_name,
+                image=args.image,
+                nodes=args.nodes,
+                gpus_per_node=args.gpus_per_node,
+                cpus_per_node=args.cpus_per_node,
+                mem_gi_per_node=args.mem_per_node,
+                ephemeral_gi_per_node=args.ephemeral_per_node,
+                description=args.description,
+                owner_id=owner_id,
+                session_id=session_id,
+                extra_env=env,
+                extra_labels=extra_labels,
+            )
             info(f"creating RayJob workload (workspace={workspace} nodes={args.nodes})")
             wid = safe.create_workload(body)
             info(f"workload created: {wid}")
@@ -435,8 +417,12 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
                 )
 
     merged = dict(_load_state())
+    prior_token = str(merged.get("ray_dashboard_token") or "").strip()
+    if pending_dashboard_token:
+        prior_token = pending_dashboard_token
     merged.update(
         {
+            "backend": "rayjob",
             "rayjob_id": wid,
             "workspace": workspace,
             "nodes": args.nodes,
@@ -444,6 +430,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
             "head_pod_ip": head_pod_ip,
             "ray_address": ray_gcs_address(head_pod_ip),
             "ray_dashboard_url": (ray_dashboard.dashboard_url(head_pod_ip) if head_pod_ip else ""),
+            "ray_dashboard_token": prior_token,
             "service_url": f"http://{wid}.{workspace}.svc.cluster.local:8888",
             "last_create_request": {
                 "image": args.image,
@@ -453,6 +440,6 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         }
     )
     _save_state(merged)
-    info(f"state written to {STATE_FILE}")
+    info(f"state written to {_state_file()}")
     print(json.dumps(merged, indent=2, sort_keys=True))
     return 0

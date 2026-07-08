@@ -8,7 +8,7 @@ import pytest
 
 from dataclasses import replace
 
-from hyperloom.agents.framework.decision import candidate_score, winner_decision
+from hyperloom.agents.framework.decision import candidate_score, prior_score, winner_decision
 from hyperloom.agents.framework.models import ExploreRequest
 
 
@@ -107,3 +107,54 @@ def test_candidate_score_orders_two_candidates_correctly() -> None:
     high = candidate_score(_req(), 300.0, 0.9)
     low = candidate_score(_req(), 150.0, 0.9)
     assert high > low
+
+
+# prior_score ---------------------------------------------------------------
+
+
+def test_prior_score_rejected_history_does_not_outrank_cold_start() -> None:
+    """A known apply failure with no gain should not get positive priority."""
+    ledger = [
+        {
+            "framework": "vllm",
+            "pr_url": "https://example/pr/1",
+            "gap_canonical_id": "g1",
+            "gap_keywords": ["moe"],
+            "outcome": "rejected_apply_fail",
+            "tps_delta_pct": 0.0,
+        }
+    ]
+    score = prior_score(
+        {
+            "framework": "vllm",
+            "html_url": "https://example/pr/1",
+            "gap_canonical_id": "g1",
+            "gap_keywords": ["moe"],
+        },
+        ledger=ledger,
+    )
+    assert score == 0.0
+
+
+def test_prior_score_tolerates_bad_numeric_ledger_fields() -> None:
+    """Malformed numeric ledger fields must not abort pre-benchmark ranking."""
+    ledger = [
+        {
+            "framework": "vllm",
+            "pr_url": "https://example/pr/2",
+            "gap_canonical_id": "g1",
+            "gap_keywords": ["moe"],
+            "outcome": "integrated",
+            "tps_delta_pct": "not-a-number",
+        }
+    ]
+    score = prior_score(
+        {
+            "framework": "vllm",
+            "html_url": "https://example/pr/2",
+            "gap_canonical_id": "g1",
+            "gap_keywords": ["moe"],
+        },
+        ledger=ledger,
+    )
+    assert score > 0.0

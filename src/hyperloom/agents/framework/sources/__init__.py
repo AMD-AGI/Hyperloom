@@ -125,7 +125,14 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         return _dedupe(out)
 
     for mode in request.search_modes:
-        if mode == "primus_cortex":
+        if mode == "gbrain_pr_kb":
+            found = _run_pr_kb(request)
+            _log.info(
+                "enumerate_candidates: gbrain_pr_kb returned %d candidate(s)",
+                len(found),
+            )
+            out.extend(found)
+        elif mode == "primus_cortex":
             found = _run_primus_cortex(request)
             _log.info(
                 "enumerate_candidates: primus_cortex returned %d candidate(s)",
@@ -150,6 +157,24 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         len(out) - len(request.candidate_refs),
     )
     return deduped
+
+
+def _run_pr_kb(request: ExploreRequest) -> list[Candidate]:
+    """Query the gbrain PR KB; best-effort - empty list on any failure.
+
+    Delegates to :func:`hyperloom.agents.framework.sources.pr_kb.enumerate_pr_kb`,
+    which is disabled/degrades to ``[]`` when PR KB is off or gbrain is
+    unreachable.
+
+    Args:
+        request (ExploreRequest): Request supplying repo URL + gap description.
+
+    Returns:
+        list[Candidate]: gbrain_pr_kb candidates, or ``[]`` on any failure.
+    """
+    from .pr_kb import enumerate_pr_kb
+
+    return enumerate_pr_kb(request)
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:

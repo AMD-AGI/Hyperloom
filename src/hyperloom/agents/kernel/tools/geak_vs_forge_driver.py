@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Thin glue driver: runs GEAK or Forge on devalshah's post-explore analysis via
-HL's OWN functions. Contains zero kernel-opt/analysis logic — only sequences
-HL calls:
-  parse_analysis_md -> _finalize_candidates -> write_reports (kernel_candidates.json)
-  -> run_optimization_handler (HL batch dispatch: 1 kernel/GPU parallel)
-
-Usage:
-  geak_vs_forge_driver.py --analysis <devalshah analysis.md> --csv-dir <perf_report_csvs>
-                          --framework <sglang|vllm> --backend <geak|forge>
-                          --session-dir <out> --model <name> [--top-k 10]
-"""
+"""Glue driver that runs GEAK or Forge from a post-explore TraceLens report."""
 
 import argparse
 import asyncio
@@ -19,9 +9,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
-# This file lives at <HL repo>/kernel-agent/tools/geak_vs_forge_driver.py, so the repo
-# root is two parents up. Derive it (instead of hardcoding) for portability across clones;
-# override with $HYPERLOOM_REPO_ROOT if importing HL from elsewhere.
+# Derive the Hyperloom repo root; HYPERLOOM_REPO_ROOT overrides clone layout.
 REPO = (
     Path(os.environ["HYPERLOOM_REPO_ROOT"])
     if os.environ.get("HYPERLOOM_REPO_ROOT")
@@ -30,8 +18,7 @@ REPO = (
 sys.path.insert(0, str(REPO / "kernel-agent" / "tools"))
 sys.path.insert(0, str(REPO))
 
-# These imports MUST follow the sys.path setup above (HL repo + tools dir), so they
-# are intentionally not at module top -> E402 suppressed.
+# Imports must follow sys.path setup above.
 import tracelens_skill_runner as tlr  # noqa: E402  # HL
 import tracelens_analysis as tla  # noqa: E402  # HL
 from hyperloom.orchestrator.kernel import request_handlers as krh  # noqa: E402  # HL
@@ -171,9 +158,7 @@ def main() -> int:
     md = Path(a.analysis)
     csv_dir = Path(a.csv_dir) if a.csv_dir else None
 
-    # 1) HL: analysis.md -> candidates (parse + finalize with CSV-resolved shapes/source).
-    # --candidates: use the STRUCTURED kernel_candidates.json hot_kernels directly so the
-    # precise op names survive (analysis.md re-parse loses them -> composite ops can't resolve).
+    # Prefer structured candidates so exact op names survive composite resolution.
     if a.candidates:
         _cd = json.loads(Path(a.candidates).read_text())
         parsed = [c for c in (_cd.get("hot_kernels") or []) if isinstance(c, dict)][: a.top_k]
@@ -192,10 +177,7 @@ def main() -> int:
     editable = [c for c in cands if c.get("reusable_native_kernel") is True]
     print(f"[driver] candidates={len(cands)} editable={len(editable)}", flush=True)
 
-    # 1b) OPTIONAL enrichment: attach authoritative WORKLOAD CONTEXT per candidate so GEAK's
-    # harness-gen pins the TRUE serving regime instead of guessing the decode context (the proven
-    # reason kernel wins fail to reach E2E). Pass everything we have; let GEAK figure out the rest.
-    # Default-off: with no --enrich the candidate dict is untouched and the prompt is byte-identical.
+    # Optional enrichment pins workload context without changing the default prompt.
     if a.enrich:
         analysis_dir = md.parent
         fusion = _load_fusion_cues(analysis_dir)
@@ -203,7 +185,7 @@ def main() -> int:
             c["extra_dispatch_context"] = _build_workload_context(c, a, cands, fusion)
         print(f"[driver] --enrich: attached extra_dispatch_context to {len(cands)} candidates", flush=True)
 
-    # 2) HL: write kernel_candidates.json (the dispatch payload artifact)
+    # Write the dispatch payload artifact.
     wr_args = Namespace(
         model_name=a.model,
         framework=a.framework,

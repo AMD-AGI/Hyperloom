@@ -253,6 +253,11 @@ class ExplorePhase(PhaseHandler):
         # ``discover_returned_no_new_candidates`` when there are none.
         state.framework_agent_phase_done = False
         state.framework_agent_discover_failures = 0
+        # Reset the config-exploration guard so each macro-cycle re-runs the
+        # framework config lane (default OFF; no-op unless enabled).
+        state.framework_config_lane_state = ""
+        state.framework_config_lane_round = 0
+        state.framework_config_pending_grid = []
         # Mark a macro-cycle boundary in the preserved progress ledger so the
         # consecutive-no-keep plateau gate (``_framework_agent_consecutive_no_keep``)
         # does NOT carry the prior cycle's trailing no-KEEP streak into this
@@ -1332,6 +1337,10 @@ class ExplorePhase(PhaseHandler):
             proposals: The specialist ``proposal_set`` entries materialised into
                 the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
         """
+        # Framework config-generation specialists own their proposal_set via the
+        # config subphase; skip the mn-explore bridge so it is not double-consumed.
+        if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
+            return
         from ..actions.executors._multi_node_env import is_multi_node
 
         if not is_multi_node() or not proposals:

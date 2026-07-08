@@ -625,6 +625,18 @@ class DispatcherCollaborator:
                             "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
                             task.task_id,
                         )
+                    # FRAMEWORK config-exploration: harvest a generation
+                    # specialist's config proposal_set into the pending grid.
+                    try:
+                        self._ingest_framework_config_generation(
+                            task=task,
+                            done_payload=done_payload,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "framework_config: generation ingest failed for task=%s",
+                            task.task_id,
+                        )
                 # Bump the per-EXPLORE specialist dispatch counter (Robustness reads it to detect storms).
                 try:
                     self.shared_state.bump_specialist_dispatched()
@@ -718,6 +730,17 @@ class DispatcherCollaborator:
             # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
+                if str((task.params or {}).get("source") or "") == "framework_config_exploration":
+                    try:
+                        self._record_framework_config_exploration_result(
+                            task=task,
+                            result=result_dict,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "framework_config: result bookkeeping failed for task=%s",
+                            task.task_id,
+                        )
                 try:
                     self._record_explore_round_gaps(
                         task=task,

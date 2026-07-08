@@ -199,7 +199,7 @@ def test_compute_plateau_framework_agent_returns_signal():
 
 
 def test_exit_normal_framework_agent_force_exit_evidence_carries_pending_count():
-    """Regression for P1.a — force-exit evidence surfaces ``pending_candidate_count``."""
+    """Regression: force-exit evidence surfaces ``pending_candidate_count``."""
     batches = [
         {
             "batch_id": "b1",

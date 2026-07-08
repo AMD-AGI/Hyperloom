@@ -85,16 +85,22 @@ def dashboard_url(head_pod_ip: str) -> str:
 class RayDashboardClient:
     """Stateless HTTP wrapper for ``/api/jobs/`` on a single head pod IP."""
 
-    def __init__(self, head_pod_ip: str) -> None:
+    def __init__(self, head_pod_ip: str, *, token: str | None = None) -> None:
         """Create a client bound to one head pod's dashboard.
 
         Args:
             head_pod_ip (str): The head pod IP whose dashboard to target.
+            token (str | None): Optional ``RAY_DASHBOARD_TOKEN`` for
+                authenticated dashboard access.
         """
         self._base = dashboard_url(head_pod_ip)
+        headers: dict[str, str] = {"Accept": "application/json"}
+        tok = (token or "").strip()
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
         self._client = httpx.Client(
             timeout=_HTTPX_TIMEOUT,
-            headers={"Accept": "application/json"},
+            headers=headers,
         )
 
     def close(self) -> None:

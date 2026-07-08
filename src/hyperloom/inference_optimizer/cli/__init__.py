@@ -1348,8 +1348,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if v:
                 os.environ[env_key] = v
 
-    await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
-
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = _clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
@@ -1513,7 +1511,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.no_framework_agent = True
             print("  framework phase       : DISABLED (persisted from original run)")
         elif bool(getattr(args, "no_framework_agent", False)):
-            # Inverse (P2.d): honour --no-framework-agent on resume only before FRAMEWORK is entered.
+            # Inverse: honour --no-framework-agent on resume only before FRAMEWORK is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
                 state.framework_agent_phase_enabled = False
@@ -1790,6 +1788,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 session_dir=session_dir,
             )
         )
+
+    from ..multi_node.state_paths import bind_state_file_to_session
+
+    bind_state_file_to_session(session_dir)
+    if nodes_resolved >= 2:
+        await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
 
     objective = build_objective(
         {

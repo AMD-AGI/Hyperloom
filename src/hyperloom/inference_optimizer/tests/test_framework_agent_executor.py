@@ -166,7 +166,7 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Path):
-    """Regression for P2.a: missing explicit patches must short-circuit to
+    """Regression: missing explicit patches must short-circuit to
     no_patch, never falling back to the candidate's diff_url."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -579,7 +579,7 @@ index 0000000..1111111
 
 @pytest.mark.asyncio
 async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
-    """Regression for P1.c: B's REVERT must reset to A's KEEP commit, not baseline."""
+    """Regression: B's REVERT must reset to A's KEEP commit, not baseline."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -841,7 +841,7 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
-    """P2 regression: a PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
+    """Regression: a PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -885,7 +885,7 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
-    """P1 regression: a cross-repo candidate must fall back to diff_url, not checkout-head."""
+    """Regression: a cross-repo candidate must fall back to diff_url, not checkout-head."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
