@@ -13,12 +13,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 import httpx
 
 from ..signals import Symptom, SymptomSeverity
-from ..state_store import DetectorStateView
+if TYPE_CHECKING:
+    from ..state_store import DetectorStateView
 
 
 log = logging.getLogger(__name__)
