@@ -259,4 +259,4 @@ detail rather than something you should tune.
 Use these resources for related configuration and reference information:
 
 * [Hyperloom authentication and credentials](authentication.md) — Credential precedence and the auth-proxy in detail.
-* [Troubleshooting Hyperloom](../troubleshooting.md) — Symptom → variable reverse-lookup for common failures.
+* [Troubleshooting Hyperloom](troubleshooting.md) — Symptom → variable reverse-lookup for common failures.

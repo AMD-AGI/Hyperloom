@@ -104,4 +104,4 @@ pipeline, or downstream integration on top of this file — see
 
 ## Troubleshooting
 
-If a run fails on first launch, see [Troubleshooting Hyperloom](../troubleshooting.md).
+If a run fails on first launch, see [Troubleshooting Hyperloom](../reference/troubleshooting.md).

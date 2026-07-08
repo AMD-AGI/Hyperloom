@@ -18,7 +18,7 @@ Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a mana
 For application-level configuration see
 [Environment variables](environment-variables.md); for
 credential setup see [Hyperloom authentication and credentials](authentication.md); for
-recurring symptoms see [Troubleshooting Hyperloom](../troubleshooting.md).
+recurring symptoms see [Troubleshooting Hyperloom](troubleshooting.md).
 
 ---
 

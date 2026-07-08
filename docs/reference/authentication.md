@@ -342,4 +342,4 @@ command (preflight rewrites it automatically), or delete the stale
 Use these resources for related configuration and reference information:
 
 * [Environment variables](environment-variables.md) — Every environment variable read by the code, including non-credential tunables.
-* [Troubleshooting Hyperloom](../troubleshooting.md) — Common 401 / gateway / Ray-GPU symptoms.
+* [Troubleshooting Hyperloom](troubleshooting.md) — Common 401 / gateway / Ray-GPU symptoms.

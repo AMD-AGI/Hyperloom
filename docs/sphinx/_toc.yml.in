@@ -54,7 +54,7 @@ subtrees:
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
-  - file: troubleshooting.md
+  - file: reference/troubleshooting.md
     title: Troubleshooting
 
 - caption: About

@@ -92,4 +92,4 @@ QUARK_ROOT=/workspace/Quark
 
 - [Run a Hyperloom optimization](../how-to/optimize.md)
 - [Environment variables](../reference/environment-variables.md)
-- [Troubleshooting Hyperloom](../troubleshooting.md)
+- [Troubleshooting Hyperloom](../reference/troubleshooting.md)

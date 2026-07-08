@@ -188,4 +188,4 @@ Use these resources for related reference information:
 
 * [`session_breakdown.json` integration in Hyperloom](session-breakdown.md) — The schema produced by `dump_session_breakdown.py`.
 * [Hyperloom self-hosting and operations guide](operations.md) — Retention recommendations, including which scripts' outputs to back up long-term.
-* [Troubleshooting Hyperloom](../troubleshooting.md) — Symptoms vs which script to reach for first.
+* [Troubleshooting Hyperloom](troubleshooting.md) — Symptoms vs which script to reach for first.
