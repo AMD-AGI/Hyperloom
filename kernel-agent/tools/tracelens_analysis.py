@@ -5683,11 +5683,19 @@ def write_reports(
             if tools_dir not in sys.path:
                 sys.path.insert(0, tools_dir)
             from diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
+            from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
 
-            _num_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
+            # Per-step divisor = denoise steps ACTUALLY IN the trace (profiled
+            # ProfilerStep iterations), preferred over the requested full sampler
+            # schedule; the deterministic route has no steady-window detection, so
+            # this full-trace count is a documented average-over-profiled-steps.
+            _num_steps = resolve_perstep_divisor(
+                count_profiler_steps(getattr(args, "trace_input", "") or ""),
+                int(getattr(args, "num_denoise_steps", 0) or 0),
+            )
             _diff_report = _build_diffusion_roofline(
                 tracelens_dir / "perf_report_csvs",
-                _num_steps or None,
+                _num_steps,
                 int(getattr(args, "top_k", 10) or 10),
             )
             out = run_dir / "diffusion_roofline.json"

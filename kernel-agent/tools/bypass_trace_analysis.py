@@ -47,6 +47,7 @@ from _idle_gate import (  # noqa: E402
     build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
+from _denoise_steps import resolve_perstep_divisor  # noqa: E402
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
@@ -558,10 +559,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 
+            # Per-step divisor is the denoise steps IN the analyzed window
+            # (trace-inferred, e.g. steady_window.step_count), NOT the requested
+            # full schedule -- the mismatch is already surfaced as a warning.
+            _diff_steps = resolve_perstep_divisor(inferred_denoise_steps, requested_denoise_steps)
             _diff_report = build_report_from_bypass(
                 candidates.get("hot_kernels", []),
                 analyze.get("timeline") or {},
-                (requested_denoise_steps or inferred_denoise_steps) or None,
+                _diff_steps,
                 top_k,
             )
             _diff_path = run_dir / "diffusion_roofline.json"
