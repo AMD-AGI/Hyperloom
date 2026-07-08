@@ -21,18 +21,9 @@ from ..state.optimization_journal import (
     JournalEntry,
 )
 from ..bus.message_bus import Message
-from ..loop.coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
-    _BASELINE_FINGERPRINT_KEYS,
-    _baseline_params_fingerprint,
-    _dedupe_extra_server_args,
-    _infer_model_class_from_config,
-    _merge_cumulative_extra_sglang_args,
-    _parse_baseline_workload_extra,
-    _parse_iso_unix,
+from ..loop.coordinator_helpers import (
     _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
-    format_exc_brief,
-    serialize_verdict_advisory,
 )
 from ..loop.coordinator import (
     PERFSKILLS_GEAK_BACKEND,

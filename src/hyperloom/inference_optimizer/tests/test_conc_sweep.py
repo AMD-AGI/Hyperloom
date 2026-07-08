@@ -980,7 +980,6 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
-    import asyncio
     from unittest.mock import AsyncMock, MagicMock
     from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 

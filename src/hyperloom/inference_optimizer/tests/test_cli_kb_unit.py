@@ -97,7 +97,7 @@ def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
-    monkeypatch.setattr(gi, "build_mirror_mcp_from_env", lambda: object())
+    monkeypatch.setattr(gi, "build_mirror_mcp_from_env", object)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     # inline mirror wraps the dispatcher
     assert isinstance(kb, gi.GbrainMirroringRecipeKB)
@@ -141,7 +141,7 @@ def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
-    monkeypatch.setattr(gi, "build_mirror_mcp_from_env", lambda: object())
+    monkeypatch.setattr(gi, "build_mirror_mcp_from_env", object)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert isinstance(kb, gi.GbrainMirroringRecipeKB)
     cli_kb._attach_recipe_audit_hook(kb, tmp_path)

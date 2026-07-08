@@ -112,8 +112,6 @@ class TestDetectImage:
         marker = tmp_path / "marker_image"
         marker.write_text("custom/image:1\n")
 
-        original_init = Path.__init__
-
         # Substitute the well-known marker paths used by _detect_image.
         original_exists = Path.exists
 

@@ -323,7 +323,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 # CLI surface check — the default capacity is the research-lane ceiling.
 def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     """The default ``--research-lane-capacity`` is the GPU-derived ceiling (2 × visible GPU)."""
-    import hyperloom.inference_optimizer.cli as cli_mod
+    from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False)
@@ -340,8 +340,7 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
 
 def test_cli_research_lane_capacity_env_override(monkeypatch):
     """An explicit env value still wins over the GPU-derived default."""
-    import hyperloom.inference_optimizer.cli as cli_mod
-
+    from hyperloom.inference_optimizer import cli as cli_mod
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "3")
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])

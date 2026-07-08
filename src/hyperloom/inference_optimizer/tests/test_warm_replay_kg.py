@@ -249,7 +249,7 @@ class _RecordingKG:
 def _emit_decision(monkeypatch: Any, kg: Any, **kwargs: Any) -> None:
     from types import SimpleNamespace
 
-    import hyperloom.orchestrator.knowledge.recipe_kb.kg_client as kgmod
+    from hyperloom.orchestrator.knowledge.recipe_kb import kg_client as kgmod
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     monkeypatch.setattr(kgmod, "get_kg_client", lambda: kg)

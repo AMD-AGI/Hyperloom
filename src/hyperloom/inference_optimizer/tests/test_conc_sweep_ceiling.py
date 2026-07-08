@@ -11,9 +11,6 @@ import pytest
 
 # Imported first to break a circular dependency between conc_sweep and
 # action_executors.conc_sweep (else the module fails to collect in isolation).
-from hyperloom.orchestrator.actions.executors._grid_runner import (  # noqa: F401
-    VariantResult,
-)
 from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
 from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState

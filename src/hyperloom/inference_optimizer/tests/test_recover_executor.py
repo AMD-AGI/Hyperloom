@@ -86,7 +86,7 @@ async def test_no_stale_owners_returns_succeeded(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _healthy_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _healthy_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
 
     out = await exe(
@@ -114,7 +114,7 @@ async def test_force_cleanup_false_skips_kill_stage(tmp_path, monkeypatch):
     workspace.mkdir()
     exe = RecoverExecutor()
 
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _healthy_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _healthy_probe)
     calls: list[str] = []
 
     def _should_not_be_called():
@@ -161,8 +161,6 @@ async def test_kills_stale_owners_and_recovers(tmp_path, monkeypatch):
 
     monkeypatch.setattr(exe, "_send_signal", _send)
     monkeypatch.setattr(exe, "_pid_alive", lambda pid: False)
-    import hyperloom.orchestrator.actions.executors.recover as recmod
-
     monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
 
     out = await exe(
@@ -210,8 +208,6 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
 
     monkeypatch.setattr(exe, "_send_signal", _send)
     monkeypatch.setattr(exe, "_pid_alive", lambda pid: True)
-    import hyperloom.orchestrator.actions.executors.recover as recmod
-
     monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
 
     out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
@@ -228,7 +224,7 @@ async def test_env_gate_blocks_gpureset_when_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _leaked_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
     called: dict[str, bool] = {}
 
@@ -289,7 +285,7 @@ async def test_gpureset_returncode_nonzero_persists_failure(tmp_path, monkeypatc
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     exe = RecoverExecutor()
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _leaked_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
     monkeypatch.setattr(
         exe,
@@ -342,7 +338,7 @@ async def test_gpureset_skipped_when_no_rocr_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     exe = RecoverExecutor()
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _leaked_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
     monkeypatch.setattr(
         exe,
@@ -393,7 +389,7 @@ def test_parse_rocm_smi_vram_csv_handles_garbage_and_blank_blocks():
 async def test_result_json_omitted_when_no_workspace(monkeypatch):
     """Without a pre-made workspace the executor returns a complete dict but skips the on-disk audit."""
     exe = RecoverExecutor()
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _healthy_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _healthy_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
 
     out = await exe(_ctx(workspace=None, params={"force_gpu_cleanup": True}))
@@ -407,7 +403,7 @@ async def test_result_json_has_expected_keys(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     exe = RecoverExecutor()
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _healthy_probe())
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _healthy_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
     await exe(
         _ctx(
@@ -448,8 +444,6 @@ def test_module_callable_exists():
 # gpureset subprocess error paths (real ``_try_rocm_smi_gpureset``)
 def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
     exe = RecoverExecutor()
-    import hyperloom.orchestrator.actions.executors.recover as recmod
-
     monkeypatch.setattr(recmod.shutil, "which", lambda b: None)
     out = exe._try_rocm_smi_gpureset([0, 1])
     assert out == {"error": "rocm-smi not on PATH"}
@@ -457,8 +451,6 @@ def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
 
 def test_try_rocm_smi_gpureset_handles_timeout(monkeypatch):
     exe = RecoverExecutor()
-    import hyperloom.orchestrator.actions.executors.recover as recmod
-
     monkeypatch.setattr(
         recmod.shutil,
         "which",
@@ -476,8 +468,6 @@ def test_try_rocm_smi_gpureset_handles_timeout(monkeypatch):
 
 def test_try_rocm_smi_gpureset_returns_stdout_stderr(monkeypatch):
     exe = RecoverExecutor()
-    import hyperloom.orchestrator.actions.executors.recover as recmod
-
     monkeypatch.setattr(
         recmod.shutil,
         "which",
@@ -891,7 +881,7 @@ class TestWorkspaceHelpers:
 # ===========================================================================
 
 
-import hyperloom.orchestrator.actions.executors.recover as recmod  # noqa: E402
+from hyperloom.orchestrator.actions.executors import recover as recmod  # noqa: E402
 
 
 class TestWriteResultJsonOSError:

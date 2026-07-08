@@ -216,7 +216,6 @@ def test_pr_feed_warm_budget_exhausted(monkeypatch):
     # zero budget with monotonic always past the deadline
     import hyperloom.orchestrator.knowledge.pr_monitor as mod
 
-    times = iter([100.0, 100.0, 200.0, 300.0])
     monkeypatch.setattr(mod, "_matches_keywords", pm._matches_keywords)
     out, warns = c.pr_feed_warm(["a/b"], total_budget_sec=0.0)
     # total_budget_sec falsy -> budget check skipped; just returns empty

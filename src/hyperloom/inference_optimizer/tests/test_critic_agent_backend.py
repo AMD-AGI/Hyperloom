@@ -1138,8 +1138,6 @@ faked). Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
 """
 
 
-import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any

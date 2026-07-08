@@ -408,8 +408,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
 # 5. CLI argparse surface — flags are wired
 def test_cli_specialist_flags_present():
     """Smoke that the new CLI specialist flags parse."""
-    import hyperloom.inference_optimizer.cli as cli_mod
-
+    from hyperloom.inference_optimizer import cli as cli_mod
     parser = cli_mod._build_parser()
     args = parser.parse_args(
         [
@@ -433,7 +432,7 @@ def test_cli_specialist_flags_present():
 
 
 def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
-    import hyperloom.inference_optimizer.cli as cli_mod
+    from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     # research-lane-capacity default is GPU-derived; pin the GPU count for determinism.

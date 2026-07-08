@@ -156,7 +156,7 @@ def test_rescue_candidate_paths_default(tmp_path, monkeypatch):
 def test_rescue_candidate_paths_env_dir_and_file(tmp_path, monkeypatch):
     leak = tmp_path / "leaks"
     leak.mkdir()
-    f = _write_json(leak / "inferencex_result_1.json", {"x": 1})
+    _write_json(leak / "inferencex_result_1.json", {"x": 1})
     standalone = _write_json(tmp_path / "extra.json", {"y": 2})
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", f"{leak}:{standalone}")
     ws = tmp_path / "ws"

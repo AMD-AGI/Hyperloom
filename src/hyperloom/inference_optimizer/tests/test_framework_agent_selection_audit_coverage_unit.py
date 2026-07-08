@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import subprocess
 import types
-from pathlib import Path
-
 import pytest
 
 from hyperloom.orchestrator.loop import coordinator as coord_mod

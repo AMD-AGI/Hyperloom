@@ -240,7 +240,7 @@ def test_eval_report_malformed_treated_as_env_unavailable(build_workspace):
 
 
 def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
-    ws = build_workspace(
+    build_workspace(
         include_manifest=False,
         include_quantized_dir=False,
         include_validation_report=False,
