@@ -484,12 +484,31 @@ def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
     assert "XDIT_QUALITY_REF_WRITE" not in bench["envs"]
 
 
-def test_quality_ref_no_operator_ref_leaves_default(monkeypatch, tmp_path):
-    # Scriptable but no operator reference configured: keys are not forced
-    # (gate stays at the YAML default = disabled), preserving legacy behavior.
+def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tmp_path):
+    # No operator reference configured: a stable per-session reference is
+    # derived (session_dir/storage/quality_ref/baseline.png) so the gate stays
+    # ACTIVE with zero operator setup. A variant COMPAREs against it, never
+    # writes.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    sess = tmp_path / "sess"
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sess))
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
     bench = _materialize(src, tmp_path / "out")
-    assert "XDIT_QUALITY_REF" not in bench["envs"]
-    assert "XDIT_QUALITY_REF_WRITE" not in bench["envs"]
+    expected = str(sess / "storage" / "quality_ref" / "baseline.png")
+    assert bench["envs"]["XDIT_QUALITY_REF"] == expected
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == ""
+
+
+def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_path):
+    # The baseline writes the derived per-session reference (compare off) so a
+    # subsequent variant has something to gate against without operator setup.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    sess = tmp_path / "sess"
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sess))
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    expected = str(sess / "storage" / "quality_ref" / "baseline.png")
+    assert bench["envs"]["XDIT_QUALITY_REF"] == ""
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected

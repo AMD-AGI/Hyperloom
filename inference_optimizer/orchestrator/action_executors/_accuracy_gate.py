@@ -201,11 +201,21 @@ def quality_gate_passed(
     #     closed. ``XDIT_QUALITY_REF`` is read from the process env shared by
     #     every executor task, mirroring what the bench wrapper was handed.
     if require and quality_gate.get("skipped"):
+        # The baseline establishing the reference on its first run has nothing
+        # to compare against yet -> pass.
         if str(quality_gate.get("reason") or "") == "reference_established":
             return True
-        if os.environ.get("XDIT_QUALITY_REF", "").strip():
-            return False
-        return True
+        # Any other skip on a scriptable workload means the ONLY correctness
+        # signal never ran. ``_workload_envs`` now auto-defaults a per-session
+        # reference for every scriptable variant, so a comparison is ALWAYS
+        # expected; a skipped one (missing reference, unreadable image, image
+        # libs unavailable, ...) is an unverifiable result -> fail closed
+        # rather than trusting an unchecked speedup. (The former env-gated
+        # branch fail-opened: it probed ``XDIT_QUALITY_REF`` in the
+        # orchestrator process env, but the reference is injected via
+        # ``benchmark.envs`` for the wrapper subprocess, not the process env,
+        # so the probe was empty and every skip passed.)
+        return False
     if "passed" in quality_gate:
         return bool(quality_gate["passed"])
     checks = (

@@ -1154,3 +1154,87 @@ def test_pair_key_degrades_when_turn_absent():
     row = {"component": "oob", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k  # stable / deterministic
+
+
+# ---------------------------------------------------------------------------
+# record_status — live state.json mirror
+# ---------------------------------------------------------------------------
+def _status(**over) -> dict:
+    base = {"phase": "EXPLORE", "stop_reason": "", "cumulative_gain": 12.5}
+    base.update(over)
+    return base
+
+
+def test_record_status_disabled_is_noop(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    em = lfe.LangfuseEmitter(tmp_path)
+    assert em.enabled is False
+    em.record_status(_status())  # must not raise / must not build a client
+    assert em._client is None
+
+
+def test_record_status_emits_observation_and_trace_metadata(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
+
+    em.record_status(_status(phase="PRELUDE"))
+
+    # A session_status observation was appended (the timeline half).
+    status_spans = [s for s in client.spans if s.kwargs.get("name") == "session_status"]
+    assert len(status_spans) == 1
+    assert status_spans[0].kwargs.get("output", {}).get("phase") == "PRELUDE"
+    # Trace-level metadata was upserted (the current-snapshot half).
+    assert client.trace_updates, "expected update_trace to stamp trace metadata"
+    assert client.trace_updates[-1]["metadata"]["phase"] == "PRELUDE"
+    assert em._counts["status_updates_sent"] == 1
+
+
+def test_record_status_throttles_unchanged_snapshots(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+
+    em.record_status(_status(phase="EXPLORE"))
+    em.record_status(_status(phase="EXPLORE"))  # identical -> throttled
+    assert em._counts["status_updates_sent"] == 1
+
+    em.record_status(_status(phase="SWEEP"))  # changed -> sent
+    assert em._counts["status_updates_sent"] == 2
+
+
+def test_record_status_refreshes_after_min_interval(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+
+    # min_refresh_sec=0 makes even an unchanged snapshot re-send (slow heartbeat).
+    em.record_status(_status(), min_refresh_sec=0.0)
+    em.record_status(_status(), min_refresh_sec=0.0)
+    assert em._counts["status_updates_sent"] == 2
+
+
+def test_record_status_send_failure_is_swallowed(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+
+    def _boom(**kwargs):
+        raise RuntimeError("langfuse down")
+
+    monkeypatch.setattr(client, "start_observation", _boom)
+    em.record_status(_status())  # must not raise
+    assert em._counts["errors"] >= 1
+    assert em._counts["status_updates_sent"] == 0

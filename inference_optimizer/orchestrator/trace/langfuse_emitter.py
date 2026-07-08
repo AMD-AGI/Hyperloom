@@ -380,6 +380,7 @@ class LangfuseEmitter:
             "generations_text_only": 0,
             "generations_token_only": 0,
             "session_start_recorded": 0,  # 1 once the startup marker was sent
+            "status_updates_sent": 0,  # live state.json status snapshots mirrored
             "scores_sent": 0,  # decision Scores created (span + trace)
             "spans_opened": 0,  # phase + agent spans created
             "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
@@ -392,6 +393,12 @@ class LangfuseEmitter:
             "errors": 0,  # swallowed send failures
         }
         self._flushed = False
+        # Live-status mirror throttle (process-wide via the singleton registry):
+        # the last pushed status signature + monotonic timestamp, so a status
+        # snapshot is only sent on-change or after a slow refresh interval even
+        # though ``SharedState.save`` (its caller) runs many times per tick.
+        self._last_status_sig: tuple | None = None
+        self._last_status_ts: float = 0.0
         self._enabled = self._init_client()
 
     # -- gating / client setup ------------------------------------------
@@ -859,6 +866,76 @@ class LangfuseEmitter:
             # Persist the breakdown_recorded flag so a later process (recovery)
             # sees it and skips re-attaching the document.
             self._write_receipt()
+
+    def record_status(
+        self,
+        status: dict[str, Any],
+        *,
+        min_refresh_sec: float = 300.0,
+    ) -> None:
+        """Mirror a live ``state.json`` status snapshot onto the session's trace.
+
+        Two effects, both keyed to this session's ``trace_id`` so they land on
+        the same trace as the orchestration/kernel spans:
+
+        * trace-level **metadata** is upserted from ``status`` (the ``traces``
+          table is a ReplacingMergeTree keyed by trace_id, so this is always the
+          *current* snapshot — one row, directly filterable by
+          ``metadata['phase']`` etc.);
+        * a lightweight ``session_status`` **observation** is appended so the
+          status **timeline** is queryable (latest = max ``start_time``).
+
+        Throttled to avoid flooding the trace / adding latency on the save hot
+        path: a snapshot is sent only when its signature changed from the last
+        push, or after ``min_refresh_sec`` elapsed (a slow heartbeat so a
+        long-lived phase still refreshes). Never flushes the client (relies on
+        the SDK's auto-flush cadence). Best-effort and a no-op unless live push
+        is enabled; any send failure is swallowed.
+
+        Args:
+            status (dict[str, Any]): Flat scalar status summary (str/bool/int/
+                float values); non-scalars are coerced by ``_otel_attr_value``.
+            min_refresh_sec (float): Minimum seconds between unchanged pushes.
+        """
+        if not self._enabled:
+            return
+        if not isinstance(status, dict) or not status:
+            return
+        try:
+            import time
+
+            sig = tuple(sorted((str(k), status[k]) for k in status))
+            now = time.monotonic()
+            if (
+                self._last_status_sig is not None
+                and sig == self._last_status_sig
+                and (now - self._last_status_ts) < min_refresh_sec
+            ):
+                return
+            obs = _start_obs(
+                self._client,
+                name="session_status",
+                as_type="span",
+                trace_context={"trace_id": self._trace_id},
+                input=None,
+                output=status,
+                metadata=status,
+            )
+            # Upsert the trace-level snapshot so external consumers can read the
+            # current status straight off the trace row (not just observations).
+            _set_trace_attrs(
+                obs,
+                name=self._trace_name(),
+                session_id=self._session_label,
+                metadata=status,
+            )
+            _end_obs(obs, None)
+            self._counts["status_updates_sent"] += 1
+            self._last_status_sig = sig
+            self._last_status_ts = now
+        except Exception:  # noqa: BLE001 — status mirror must never break the loop
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_status failed", exc_info=True)
 
     def _close_spans(self) -> None:
         """End every open span, innermost first (agent -> phase -> root)."""
@@ -1356,6 +1433,26 @@ def record_session_breakdown(
     get_emitter(session_dir).record_session_breakdown(breakdown)
 
 
+def record_status(
+    session_dir: Path,
+    status: dict[str, Any],
+    *,
+    min_refresh_sec: float = 300.0,
+) -> None:
+    """Module-level convenience: mirror a status snapshot for ``session_dir``.
+
+    Reuses the per-session emitter singleton (so its throttle state persists
+    across the many short-lived ``SharedState`` instances a run creates). No-op
+    when live push is disabled; best-effort (never raises).
+
+    Args:
+        session_dir: Session directory whose trace the status attaches to.
+        status: Flat scalar status summary to mirror.
+        min_refresh_sec: Minimum seconds between unchanged pushes.
+    """
+    get_emitter(session_dir).record_status(status, min_refresh_sec=min_refresh_sec)
+
+
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
 
@@ -1389,4 +1486,5 @@ __all__ = [
     "get_emitter",
     "read_receipt",
     "record_session_breakdown",
+    "record_status",
 ]

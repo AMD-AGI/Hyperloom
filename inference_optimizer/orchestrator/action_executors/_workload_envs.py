@@ -741,6 +741,15 @@ def materialize_config_with_envs(
     # the reference here — the single choke point every scriptable bench path
     # funnels through — so the wrapper actually compares. Authoritative over the
     # YAML/caller because the empty YAML default is precisely the bug.
+    #
+    # Zero-config default: when the operator configures nothing, derive a
+    # stable per-session reference path instead of leaving the gate disabled.
+    # ``session_dir()`` is pinned once per session via
+    # ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (inherited by every bench
+    # subprocess), so the baseline and ALL variants resolve the SAME file;
+    # ``storage/`` is part of the session skeleton. This guarantees the
+    # baseline always writes a reference and every variant gates against it,
+    # so no operator setup is required for the correctness gate to bite.
     #   * BASELINE (establish_quality_ref=True): force COMPARE off + WRITE the
     #     fresh reference, so a stale file from a previous session cannot make
     #     the baseline gate against the wrong truth.
@@ -752,18 +761,21 @@ def materialize_config_with_envs(
     #     clobber the baseline reference.
     if framework_registry.is_scriptable(bench.get("framework")):
         _qref = os.environ.get("XDIT_QUALITY_REF", "").strip()
+        if not _qref:
+            from ...paths import session_dir
+
+            _qref = str(session_dir() / "storage" / "quality_ref" / "baseline.png")
         if is_profile:
             envs["XDIT_QUALITY_REF"] = ""
             envs["XDIT_QUALITY_REF_WRITE"] = ""
-        elif _qref:
-            if establish_quality_ref:
-                envs["XDIT_QUALITY_REF"] = ""
-                envs["XDIT_QUALITY_REF_WRITE"] = (
-                    os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
-                )
-            else:
-                envs["XDIT_QUALITY_REF"] = _qref
-                envs["XDIT_QUALITY_REF_WRITE"] = ""
+        elif establish_quality_ref:
+            envs["XDIT_QUALITY_REF"] = ""
+            envs["XDIT_QUALITY_REF_WRITE"] = (
+                os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
+            )
+        else:
+            envs["XDIT_QUALITY_REF"] = _qref
+            envs["XDIT_QUALITY_REF_WRITE"] = ""
         # ── Model-arg wiring (scriptable xDiT registry resolution) ────────
         # The xDiT runner resolves models via MODEL_REGISTRY keys (e.g.
         # "Qwen-Image", "FLUX.1-dev"), NOT arbitrary filesystem paths. The
@@ -776,6 +788,20 @@ def materialize_config_with_envs(
         # "name" because registry lookup keys on the basename.
         envs["XDIT_MODEL_ARG"] = (
             os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+        )
+        # ── Global model root for xDiT local-snapshot resolution ──────────
+        # XDIT_MODEL_ARG=name passes only the model-dir basename to the xDiT
+        # runner, which resolves it via MODEL_REGISTRY. The baked
+        # hyperloom_local_aliases map each registered name to a local snapshot
+        # dir rooted at $XDIT_MODEL_ROOT/<slug>; pinning it here (mirrors
+        # HF_HOME ergonomics -- one env relocates every model dir) makes the
+        # runner load the pre-provisioned /primus copy offline instead of
+        # re-downloading the weights from HF into the container's ephemeral
+        # storage, which overflowed the 50Gi ephemeral limit and evicted the
+        # pod mid-baseline. Forwarded via benchmark.envs so Magpie passes it to
+        # the scriptable wrapper subprocess.
+        envs["XDIT_MODEL_ROOT"] = (
+            os.environ.get("XDIT_MODEL_ROOT", "").strip() or "/primus/models"
         )
         # ── Baseline attention-backend guard (scriptable xDiT) ────────────
         # The baseline must measure the clean, verified reference config. The

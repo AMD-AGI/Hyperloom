@@ -1193,6 +1193,13 @@ class SharedState:
             session_dir (Path): The session root directory; created if it
                 does not already exist.
         """
+        # Source-of-truth backfill: scriptable/diffusion (xDiT) promotion paths
+        # store ``tput`` (img/s) but often leave ``e2el_mean_ms`` empty (the
+        # rebench/raw-result path drops it). Since the per-image e2e latency is
+        # exactly ``1000 / img_per_s`` for these single-stream workloads, derive
+        # it here so state.json current_best, the recorder ``final`` singleton,
+        # and the recipe KB all carry the primary latency metric. Best-effort.
+        self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
@@ -1233,6 +1240,91 @@ class SharedState:
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
             log.debug("current_setting.sh render failed", exc_info=True)
+        # Live status mirror: reflect the just-persisted state.json snapshot into
+        # Langfuse so external consumers get structured, real-time status
+        # (phase / stop_reason / gain / streak / lifecycle) without waiting for
+        # the session-end flush. Runs only after the atomic replace succeeded;
+        # the emitter throttles (on-change or slow refresh) and swallows any
+        # failure, so a Langfuse hiccup never blocks or slows the save path.
+        try:
+            from .trace.langfuse_emitter import record_status as _lf_record_status
+
+            _lf_record_status(session_dir, self._langfuse_status_summary())
+        except Exception:  # noqa: BLE001 — status mirror must never block save
+            log.debug("langfuse status mirror failed", exc_info=True)
+
+    def _backfill_scriptable_latency(self) -> None:
+        """Derive ``current_best.e2el_mean_ms`` from ``tput`` for scriptable runs.
+
+        No-op for serving frameworks, when there is no current best, or when a
+        measured ``e2el_mean_ms`` is already present. For scriptable xDiT the
+        per-image e2e latency equals ``1000 / img_per_s`` (single-stream), so the
+        stored ``tput`` fully determines it. Never raises.
+        """
+        try:
+            from .. import framework_registry
+
+            fw = str(getattr(self, "framework", "") or "")
+            if not framework_registry.is_scriptable(fw):
+                return
+            cb = self.current_best
+            if not isinstance(cb, dict):
+                return
+            if cb.get("e2el_mean_ms") is not None:
+                return
+            tput = cb.get("tput")
+            if not isinstance(tput, (int, float)) or tput <= 0:
+                return
+            e2el = framework_registry.primary_metric_value(fw, float(tput))
+            if e2el is not None and e2el > 0:
+                cb["e2el_mean_ms"] = round(float(e2el), 4)
+        except Exception:  # noqa: BLE001 — derived backfill, never blocks save
+            pass
+
+    def _langfuse_status_summary(self) -> dict[str, Any]:
+        """Flatten the state into an OTEL-friendly scalar status snapshot.
+
+        Only top-level scalars (str/bool/int/float) are emitted so each key
+        lands as a directly-filterable Langfuse trace-metadata attribute
+        (nested values would be JSON-stringified). Float gains/throughput are
+        rounded so tiny per-tick deltas don't defeat the emitter's on-change
+        throttle. Best-effort: any field access is defensive.
+
+        Returns:
+            dict[str, Any]: The flat scalar status summary to mirror.
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        last = self.lifecycle[-1] if self.lifecycle else {}
+        summary: dict[str, Any] = {
+            "phase": self.phase or "",
+            "stop_reason": self.stop_reason or "",
+            "closing_phase": bool(self.closing_phase),
+            "degraded_mode": bool(self.degraded_mode),
+            "cumulative_gain": round(float(self.cumulative_gain or 0.0), 2),
+            "cumulative_gain_validated": round(
+                float(self.cumulative_gain_validated or 0.0), 2,
+            ),
+            "baseline_failure_streak": int(self.baseline_failure_streak or 0),
+            "macro_cycle": int(self.macro_cycle or 0),
+            "session_id": self.session_id or "",
+            "model_name": self.model_name or "",
+            "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
+        }
+        tput = cb.get("tput") if isinstance(cb, dict) else None
+        if isinstance(tput, (int, float)) and not isinstance(tput, bool):
+            summary["current_best_tput"] = round(float(tput), 1)
+        if isinstance(last, dict):
+            if last.get("seq") is not None:
+                summary["last_seq"] = last.get("seq")
+            if last.get("status"):
+                summary["last_lifecycle_status"] = str(last.get("status"))
+            if last.get("phase"):
+                summary["last_lifecycle_phase"] = str(last.get("phase"))
+        return {
+            k: v
+            for k, v in summary.items()
+            if isinstance(v, (str, bool, int, float))
+        }
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1956,6 +2048,44 @@ class SharedState:
         """
         return _first_positive_tput(self.current_best)
 
+    def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
+        """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.
+
+        The sidecar sits at the TraceLens run-dir root
+        (``<session>/kernel-agent/runs/<ts>/<ts>_tl-*/diffusion_roofline.json``).
+        Diffusion/xDiT trace_analyze emits ONLY this sidecar (no
+        ``kernel_roofline.json``), so ``kernel_roofline_path`` is empty and the
+        run-dir cannot be derived from it. Resolve, in order:
+
+          1. ``kernel_roofline_path`` run-dir root (serving/kernel path, when set).
+          2. Newest sidecar under ``<session>/kernel-agent/runs`` (diffusion path).
+
+        Args:
+            kernel_roofline_path: Path to ``reports/kernel_roofline.json`` when
+                present; empty for diffusion sessions.
+
+        Returns:
+            The resolved sidecar path, or ``None`` when none is found.
+        """
+        krp = str(kernel_roofline_path or "").strip()
+        if krp:
+            cand = Path(krp).parent.parent / "diffusion_roofline.json"
+            if cand.is_file():
+                return cand
+        session_dir = getattr(self, "_session_dir", None)
+        if session_dir:
+            try:
+                sidecars = [
+                    p
+                    for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json")
+                    if p.is_file()
+                ]
+                if sidecars:
+                    return max(sidecars, key=lambda p: p.stat().st_mtime)
+            except OSError:
+                return None
+        return None
+
     def _scriptable_latency_roofline(
         self, framework: str, achieved_tput: float, kernel_roofline_path: Any
     ) -> tuple[float, float]:
@@ -1986,21 +2116,28 @@ class SharedState:
             e2e_mean_ms = float(
                 framework_registry.primary_metric_value(framework, achieved_tput) or 0.0
             )
-            # Ideal per-image latency floor from the diffusion roofline sidecar
-            # (run_dir/diffusion_roofline.json; kernel_roofline is run_dir/reports/).
+            # Ideal per-image latency floor from the diffusion roofline sidecar.
             roofline_ideal_ms = 0.0
-            try:
-                sidecar = Path(str(kernel_roofline_path)).parent.parent / "diffusion_roofline.json"
-                if sidecar.is_file():
+            sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
+            if sidecar is not None:
+                try:
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
-                    analytic = data.get("analytic_dit_ceiling") if isinstance(data, dict) else None
-                    totals = data.get("totals") if isinstance(data, dict) else None
-                    if isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
+                    data = data if isinstance(data, dict) else {}
+                    # Priority: a-priori approach-a analytic ceiling (full
+                    # pipeline, config/safetensors-derived, already in ms) >
+                    # DiT-only analytic ceiling (us) > trace-summed per-kernel
+                    # ideal (us; 0 under torch.compile fusion).
+                    approach_a = data.get("analytic_ceiling")
+                    analytic = data.get("analytic_dit_ceiling")
+                    totals = data.get("totals")
+                    if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
+                        roofline_ideal_ms = float(approach_a["ideal_ms"])
+                    elif isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
                         roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
                     elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
                         roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                roofline_ideal_ms = 0.0
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    roofline_ideal_ms = 0.0
             return e2e_mean_ms, roofline_ideal_ms
         except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
             return 0.0, 0.0

@@ -2500,6 +2500,16 @@ async def trace_analyze_handler(
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
                 pass
+        # Forward the local model dir + precision so the diffusion roofline
+        # sidecar can emit an a-priori analytic compute ceiling (approach-a),
+        # which the session breakdown surfaces as roofline_ideal_ms. Best-effort:
+        # the tool falls back to resolving --model-name when --model-path is absent.
+        model_path = (payload.get("model_path") or state.model_path or "").strip()
+        if model_path:
+            cmd += ["--model-path", str(model_path)]
+        precision = (payload.get("precision") or workload.get("precision") or "").strip()
+        if precision:
+            cmd += ["--precision", str(precision)]
     else:
         # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
         split_conc = payload.get("split_conc") or workload.get("conc")

@@ -83,6 +83,7 @@ testpaths = [
     "critic-agent/runtime/tests",
     "quantization_agent/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
+    "kernel-agent/tools/test_diffusion_flops.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
     "kernel-agent/tools/test_gemm_tuning.py",
     "kernel-agent/tools/test_io_utils.py",

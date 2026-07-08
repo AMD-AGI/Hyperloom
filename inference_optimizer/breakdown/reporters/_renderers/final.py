@@ -97,6 +97,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     md_kv = md_kv_list(
         [
             ("final_throughput_tok_s_per_gpu", final_tput),
+            ("throughput_unit", f.get("throughput_unit") or None),
             ("cumulative_gain_pct_validated", gain_v),
             ("cumulative_gain_pct_per_round_sum", gain_round),
             ("validated_at_stack_len", val_stack_len),
