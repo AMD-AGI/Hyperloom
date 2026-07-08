@@ -270,6 +270,14 @@ exclude_also = [
 ]
 skip_empty = true
 precision = 2
+# Tolerate transient CI-generated source files (e.g. a ``*_bundle.py`` a
+# subprocess writes to the repo root, coverage traces, then cleans up) that
+# leave a dangling entry in ``.coverage``. Without this the standalone
+# ``coverage report`` hardening step in tests-coverage.yml turns coverage.py's
+# ``couldnt-parse`` WARNING into a fatal ``NoSource`` error (exit 1), even
+# though pytest-cov's own report already skips it. fail_under stays enforced
+# over the parseable source tree.
+ignore_errors = true
 # Line coverage across all ``[tool.coverage.run].source`` trees (UT run in CI).
 fail_under = 90
 

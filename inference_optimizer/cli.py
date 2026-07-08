@@ -4573,6 +4573,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "param search. Default: explore enabled.",
     )
     opt.add_argument(
+        "--enable-framework-config-exploration",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_EXPLORATION",
+            "0",
+        ).strip()
+        in ("1", "true", "True", "TRUE", "yes"),
+        help="(Stage-1, default OFF) Let the FRAMEWORK_AGENT phase run "
+        "explore-style config-grid exploration (reusing the ExploreExecutor) "
+        "before it advances, giving FRAMEWORK the EXPLORE config-search "
+        "capability. The EXPLORE phase and overall phase flow are unchanged; "
+        "results share the explore_search dedup ledger. Also read from "
+        "$INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_EXPLORATION=1.",
+    )
+    opt.add_argument(
         "--launch-info-file",
         type=str,
         default=None,
