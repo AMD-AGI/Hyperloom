@@ -2363,6 +2363,14 @@ class Coordinator:
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
+        # (default OFF) FRAMEWORK config-exploration lane: before actually
+        # leaving FRAMEWORK_AGENT, run explore-style config-grid rounds so
+        # FRAMEWORK gains the EXPLORE config-search capability. Placed after the
+        # trajectory reviewer so holding the phase never skips it. No-op unless
+        # framework_config_exploration_enabled is set (default flow unchanged).
+        if self._framework_config_lane_should_engage(next_phase):
+            if await self._maybe_hold_for_framework_config_lane():
+                return
         if next_phase is None:
             return
         target, reason, evidence = next_phase
@@ -2676,6 +2684,11 @@ class Coordinator:
         # ``discover_returned_no_new_candidates`` when there are none.
         state.framework_agent_phase_done = False
         state.framework_agent_discover_failures = 0
+        # Reset the config-exploration guard so each macro-cycle re-runs the
+        # framework config lane (default OFF; no-op unless enabled).
+        state.framework_config_lane_state = ""
+        state.framework_config_lane_round = 0
+        state.framework_config_pending_grid = []
         # Mark a macro-cycle boundary in the preserved progress ledger so the
         # consecutive-no-keep plateau gate (``_framework_agent_consecutive_no_keep``)
         # does NOT carry the prior cycle's trailing no-KEEP streak into this
@@ -12832,6 +12845,10 @@ class Coordinator:
             proposals: The specialist ``proposal_set`` entries materialised into
                 the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
         """
+        # Framework config-generation specialists own their proposal_set via the
+        # config subphase; skip the mn-explore bridge so it is not double-consumed.
+        if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
+            return
         from .action_executors._multi_node_env import is_multi_node
 
         if not is_multi_node() or not proposals:
@@ -12901,6 +12918,775 @@ class Coordinator:
                 task.task_id,
                 domain,
             )
+
+    # Cap on the framework config-exploration grid so a single round cannot
+    # monopolise the phase budget (mirrors _MN_AUTO_EXPLORE_GRID_CAP).
+    _FRAMEWORK_CONFIG_GRID_CAP = 8
+    # Max config-exploration rounds per FRAMEWORK subphase (safety cap; the lane
+    # normally terminates earlier once a round yields no new candidates).
+    # Overridable via INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS.
+    _FRAMEWORK_CONFIG_MAX_ROUNDS = 4
+
+    def _build_framework_config_grid(
+        self,
+        *,
+        explicit_grid: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Assemble an explore-schema config grid for the FRAMEWORK_AGENT phase.
+
+        Stage-1 replication of the EXPLORE config-search capability inside
+        FRAMEWORK. Candidate sources, in priority order:
+
+        1. ``explicit_grid`` -- a caller/test-supplied list of variant dicts.
+        2. The framework's programmatic default seed grid
+           (:func:`_default_grid_for_framework`; non-empty for atom / xDiT).
+
+        Specialist config levers and KB recipe best_config are intentionally
+        NOT re-sourced here: they already land through
+        :meth:`_maybe_autosubmit_framework_config` (integrate_patch) and the
+        PRELUDE ``replay_warm_recipe`` path. Every returned variant is stamped
+        ``provenance='framework_agent:config'`` so the ledger and report can
+        separate framework-driven config search from EXPLORE-phase work.
+
+        Args:
+            explicit_grid: Optional caller-supplied variant dicts.
+
+        Returns:
+            A (possibly empty) list of variant dicts in the ExploreExecutor
+            grid schema, capped at ``_FRAMEWORK_CONFIG_GRID_CAP``.
+        """
+        provenance = "framework_agent:config"
+        grid: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+
+        def _add(name: str, args: str, envs: dict[str, str], note: str) -> None:
+            nm = (name or "").strip()
+            if not nm or nm in seen_names:
+                return
+            # A variant with neither a server-arg nor an env override has
+            # nothing for the restart to apply; drop it.
+            if not args and not envs:
+                return
+            seen_names.add(nm)
+            grid.append(
+                {
+                    "name": nm,
+                    "extra_args": args,
+                    "extra_envs": envs,
+                    "provenance": provenance,
+                    "note": (note or "")[:200],
+                }
+            )
+
+        for raw in explicit_grid or []:
+            if not isinstance(raw, dict):
+                continue
+            args = str(
+                raw.get("extra_args") or raw.get("extra_server_args") or ""
+            ).strip()
+            envs_raw = raw.get("extra_envs")
+            envs = (
+                {str(k): str(v) for k, v in envs_raw.items()}
+                if isinstance(envs_raw, dict)
+                else {}
+            )
+            _add(
+                str(raw.get("name") or ""),
+                args,
+                envs,
+                str(raw.get("note") or raw.get("provenance") or ""),
+            )
+
+        # ``explicit_grid=[]`` means the caller harvested an empty set --
+        # honour it (no seed fallback); only ``None`` (no grid supplied) seeds.
+        if explicit_grid is None and len(grid) < self._FRAMEWORK_CONFIG_GRID_CAP:
+            try:
+                from .action_executors.explore import _default_grid_for_framework
+
+                seeds = _default_grid_for_framework(
+                    str(getattr(self.shared_state, "framework", "") or ""),
+                    model_class=str(
+                        getattr(self.shared_state, "model_class", "") or ""
+                    ),
+                )
+            except Exception:  # noqa: BLE001 -- seed grid is best-effort
+                log.debug(
+                    "framework_config: default seed grid build failed",
+                    exc_info=True,
+                )
+                seeds = []
+            for gv in seeds or []:
+                gv_envs = {
+                    str(k): str(v)
+                    for k, v in (getattr(gv, "extra_envs", None) or {}).items()
+                }
+                _add(
+                    str(getattr(gv, "name", "") or ""),
+                    str(getattr(gv, "extra_server_args", "") or "").strip(),
+                    gv_envs,
+                    str(getattr(gv, "note", "") or ""),
+                )
+
+        return grid[: self._FRAMEWORK_CONFIG_GRID_CAP]
+
+    def _framework_config_explore_params(
+        self,
+        grid: list[dict[str, Any]],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Build the ``explore`` task params for a framework config round.
+
+        Mirrors the plumbing the LLM / mn-auto explore paths use so the
+        ExploreExecutor sees the same base config, base-throughput anchor,
+        benchmark script and (via :meth:`_inject_explore_runtime_params`)
+        overtime/timeout knobs plus the ``explore_search`` dedup ledger.
+
+        Args:
+            grid: The framework config grid (variant dicts).
+            reason: Human-readable reason stamped on the task params.
+
+        Returns:
+            The explore-task params dict.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "framework_config_exploration",
+            "reason": reason,
+            "grid": grid,
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_server_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        if base_tput:
+            params["base_tput"] = base_tput
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        # Thread overtime/timeout knobs + explore_search ledger (dedup memory).
+        self._inject_explore_runtime_params(params)
+        return params
+
+    async def _run_framework_config_exploration(
+        self,
+        *,
+        explicit_grid: list[dict[str, Any]] | None = None,
+        reason: str = "framework_config_lane",
+        round_no: int = 0,
+    ) -> str:
+        """Enqueue one explore-style config-exploration round from FRAMEWORK.
+
+        Stage-1 capability replication: FRAMEWORK reuses the ExploreExecutor
+        end-to-end (grid benchmark, overtime kill, throughput + accuracy gate,
+        per-KEEP stack rebench, ``explore_search`` dedup) for a multi-variant
+        server-arg / env config search. Coordinator-internal; the LLM never
+        proposes it and the phase machine is untouched.
+
+        Args:
+            explicit_grid: Optional caller/test grid; otherwise the framework
+                default seed grid is used.
+            reason: Reason stamped on the enqueued task.
+            round_no: Round index folded into the idempotency key so each
+                config-exploration round dispatches a distinct explore task
+                (a shared key would collapse rounds 2..N onto round 1's task).
+
+        Returns:
+            The enqueued (or existing) ``explore`` task id, or ``""`` when
+            there is no grid to run.
+        """
+        grid = self._build_framework_config_grid(explicit_grid=explicit_grid)
+        if not grid:
+            log.info(
+                "framework_config: no config grid to run (reason=%s); skipping",
+                reason,
+            )
+            return ""
+        params = self._framework_config_explore_params(grid, reason=reason)
+        try:
+            etask, was_existing = await self.tasks.create_or_return_existing(
+                kind="explore",
+                params=params,
+                idempotency_key=f"framework-config-explore-round{int(round_no)}{self._cycle_idem_suffix()}",
+            )
+        except Exception:  # noqa: BLE001 -- defensive; never wedge the pump
+            log.exception("framework_config: failed to enqueue explore round")
+            return ""
+        log.info(
+            "framework_config: enqueued explore task_id=%s "
+            "(variants=%d reason=%s existing=%s)",
+            etask.task_id,
+            len(grid),
+            reason,
+            was_existing,
+        )
+        return str(getattr(etask, "task_id", "") or "")
+
+    async def _framework_config_exploration_inflight(self) -> bool:
+        """True while a framework config-exploration ``explore`` task is live.
+
+        Returns:
+            ``True`` when a queued or running ``explore`` task carries the
+            ``source='framework_config_exploration'`` marker.
+        """
+        try:
+            queued = await self.tasks.queued()
+            running = await self.tasks.running()
+        except Exception:  # noqa: BLE001 -- defensive
+            return False
+        for t in (*queued, *running):
+            if getattr(t, "kind", "") != "explore":
+                continue
+            params = getattr(t, "params", None) or {}
+            if str(params.get("source") or "") == "framework_config_exploration":
+                return True
+        return False
+
+    def _framework_config_max_rounds(self) -> int:
+        """Resolve the max config-exploration rounds per FRAMEWORK subphase.
+
+        Reads ``INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS`` (positive int)
+        and otherwise falls back to ``_FRAMEWORK_CONFIG_MAX_ROUNDS``.
+
+        Returns:
+            The positive per-subphase round cap.
+        """
+        import os
+
+        try:
+            v = int(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS", "0"
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            v = 0
+        return v if v > 0 else self._FRAMEWORK_CONFIG_MAX_ROUNDS
+
+    def _framework_config_new_variants(
+        self,
+        grid: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Drop grid variants already in the ``explore_search`` tested ledger.
+
+        This is what lets the deterministic (source-fed) lane terminate: once a
+        round's variants land in ``tested`` the next round sees no new work.
+
+        Args:
+            grid: Candidate variant dicts (ExploreExecutor grid schema).
+
+        Returns:
+            The subset of ``grid`` whose canonical fingerprint is not yet in
+            ``explore_search['tested']``.
+        """
+        from .action_executors._canonical_fingerprint import canonical_fingerprint
+
+        tested: dict[str, Any] = {}
+        es = getattr(self.shared_state, "explore_search", None)
+        if isinstance(es, dict) and isinstance(es.get("tested"), dict):
+            tested = es["tested"]
+        out: list[dict[str, Any]] = []
+        for v in grid or []:
+            if not isinstance(v, dict):
+                continue
+            fp = canonical_fingerprint(
+                str(v.get("extra_args") or v.get("extra_server_args") or ""),
+                dict(v.get("extra_envs") or {}),
+            )
+            if fp in tested:
+                continue
+            out.append(v)
+        return out
+
+    def _finish_framework_config_lane(self, *, reason: str) -> None:
+        """Mark the FRAMEWORK config-exploration subphase done and persist.
+
+        Args:
+            reason: Why the lane finished (``no_new_candidates`` / ``max_rounds``
+                / ``dispatch_skipped``).
+        """
+        state = self.shared_state
+        state.framework_config_lane_state = "done"
+        log.info(
+            "framework_config: lane done (reason=%s rounds=%d)",
+            reason,
+            int(getattr(state, "framework_config_lane_round", 0) or 0),
+        )
+        try:
+            state.record_lifecycle_event(
+                step="framework_config_lane",
+                status=_phase_state.LIFECYCLE_STATUS_END,
+                phase=_phase_state.PHASE_FRAMEWORK_AGENT,
+                detail=f"reason={reason} rounds={int(getattr(state, 'framework_config_lane_round', 0) or 0)}",
+            )
+        except Exception:  # noqa: BLE001 -- defensive; observability only
+            log.debug("framework_config: lane lifecycle emit failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 -- defensive
+            log.exception("framework_config: save after lane finish failed")
+
+    def _framework_config_generation_context_lines(
+        self,
+        *,
+        framework: str,
+        direction: str,
+        direction_pct: float,
+    ) -> list[str]:
+        """Build bottleneck + discovered-flag advisory lines for the config
+        generation specialist notes (context enrichment).
+
+        Names the live top bottleneck (and dominant roofline direction) plus the
+        server/param flags already discovered for ``framework`` so the specialist
+        proposes higher-signal, non-redundant variants. All best-effort; returns
+        an empty list when no context is available.
+
+        Args:
+            framework: The normalized framework key (e.g. ``"sglang"``).
+            direction: The dominant roofline direction ("" when unknown).
+            direction_pct: The saturation percent for ``direction``.
+
+        Returns:
+            A list of advisory note lines (possibly empty).
+        """
+        state = self.shared_state
+        lines: list[str] = []
+        try:
+            bottleneck = str(state.current_top_bottleneck() or "").strip()
+        except Exception:  # noqa: BLE001 -- advisory only; never block dispatch
+            bottleneck = ""
+        if bottleneck or direction:
+            detail = bottleneck or "unknown"
+            if direction:
+                detail += f" (dominant roofline direction: {direction} {float(direction_pct):.0f}% saturated)"
+            lines += [
+                "",
+                f"CURRENT BOTTLENECK: {detail}.",
+                "Prioritise variants that directly relieve THIS bottleneck.",
+            ]
+        discovered = getattr(state, "discovered_flags", None)
+        # Match record_discovered_flags key normalization (blank -> "unknown").
+        entry = (
+            discovered.get(framework or "unknown")
+            if isinstance(discovered, dict)
+            else None
+        )
+        if isinstance(entry, dict):
+            flag_names = [
+                str(f)
+                for f in (
+                    list(entry.get("backend_flags") or [])
+                    + list(entry.get("param_flags") or [])
+                )
+                if str(f).strip()
+            ][:15]
+            if flag_names:
+                lines.append(
+                    "ALREADY-DISCOVERED FLAGS for this framework (build on these, "
+                    "avoid re-proposing): " + ", ".join(flag_names)
+                )
+        return lines
+
+    async def _dispatch_framework_config_generation_specialist(
+        self,
+        round_no: int,
+    ) -> str:
+        """Dispatch a read-only, bottleneck-matched specialist that PROPOSES config variants.
+
+        The specialist emits a ``proposal_set`` of ``extra_args`` / ``extra_envs``
+        variants (NOT source patches); the config subphase harvests it into a
+        grid and benchmarks it via the ExploreExecutor. This is how FRAMEWORK
+        replicates EXPLORE's LLM-driven candidate generation. Coordinator-only.
+
+        Args:
+            round_no: 1-based round index (for the gap id + idempotency key).
+
+        Returns:
+            The dispatched specialist task id, or ``""`` on failure.
+        """
+        state = self.shared_state
+        framework = str(getattr(state, "framework", "") or "").strip().lower()
+        gap_cid = f"gap.framework_config.round{int(round_no)}"
+        # Increment 1 -- bottleneck-driven domain: mirror EXPLORE's specialist
+        # routing so the config-generation specialist matches the current
+        # dominant roofline direction (comm/systems/kernel/serving). Falls back
+        # to the serving specialist when no roofline snapshot exists yet.
+        direction, direction_pct = self._dominant_roofline_direction()
+        from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
+        _hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
+        domain = _hint[0] if _hint else "serving_specialist"
+        # Increment 2 -- context enrichment: name the live bottleneck + the
+        # flags already discovered for this framework so the specialist
+        # proposes higher-signal, non-redundant variants.
+        context_lines = self._framework_config_generation_context_lines(
+            framework=framework,
+            direction=direction,
+            direction_pct=direction_pct,
+        )
+        notes = "\n".join(
+            [
+                "FRAMEWORK CONFIG-EXPLORATION TASK.",
+                "",
+                "Propose a GRID of runtime config variants to try for this model /",
+                "hardware / workload -- server flags and/or environment variables",
+                "that may raise throughput WITHOUT changing source. Do NOT write",
+                "patches.",
+                "",
+                "Return a ``proposal_set`` where each entry carries:",
+                "  - name: short unique label",
+                "  - extra_args: server CLI flags (string), and/or",
+                "  - extra_envs: {ENV: value} overrides",
+                "  - reason: one line on why it may help.",
+                "The Coordinator benchmarks each variant and decides KEEP/REVERT;",
+                "you do not benchmark. Prefer high-signal, distinct variants.",
+                *context_lines,
+            ]
+        )
+        params: dict[str, Any] = {
+            "domain": domain,
+            "gap_canonical_id": gap_cid,
+            "gap_symptom": (
+                "Propose runtime config variants (server args / env) for a throughput grid"
+            ),
+            "gap_layer": "framework",
+            "framework": framework,
+            # Marker so completion harvest routes the proposal_set into the config
+            # subphase (and the mn-explore bridge skips it to avoid double-consume).
+            "framework_config_generation": True,
+            "source": "coordinator_internal",
+            "readonly": True,
+            "notes": notes,
+            **self._framework_gpu_params(),
+        }
+        try:
+            await self._warm_specialist_params(params)
+        except Exception:  # noqa: BLE001 -- best-effort warmup
+            log.debug(
+                "framework_config: warm specialist params failed", exc_info=True
+            )
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
+        idem = f"framework-config-generation:round{int(round_no)}{self._cycle_idem_suffix()}"
+        try:
+            spec_task, _existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idem,
+                requires_lanes=lanes,
+                allowed_tools=["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
+                side_effects=["writes_results"],
+                lease_ttl_sec=ttl,
+            )
+        except Exception:  # noqa: BLE001 -- defensive; never wedge the pump
+            log.exception("framework_config: generation specialist dispatch failed")
+            return ""
+        log.info(
+            "framework_config: dispatched generation specialist task_id=%s round=%d",
+            getattr(spec_task, "task_id", ""),
+            int(round_no),
+        )
+        return str(getattr(spec_task, "task_id", "") or "")
+
+    async def _framework_config_generation_inflight(self) -> bool:
+        """True while a framework config-generation specialist is queued/running."""
+        try:
+            queued = await self.tasks.queued()
+            running = await self.tasks.running()
+        except Exception:  # noqa: BLE001 -- defensive
+            return False
+        for t in (*queued, *running):
+            if getattr(t, "kind", "") != "specialist":
+                continue
+            params = getattr(t, "params", None) or {}
+            if bool(params.get("framework_config_generation")):
+                return True
+        return False
+
+    def _framework_config_grid_from_proposals(
+        self,
+        proposals: list[Any],
+    ) -> list[dict[str, Any]]:
+        """Convert a specialist ``proposal_set`` into framework config grid dicts.
+
+        Mirrors the mn-explore transform: keep entries carrying a server-arg or
+        env override, stamp ``provenance='framework_agent:config'``.
+
+        Args:
+            proposals: The specialist ``proposal_set`` entries.
+
+        Returns:
+            Variant dicts in the ExploreExecutor grid schema.
+        """
+        out: list[dict[str, Any]] = []
+        for i, p in enumerate(proposals or []):
+            if not isinstance(p, dict):
+                continue
+            args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
+            envs_raw = p.get("extra_envs")
+            envs = (
+                {str(k): str(v) for k, v in envs_raw.items()}
+                if isinstance(envs_raw, dict)
+                else {}
+            )
+            if not args and not envs:
+                continue
+            name = str(p.get("name") or "").strip() or f"framework-config-{i}"
+            out.append(
+                {
+                    "name": name,
+                    "extra_args": args,
+                    "extra_envs": envs,
+                    "provenance": "framework_agent:config",
+                    "note": str(p.get("reason") or "")[:200],
+                }
+            )
+        return out
+
+    def _ingest_framework_config_generation(
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any],
+    ) -> None:
+        """Harvest a config-generation specialist's ``proposal_set`` into the
+        pending grid for the config subphase.
+
+        No-op unless the task carries the ``framework_config_generation`` marker.
+
+        Args:
+            task: The completed specialist task.
+            done_payload: Its ``specialist_done`` payload.
+        """
+        params = getattr(task, "params", None) or {}
+        if not bool(params.get("framework_config_generation")):
+            return
+        proposals = (
+            done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
+        )
+        grid = self._framework_config_grid_from_proposals(proposals or [])
+        state = self.shared_state
+        if not isinstance(getattr(state, "framework_config_pending_grid", None), list):
+            state.framework_config_pending_grid = []
+        state.framework_config_pending_grid = grid
+        log.info(
+            "framework_config: harvested %d generated config variant(s) from task=%s",
+            len(grid),
+            getattr(task, "task_id", ""),
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 -- defensive
+            log.exception("framework_config: save after generation ingest failed")
+
+    async def _start_framework_config_generation(self, *, round_no: int) -> bool:
+        """Start a config-exploration round by dispatching a generation specialist.
+
+        Falls back to the deterministic default seed grid when generation cannot
+        be dispatched, so the lane still makes progress (or finishes cleanly).
+
+        Args:
+            round_no: 0-based count of rounds already run.
+
+        Returns:
+            ``True`` to hold the phase; ``False`` when the lane finished.
+        """
+        state = self.shared_state
+        gen_id = await self._dispatch_framework_config_generation_specialist(round_no + 1)
+        if gen_id:
+            state.framework_config_lane_state = "generating"
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 -- defensive
+                log.exception("framework_config: save after generation dispatch failed")
+            return True
+        # Generation unavailable: fall back to the deterministic default grid.
+        new_variants = self._framework_config_new_variants(
+            self._build_framework_config_grid()
+        )
+        if not new_variants:
+            self._finish_framework_config_lane(reason="no_candidates")
+            return False
+        task_id = await self._run_framework_config_exploration(
+            explicit_grid=new_variants,
+            reason=f"framework_config_round_{round_no + 1}",
+            round_no=round_no + 1,
+        )
+        if not task_id:
+            self._finish_framework_config_lane(reason="dispatch_skipped")
+            return False
+        state.framework_config_lane_state = "running"
+        state.framework_config_lane_round = round_no + 1
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 -- defensive
+            log.exception("framework_config: save after fallback dispatch failed")
+        return True
+
+    def _framework_config_lane_should_engage(self, next_phase) -> bool:
+        """True when the (default-OFF) FRAMEWORK config-exploration lane should
+        engage this tick.
+
+        Engages only when the config-exploration flag is set and the phase
+        machine is about to leave FRAMEWORK_AGENT (so the subphase can hold the
+        phase and run config rounds first). Extracted from
+        :meth:`_advance_phase_if_needed` so the trigger is unit-testable.
+
+        Args:
+            next_phase: The ``compute_next_phase`` result (a ``(phase, reason,
+                evidence)`` tuple) or ``None``.
+
+        Returns:
+            ``True`` when the config subphase should be given a chance to hold
+            the phase; ``False`` otherwise (the default flow).
+        """
+        if not bool(
+            getattr(self.shared_state, "framework_config_exploration_enabled", False)
+        ):
+            return False
+        if next_phase is None:
+            return False
+        current = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+        target = str(next_phase[0]).strip().upper()
+        return (
+            current == _phase_state.PHASE_FRAMEWORK_AGENT
+            and target != _phase_state.PHASE_FRAMEWORK_AGENT
+        )
+
+    async def _maybe_hold_for_framework_config_lane(self) -> bool:
+        """(Default OFF) Drive the FRAMEWORK config-exploration subphase.
+
+        Route B: FRAMEWORK replicates EXPLORE's LLM-driven config search as a
+        two-step-per-round loop over ``framework_config_lane_state``
+        (``''`` -> ``'generating'`` -> ``'running'`` -> ``'done'``):
+
+        * ``''`` -> dispatch a config-generation specialist (LLM proposes a
+          config variant grid); hold.
+        * ``'generating'`` -> hold while the specialist runs; on completion its
+          harvested ``proposal_set`` (in ``framework_config_pending_grid``) is
+          de-duped against the ``explore_search`` tested ledger and benchmarked
+          via an explore round; empty -> finish.
+        * ``'running'`` -> hold while the explore round runs; on completion start
+          the next round (or finish at the round cap).
+
+        When the flag is False (the default) this is a no-op returning ``False``
+        so the standard PRELUDE -> FRAMEWORK_AGENT -> EXPLORE flow is unchanged.
+
+        Returns:
+            ``True`` to hold the phase inside the config subphase; ``False`` to
+            let it advance as usual.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "framework_config_exploration_enabled", False)):
+            return False
+        lane = str(getattr(state, "framework_config_lane_state", "") or "")
+        if lane == "done":
+            return False
+        # Phase budget spent: the dispatcher stops spawning new phase-scoped
+        # variants (incl. our queued explore round) while the inflight check
+        # counts queued tasks, so holding here would livelock the phase past
+        # its budget. Yield so the phase-budget-exhausted exit can advance.
+        if self._dispatch_paused_for_phase_budget():
+            self._finish_framework_config_lane(reason="phase_budget_exhausted")
+            return False
+        if lane == "":
+            return await self._start_framework_config_generation(round_no=0)
+        if lane == "generating":
+            if await self._framework_config_generation_inflight():
+                return True
+            pending = list(getattr(state, "framework_config_pending_grid", None) or [])
+            state.framework_config_pending_grid = []
+            round_no = int(getattr(state, "framework_config_lane_round", 0) or 0)
+            new_variants = self._framework_config_new_variants(
+                self._build_framework_config_grid(explicit_grid=pending)
+            )
+            if not new_variants:
+                self._finish_framework_config_lane(reason="generation_empty")
+                return False
+            task_id = await self._run_framework_config_exploration(
+                explicit_grid=new_variants,
+                reason=f"framework_config_round_{round_no + 1}",
+                round_no=round_no + 1,
+            )
+            if not task_id:
+                self._finish_framework_config_lane(reason="dispatch_skipped")
+                return False
+            state.framework_config_lane_state = "running"
+            state.framework_config_lane_round = round_no + 1
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 -- defensive
+                log.exception("framework_config: save after round dispatch failed")
+            return True
+        if lane == "running":
+            if await self._framework_config_exploration_inflight():
+                return True
+            round_no = int(getattr(state, "framework_config_lane_round", 0) or 0)
+            if round_no >= self._framework_config_max_rounds():
+                self._finish_framework_config_lane(reason="max_rounds")
+                return False
+            return await self._start_framework_config_generation(round_no=round_no)
+        return False
+
+    def _record_framework_config_exploration_result(
+        self,
+        *,
+        task: "Task",
+        result: dict[str, Any],
+    ) -> None:
+        """Append a compact record of a framework config-exploration round.
+
+        Stored on ``framework_config_exploration_results`` (NOT
+        ``framework_agent_phase_progress``) so framework config search never
+        perturbs the source-candidate plateau gate. Winners are already
+        promoted through the standard explore harvest (current_best /
+        optimization_stack / explore_search).
+
+        Args:
+            task: The completed framework-config ``explore`` task.
+            result: The explore result dict (per_variant_outcomes / winners).
+        """
+        from ._time import now_iso
+
+        state = self.shared_state
+        outcomes = result.get("per_variant_outcomes") or []
+        kept = sum(
+            1
+            for o in outcomes
+            if isinstance(o, dict) and str(o.get("outcome") or "").upper() == "KEEP"
+        )
+        row = {
+            "task_id": str(getattr(task, "task_id", "") or ""),
+            "reason": str((getattr(task, "params", None) or {}).get("reason") or ""),
+            "variant_count": len(result.get("grid") or []) or len(outcomes),
+            "kept": kept,
+            "best_gain_pct": result.get("best_gain_pct"),
+            "ts": now_iso(),
+        }
+        if not isinstance(
+            getattr(state, "framework_config_exploration_results", None), list
+        ):
+            state.framework_config_exploration_results = []
+        state.framework_config_exploration_results.append(row)
+        try:
+            state.record_lifecycle_event(
+                step="framework_config_round",
+                status=_phase_state.LIFECYCLE_STATUS_END,
+                phase=_phase_state.PHASE_FRAMEWORK_AGENT,
+                detail=f"task={row['task_id']} kept={kept} variants={row['variant_count']}",
+            )
+        except Exception:  # noqa: BLE001 -- defensive; observability only
+            log.debug("framework_config: round lifecycle emit failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 -- defensive
+            log.exception("framework_config: save after result record failed")
 
     async def _record_specialist_result(
         self,
@@ -14691,6 +15477,18 @@ class Coordinator:
                             "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
                             task.task_id,
                         )
+                    # FRAMEWORK config-exploration: harvest a generation
+                    # specialist's config proposal_set into the pending grid.
+                    try:
+                        self._ingest_framework_config_generation(
+                            task=task,
+                            done_payload=done_payload,
+                        )
+                    except Exception:  # noqa: BLE001 -- defensive
+                        log.exception(
+                            "framework_config: generation ingest failed for task=%s",
+                            task.task_id,
+                        )
                 # Bump the per-EXPLORE specialist dispatch counter (Robustness reads it to detect storms).
                 try:
                     self.shared_state.bump_specialist_dispatched()
@@ -14784,6 +15582,17 @@ class Coordinator:
             # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
+                if str((task.params or {}).get("source") or "") == "framework_config_exploration":
+                    try:
+                        self._record_framework_config_exploration_result(
+                            task=task,
+                            result=result_dict,
+                        )
+                    except Exception:  # noqa: BLE001 -- defensive
+                        log.exception(
+                            "framework_config: result bookkeeping failed for task=%s",
+                            task.task_id,
+                        )
                 try:
                     self._record_explore_round_gaps(
                         task=task,
