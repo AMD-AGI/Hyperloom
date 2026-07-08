@@ -2330,6 +2330,144 @@ async def run_gemm_tuning_handler(
     return result
 
 
+# ──────────────────────── forge-fusion (autonomous kernel fusion) ────────────
+_FORGE_FUSION_RESULT_RE = re.compile(
+    r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORGE_FUSION_RESULT_END", re.DOTALL)
+
+
+def _forge_fusion_available() -> bool:
+    """Check if the forge-fusion CLI is importable or on PATH."""
+    if shutil.which("forge-fusion"):
+        return True
+    try:
+        return importlib.util.find_spec("forge_fusion") is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
+    """Parse the FORGE_FUSION_RESULT_BEGIN/END sentinel block from stdout."""
+    m = _FORGE_FUSION_RESULT_RE.search(stdout)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _resolve_fusion_decode_trace(state, payload: dict) -> str:
+    """Reuse the PRELUDE/roofline decode trace for fusion discovery.
+
+    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto
+    trace. Hyperloom already captured one in PRELUDE (``state.last_profile_trace``),
+    so reuse it instead of re-profiling. Explicit ``payload['trace_path']`` wins.
+    """
+    explicit = str(payload.get("trace_path") or "").strip()
+    if explicit and Path(explicit).is_file():
+        return explicit
+    trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    if trace and Path(trace).is_file():
+        return trace
+    return ""
+
+
+async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Autonomous kernel fusion via the forge-fusion CLI.
+
+    Mirrors ``_run_forge_gemm_tuning``: builds an input-json, shells out to the
+    ``forge_fusion.py`` wrapper (which drives ``forge-fusion run``: discover ->
+    author(few-shot) -> kernel-validate -> serving-smoke -> keep), and parses the
+    normalized result sentinel. A KEPT fusion carries a source patch + env flags
+    and ``requires_e2e_validation`` so the integrate/re-baseline gate confirms the
+    end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
+    """
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+
+    if not _forge_fusion_available():
+        return {
+            "status": "failed", "engine": "forge_fusion",
+            "error_class": "forge_fusion_not_found",
+            "error": ("forge-fusion CLI not found. Install via "
+                      "'pip install -e <KernelForge>/src/forge_fusion'."),
+            "decision": "REVERT", "kept": False,
+        }
+
+    model_path = str(
+        payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    if not model_path:
+        return {"status": "failed", "engine": "forge_fusion",
+                "error_class": "model_path_missing", "error": "model_path is required",
+                "decision": "REVERT", "kept": False}
+
+    trace_path = _resolve_fusion_decode_trace(state, payload)
+    if not trace_path:
+        return {"status": "skipped", "engine": "forge_fusion",
+                "error_class": "decode_trace_missing",
+                "error": ("no decode trace available for fusion discovery "
+                          "(state.last_profile_trace empty; run profile/roofline first)"),
+                "decision": "REVERT", "kept": False}
+
+    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    gpu = str(payload.get("gpu") or "0").strip()
+    llm_model = str(
+        payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
+    max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
+    timeout = int(payload.get("timeout") or os.environ.get("FORGE_FUSION_TIMEOUT") or 7200)
+
+    workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    input_payload = {
+        "trace_path": trace_path,
+        "model_path": model_path,
+        "framework": framework,
+        "output_dir": str(workspace),
+        "discover_mode": str(payload.get("discover_mode") or "llm"),
+        "llm_model": llm_model,
+        "max_turns": max_turns,
+        "gpu": gpu,
+        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
+        "verbose": bool(payload.get("verbose", False)),
+    }
+    input_json = workspace / "forge_fusion_input.json"
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
+
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+        result = _parse_forge_fusion_sentinel(stdout)
+        if result is None:
+            result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {"status": "failed", "engine": "forge_fusion",
+                  "error_class": "subprocess_timeout",
+                  "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+                  "decision": "REVERT", "kept": False}
+
+    result.setdefault("engine", "forge_fusion")
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("framework", framework)
+    result.setdefault("model_path", model_path)
+    result.setdefault("source", "forge_fusion")
+    return result
+
+
+async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Run autonomous kernel fusion via forge-fusion (serving-validated).
+
+    Registered as the ``run_fusion`` kernel request. Sits between GEMM tuning and
+    generic kernel-opt in the KERNEL phase: authors serving-safe fused kernels and
+    returns a source patch + env flags for the integrate gate to adopt on an
+    end-to-end win.
+    """
+    return await _run_forge_fusion(payload, session_dir=session_dir)
+
+
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
@@ -5217,6 +5355,7 @@ async def integrate_handler(
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
+    "run_fusion": run_fusion_handler,
     "run_optimization": run_optimization_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
