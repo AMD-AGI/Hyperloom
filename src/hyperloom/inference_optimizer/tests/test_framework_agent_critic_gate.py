@@ -11,8 +11,6 @@ apply/author enqueue (approve/advise) or the ``critic_denied`` row (reject) via
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from hyperloom.orchestrator.roles import (
