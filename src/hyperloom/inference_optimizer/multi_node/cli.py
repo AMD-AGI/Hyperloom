@@ -1490,45 +1490,61 @@ def _submit_and_collect_pod_json(
 
 
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
-# tree-reform.MD P2.2: cohesive rayjob/dynamo clusters extracted to
-# commands/{rayjob,dynamo}.py; imported here (after every base helper/const
-# either sibling needs is already defined above) and re-exported (``X as X``)
-# so the module namespace + monkeypatch surface (``mn_cli.cmd_create_rayjob``
-# etc.) stays intact. The commands modules import base symbols back from this
-# module by name — a safe partial-module cycle because Python has already
-# executed everything above this line before either sibling is first imported.
-from .commands.rayjob import (
-    _SAFE_GET_WORKLOAD_404_GRACE_S as _SAFE_GET_WORKLOAD_404_GRACE_S,
-    _TERMINAL_FAIL_PHASES as _TERMINAL_FAIL_PHASES,
-    _TERMINAL_OK_PHASES as _TERMINAL_OK_PHASES,
-    _checkpoint_create_rayjob_state as _checkpoint_create_rayjob_state,
-    _write_rayjob_meta as _write_rayjob_meta,
-    ray_gcs_address as ray_gcs_address,
-    _credential_fanout as _credential_fanout,
-    _is_safe_get_workload_404 as _is_safe_get_workload_404,
-    _summarize_workload_failure as _summarize_workload_failure,
-    _find_head_pod_ip as _find_head_pod_ip,
-    cmd_create_rayjob as cmd_create_rayjob,
-)
+# tree-reform.MD P2.2: cohesive rayjob/dynamo clusters live in
+# commands/{rayjob,dynamo}.py. Bind only the command hooks used below; legacy
+# helper access is handled lazily by ``__getattr__`` to avoid import cycles.
+from .commands.rayjob import cmd_create_rayjob as cmd_create_rayjob
 from .commands.dynamo import (
-    _DYNAMO_SSH_DIR as _DYNAMO_SSH_DIR,
     cmd_create_dynamo as cmd_create_dynamo,
-    _dynamo_require_state as _dynamo_require_state,
-    _FORWARD_ENV_PREFIXES as _FORWARD_ENV_PREFIXES,
-    _collect_forward_env as _collect_forward_env,
-    _dynamo_fanout_launch as _dynamo_fanout_launch,
     _dynamo_restart_server as _dynamo_restart_server,
-    _dynamo_all_gpu_ips as _dynamo_all_gpu_ips,
     _dynamo_kill_inference as _dynamo_kill_inference,
-    _dynamo_ssh_node_op as _dynamo_ssh_node_op,
     _dynamo_apply_tracelens_patch as _dynamo_apply_tracelens_patch,
     _dynamo_apply_patch as _dynamo_apply_patch,
     _dynamo_revert_patch as _dynamo_revert_patch,
     _dynamo_kernel_bench as _dynamo_kernel_bench,
-    _resolve_geak_src as _resolve_geak_src,
     cmd_install_geak as cmd_install_geak,
     cmd_install_oob as cmd_install_oob,
 )
+
+_RAYJOB_COMPAT_EXPORTS = frozenset(
+    {
+        "_SAFE_GET_WORKLOAD_404_GRACE_S",
+        "_TERMINAL_FAIL_PHASES",
+        "_TERMINAL_OK_PHASES",
+        "_checkpoint_create_rayjob_state",
+        "_write_rayjob_meta",
+        "ray_gcs_address",
+        "_credential_fanout",
+        "_is_safe_get_workload_404",
+        "_summarize_workload_failure",
+        "_find_head_pod_ip",
+    }
+)
+_DYNAMO_COMPAT_EXPORTS = frozenset(
+    {
+        "_DYNAMO_SSH_DIR",
+        "_dynamo_require_state",
+        "_FORWARD_ENV_PREFIXES",
+        "_collect_forward_env",
+        "_dynamo_fanout_launch",
+        "_dynamo_all_gpu_ips",
+        "_dynamo_ssh_node_op",
+        "_resolve_geak_src",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy compatibility exports for helpers moved to command modules."""
+    if name in _RAYJOB_COMPAT_EXPORTS:
+        from .commands import rayjob
+
+        return getattr(rayjob, name)
+    if name in _DYNAMO_COMPAT_EXPORTS:
+        from .commands import dynamo
+
+        return getattr(dynamo, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:

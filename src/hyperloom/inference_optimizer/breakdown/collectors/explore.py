@@ -158,6 +158,7 @@ def _patch_winners_history(
                     try:
                         w2["gain_pct"] = (float(w2["tput"]) - bt) / bt * 100.0
                     except (TypeError, ValueError, ZeroDivisionError):
+                        # Leave gain unset when persisted throughput is not numeric.
                         pass
                 new_winners.append(w2)
             row["winners"] = new_winners
@@ -168,6 +169,7 @@ def _patch_winners_history(
                     best["gain_pct"] = (float(best["tput"]) - bt) / bt * 100.0
                     row["best"] = best
                 except (TypeError, ValueError, ZeroDivisionError):
+                    # Leave best.gain_pct unset when persisted throughput is not numeric.
                     pass
         out.append(row)
     return out
@@ -321,6 +323,7 @@ def _shape_sweep_point(
             isl_ = int(m.group(3))
             osl_ = int(m.group(4))
         except ValueError:
+            # Keep parsed knobs as None for non-canonical variant names.
             pass
     report = _find_benchmark_report(variant_dir)
     report_data = _load_json_safe(report, warnings) if report else None

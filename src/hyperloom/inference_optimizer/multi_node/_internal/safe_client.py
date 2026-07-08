@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -88,10 +89,8 @@ class SafeClient:
 
     def close(self) -> None:
         """Close the underlying HTTP client, ignoring any errors."""
-        try:
+        with suppress(Exception):
             self._client.close()
-        except Exception:
-            pass
 
     def __enter__(self) -> "SafeClient":
         """Enter the context manager.

@@ -34,18 +34,35 @@ from .._internal.rayjob_credentials import rayjob_credential_fanout
 import logging
 log = logging.getLogger(__name__)
 
-# tree-reform.MD P2.2: base state/poll helpers stay in ``cli.py`` (they're
-# also used by dynamo.py and the rest of cli.py); imported back here. Safe
-# partial-module cycle: cli.py imports this module only after all of these
-# names are already defined (see the comment at that import site).
-from ..cli import (
-    _state_file,
-    _load_state,
-    _save_state,
-    _parse_kv_list,
-    _short_poll,
-    _poll_timeout_from_args,
-)
+def _mn_cli():
+    """Import the parent CLI lazily to keep command modules acyclic."""
+    from .. import cli as mn_cli
+
+    return mn_cli
+
+
+def _state_file():
+    return _mn_cli()._state_file()
+
+
+def _load_state():
+    return _mn_cli()._load_state()
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    _mn_cli()._save_state(state)
+
+
+def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
+    return _mn_cli()._parse_kv_list(values)
+
+
+def _short_poll(**kwargs):
+    return _mn_cli()._short_poll(**kwargs)
+
+
+def _poll_timeout_from_args(args: argparse.Namespace) -> int:
+    return _mn_cli()._poll_timeout_from_args(args)
 
 # SaFE read-after-write lag: GET /workloads/{id} may 404 briefly post-create.
 _SAFE_GET_WORKLOAD_404_GRACE_S = 30.0

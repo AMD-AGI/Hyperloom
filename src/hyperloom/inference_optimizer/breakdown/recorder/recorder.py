@@ -24,6 +24,7 @@ import os
 import re
 import tempfile
 import threading
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -214,10 +215,8 @@ class Recorder:
                 f.write(data)
             os.replace(tmp, target)
         except Exception:
-            try:
+            with suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
         return target
 

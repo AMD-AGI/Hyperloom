@@ -43,6 +43,7 @@ import os
 import shutil
 import tempfile
 import zipfile
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -435,10 +436,8 @@ def package_session_artifacts(
                 zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
             os.replace(tmp_path, target)
         except Exception:
-            try:
+            with suppress(OSError):
                 tmp_path.unlink()
-            except OSError:
-                pass
             raise
 
         log.info(

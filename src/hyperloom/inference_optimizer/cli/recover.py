@@ -15,103 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .executors import (  # noqa: F401 - re-exported for callers/tests
-    _NOOP_KINDS_KERNEL_ONLY,
-    _REAL_EXECUTORS_FULL,
-    _build_specialist_executor,
-    _noop_prep,
-    _register_executors,
-)
-from .kb import (  # noqa: F401 - re-exported for callers/tests
-    _bootstrap_cortex_kb,
-    _bootstrap_knowledge_plane,
-    _build_recipe_kb_dispatcher,
-    _resolve_local_kb_root,
-)
-from .backends import (  # noqa: F401 - re-exported for callers/tests
-    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
-    _build_backends,
-    _build_proposal_scorer,
-    _build_robustness_options,
-    _robustness_server_configured,
-)
-from .model_gate import (  # noqa: F401 - re-exported for callers/tests
-    _AMD_GPU_TYPES,
-    _AMD_UNSUPPORTED_ARCHITECTURES,
-    _AMD_UNSUPPORTED_MODEL_TYPES,
-    _AMD_UNSUPPORTED_QUANT_ALGOS,
-    _AMD_UNSUPPORTED_QUANT_METHODS,
-    _CONTEXT_HEADROOM_DEFAULT,
-    _CONTEXT_HEADROOM_ENV,
-    _GEMMA2_ARCHITECTURES,
-    _GFX_TO_RUNNER,
-    _MAX_MODEL_LEN_HEADROOM,
-    _MAXPOS_CONFIG_KEYS,
-    _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES,
-    _PHI3_ROPE_TYPES,
-    _ROPE_CONFIG_KEYS,
-    _SAFETENSORS_HEADER_LIMIT,
-    _SUPPORTED_ARCH_MARKERS,
-    _SUPPORTED_MODEL_TYPES,
-    _TEXT_COERCIBLE_MODEL_TYPES,
-    _TEXT_DECODER_CONFIG_KEYS,
-    _TOKENIZER_ARTIFACT_FILES,
-    _UNRECOGNIZED_ARCHITECTURES,
-    _UNRECOGNIZED_MODEL_TYPES,
-    _UNREGISTERED_CUSTOM_CONFIG_TYPES,
-    _UNSUPPORTED_ARCHITECTURES,
-    _UNSUPPORTED_CONFIG_KEYS,
-    _UNSUPPORTED_MODEL_TYPES,
-    _VERDICT_TEXT_COERCIBLE,
-    _VERDICT_VISION_ONLY,
-    _VOCAB_WEIGHT_NAMES,
-    _arch_is_supported_text_generation,
-    _autodetect_gpu_type,
-    _config_architectures,
-    _config_declares_text_decoder,
-    _context_headroom_tokens,
-    _detect_amd_unsupported_quant,
-    _detect_gemma2_missing_hidden_act,
-    _detect_incompatible_model_config,
-    _detect_missing_tokenizer_files,
-    _detect_phi3_rope_scaling_incompatible,
-    _detect_unrecognized_architecture,
-    _detect_unsupported_model,
-    _detect_vocab_weight_shape_mismatch,
-    _gpu_runner_type,
-    _load_model_arch,
-    _load_model_config_dict,
-    _load_model_config_tags,
-    _load_model_max_position_embeddings,
-    _model_has_dual_chunk_attention,
-    _model_is_moe,
-    _preflight_context_window,
-    _preflight_model_config_compat,
-    _preflight_unsupported_model_arch,
-    _read_safetensors_header,
-    _resolve_amd_gpu_type,
-    _resolve_gpu_type,
-    _resolve_max_model_len,
-)
-from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
-    _model_is_gemma2,
-    summarize_model_config,
-)
-from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
-    _default_target_summary,
-    _parse_conc_sweep_concs,
-    _print_final_summary,
-    _print_kernel_opt_summary_line,
-    _print_session_skeleton,
-    _read_failure_summary,
-    _reconcile_crash_count,
-    _resolve_reference_recipe,
-    _resolve_session_dir_for_summary,
-    _seed_shared_state,
-    _snapshot_system_prompts,
-    resolve_model_display_name,
-)
-
 log = logging.getLogger(__name__)
 
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
@@ -139,7 +42,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
             state = json.loads(state_path.read_text(encoding="utf-8"))
             close_done = bool((state or {}).get("close_sequence_done"))
         except (json.JSONDecodeError, OSError):
-            pass
+            close_done = False
 
     breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
 

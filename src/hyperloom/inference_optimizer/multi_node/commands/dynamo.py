@@ -37,30 +37,80 @@ from .._internal.server_args_safety import ServerArgsRejected, validate_server_a
 import logging
 log = logging.getLogger(__name__)
 
-# tree-reform.MD P2.2: base state/poll/exit-code helpers stay in ``cli.py``
-# (also used by rayjob.py and the rest of cli.py); imported back here. Safe
-# partial-module cycle: cli.py imports this module only after all of these
-# names are already defined (see the comment at that import site).
-from .. import cli as _mn_cli
-from ..cli import (
-    _state_file,
-    _dynamo_ssh_dir,
-    _dynamo_known_hosts_path,
-    _refresh_dynamo_known_hosts,
-    _dynamo_ssh_run_script,
-    _dynamo_ssh_bash_with_env,
-    EXIT_CONFIG_ERROR,
-    EXIT_TRANSIENT,
-    _load_state,
-    _save_state,
-    _short_poll,
-    _poll_timeout_from_args,
-    _normalize_extra_args,
-    _read_pod_script,
-    _read_bundled_pod_python_script,
-    _extract_pod_json,
-    _DEFAULT_POLL_INTERVAL_S,
-)
+class _MnCliProxy:
+    """Lazy proxy preserving ``dyn._mn_cli`` monkeypatch compatibility."""
+
+    def __getattr__(self, name: str) -> Any:
+        from .. import cli as mn_cli
+
+        return getattr(mn_cli, name)
+
+
+_mn_cli = _MnCliProxy()
+
+
+def _state_file():
+    return _mn_cli._state_file()
+
+
+def _dynamo_ssh_dir():
+    return _mn_cli._dynamo_ssh_dir()
+
+
+def _dynamo_known_hosts_path(state: dict[str, Any] | None = None):
+    return _mn_cli._dynamo_known_hosts_path(state)
+
+
+def _refresh_dynamo_known_hosts(ips: list[str], port: int, *, state: dict[str, Any] | None = None):
+    return _mn_cli._refresh_dynamo_known_hosts(ips, port, state=state)
+
+
+def _dynamo_ssh_run_script(*args, **kwargs):
+    return _mn_cli._dynamo_ssh_run_script(*args, **kwargs)
+
+
+def _dynamo_ssh_bash_with_env(*args, **kwargs):
+    return _mn_cli._dynamo_ssh_bash_with_env(*args, **kwargs)
+
+
+def _load_state():
+    return _mn_cli._load_state()
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    _mn_cli._save_state(state)
+
+
+def _short_poll(**kwargs):
+    return _mn_cli._short_poll(**kwargs)
+
+
+def _poll_timeout_from_args(args: argparse.Namespace) -> int:
+    return _mn_cli._poll_timeout_from_args(args)
+
+
+def _normalize_extra_args(s: str | None) -> str:
+    return _mn_cli._normalize_extra_args(s)
+
+
+def _read_pod_script(name: str) -> str:
+    return _mn_cli._read_pod_script(name)
+
+
+def _read_bundled_pod_python_script(name: str):
+    return _mn_cli._read_bundled_pod_python_script(name)
+
+
+def _extract_pod_json(logs: str) -> dict | None:
+    return _mn_cli._extract_pod_json(logs)
+
+
+def _DEFAULT_POLL_INTERVAL_S() -> int:
+    return _mn_cli._DEFAULT_POLL_INTERVAL_S
+
+
+EXIT_CONFIG_ERROR = 3
+EXIT_TRANSIENT = 1
 # rayjob.py is imported by cli.py first (see the re-export site), so its
 # symbols are already resolvable by the time this module loads.
 from .rayjob import (
@@ -1028,7 +1078,7 @@ def cmd_install_oob(args: argparse.Namespace) -> int:
         return _mn_cli._rayjob_install_oob(
             state,
             oob_src=oob_src,
-            poll_interval=int(getattr(args, "poll_interval", _DEFAULT_POLL_INTERVAL_S) or _DEFAULT_POLL_INTERVAL_S),
+            poll_interval=int(getattr(args, "poll_interval", _mn_cli._DEFAULT_POLL_INTERVAL_S) or _mn_cli._DEFAULT_POLL_INTERVAL_S),
             poll_timeout=_poll_timeout_from_args(args),
             print_logs=bool(getattr(args, "print_logs", False)),
         )

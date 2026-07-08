@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -723,10 +724,8 @@ def write_breakdown_json(
         tmp_path.write_text(payload, encoding="utf-8")
         os.replace(tmp_path, target)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
     return target
@@ -779,10 +778,8 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
             tmp_path.write_text(payload, encoding="utf-8")
             os.replace(tmp_path, target)
         except Exception:
-            try:
+            with suppress(OSError):
                 tmp_path.unlink()
-            except OSError:
-                pass
             raise
         log.info("session_breakdown: refreshed langfuse section in %s", target)
         return True
@@ -933,10 +930,8 @@ def write_minimal_final_report(
         tmp_path.write_text("\n".join(lines), encoding="utf-8")
         os.replace(tmp_path, target)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise
     log.info("emergency final report: wrote %s", target)
     return target
@@ -1037,10 +1032,8 @@ def write_minimal_final_json(
         )
         os.replace(tmp_path, target)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise
     log.info("crash-safe final.json: wrote %s", target)
     return target

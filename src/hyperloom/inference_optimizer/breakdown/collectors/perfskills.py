@@ -233,8 +233,8 @@ def _perfskills_reconstruct_from_disk(
                         {"kernel_journey_path": str(kj)}, warnings
                     )
                 )
-        except OSError:
-            pass
+        except OSError as exc:
+            warnings.append(f"perfskills: accepted kernels journey unreadable: {exc}")
 
     # 5) newest-artifact timestamp (how far the run got in wall-clock). Bounded
     #    to a handful of key paths — the exp_root tree can hold thousands of

@@ -35,6 +35,7 @@ from __future__ import annotations
 import json as _json
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -62,10 +63,8 @@ def atomic_write_bytes(path: Path, data: bytes, *, make_parents: bool = False) -
             fh.write(data)
         os.replace(tmp, path)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
         raise
 
 
@@ -98,10 +97,8 @@ def atomic_write_text(
             fh.write(text)
         os.replace(tmp, path)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
         raise
 
 

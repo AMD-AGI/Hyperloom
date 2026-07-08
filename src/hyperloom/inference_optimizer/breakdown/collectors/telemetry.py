@@ -320,6 +320,7 @@ def _collect_lane_timeline(
         try:
             conn.close()
         except Exception:  # noqa: BLE001
+            # Closing a read-only telemetry connection is best-effort during breakdown export.
             pass
 
     rows: list[dict[str, Any]] = []
