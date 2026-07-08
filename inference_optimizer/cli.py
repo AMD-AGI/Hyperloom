@@ -904,12 +904,13 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
 def _claude_native_enabled() -> bool:
     """True when Claude-native mode is on (``--claude-native`` / ``HYPERLOOM_CLAUDE_NATIVE``).
 
-    In native mode Hyperloom authenticates Claude through the locally
-    logged-in ``claude`` CLI (``~/.claude`` credentials from ``claude login``)
-    instead of an LLM gateway. This bypasses the gateway credential gate, the
-    ``~/.claude`` ``customApiUrl`` rewrite, and the gateway model-catalog probe,
-    and it leaves ``ANTHROPIC_BASE_URL`` unset so the spawned ``claude``
-    subprocesses (which inherit ``os.environ``) reach the CLI's own endpoint.
+    In native mode Hyperloom authenticates Claude against native Anthropic
+    (``api.anthropic.com``) with the Anthropic credential (``ANTHROPIC_API_KEY``
+    / ``ANTHROPIC_AUTH_TOKEN``, e.g. from ``claude login``) instead of the AMD
+    gateway. It bypasses the gateway credential gate, the gateway model-catalog
+    probe, and the codex/OpenAI smoke-test, and routes orchestration plus the
+    forge/geak/OOB kernel backends at the native endpoint (see
+    ``_configure_claude_native_endpoints``).
 
     ``main()`` mirrors the ``--claude-native`` flag into
     ``HYPERLOOM_CLAUDE_NATIVE`` right after parsing, so this env-only check is
@@ -924,6 +925,80 @@ def _claude_native_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def _configure_claude_native_endpoints(
+    args: argparse.Namespace | None = None,
+) -> tuple[str, str]:
+    """Route every Claude-capable backend at native Anthropic in claude-native mode.
+
+    Points orchestration (the ``claude`` CLI), GEAK, and forge/OOB at
+    ``ANTHROPIC_BASE_URL`` (default ``https://api.anthropic.com``) using the
+    Anthropic credential (``ANTHROPIC_API_KEY`` or ``ANTHROPIC_AUTH_TOKEN``)
+    instead of the AMD gateway, so the kernel generators (forge/geak) run
+    without ``SAFE_API_KEY`` / ``OPENAI_BASE_URL``. GEAK talks to Anthropic via
+    litellm's ``anthropic/`` provider, so ``GEAK_MODEL_NAME`` is prefixed
+    accordingly. The OpenAI/codex side is left unset (Claude-only run).
+
+    Explicit operator values (``GEAK_BASE_URL``, ``OOB_API_KEY``, …) are always
+    preserved; this only fills gaps.
+
+    Returns:
+        tuple[str, str]: ``(anthropic_base_url, "")`` for diagnostics.
+    """
+    anthropic_base = (
+        os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com"
+    )
+    os.environ["ANTHROPIC_BASE_URL"] = anthropic_base
+    anthropic_key = (
+        os.environ.get("ANTHROPIC_API_KEY", "")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    )
+    print(f"Preflight: claude-native — routing orchestration + forge/geak/oob at {anthropic_base}")
+
+    # forge/geak/OOB read these; fill only the gaps so operator overrides win.
+    fills: dict[str, str] = {
+        "GEAK_BASE_URL": anthropic_base,
+        "OOB_BASE_URL": anthropic_base,
+        "LLM_API_BASE": anthropic_base,
+    }
+    if anthropic_key:
+        fills.update(
+            {
+                "ANTHROPIC_API_KEY": anthropic_key,  # litellm anthropic/ provider reads this
+                "GEAK_API_KEY": anthropic_key,
+                "OOB_API_KEY": anthropic_key,
+            }
+        )
+    for var, want in fills.items():
+        if not os.environ.get(var):
+            os.environ[var] = want
+            shown = "<redacted>" if var.endswith(("_KEY", "_TOKEN")) else want
+            print(f"Preflight: claude-native set {var} -> {shown}")
+
+    # GEAK needs the ``anthropic/`` litellm provider prefix (a bare ``claude-*``
+    # name would route through the OpenAI-compatible transformer / gateway).
+    if not os.environ.get("GEAK_MODEL_NAME"):
+        claude_model = (
+            getattr(args, "claude_model", None)
+            or os.environ.get("CLAUDE_MODEL")
+            or "claude-opus-4-8"
+        ).strip()
+        prefixed = (
+            claude_model if claude_model.startswith("anthropic/") else f"anthropic/{claude_model}"
+        )
+        os.environ["GEAK_MODEL_NAME"] = prefixed
+        print(f"Preflight: claude-native set GEAK_MODEL_NAME -> {prefixed} (litellm anthropic provider)")
+
+    if not anthropic_key:
+        print(
+            "Preflight: WARNING — claude-native mode has no ANTHROPIC_API_KEY / "
+            "ANTHROPIC_AUTH_TOKEN. Orchestration can still use the `claude` CLI "
+            "login, but forge/geak (litellm → api.anthropic.com) need an "
+            "Anthropic key/token to authenticate. Export one (e.g. from "
+            "`claude login`) before install/launch."
+        )
+    return anthropic_base, ""
 
 
 def _validate_credentials() -> None:
@@ -1993,12 +2068,13 @@ def _preflight(
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if _claude_native_enabled():
-        # Native mode: do NOT inject gateway base URLs or rewrite
-        # ~/.claude/config.json. Leaving ANTHROPIC_BASE_URL unset lets the
-        # spawned `claude` subprocesses (env = os.environ.copy()) authenticate
-        # against the CLI's own logged-in endpoint. resolved_urls stays None so
-        # the model-catalog probe is skipped downstream.
-        print("Preflight: claude-native mode — leaving ~/.claude and ANTHROPIC_BASE_URL untouched (native CLI auth)")
+        # Native mode: route orchestration + forge/geak/OOB at native Anthropic
+        # (api.anthropic.com) with the Anthropic token, instead of the AMD
+        # gateway. Does NOT rewrite ~/.claude to a gateway; the spawned `claude`
+        # subprocesses (env = os.environ.copy()) inherit ANTHROPIC_BASE_URL +
+        # key. resolved_urls carries the anthropic base for diagnostics; the
+        # gateway model-catalog probe stays skipped downstream.
+        resolved_urls = _configure_claude_native_endpoints(args)
     elif anthropic_url or openai_url:
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),

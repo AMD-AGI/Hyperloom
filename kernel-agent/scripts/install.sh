@@ -161,6 +161,15 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
+
+# claude-native mode: forge/geak authenticate against native Anthropic
+# (api.anthropic.com) with the Anthropic token instead of the AMD gateway.
+# Mirrors inference_optimizer/cli.py::_claude_native_enabled().
+HL_CLAUDE_NATIVE=0
+case "$(printf '%s' "${HYPERLOOM_CLAUDE_NATIVE:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) HL_CLAUDE_NATIVE=1 ;;
+esac
+
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 # Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
@@ -206,7 +215,13 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Anthropic /v1/messages transformer.  Without this, GEAK gets
 # Primus.00009 / NotFound on the same key+URL that works through
 # /chat/completions.
-GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-8}"
+# claude-native: default to the litellm anthropic/ provider so GEAK reaches
+# api.anthropic.com directly; gateway mode keeps the bare name (openai/ prefix).
+if [ "$HL_CLAUDE_NATIVE" -eq 1 ]; then
+  GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-anthropic/claude-opus-4-8}"
+else
+  GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-8}"
+fi
 case "${GEAK_MODEL_NAME_RAW}" in
   openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
     GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
@@ -274,8 +289,14 @@ GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
-GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
+if [ "$HL_CLAUDE_NATIVE" -eq 1 ]; then
+  # Native: key from the Anthropic token; base URL defaults to api.anthropic.com.
+  GEAK_API_KEY_VAL="${GEAK_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
+  GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}"
+else
+  GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
+  GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
+fi
 # LiteLLM provider-specific base_url normalisation:
 #   * openai/* models require the OpenAI-compatible base URL, which in our
 #     gateway includes the trailing /v1.  Preserve it.
@@ -287,8 +308,13 @@ case "${GEAK_MODEL_NAME_VAL}" in
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
 esac
-OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
-OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
+if [ "$HL_CLAUDE_NATIVE" -eq 1 ]; then
+  OOB_API_KEY_VAL="${OOB_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
+  OOB_BASE_URL_VAL="${OOB_BASE_URL:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}"
+else
+  OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
+  OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
+fi
 # Cursor SDK key. Independent issuer (Cursor account, prefix `crsr_...`); never
 # inherit from SAFE_API_KEY / OOB_API_KEY because those address the AMD gateway.
 # Leave empty if the operator has not provisioned a Cursor key — the cursor
@@ -1011,6 +1037,9 @@ ensure_geak() {
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
       if [ -z "$GEAK_API_KEY_VAL" ] || [ -z "$GEAK_BASE_URL_VAL" ]; then
+        if [ "$HL_CLAUDE_NATIVE" -eq 1 ]; then
+          die "Cannot generate GEAK litellm config in claude-native mode: set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (base URL defaults to api.anthropic.com)"
+        fi
         die "Cannot generate GEAK litellm config: SAFE_API_KEY and OPENAI_BASE_URL are required"
       fi
       cat > "$GEAK_CONFIG" <<EOF
