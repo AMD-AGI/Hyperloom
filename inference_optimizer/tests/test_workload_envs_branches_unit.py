@@ -419,3 +419,48 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
         bench = _materialize(src, tmp_path / "out")
     assert _profile_num_steps(bench) == 2000  # honored verbatim
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
+
+
+# ---- sparse eval task selection (EVAL_TASK -> EVAL_TASKS_DIR) ----
+# M3: operator sets EVAL_TASK (e.g. tinyGSM8k); we must ALSO emit EVAL_TASKS_DIR
+# (the env InferenceX's run_lm_eval actually reads) so the sparse task engages.
+def _clear_eval_env(monkeypatch):
+    for k in ("EVAL_TASK", "EVAL_TASKS_DIR", "EVAL_LIMIT"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_eval_task_emits_tasks_dir(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    _clear_eval_env(monkeypatch)
+    monkeypatch.setenv("EVAL_TASK", "tinyGSM8k")
+    bench = _materialize(_write(tmp_path / "cfg.yaml"), tmp_path / "out")
+    # EVAL_TASKS_DIR is what run_lm_eval reads; EVAL_TASK kept for readability.
+    assert bench["envs"]["EVAL_TASKS_DIR"] == "tinyGSM8k"
+    assert bench["envs"]["EVAL_TASK"] == "tinyGSM8k"
+
+
+def test_eval_task_unset_emits_nothing(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    _clear_eval_env(monkeypatch)
+    bench = _materialize(_write(tmp_path / "cfg.yaml"), tmp_path / "out")
+    # default (full GSM8K): no keys injected, behavior unchanged.
+    assert "EVAL_TASKS_DIR" not in bench["envs"]
+    assert "EVAL_TASK" not in bench["envs"]
+
+
+def test_eval_tasks_dir_explicit_wins(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    _clear_eval_env(monkeypatch)
+    monkeypatch.setenv("EVAL_TASK", "tinyGSM8k")
+    monkeypatch.setenv("EVAL_TASKS_DIR", "utils/evals/gsm8k.yaml")
+    bench = _materialize(_write(tmp_path / "cfg.yaml"), tmp_path / "out")
+    # An explicit EVAL_TASKS_DIR (path or name) is respected, not overwritten.
+    assert bench["envs"]["EVAL_TASKS_DIR"] == "utils/evals/gsm8k.yaml"
+
+
+def test_eval_limit_forwarded(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    _clear_eval_env(monkeypatch)
+    monkeypatch.setenv("EVAL_LIMIT", "50")
+    bench = _materialize(_write(tmp_path / "cfg.yaml"), tmp_path / "out")
+    assert str(bench["envs"]["EVAL_LIMIT"]) == "50"

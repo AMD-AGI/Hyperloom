@@ -96,6 +96,83 @@ class TestParseEvalResults:
         assert out["accuracy"] is None
         assert "parse error" in out["error"]
 
+    # Tests for the extended parse_eval_results: single-task back-compat with
+    # tasks_used, acc_norm recognition, multi-task averaging, group-aggregate-row
+    # exclusion, and mixed-metric labeling (sparse tinyBenchmarks / metabench).
+    def test_single_task_reports_tasks_used(self, tmp_path):
+        eval_dir = tmp_path / "eval_one"
+        eval_dir.mkdir()
+        (eval_dir / "results.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.81}}})
+        )
+        out = ag.parse_eval_results(tmp_path)
+        assert out["accuracy"] == pytest.approx(0.81)
+        assert out["task"] == "gsm8k"
+        assert out["tasks_used"] == ["gsm8k"]
+        assert out["metric"] == "exact_match,strict-match"
+
+    def test_recognizes_acc_norm(self, tmp_path):
+        eval_dir = tmp_path / "eval_an"
+        eval_dir.mkdir()
+        (eval_dir / "results.json").write_text(
+            json.dumps({"results": {"tinyMMLU": {"acc_norm,none": 0.64}}})
+        )
+        out = ag.parse_eval_results(tmp_path)
+        assert out["accuracy"] == pytest.approx(0.64)
+        assert out["metric"] == "acc_norm,none"
+
+    def test_averages_multiple_leaf_tasks(self, tmp_path):
+        # A sparse group (tinyBenchmarks-style) emits several leaf tasks; the
+        # gate averages them into one comparable number.
+        eval_dir = tmp_path / "eval_grp"
+        eval_dir.mkdir()
+        results = {
+            "results": {
+                "tinyArc": {"acc_norm,none": 0.50},
+                "tinyHellaswag": {"acc_norm,none": 0.70},
+            }
+        }
+        (eval_dir / "results.json").write_text(json.dumps(results))
+        out = ag.parse_eval_results(tmp_path)
+        assert out["accuracy"] == pytest.approx(0.60)
+        assert set(out["tasks_used"]) == {"tinyArc", "tinyHellaswag"}
+        assert out["metric"] == "acc_norm,none"
+
+    def test_excludes_group_aggregate_rows(self, tmp_path):
+        # lm-eval reports the group row alongside its leaf subtasks; averaging it
+        # in would double-count, so group_subtasks keys are excluded.
+        eval_dir = tmp_path / "eval_mb"
+        eval_dir.mkdir()
+        results = {
+            "results": {
+                "metabench": {"acc,none": 0.99},  # group aggregate — must be ignored
+                "metabench_arc": {"acc,none": 0.40, "acc_norm,none": 0.48},
+                "metabench_mmlu": {"acc,none": 0.60},
+            },
+            "group_subtasks": {"metabench": ["metabench_arc", "metabench_mmlu"]},
+        }
+        (eval_dir / "results.json").write_text(json.dumps(results))
+        out = ag.parse_eval_results(tmp_path)
+        # mean(0.40, 0.60) = 0.50; the 0.99 group row is excluded; acc,none
+        # outranks acc_norm,none on metabench_arc.
+        assert out["accuracy"] == pytest.approx(0.50)
+        assert "metabench" not in out["tasks_used"]
+        assert set(out["tasks_used"]) == {"metabench_arc", "metabench_mmlu"}
+
+    def test_mixed_metrics_marks_metric_mixed(self, tmp_path):
+        eval_dir = tmp_path / "eval_mix"
+        eval_dir.mkdir()
+        results = {
+            "results": {
+                "tinyGSM8k": {"exact_match,strict-match": 0.50},
+                "tinyArc": {"acc_norm,none": 0.60},
+            }
+        }
+        (eval_dir / "results.json").write_text(json.dumps(results))
+        out = ag.parse_eval_results(tmp_path)
+        assert out["accuracy"] == pytest.approx(0.55)
+        assert out["metric"] == "mixed"
+
 
 class TestAccuracyPassed:
     def test_baseline_zero_skips_gate(self):

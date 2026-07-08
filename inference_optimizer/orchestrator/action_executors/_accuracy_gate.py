@@ -72,11 +72,42 @@ def is_high_accuracy_risk(
     return False
 
 
-def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
-    """Extract accuracy score from Magpie workspace's eval output.
+# Recognize more metric keys + support sparse multi-task groups
+# (tinyBenchmarks / metabench). Priority-ordered metric keys; the first key
+# present on a task is the one used for that task. ``exact_match`` (generation)
+# outranks ``acc`` / ``acc_norm`` (multiple-choice) so GSM8K-style tasks keep
+# their historical metric; ``acc_norm,none`` is recognized so sparse
+# multiple-choice subsets (tinyBenchmarks anchors, metabench) report a score
+# instead of being skipped.
+_RECOGNIZED_METRIC_KEYS: tuple[str, ...] = (
+    "exact_match,strict-match",
+    "exact_match,flexible-extract",
+    "exact_match,none",
+    "acc,none",
+    "acc_norm,none",
+)
 
-    Searches ``results*.json`` recursively for the GSM8K-primary
-    ``exact_match,strict-match`` metric.
+
+def _pick_task_metric(metrics: dict[str, Any]) -> tuple[str, float] | None:
+    """Return ``(metric_key, score)`` for the first recognized numeric metric."""
+    for key in _RECOGNIZED_METRIC_KEYS:
+        if key in metrics:
+            score = metrics[key]
+            if isinstance(score, (int, float)):
+                return key, float(score)
+    return None
+
+
+def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
+    """Extract an accuracy score from a Magpie workspace's eval output.
+
+    Searches ``results*.json`` recursively and reads the first recognized
+    metric (see :data:`_RECOGNIZED_METRIC_KEYS`) from each leaf task. A single
+    task (e.g. plain ``gsm8k``) returns that task's score unchanged. When the
+    run emits several leaf tasks — a sparse *group* such as ``tinyBenchmarks``
+    or ``metabench`` — their scores are **averaged** into one number so the gate
+    has a single value to compare. Group-aggregate rows (``group_subtasks``
+    keys) are excluded so leaf tasks are never double-counted.
 
     Args:
         workspace (Path | str): The benchmark workspace to search recursively
@@ -84,8 +115,11 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: ``{"accuracy": float, "task": str, "metric": str,
-            "source_file": str}`` on success, or ``{"accuracy": None,
-            "error": str}`` when no result / metric is found.
+            "tasks_used": list[str], "source_file": str}`` on success, or
+            ``{"accuracy": None, "error": str}`` when no result / metric is
+            found. ``task`` is the task name for a single task or a
+            comma-joined list for several; ``metric`` is the shared metric key
+            or ``"mixed"`` when leaf tasks used different metrics.
     """
     workspace = Path(workspace)
     search_paths = [
@@ -105,20 +139,55 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
         return {"accuracy": None, "error": f"parse error: {exc}"}
 
     results = data.get("results", {})
-    for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
-            if key in metrics:
-                score = metrics[key]
-                if isinstance(score, (int, float)):
-                    log.info("accuracy_gate: task=%s metric=%s score=%.4f source=%s", task_name, key, score, latest)
-                    return {
-                        "accuracy": float(score),
-                        "task": task_name,
-                        "metric": key,
-                        "source_file": str(latest),
-                    }
+    # Average across all recognized leaf tasks (for sparse groups like
+    # tinyBenchmarks / metabench) instead of returning only the first single
+    # task's exact_match. Group-aggregate rows (lm-eval reports a group alongside
+    # its leaf subtasks) would double-count if averaged in, so drop any task that
+    # owns subtasks.
+    #
+    # NOTE: this is a naive equal-weight arithmetic mean over leaf tasks -- every
+    # task counts the same regardless of item count or difficulty, and there is
+    # no IRT / difficulty normalization. All metrics are on a 0-1 scale so the
+    # mean is well-formed, but treat the composite as an observability signal,
+    # not a calibrated score. A single task is unaffected (mean of one == itself).
+    group_subtasks = data.get("group_subtasks", {}) or {}
+    group_names = {name for name, subs in group_subtasks.items() if subs}
 
-    return {"accuracy": None, "error": f"no recognized metric in {latest}"}
+    tasks: list[str] = []
+    metrics_used: list[str] = []
+    scores: list[float] = []
+    for task_name, metrics in results.items():
+        if task_name in group_names:
+            continue
+        picked = _pick_task_metric(metrics)
+        if picked is None:
+            continue
+        metric_key, score = picked
+        tasks.append(task_name)
+        metrics_used.append(metric_key)
+        scores.append(score)
+
+    if not scores:
+        return {"accuracy": None, "error": f"no recognized metric in {latest}"}
+
+    accuracy = sum(scores) / len(scores)
+    metric = metrics_used[0] if len(set(metrics_used)) == 1 else "mixed"
+    task = tasks[0] if len(tasks) == 1 else ",".join(tasks)
+    log.info(
+        "accuracy_gate: tasks=%s metric=%s score=%.4f (n=%d) source=%s",
+        task,
+        metric,
+        accuracy,
+        len(scores),
+        latest,
+    )
+    return {
+        "accuracy": accuracy,
+        "task": task,
+        "metric": metric,
+        "tasks_used": tasks,
+        "source_file": str(latest),
+    }
 
 
 def accuracy_passed(

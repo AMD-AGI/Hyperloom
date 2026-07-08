@@ -865,6 +865,30 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
+    # Select a cheap sparse accuracy eval (e.g. tinyGSM8k) per run, as an optional
+    # observability signal (decoupled from gating). The operator-facing knob is
+    # EVAL_TASK, but InferenceX's run_lm_eval reads EVAL_TASKS_DIR and passes it to
+    # `lm_eval --tasks` (which accepts a registered task NAME like tinyGSM8k OR a
+    # yaml path). So we emit EVAL_TASKS_DIR (the name that actually engages the
+    # task) AND keep EVAL_TASK for readability / other consumers. EVAL_LIMIT is
+    # forwarded for when the eval step honors `--limit` (unnecessary for tinyGSM8k,
+    # which is inherently ~100 items). All are no-ops when unset -> default full
+    # GSM8K, so behavior is unchanged unless an operator opts in. Values already in
+    # `envs` (extra_envs) or the process env win (setdefault); prefer EVAL_TASKS_DIR
+    # if the operator set it explicitly.
+    _eval_task = (
+        envs.get("EVAL_TASKS_DIR")
+        or envs.get("EVAL_TASK")
+        or os.environ.get("EVAL_TASKS_DIR")
+        or os.environ.get("EVAL_TASK")
+    )
+    if _eval_task:
+        envs.setdefault("EVAL_TASKS_DIR", _eval_task)
+        envs.setdefault("EVAL_TASK", _eval_task)
+    if "EVAL_LIMIT" not in envs:
+        _eval_limit = os.environ.get("EVAL_LIMIT")
+        if _eval_limit:
+            envs["EVAL_LIMIT"] = _eval_limit
     # KernelForge fp8 block-scale CK backend switch: when the coordinator
     # promoted an fp8-blockscale gemm_tuning KEEP it injects
     # SGLANG_FP8_BLOCKSCALE_CK_MAX_M into the serving envs. That env only takes
