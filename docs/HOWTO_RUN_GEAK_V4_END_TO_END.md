@@ -67,7 +67,7 @@ git clone -b fix/ccache-298-on-322 \
 ```
 
 > GEAK **v4 needs no build/install** — the workflow is the `.js` script run via the
-> Claude Code Workflow tool. HL needs its normal `kernel-agent/scripts/install.sh`
+> Claude Code Workflow tool. HL needs its normal `src/hyperloom/agents/kernel/scripts/install.sh`
 > (it produces the runtime env + GEAK config used for dispatch).
 
 ## 2. Prerequisites / environment
@@ -230,7 +230,7 @@ apply all of them together in §6.
 
 This is the deliverable number. There are two ways to get it — **autonomous
 (default, recommended)** and **manual (fallback)**. Both use the same single shared
-gate-less primitive `apply_and_bench.py` (HL `kernel-agent/tools/`), which:
+gate-less primitive `apply_and_bench.py` (HL `src/hyperloom/agents/kernel/tools/`), which:
 1. applies each patch to its target (handles aiter `.cu` rebuild with
    `AITER_REBUILD=1` + jit/cpp_itfs cache invalidation; also handles `.diff` via
    `git apply` and full-source-file replacement),

@@ -60,7 +60,7 @@ Local Mode runs Hyperloom in a Docker container on your AMD GPU machine. Cursor 
 
 ## Quickstart — Bare-Metal (No Docker)
 
-Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `inference_optimizer/scripts/install_baremetal.sh`, then drive it from Cursor. See **[docs/QUICKSTART_BAREMETAL.md](docs/QUICKSTART_BAREMETAL.md)** for the full setup guide (prerequisites, credential setup, optional SGLang/vLLM install, and launch instructions).
+Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `src/hyperloom/inference_optimizer/assets/install_baremetal.sh`, then drive it from Cursor. See **[docs/QUICKSTART_BAREMETAL.md](docs/QUICKSTART_BAREMETAL.md)** for the full setup guide (prerequisites, credential setup, optional SGLang/vLLM install, and launch instructions).
 
 ---
 
@@ -110,11 +110,11 @@ Self-hosted Hyperloom is MIT licensed (see
 
 ## Detailed Skill Documentation
 
-The repo ships a single skill — `inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
+The repo ships a single skill — `src/hyperloom/inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
 
 | Domain | Skill | Description |
 |--------|-------|-------------|
-| **Inference** | [SKILL.md](inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
+| **Inference** | [SKILL.md](src/hyperloom/inference_optimizer/SKILL.md) | Multi-agent system, CLI-driven, fully automated |
 
 The skill file is the agent's instructions. It encodes the full optimization methodology — setup, profiling protocol, what to try, how to measure, when to stop, and how to report. The knowledge base sections are updated live during runs with new pitfalls and validated results.
 
@@ -124,25 +124,43 @@ The skill file is the agent's instructions. It encodes the full optimization met
 
 ```
 Hyperloom/
-├── inference_optimizer/                  # Inference optimization skill (sole entry point)
-│   ├── SKILL.md                          # Skill spec (Cursor/Claw entry point)
-│   ├── cli.py                            # CLI entry: inference_optimizer optimize
-│   ├── actions/_meta/                    # Action metadata and scheduling policy
-│   ├── baseline_comparison/              # InferenceX baseline comparison and target analysis
+├── src/hyperloom/                        # Single src-layout namespace (tree-reform.MD)
+│   ├── common/                           # Zero-dependency shared library (io/env/jsonio/...)
+│   ├── inference_optimizer/              # Inference optimization skill (sole entry point)
+│   │   ├── SKILL.md                      # Skill spec (Cursor/Claw entry point)
+│   │   ├── cli/                          # CLI entry: inference_optimizer optimize
+│   │   ├── session/                      # Session paths, manifest writer, single-optimizer lock
+│   │   ├── actions/_meta/                # Action metadata and scheduling policy
+│   │   ├── baseline_comparison/          # InferenceX baseline comparison and target analysis
+│   │   ├── tools/                        # Operator CLIs (dump_session_breakdown/event_counts/…)
+│   │   ├── experiments/                  # A/B and roofline-audit scripts
+│   │   ├── assets/                       # Install scripts, baseline/profile configs
+│   │   └── tests/                        # Inference optimizer unit and regression tests
 │   ├── orchestrator/                     # Coordinator + agent roles + action executors
-│   │   ├── action_executors/             # Executors for baseline/profile/params/sweep, etc.
-│   │   ├── backends/                     # Claude/Codex/Critic backend adapters
-│   │   └── system_prompts/               # Orchestration prompt construction
-│   ├── scripts/                          # Install scripts, baseline/profile configs
-│   └── tests/                            # Inference optimizer unit and regression tests
-├── kernel-agent/                         # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
-│   ├── SKILL.md                          # Kernel-agent operation spec
-│   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
-│   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
-│   ├── scripts/                          # Runtime setup scripts: install.sh, etc.
-│   └── tests/                            # Kernel-agent tool tests
-├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
-├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
+│   │   ├── loop/                         # Coordinator facade + collaborators
+│   │   ├── phases/                       # Phase state machine + per-phase handlers
+│   │   ├── policy/                       # PolicyGate + action surfaces
+│   │   ├── actions/                      # Action registry + executors/
+│   │   ├── roles/                        # Claude/Codex/Critic/Robustness backend adapters
+│   │   ├── state/                        # SharedState + journal/memory/task-registry/objective
+│   │   ├── bus/                          # Message bus, cursor store, GPU pool, resource locks
+│   │   ├── knowledge/                    # KB writeback, PR monitor, research hints
+│   │   ├── specialists/                  # EXPLORE specialist search ("Arbor")
+│   │   ├── kernel/                       # Kernel-request handling + roofline
+│   │   ├── framework/                    # FRAMEWORK_AGENT client/paths
+│   │   ├── scoring/                      # Proposal scorer
+│   │   └── prompts/                      # Orchestration prompt construction
+│   └── agents/                           # Sibling skills, promoted into the hyperloom namespace
+│       ├── critic/                       # Critic subprocess runtime (proposal review)
+│       ├── robustness/                   # Robustness subprocess runtime (health/RCA)
+│       ├── framework/                    # Framework-agent (PR/ref discovery + enablement)
+│       ├── quantization/                 # Optional AMD Quark PTQ prelude (--quantize)
+│       └── kernel/                       # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
+│           ├── SKILL.md                  # Kernel-agent operation spec
+│           ├── tools/                    # TraceLens analysis, kernel optimization, patch apply
+│           │   └── backends/             # GEAK/OOB submission (Ray-scheduled)
+│           ├── scripts/                  # Runtime setup scripts: install.sh, etc.
+│           └── tests/                    # Kernel-agent tool tests
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
 ├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts
