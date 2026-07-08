@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -176,3 +178,130 @@ def test_real_models_resolve_or_reference(slug):
     est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
     assert est["total_flops"] > 0
     assert est["ideal_ms"] > 0
+
+
+# ---- safetensors-header inference fallback -------------------------------
+def _write_safetensors(model_dir: Path, header: dict, name: str = "diffusion_pytorch_model.safetensors") -> Path:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    jb = json.dumps(header).encode("utf-8")
+    (model_dir / name).write_bytes(struct.pack("<Q", len(jb)) + jb)
+    return model_dir
+
+
+def test_safetensors_header_bad_file_returns_none(tmp_path):
+    p = tmp_path / "bad.safetensors"
+    # Valid 8-byte length prefix but non-JSON body -> JSONDecodeError -> None.
+    p.write_bytes(struct.pack("<Q", 12) + b"not-json----")
+    assert df._safetensors_header(p) is None
+
+
+def test_infer_geometry_diffusers_naming_flux(tmp_path):
+    header = {
+        "__metadata__": {"format": "pt"},
+        "transformer_blocks.0.attn.to_q.weight": {"shape": [3072, 3072]},
+        "transformer_blocks.1.attn.to_q.weight": {"shape": [3072, 3072]},
+        "single_transformer_blocks.0.attn.to_q.weight": {"shape": [3072, 3072]},
+    }
+    md = _write_safetensors(tmp_path / "flux.1-schnell", header)
+    g = df._infer_geometry_from_safetensors(md)
+    assert g is not None
+    assert g.model_class == "FluxTransformer2DModel"
+    assert g.hidden == 3072
+    assert g.num_double_layers == 2 and g.num_single_layers == 1
+
+
+def test_infer_geometry_hunyuan_naming_img_attn_qkv(tmp_path):
+    header = {
+        "double_blocks.0.img_attn_qkv.weight": {"shape": [9216, 3072]},
+        "single_blocks.0.linear1.weight": {"shape": [12288, 3072]},
+    }
+    md = _write_safetensors(tmp_path / "hunyuan-dit", header)
+    g = df._infer_geometry_from_safetensors(md)
+    assert g is not None
+    assert g.model_class == "HunyuanImageTransformer2DModel"
+    assert g.hidden == 3072
+
+
+def test_infer_geometry_no_blocks_returns_none(tmp_path):
+    md = _write_safetensors(tmp_path / "x", {"some.random.weight": {"shape": [10, 10]}})
+    assert df._infer_geometry_from_safetensors(md) is None
+
+
+def test_infer_geometry_blocks_without_hidden_returns_none(tmp_path):
+    md = _write_safetensors(tmp_path / "y", {"double_blocks.0.mlp.weight": {"shape": [10, 10]}})
+    assert df._infer_geometry_from_safetensors(md) is None
+
+
+def test_infer_geometry_unreadable_header_returns_none(tmp_path):
+    md = tmp_path / "z"
+    md.mkdir()
+    # Header length points far past EOF -> json parse fails -> header None.
+    (md / "diffusion_pytorch_model.safetensors").write_bytes(struct.pack("<Q", 10**9))
+    assert df._infer_geometry_from_safetensors(md) is None
+
+
+def test_find_denoiser_safetensors_missing_returns_none(tmp_path):
+    assert df._find_denoiser_safetensors(tmp_path) is None
+
+
+# ---- unresolved geometry -------------------------------------------------
+def test_estimate_and_ceiling_none_for_unknown_class(tmp_path):
+    d = _write_denoiser(tmp_path / "u", {"_class_name": "TotallyUnknownModel"})
+    assert df.estimate_image_flops(d) is None
+    assert df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16") is None
+
+
+def test_unet_int_transformer_layers_per_block():
+    """The ``isinstance(tlpb, int)`` broadcast branch in ``_unet_forward_flops``
+    is a defensive path (built directly rather than via ``resolve_geometry``)."""
+    g = df.DenoiserGeometry(
+        model_class="UNet2DConditionModel",
+        family="unet",
+        hidden=0,
+        num_double_layers=0,
+        num_single_layers=0,
+        head_dim=0,
+        intermediate=0,
+        gated_ffn=False,
+        unet={
+            "block_out_channels": [320, 640],
+            "layers_per_block": 2,
+            "transformer_layers_per_block": 2,  # int -> broadcast branch (line 481)
+            "cross_attention_dim": 2048,
+            "in_channels": 4,
+        },
+    )
+    assert df.forward_flops(g, 512, 512)["forward_flops"] > 0
+
+
+# ---- _fmt + CLI ----------------------------------------------------------
+def test_fmt_with_and_without_ideal_ms(tmp_path):
+    cfg = {"_class_name": "SD3Transformer2DModel", "num_layers": 4,
+           "num_attention_heads": 8, "attention_head_dim": 8, "patch_size": 2}
+    d = _write_denoiser(tmp_path / "m", cfg)
+    est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
+    line = df._fmt(est)
+    assert "TFLOP/img" in line and "ideal=" in line
+    # unknown gpu -> peak 0 -> no ideal_ms key -> no "ideal=" suffix.
+    est_no_peak = df.analytic_ceiling(d, gpu_type="unknown", precision="bf16")
+    assert "ideal=" not in df._fmt(est_no_peak)
+
+
+def test_main_text_and_json_and_failure(tmp_path, monkeypatch, capsys):
+    cfg = {"_class_name": "SD3Transformer2DModel", "num_layers": 4,
+           "num_attention_heads": 8, "attention_head_dim": 8, "patch_size": 2}
+    d = _write_denoiser(tmp_path / "m", cfg)
+
+    monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(d)])
+    assert df.main() == 0
+    assert "TFLOP/img" in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(d), "--json"])
+    assert df.main() == 0
+    assert '"total_flops"' in capsys.readouterr().out
+
+    bad = tmp_path / "empty"
+    bad.mkdir()
+    monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(bad)])
+    assert df.main() == 1
+    assert "could not resolve" in capsys.readouterr().out
