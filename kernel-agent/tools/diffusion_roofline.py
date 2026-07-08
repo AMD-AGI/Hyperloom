@@ -422,6 +422,7 @@ def build_report_from_bypass(
     dit_geometry: dict[str, Any] | None = None,
     achievable_tflops: float | None = None,
     totals: dict[str, Any] | None = None,
+    kernels_aggregated: int | None = None,
 ) -> dict[str, Any]:
     """Build the workload roofline report from the bypass candidate set.
 
@@ -440,6 +441,9 @@ def build_report_from_bypass(
         totals: Pre-computed WORKLOAD totals over ALL analyzed kernels (from
             ``_bypass_report.build_workload_roofline_totals``). When omitted,
             falls back to aggregating the (top-k capped) ``hot_kernels`` only.
+        kernels_aggregated: Count of device kernels the ``totals`` cover (for the
+            ``kernels_aggregated`` metadata under full scope). Defaults to
+            ``len(hot_kernels)`` when omitted.
 
     Returns:
         The workload-roofline report dict.
@@ -463,8 +467,12 @@ def build_report_from_bypass(
         source="bypass_analytical",
     )
     # ``all_device_kernels`` when totals cover every kernel; else the top-k subset.
+    # kernels_aggregated must match that scope: the caller's all-kernel count when
+    # full scope, else the (top-k) candidate count actually aggregated.
     report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
-    report["kernels_aggregated"] = len(hot_kernels)
+    report["kernels_aggregated"] = (
+        int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
+    )
     return report
 
 

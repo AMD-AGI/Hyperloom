@@ -569,12 +569,14 @@ def main(argv: list[str] | None = None) -> int:
             _workload_totals = _report.build_workload_roofline_totals(
                 analyze, target_platform=args.target_platform
             )
+            _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]
             _diff_report = build_report_from_bypass(
                 candidates.get("hot_kernels", []),
                 analyze.get("timeline") or {},
                 _diff_steps,
                 top_k,
                 totals=_workload_totals,
+                kernels_aggregated=len(_all_kernels),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
             _atomic_write_json(_diff_path, _diff_report)

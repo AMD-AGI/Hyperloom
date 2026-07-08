@@ -77,6 +77,24 @@ def test_build_workload_roofline_totals_covers_all_kernels():
         assert key in totals
 
 
+def test_build_workload_roofline_totals_splits_compute_and_memory():
+    # With real shapes the workload totals must populate the attainment-weighted
+    # sigma_ideal AND the compute/memory split (not all no_perf_model).
+    kernels = [
+        {"name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm", "gpu_time_us": 500.0, "count": 1,
+         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {"name": "vectorized_elementwise_kernel", "op_name": "aten::add", "gpu_time_us": 200.0, "count": 1,
+         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+    ]
+    analyze = _analyze([dict(k) for k in kernels])
+    t = report.build_workload_roofline_totals(analyze, target_platform="mi300x")
+    assert t["sigma_actual_kernel_us"] == 700.0
+    assert t["compute_bound_us"] > 0.0   # the GEMM
+    assert t["memory_bound_us"] > 0.0    # the elementwise
+    assert t["sigma_ideal_roofline_us"] > 0.0
+    assert 0.0 < t["kernel_roofline_efficiency"] <= 1.0
+
+
 def test_build_candidates_exposes_routable_subset():
     # Contract alignment (P0): hot_kernels stays the FULL ranked set; the reusable
     # dispatch subset is exposed separately as routable_kernels.
