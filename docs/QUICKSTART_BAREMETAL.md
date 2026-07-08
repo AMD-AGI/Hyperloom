@@ -50,7 +50,7 @@ OPENAI_API_KEY=sk-xxxxx
 ## 3. Run the bare-metal installer
 
 ```bash
-inference_optimizer/scripts/install_baremetal.sh
+src/hyperloom/inference_optimizer/assets/install_baremetal.sh
 ```
 
 The script reads credentials from `.env` automatically. Common options:
@@ -74,4 +74,4 @@ source '<path printed by install_baremetal.sh>'
 
 The default location is usually `/workspace/hyperloom/runtime/hyperloom.env.sh`, but use the printed path if you changed `USER_DATA_PATH` in `.env` or passed `--user-data-path`.
 
-Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Launch Inference Optimization](QUICKSTART_LOCAL_MODE.md#launch-inference-optimization).
+Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Launch Inference Optimization](QUICKSTART_LOCAL_MODE.md#launch-inference-optimization).

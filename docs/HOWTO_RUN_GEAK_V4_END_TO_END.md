@@ -268,7 +268,7 @@ patch selection, or v4 runs driven outside HL's batch handler.
 Apply **all** kernels at once with repeated `--pair PATCH:TARGET`:
 
 ```bash
-cd /wekafs/sapmajum/PROJECTS/HL_fresh/kernel-agent
+cd /wekafs/sapmajum/PROJECTS/HL_fresh/src/hyperloom/agents/kernel
 
 python3 tools/apply_and_bench.py \
   --pair "<exp_root>/.../attention/final_patch.diff:/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu" \

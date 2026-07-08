@@ -16,16 +16,14 @@ from datetime import datetime
 from pathlib import Path
 
 # -- Path setup --------------------------------------------------------------
-# conf.py lives in <repo>/docs; the importable source packages live at the repo
-# root and under the per-agent ``src`` / package directories. Add them all to
-# sys.path so autodoc can import the modules it documents.
+# conf.py lives in <repo>/docs; after the src-layout tree-reform the whole
+# ``hyperloom`` distribution lives under a single ``src/`` namespace. Add the
+# repo root and ``src`` so autodoc can import the modules it documents.
 DOCS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = DOCS_DIR.parent
 for _path in (
     REPO_ROOT,
     REPO_ROOT / "src",
-    REPO_ROOT / "robustness-agent" / "src",
-    REPO_ROOT / "framework-agent" / "src",
 ):
     if _path.is_dir():
         sys.path.insert(0, str(_path))
