@@ -11,9 +11,11 @@ name: Lint
 # green Lint job.
 #
 # Pylint: ``--errors-only`` limits output to fatal/error-severity messages
-# (not convention or refactor hints). Multiple first-party packages are checked
-# after editable installs + ``PYTHONPATH`` for critic ``runtime`` and
-# ``quantization_agent`` (see the ``pylint`` job run script).
+# (not convention or refactor hints). tree-reform.MD P2.5: critic-agent,
+# robustness-agent, framework-agent, and quantization_agent were all promoted
+# into the single ``hyperloom`` distribution (``hyperloom.agents.*``); the
+# single editable install below covers all of them (no more per-agent
+# editable installs / separate PYTHONPATH entries / bare ``runtime`` module).
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
@@ -92,20 +94,20 @@ jobs:
           pip install --upgrade pip
           pip install "pylint>=3.0,<4"
           pip install -e ".[test]"
-          pip install -e "robustness-agent/.[test]"
-          pip install -e "framework-agent/."
 
       - name: Pylint (errors only)
         continue-on-error: true
         env:
-          # critic-agent: top-level package is ``runtime``; repo root for
-          # ``quantization_agent`` (not installed as its own distribution here).
+          # ``quantization_agent`` and ``ci`` are still flat repo-root
+          # packages (tree-reform.MD P2.6 promotes ``ci``; quantization_agent
+          # itself was promoted into hyperloom.agents but the bare-name
+          # dotted-path below is kept for the pylint invocation).
           PYTHONPATH: >-
-            ${{ github.workspace }}/critic-agent:${{ github.workspace }}
+            ${{ github.workspace }}
         run: |
           pylint --errors-only \
             inference_optimizer \
-            robustness_agent \
-            framework_agent \
-            runtime \
-            quantization_agent
+            hyperloom.agents.robustness \
+            hyperloom.agents.framework \
+            hyperloom.agents.critic.runtime \
+            hyperloom.agents.quantization
