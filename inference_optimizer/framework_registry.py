@@ -213,6 +213,24 @@ def primary_metric_unit(framework: str | None) -> str:
     return "ms" if is_scriptable(framework) else "tok/s/GPU"
 
 
+def primary_metric_name(framework: str | None) -> str:
+    """Return the state field name holding a session's primary result metric.
+
+    Serving frameworks are ranked by token throughput
+    (``throughput_tok_s_per_gpu``); scriptable image frameworks (e.g. xDiT) are
+    ranked by per-image end-to-end latency (``e2el_mean_ms``). Consumers use
+    this to pick the correct headline/result field per framework.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+
+    Returns:
+        str: ``"e2el_mean_ms"`` for scriptable xDiT, else
+        ``"throughput_tok_s_per_gpu"``.
+    """
+    return "e2el_mean_ms" if is_scriptable(framework) else "throughput_tok_s_per_gpu"
+
+
 def primary_metric_value(
     framework: str | None, tput_per_gpu: float | int | None
 ) -> float | None:
