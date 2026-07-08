@@ -5360,4 +5360,26 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
+    # Re-exported from sibling modules for backward compat and the test
+    # monkeypatch surface (referenced via ``request_handlers.<name>``).
+    # Declared so the re-exports are intentional, not flagged imports.
+    "_HONEST_E2E_UMBRELLA_ENV",
+    "_FALSEY",
+    "_format_last_kernel_opt",
+    "_resolve_kernel_patch_identity",
+    "kernel_patch_key",
+    "find_rejected_kernel_patch",
+    "record_kernel_integrate_result",
+    "record_kernel_opt",
+    "record_gemm_tuning",
+    "_kernel_ids_in_optimization_stack",
+    "_source_files_in_optimization_stack",
+    "_kernel_ids_with_integrate_attempts",
+    "integrate_attempt_count_for_kernel",
+    "_kernel_trace_impact_pct",
+    "next_pending_keep_kernel_id",
+    "pending_keep_kernel_ids",
+    "has_keep_pending_integrate",
+    "kernel_opt_attempts_count",
+    "untried_hot_reusable_kernels",
 ]

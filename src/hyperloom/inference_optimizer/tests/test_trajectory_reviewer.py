@@ -159,8 +159,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
 
 def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
     """A Journal.load_or_create failure yields an empty entry list (L52-53)."""
-    import hyperloom.orchestrator.knowledge.trajectory_reviewer as tr
-
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
     def boom(*_a, **_k):
         raise RuntimeError("journal unreadable")
 
@@ -183,8 +182,7 @@ def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path)
 
 def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
     """An unexpected error inside the digest builder is swallowed (L171-173)."""
-    import hyperloom.orchestrator.knowledge.trajectory_reviewer as tr
-
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
     def boom(*_a, **_k):
         raise RuntimeError("kaboom")
 

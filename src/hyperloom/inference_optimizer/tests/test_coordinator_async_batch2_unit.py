@@ -1153,8 +1153,7 @@ async def test_promote_baseline_materialized_parse_raises(
     monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
-    import hyperloom.orchestrator.loop.coordinator as mod
-
+    from hyperloom.orchestrator.loop import coordinator as mod
     def _boom(path):
         raise RuntimeError("parse failed")
 
@@ -1368,8 +1367,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
-    import hyperloom.orchestrator.state.shared_state as ss_mod
-
+    from hyperloom.orchestrator.state import shared_state as ss_mod
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
     from hyperloom.orchestrator.framework import paths as fp
 
@@ -1640,12 +1638,6 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
 async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.policy, "validate_intent", lambda s, i: None)
     seen: list[str] = []
-
-    async def _mk(name):
-        async def _h(source, intent):
-            seen.append(name)
-
-        return _h
 
     routes = {
         IntentType.KILL_TASK: "_handle_kill_task",

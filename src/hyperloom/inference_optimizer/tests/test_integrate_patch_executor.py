@@ -297,7 +297,7 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    workspace = _write_specialist_workspace(
+    _write_specialist_workspace(
         session_dir,
         "t-spec-1",
         patch_contents=[_VALID_PATCH],
@@ -327,7 +327,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    workspace = _write_specialist_workspace(
+    _write_specialist_workspace(
         session_dir,
         "t-spec-2",
         patch_contents=[_BAD_PATCH],
@@ -836,8 +836,7 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
     """Q3: enablement integrate replays setup_commands and surfaces them in the result."""
-    import hyperloom.orchestrator.actions.executors.integrate_patch as ip_mod
-
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
