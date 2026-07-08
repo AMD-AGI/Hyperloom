@@ -16,6 +16,8 @@ subtrees:
   entries:
   - file: install/hyperloom-installation.md
     title: Install Hyperloom
+  - file: install/quickstart.md
+    title: Quickstart — hosted UI
 
 - caption: Components
   entries:

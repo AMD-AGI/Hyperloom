@@ -40,3 +40,6 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Authentication and credentials </reference/authentication>`
     * :doc:`Troubleshooting <troubleshooting>`  
 
+To contribute to the documentation, see `Contributing to Hyperloom <https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md>`_.
+
+Magpie is released under the MIT license. For details, see the :doc:`License <license>` page.

@@ -1,22 +1,24 @@
 ---
 myst:
   html_meta:
-    "description": "Release notes for Hyperloom, following Keep a Changelog format and Semantic Versioning. Links to the full changelog and per-version upgrade steps."
-    "keywords": "Hyperloom, release notes, changelog, Semantic Versioning, ROCm, LLM inference, upgrade"
+    "description": "Hyperloom release notes"
+    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, Local Mode, kernel optimization"
 ---
 
 # Hyperloom release notes
 
 ## Hyperloom 0.1.0
 
-Initial release of Hyperloom
+Initial release of Hyperloom.
 
 ### Added
+
+This release introduces the following features:
 
 - **Agentic optimization loop** — Hyperloom treats LLM inference optimization as
   a search problem. Given a workload, the agent autonomously explores candidates
   one change at a time — backend swaps, server parameters, GEMM tuning, kernel
-  rewrites, parallelism configs — always measuring against the real workload
+  rewrites, parallelism configs — measuring against the real workload
   before accepting any change.
 
 - **TraceLens integration** — Agentic trace analysis that captures bottlenecks
@@ -34,7 +36,7 @@ Initial release of Hyperloom
 
 - **Primus-Claw hosted UI** — AMD-internal users and approved partners can run
   Hyperloom from a browser with no local GPU setup. Jobs run in isolated
-  sandboxed containers; multi-node workloads fan out via RayJob. Every run feeds
+  sandboxed containers; multi-node workloads fan out using RayJob. Every run feeds
   results back through a data flywheel that continuously improves the agent's KB
   and scoring heuristics.
 

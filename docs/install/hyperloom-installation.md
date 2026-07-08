@@ -52,6 +52,17 @@ bash inference_optimizer/scripts/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
+## Optional — quantization (AMD Quark)
+
+Use `--quantize` when you want to optimize a model that is not already available
+in a quantized format (FP8 or MXFP4). Quantizing reduces VRAM consumption and
+typically increases throughput on AMD Instinct hardware.
+
+The optional `--quantize` prelude requires an [AMD Quark](https://quark.docs.amd.com/)
+checkout at runtime. Set `QUARK_ROOT` to point at it. See the Hyperloom README's
+[quantization section](https://github.com/AMD-AGI/Hyperloom/blob/main/README.md#quantization-optional-amd-quark-dependency)
+for more information.
+
 ## Related guides
 
 - [Run a Hyperloom optimization](../how-to/optimize.md)
