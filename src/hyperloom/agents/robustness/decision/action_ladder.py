@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
-from ..state_store import DetectorStateView
+if TYPE_CHECKING:
+    from ..state_store import DetectorStateView
 from ..role.envelope import (
     Intent,
     build_alert,

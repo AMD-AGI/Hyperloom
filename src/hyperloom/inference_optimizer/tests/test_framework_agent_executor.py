@@ -953,8 +953,7 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import hyperloom.orchestrator.actions.executors.framework_agent as fp_mod
-
+    from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
         patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
@@ -988,8 +987,7 @@ async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: 
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import hyperloom.orchestrator.actions.executors.framework_agent as fp_mod
-
+    from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
         patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),

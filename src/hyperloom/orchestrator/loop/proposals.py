@@ -5,26 +5,14 @@
 from __future__ import annotations
 import json
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.common.payload_aliases import read_extra_server_args
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..state.task_registry import Task
-from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
-    _BASELINE_FINGERPRINT_KEYS,
-    _baseline_params_fingerprint,
-    _dedupe_extra_server_args,
-    _infer_model_class_from_config,
-    _merge_cumulative_extra_sglang_args,
-    _parse_baseline_workload_extra,
-    _parse_iso_unix,
-    _resolve_roofline_watermark_ratio,
-    effective_closing_grace_sec,
-    format_exc_brief,
-    serialize_verdict_advisory,
-)
+if TYPE_CHECKING:
+    from ..state.task_registry import Task
 
 from .coordinator import (
     PendingProposal,
