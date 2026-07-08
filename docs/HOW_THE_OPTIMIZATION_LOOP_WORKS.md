@@ -214,6 +214,6 @@ For a finished or interrupted session, start with:
 - `session_breakdown.json`.
 
 For reports and dashboards, `session_breakdown.json` is the external
-contract. Its producer code lives under `inference_optimizer/breakdown/`,
+contract. Its producer code lives under `src/hyperloom/inference_optimizer/breakdown/`,
 and its consumer-facing shape is documented in
 `docs/INTEGRATION_SESSION_BREAKDOWN.md`.

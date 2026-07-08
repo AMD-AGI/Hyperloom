@@ -7,7 +7,7 @@ optimization pipeline, across one or all models.
 > + a prompt skill that points at a runtime on WekaFS). The CI sends only
 > `pluginId` to the SaFE / Claw API; the plugin transparently picks up its
 > bundled tools list. Today plugin **4 (Hyperloom)** wraps the canonical
-> wekafs `inference_optimizer/` Python package via tool 85
+> wekafs `src/hyperloom/inference_optimizer/` Python package via tool 85
 > (hyperloom-prompt). To A/B test a different runtime, register a new plugin
 > and pass its ID here.
 
@@ -23,7 +23,7 @@ Existing plugins:
 
 | ID | Name        | Notes |
 |----|-------------|-------|
-| 4  | Hyperloom   | Current production plugin: tool 3 (`hyperloom-public-mcp`) + tool 85 (`hyperloom-prompt` → `@/wekafs/HyperloomV2/inference_optimizer/SKILL.md`) |
+| 4  | Hyperloom   | Current production plugin: tool 3 (`hyperloom-public-mcp`) + tool 85 (`hyperloom-prompt` → `@/wekafs/HyperloomV2/src/hyperloom/inference_optimizer/SKILL.md`) |
 
 When a new plugin is registered, append it to this table.
 

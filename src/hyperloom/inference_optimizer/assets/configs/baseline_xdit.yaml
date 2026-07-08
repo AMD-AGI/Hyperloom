@@ -1,0 +1,71 @@
+# Magpie baseline benchmark config for xDiT (diffusion, server-less).
+# Used by hyperloom.orchestrator.actions.executors.baseline /
+# sweep / explore as the default benchmark config when $FRAMEWORK=xdit.
+#
+# xDiT is a SCRIPTABLE (server-less) framework: there is no OpenAI server, no
+# benchmark_serving.py client, and no server_lifecycle reuse. The Magpie
+# wrapper xdit_{runner_type}.sh runs the xDiT CLI once per variant, parses E2E
+# latency, runs the image-quality gate (LPIPS/SSIM/MSE vs a fixed BF16
+# reference), and writes benchmark_report.json directly. Throughput is img/s.
+#
+# Two fields are FALLBACK ONLY and overridden at run time by the executor:
+#   - `benchmark.model`     <- --model / $MODEL_PATH
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+# At materialize time Hyperloom pins benchmark_script to xdit_{runner_type}.sh
+# (e.g. xdit_mi355x.sh), so it is intentionally NOT set here.
+#
+# PRECISION IS LOCKED to BF16 for an xDiT session: a precision change (FP4/FP8)
+# is a different model. XDIT_USE_FP4_GEMMS / XDIT_USE_FP8_GEMMS are forced OFF
+# by the wrapper script and are additionally on the explore blacklist.
+
+benchmark:
+  framework: xdit
+  workload_kind: scriptable        # drives server-less branching in the loop
+  # benchmark_script: xdit_mi355x.sh  # uncomment to force a specific Magpie script
+  model: /wekafs/models/FLUX.1-dev     # OVERRIDDEN at runtime; see header.
+  precision: bf16                  # LOCKED for xdit sessions
+  run_mode: local
+
+  envs:
+    TP: 8                          # = XDIT_ULYSSES_DEGREE (sequence parallel degree)
+    XDIT_HEIGHT: 1024
+    XDIT_WIDTH: 1024
+    XDIT_NUM_STEPS: 28
+    XDIT_NUM_ITERATIONS: 25        # timed iterations (steady-state)
+    XDIT_WARMUP_CALLS: 5
+    XDIT_GUIDANCE_SCALE: 4.0
+    XDIT_ATTENTION_BACKEND: aiter  # quantized backends are blacklisted
+    XDIT_USE_TORCH_COMPILE: 1
+    XDIT_USE_FP4_GEMMS: 0          # LOCKED (precision = BF16)
+    XDIT_USE_FP8_GEMMS: 0          # LOCKED (precision = BF16)
+    # Image-quality gate (same-precision thresholds — tighter than cross-
+    # precision). These reach the wrapper via env (Magpie forwards benchmark.envs
+    # only); the wrapper writes quality_gate.{passed,lpips,ssim,mse} into the
+    # report and _accuracy_gate maps passed->1.0 / fail->0.0 onto accuracy.
+    XDIT_QUALITY_REF: ""           # reference image path; empty = gate skipped
+    XDIT_QUALITY_LPIPS_MAX: 0.05
+    XDIT_QUALITY_SSIM_MIN: 0.95
+    XDIT_QUALITY_MSE_MAX: 0.002
+    # The wrapper uses bare `python3`; force the venv ahead of system so the
+    # xDiT/torch(ROCm) install is picked up rather than /usr/bin/python3.
+    # /opt/rocm/bin is REQUIRED so AITER's runtime JIT (module_fmha_v3_fwd) can
+    # find `hipcc`; without it the xDiT baseline crashes with
+    # "ModuleNotFoundError: aiter.jit.module_fmha_v3_fwd" / "hipcc not found".
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # ROCR_VISIBLE_DEVICES is injected at runtime by the executor as 0..TP-1.
+
+  gpu_selection:
+    auto: false                    # executor pins via ROCR_VISIBLE_DEVICES at runtime
+
+  server_lifecycle:
+    enabled: false                 # server-less: no reuse
+
+  timeout_seconds: 7200            # 120 min hard cap (compile + warmup + iters)
+
+  profiler:
+    torch_profiler:
+      enabled: false               # baseline needs throughput + quality only
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

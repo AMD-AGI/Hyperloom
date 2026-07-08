@@ -23,8 +23,8 @@ DOCS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = DOCS_DIR.parent
 for _path in (
     REPO_ROOT,
+    REPO_ROOT / "src",
     REPO_ROOT / "robustness-agent" / "src",
-    REPO_ROOT / "critic-agent",
     REPO_ROOT / "framework-agent" / "src",
 ):
     if _path.is_dir():

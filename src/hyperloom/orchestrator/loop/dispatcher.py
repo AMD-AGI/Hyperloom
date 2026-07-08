@@ -1,0 +1,784 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Coordinator main loop and runtime protocol manager."""
+
+from __future__ import annotations
+import asyncio
+import os
+from typing import Any
+from ..phases import machine_state as _phase_state
+from ..bus.message_bus import Message
+from ..policy.gate import (
+    SPECIALIST_FROM_AGENT_PREFIX,
+)
+from ..bus.gpu_pool import (
+    GPU_LEASE_TTL_GRACE,
+)
+from ..bus.resource_lock import (
+    KNOWN_LANES,
+    _expand_lanes,
+)
+from .sub_agent_runner import SubAgentResult
+from ..state.task_registry import Task
+from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
+    _BASELINE_FINGERPRINT_KEYS,
+    _baseline_params_fingerprint,
+    _dedupe_extra_server_args,
+    _infer_model_class_from_config,
+    _merge_cumulative_extra_sglang_args,
+    _parse_baseline_workload_extra,
+    _parse_iso_unix,
+    _resolve_roofline_watermark_ratio,
+    effective_closing_grace_sec,
+    format_exc_brief,
+    serialize_verdict_advisory,
+)
+
+import logging as _logging
+log = _logging.getLogger(__name__)
+
+
+class DispatcherCollaborator:
+    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+
+    def __init__(self, coordinator) -> None:
+        self._coord = coordinator
+
+    def __getattr__(self, name: str):
+        return getattr(object.__getattribute__(self, "_coord"), name)
+
+    def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
+        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the ActionRegistry; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions.
+
+        Args:
+            kind: The action name to resolve.
+
+        Returns:
+            A ``(requires_lanes, lease_ttl_sec)`` tuple; ``([], 0)`` when the
+            action is unknown or no registry is loaded.
+        """
+        reg = getattr(self, "action_registry", None)
+        if reg is None:
+            return [], 0
+        meta = reg.get(kind)
+        if meta is None:
+            return [], 0
+        lanes = [lane for lane in (getattr(meta, "requires_lanes", ()) or ()) if lane in KNOWN_LANES]
+        return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
+
+    def _cycle_idem_suffix(self) -> str:
+        """Idempotency-key suffix that scopes a per-cycle internal singleton to
+        the current macro-cycle (R1). Empty for cycle 0 / non-cyclic runs so the
+        monotonic-chain keys (and their tests) are byte-for-byte unchanged.
+
+        Without this, a later macro-cycle's sweep/roofline/profile would dedupe
+        to the first cycle's already-succeeded task and never re-run.
+
+        Returns:
+            ``"-c<cycle>"`` for macro-cycle > 0, else an empty string.
+        """
+        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        return f"-c{cycle}" if cycle > 0 else ""
+
+    async def _wait_for_task_terminal(
+        self,
+        task_id: str,
+        *,
+        timeout_sec: float,
+    ) -> str | None:
+        """Poll the TaskRegistry until ``task_id`` reaches a terminal
+        state, with a wall-clock timeout.
+
+        Returns the final ``task.state`` (``"succeeded"`` / ``"failed"``
+        / ``"cancelled"`` / ``"needs_manual_review"``) or ``None`` on
+        timeout (caller treats None as a soft "let's not block on this
+        forever" — the CLOSE sequencer records ``status='timeout'``).
+
+        Polling interval is 100ms — small relative to typical report /
+        session_breakdown wall time (5-30s); large enough to not
+        thrash sqlite under contention.
+
+        Args:
+            task_id (str): The task to wait on.
+            timeout_sec (float): Maximum wall-clock seconds to poll.
+
+        Returns:
+            str | None: The terminal task state, or ``None`` on timeout or if
+                the task is not found.
+        """
+        from ..state.task_registry import TaskNotFound
+
+        deadline = asyncio.get_event_loop().time() + max(0.0, float(timeout_sec))
+        poll_interval = 0.1
+        terminal = {"succeeded", "failed", "cancelled", "needs_manual_review"}
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                task = await self.tasks.get(task_id)
+            except TaskNotFound:
+                return None
+            if task.state in terminal:
+                return task.state
+            await asyncio.sleep(poll_interval)
+        return None
+
+    async def _cursor_advance_to_latest(self, agent_name: str) -> None:
+        """Advance an agent's read cursor to the latest message addressed to it.
+
+        Args:
+            agent_name (str): The agent whose inbox cursor to advance.
+        """
+        latest = await self.bus.tail(n=1, to_agent=agent_name)
+        if latest:
+            top = latest[0]
+            await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
+
+    def _dispatch_paused_for_phase_budget(self) -> bool:
+        """True when the current phase's cyclic budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
+
+        Without this, a long interleaved EXPLORE/KERNEL grid (each variant a
+        ~30-min 671B server reboot + benchmark) drains serially inside
+        ``_pump_dispatcher_once`` for hours; because the pump only returns once
+        all dispatchable work is drained, the tick never reaches
+        ``_advance_phase_if_needed`` and the (correctly computed)
+        ``kernel/explore_phase_budget_exhausted`` exit is never applied — the
+        phase machine stalls and the cyclic reloop never fires. Pausing new
+        spawns lets in-flight tasks finish, the pump return, and the phase
+        advance. Scoped to cyclic long-runs + the discretionary search phases so
+        bounded short runs and bootstrap/sweep phases are unaffected.
+
+        Returns:
+            ``True`` when new phase-scoped dispatch should pause for budget.
+        """
+        state = self.shared_state
+        phase = (getattr(state, "phase", "") or "").upper()
+        if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
+            return False
+        try:
+            if not _phase_state.is_cyclic_phases_enabled() or not _phase_state.is_long_run(state):
+                return False
+            remaining = _phase_state.phase_budget_remaining_seconds(
+                state,
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — never let the guard wedge dispatch
+            return False
+        return remaining is not None and remaining <= 0.0
+
+    async def _pump_dispatcher_once(self) -> None:
+        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
+        newly-fittable tasks while in-flight tasks run.
+
+        Unlike a single capture + ``gather``, this re-scans the queue whenever an
+        in-flight task completes (FIRST_COMPLETED) or a short poll elapses, so a
+        queued GPU task (e.g. an explore round) starts the moment its lane frees
+        rather than waiting out a long specialist / integrate_patch that was
+        already being awaited. The pump still fully drains all currently
+        dispatchable work before returning (one-pump-per-tick semantics
+        preserved). Each GPU lease is bound to its task_id and released by the
+        runner (Inv-7.3).
+
+        Budget guard: once the current phase's cyclic budget is spent
+        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
+        phase-scoped variants — drain in-flight, then return so the tick reaches
+        ``_advance_phase_if_needed`` and the phase advances (prevents the
+        KERNEL/EXPLORE interleave grid from stalling the phase machine).
+        """
+        # Dead-holder self-heal (runs EVERY tick, before scanning the queue):
+        # a crashed worker leaves its serving lanes leased and its task stuck
+        # 'running' until the multi-hour TTL fires — which strands every queued
+        # GPU task behind it and makes the explore-dedup deny new delegates as
+        # duplicates of a zombie. Detect the dead PID immediately so the lanes
+        # free and the stuck task fails (retry-eligible) this same tick.
+        try:
+            dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
+            if dead_tasks:
+                log.warning(
+                    "dispatcher: reclaimed %d running task(s) with dead holders: %s",
+                    len(dead_tasks),
+                    ", ".join(t[:12] for t in dead_tasks),
+                )
+        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+            log.exception("dispatcher: dead-running task reclaim failed")
+        try:
+            await self.locks.reap_dead_holders()
+        except Exception:  # noqa: BLE001
+            log.exception("dispatcher: dead-holder lease reap failed")
+        inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+        # Cumulative across the whole pump, not just the live in-flight set: a
+        # fast task can complete and be reaped (leaving ``inflight``) before its
+        # own queued->running transition is visible to ``tasks.queued()``, so
+        # excluding only the live set would re-dispatch it in a later pass and
+        # spin. A task is dispatched at most once per pump; genuinely new /
+        # lane-freed tasks carry ids absent from this set and still get picked up.
+        dispatched_ids: set[str] = set()
+        while True:
+            # Budget guard: stop launching NEW phase-scoped variants once the
+            # phase's cyclic budget is spent; drain in-flight then return so the
+            # tick can advance the phase (KERNEL/EXPLORE stall fix).
+            if not self._dispatch_paused_for_phase_budget():
+                spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
+                dispatched_ids.update(t.task_id for t, _, _ in spawned)
+                inflight.extend(spawned)
+            if not inflight:
+                return
+            done, _pending = await asyncio.wait(
+                [atask for _, atask, _ in inflight],
+                timeout=self._dispatcher_poll_sec,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                # Poll elapsed with no completion; re-scan in case a lane freed
+                # via lease TTL expiry / external release.
+                continue
+            remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+            completed: list[tuple[Task, Any, Any]] = []
+            for entry in inflight:
+                task, atask, gpu_lease = entry
+                if atask in done:
+                    try:
+                        maybe_result: Any = atask.result()
+                    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
+                        maybe_result = exc
+                    completed.append((task, maybe_result, gpu_lease))
+                else:
+                    remaining.append(entry)
+            inflight = remaining
+            for task, maybe_result, gpu_lease in completed:
+                await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+
+    async def _spawn_fitting_queued(
+        self,
+        *,
+        exclude_ids: set[str],
+    ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
+        """Spawn every currently lane-fitting queued task not already in flight.
+
+        Returns the ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
+        (possibly empty). Pure dispatch — per-task completion bookkeeping is
+        handled by :meth:`_reap_dispatched_task`. Applies the capacity /
+        GPU-specialist-lease gating; each lease is bound to its task_id.
+
+        Args:
+            exclude_ids: Task ids already dispatched this pump pass; skipped so
+                a task is never dispatched twice.
+
+        Returns:
+            The ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
+            (possibly empty).
+        """
+        queued = await self.tasks.queued()
+        if not queued:
+            return []
+        holders = await self.locks.lane_holders()
+        capacities = await self.locks.lane_capacities()
+        spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+        for task in queued:
+            if task.task_id in exclude_ids:
+                # Already dispatched in a prior pass of this pump; the DB row may
+                # still read 'queued' until the runner's first transition lands.
+                continue
+            lanes_needed = list(task.requires_lanes or [])
+            if lanes_needed:
+                try:
+                    expanded = _expand_lanes(lanes_needed)
+                except ValueError:
+                    log.warning(
+                        "dispatcher: task %s has unknown lane in %r; skipping until resolved",
+                        task.task_id,
+                        lanes_needed,
+                    )
+                    continue
+                if not self._lanes_fit(expanded, holders, capacities):
+                    # Stays queued; next tick re-evaluates after holders release.
+                    continue
+                lease = await self.locks.try_acquire_many(
+                    lanes_needed,
+                    holder_id=task.task_id,
+                    task_id=task.task_id,
+                    action=task.kind,
+                    ttl_sec=task.lease_ttl_sec or 60,
+                )
+                if lease is None:
+                    # Race: another holder grabbed the lane; leave queued.
+                    continue
+                # Reflect the bump in our local view for the next task in this tick.
+                for lane in lease.lanes:
+                    holders[lane] = int(holders.get(lane, 0)) + 1
+            else:
+                lease = None
+            gpu_lease = None
+            extra_context: dict[str, Any] = {}
+            if task.kind == "specialist":
+                params = task.params or {}
+                needs_gpu_raw = params.get("needs_gpu", False)
+                needs_gpu = (
+                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
+                    if isinstance(needs_gpu_raw, str)
+                    else bool(needs_gpu_raw)
+                )
+                # Explicit wall-clock budget: lane-tiered base ×
+                # ``macro_cycle`` amplification, hard-capped at 4h. macro_cycle
+                # is 0 for ≤24h bounded runs (``is_long_run`` gate), so those
+                # always get the base value and never degrade.
+                extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
+                    needs_gpu=needs_gpu,
+                )
+                if needs_gpu:
+                    # A framework-authoring specialist leases the whole machine
+                    # from ``framework_gpu_pool``; every other GPU specialist
+                    # leases from the carved ``gpu_specialist_pool``.
+                    is_framework_authoring = bool(
+                        params.get("framework_agent_authoring")
+                    )
+                    if is_framework_authoring:
+                        gpu_pool = self.framework_gpu_pool
+                        # Default to the whole machine; an explicit gpu_count
+                        # still wins (capped at pool capacity).
+                        default_gpu_count = gpu_pool.capacity or 1
+                    else:
+                        gpu_pool = self.gpu_specialist_pool
+                        # Default ``gpu_count`` to the serving TP; an explicit
+                        # ``gpu_count`` wins. Falls back to 1 when serving TP is
+                        # unknown.
+                        default_gpu_count = self._resolve_serving_tp() or 1
+                    try:
+                        gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
+                    except (TypeError, ValueError):
+                        gpu_count = default_gpu_count
+                    # A bench-capable specialist (``bench=true``) floors
+                    # gpu_count up to the serving TP; microbench / profiling
+                    # specialists (``bench=false``) keep their explicit count.
+                    bench_raw = params.get("bench", False)
+                    bench = (
+                        bench_raw.strip().lower() in ("1", "true", "yes", "on")
+                        if isinstance(bench_raw, str)
+                        else bool(bench_raw)
+                    )
+                    serving_tp = self._resolve_serving_tp() or 0
+                    if bench and serving_tp > 0 and gpu_count < serving_tp:
+                        log.info(
+                            "specialist %s: bench=true with gpu_count=%d < serving "
+                            "TP=%d; flooring gpu_count to TP (a bench specialist "
+                            "starts a real TP-sharded server and cannot run on "
+                            "fewer cards).",
+                            task.task_id,
+                            gpu_count,
+                            serving_tp,
+                        )
+                        gpu_count = serving_tp
+                    # TTL re-sourced to the wall budget. Iron law: the agent's wall-budget
+                    # kill (= the budget) must fire at or before the GPU lease
+                    # TTL, which in turn must not outlive the gpu_research_lane
+                    # lease TTL. Both are computed by ``_gpu_lease_ttl_sec`` (here
+                    # and in intent_router) so they cannot drift apart — the cards
+                    # are never reclaimed while the agent is still computing.
+                    gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
+                    gpu_lease = await gpu_pool.try_acquire(
+                        count=gpu_count,
+                        holder_id=task.task_id,
+                        task_id=task.task_id,
+                        ttl_sec=gpu_ttl_sec,
+                    )
+                    if gpu_lease is None:
+                        if lease is not None:
+                            await self.locks.release(lease)
+                            for lane in lease.lanes:
+                                holders[lane] = max(
+                                    0,
+                                    int(holders.get(lane, 0)) - 1,
+                                )
+                        continue
+                    extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
+            spawned.append(
+                (
+                    task,
+                    asyncio.create_task(
+                        self._run_dispatched_with_gpu_release(
+                            task,
+                            prebound_lease=lease,
+                            extra_context=extra_context,
+                            gpu_lease=gpu_lease,
+                        ),
+                    ),
+                    gpu_lease,
+                )
+            )
+        return spawned
+
+    async def _run_dispatched_with_gpu_release(
+        self,
+        task: Task,
+        *,
+        prebound_lease: Any,
+        extra_context: dict[str, Any],
+        gpu_lease: Any,
+    ) -> "SubAgentResult":
+        """Run a dispatched task, releasing its GPU lease in a structured finally.
+
+        Binding the GPU-lease release to the asyncio task's own
+        lifecycle (rather than relying solely on the pump loop walking to
+        :meth:`_reap_dispatched_task`) guarantees the cards are freed when the
+        run completes — normally, on error, or on cancellation — even if the
+        pump coroutine is cancelled or the reap never runs. Combined with the
+        TTL reaper (``gpu_specialist_pool.reap_expired``) this is the
+        ``finally + TTL`` double insurance that keeps a crashed/cancelled GPU
+        specialist from pinning the serving cards forever. The lock-lane lease
+        already has its own ``finally`` in ``sub_agent_runner.run_task``.
+
+        ``release`` is idempotent (a no-op DELETE), so the belt-and-suspenders
+        release in :meth:`_reap_dispatched_task` remains harmless.
+
+        Args:
+            task: The dispatched task.
+            prebound_lease: The already-acquired resource-lane lease (or None).
+            extra_context: Per-task context (wall budget, gpu ids, …).
+            gpu_lease: The GPU specialist lease to release, or None.
+
+        Returns:
+            SubAgentResult: The result from ``sub.run_task``.
+        """
+        try:
+            return await self.sub.run_task(
+                task,
+                prebound_lease=prebound_lease,
+                extra_context=extra_context,
+            )
+        finally:
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup; TTL backstops
+                    log.exception(
+                        "dispatcher: finally GPU-lease release failed for task=%s",
+                        task.task_id,
+                    )
+
+    def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
+        """Compute the explicit wall-clock budget for a specialist task.
+
+        The budget is a lane-tiered base (cpu 10min / gpu 60min) amplified by the
+        macro-cycle count and hard-capped at 4h::
+
+            budget_min = min(base × (macro_cycle + 1), 240)
+
+        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >24h
+        gate), so ≤24h bounded runs always get the base value (cpu 10 / gpu 60)
+        and never degrade.
+
+        Args:
+            needs_gpu: Whether the specialist holds a GPU lease (selects the
+                60min GPU lane base vs the 10min cpu base).
+
+        Returns:
+            float: The wall-clock budget in seconds.
+        """
+        base_min = 60.0 if needs_gpu else 10.0
+        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        budget_min = min(base_min * (macro_cycle + 1), 240.0)
+        return budget_min * 60.0
+
+    def _resolve_serving_tp(self) -> int:
+        """Resolve the live serving process's TP size (cards it holds).
+
+        Used for the serving-disjoint specialist pool (B1) and as the default
+        ``gpu_count`` for TP-coupled GPU specialists (B2). Prefers the
+        resume-safe ``shared_state.tp``; falls back to the ``TP`` env the CLI
+        exports before construction. Returns ``0`` when neither is set (the
+        legacy whole-pool / single-card behaviour).
+
+        Returns:
+            int: The serving TP size, or ``0`` when unknown.
+        """
+        tp = int(getattr(self.shared_state, "tp", 0) or 0)
+        if tp > 0:
+            return tp
+        try:
+            return max(0, int(os.environ.get("TP", "0") or 0))
+        except ValueError:
+            return 0
+
+    def _gpu_lease_ttl_sec(self, floor_ttl_sec: int = 0) -> int:
+        """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
+
+        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
+        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
+        the agent's WS1 wall-budget kill, so both are sourced from the same
+        ``wall_budget × (1 + GPU_LEASE_TTL_GRACE)`` here to keep them from
+        drifting apart.
+
+        Args:
+            floor_ttl_sec: A lower bound (e.g. the registry / existing
+                ``lease_ttl_sec``) the computed TTL is raised to.
+
+        Returns:
+            int: ``max(floor_ttl_sec, wall_budget × (1 + grace))``.
+        """
+        return max(
+            int(floor_ttl_sec or 0),
+            int(self._specialist_wall_budget_sec(needs_gpu=True) * (1.0 + GPU_LEASE_TTL_GRACE)),
+        )
+
+    async def _reap_dispatched_task(
+        self,
+        task: Task,
+        maybe_result: Any,
+        gpu_lease: Any,
+    ) -> None:
+        """Run completion bookkeeping for one finished dispatched task.
+
+        Performs per-task post-completion handling (GPU-lease
+        release, specialist auto-retry, ``delegated_result`` emission, ledgers,
+        shared-state promotion, fact-write, explore-gap refresh).
+
+        Args:
+            task: The finished dispatched task.
+            maybe_result: The task's result, or the exception it raised.
+            gpu_lease: The GPU specialist lease to release, or ``None``.
+        """
+        for (task, _, gpu_lease), maybe_result in zip(
+            [(task, None, gpu_lease)],
+            [maybe_result],
+        ):
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup
+                    log.exception(
+                        "dispatcher: failed to release GPU specialist lease for task=%s",
+                        task.task_id,
+                    )
+            if isinstance(maybe_result, BaseException):
+                log.exception(
+                    "dispatcher: spawned task %s raised: %r",
+                    task.task_id,
+                    maybe_result,
+                )
+                continue
+            result: SubAgentResult = maybe_result
+            # Bounded transient-failure auto-retry (infra only): on a subprocess
+            # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
+            # task and skip THIS attempt's delegated_result + bookkeeping so the
+            # flake neither pollutes the gaps ledger nor provokes a manual
+            # re-dispatch. Semantic empties fall through and are recorded.
+            if task.kind == "specialist":
+                try:
+                    if await self._maybe_auto_retry_specialist(task, result):
+                        continue
+                except Exception:  # noqa: BLE001 — never block the dispatch loop
+                    log.exception(
+                        "specialist auto-retry hook failed for task=%s",
+                        task.task_id,
+                    )
+            try:
+                await self.bus.append_and_seq(
+                    Message.new(
+                        "coordinator",
+                        "*",
+                        "delegated_result",
+                        {
+                            "task_id": task.task_id,
+                            "kind": task.kind,
+                            "state": result.state,
+                            "result": result.result,
+                            "error": result.error,
+                        },
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception(
+                    "dispatcher: failed to append delegated_result for task=%s",
+                    task.task_id,
+                )
+                self._record_coordinator_exception(
+                    stage="dispatcher_result",
+                    exc=exc,
+                )
+                continue
+            # Specialist bookkeeping: done payload under result.result['specialist_done']; always runs (incl. empty-synthesised) to keep the ledgers coherent.
+            if task.kind == "specialist":
+                result_dict = result.result if isinstance(result.result, dict) else {}
+                done_payload = result_dict.get("specialist_done") or {}
+                if isinstance(done_payload, dict):
+                    try:
+                        await self._record_specialist_result(
+                            task=task,
+                            done_payload=done_payload,
+                            source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "specialist bookkeeping hook failed for task=%s",
+                            task.task_id,
+                        )
+                    # FRAMEWORK authoring bridge for an EMPTY deliverable: a
+                    # specialist that authored no patch never spawns an
+                    # integrate_patch, so the authored-outcome bridge below never
+                    # fires. Without a terminal progress row the candidate is
+                    # re-selected every tick (pump livelock). Stamp it here.
+                    try:
+                        self._record_framework_agent_authoring_empty_outcome(
+                            task=task,
+                            done_payload=done_payload,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
+                            task.task_id,
+                        )
+                    # FRAMEWORK config-exploration: harvest a generation
+                    # specialist's config proposal_set into the pending grid.
+                    try:
+                        self._ingest_framework_config_generation(
+                            task=task,
+                            done_payload=done_payload,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "framework_config: generation ingest failed for task=%s",
+                            task.task_id,
+                        )
+                # Bump the per-EXPLORE specialist dispatch counter (Robustness reads it to detect storms).
+                try:
+                    self.shared_state.bump_specialist_dispatched()
+                except Exception:  # noqa: BLE001
+                    log.exception("bump_specialist_dispatched failed")
+            # intervention-mix ledger: log change_type for explore/integrate_patch so Robustness sees config streaks.
+            if task.kind in ("explore", "integrate_patch"):
+                try:
+                    self._record_intervention_for_task(task, result.result)
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "intervention ledger update failed for task=%s",
+                        task.task_id,
+                    )
+            # integrate_patch completion handling.
+            if task.kind == "integrate_patch":
+                # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT into framework_agent_phase_progress.
+                if (
+                    getattr(
+                        self.shared_state,
+                        "framework_agent_authoring_enabled",
+                        False,
+                    )
+                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT
+                ):
+                    try:
+                        self._record_framework_agent_authored_outcome(
+                            task=task,
+                            result=result,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "FRAMEWORK authored-outcome bridge failed for task=%s",
+                            task.task_id,
+                        )
+                # A reverted enablement patch clears the in-flight guard so the
+                # next FRAMEWORK pump tick retries with the next bridging
+                # candidate; a kept patch is terminal.
+                try:
+                    self._maybe_rearm_enablement(getattr(result, "result", None))
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "ENABLEMENT rearm failed for task=%s",
+                        task.task_id,
+                    )
+            # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.
+            kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
+            try:
+                if kept:
+                    await self._promote_to_shared_state(
+                        task.kind,
+                        result.result,
+                        task=task,
+                    )
+                else:
+                    await self._handle_unpromotable_result(task, result.result)
+            except Exception as exc:  # noqa: BLE001
+                log.exception(
+                    "dispatcher: promotion/unpromotable handling failed for task=%s",
+                    task.task_id,
+                )
+                self._record_coordinator_exception(
+                    stage="dispatcher_promote",
+                    exc=exc,
+                )
+                continue
+            # Fact-write hook: always called so KEEP/REVERT lands in the journal + (when enabled) a KB write.
+            # replay_warm_recipe is excluded (verification, not a new fact; _promote_warm_replay journals it).
+            if task.kind != "replay_warm_recipe":
+                try:
+                    await self._fact_write_hook(task=task, result=result, kept=kept)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(
+                        "dispatcher: fact-write hook failed for task=%s",
+                        task.task_id,
+                    )
+                    self._record_coordinator_exception(
+                        stage="dispatcher_fact_write",
+                        exc=exc,
+                    )
+            # Framework prs_tested write-back: record KEEP/REVERT patches into recipe.
+            if task.kind == "framework_agent":
+                try:
+                    self._write_prs_tested_from_framework_agent(task=task, result=result, kept=kept)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dispatcher: prs_tested write-back failed for task=%s",
+                        task.task_id,
+                    )
+                    continue
+            # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.
+            if task.kind == "explore":
+                result_dict = result.result if isinstance(result.result, dict) else {}
+                if str((task.params or {}).get("source") or "") == "framework_config_exploration":
+                    try:
+                        self._record_framework_config_exploration_result(
+                            task=task,
+                            result=result_dict,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "framework_config: result bookkeeping failed for task=%s",
+                            task.task_id,
+                        )
+                try:
+                    self._record_explore_round_gaps(
+                        task=task,
+                        result=result_dict,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "gaps refresh: explore-round update failed for task=%s",
+                        task.task_id,
+                    )
+                try:
+                    await self._refresh_gaps(reason="explore_round")
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "gaps refresh: _refresh_gaps after explore failed for task=%s",
+                        task.task_id,
+                    )
+
+    @staticmethod
+    def _lanes_fit(
+        expanded_lanes: list[str],
+        holders: dict[str, int],
+        capacities: dict[str, int],
+    ) -> bool:
+        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is try_acquire_many).
+
+        Args:
+            expanded_lanes: The fully-expanded lanes the task requires.
+            holders: Current per-lane holder counts (local view).
+            capacities: Per-lane capacities.
+
+        Returns:
+            ``True`` when every requested lane has local headroom, else
+            ``False``.
+        """
+        for lane in expanded_lanes:
+            cap = int(capacities.get(lane, 1))
+            used = int(holders.get(lane, 0))
+            if cap <= 0 or used >= cap:
+                return False
+        return True

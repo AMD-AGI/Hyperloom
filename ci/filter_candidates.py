@@ -88,7 +88,8 @@ def classify_local(repo):
         # root config.json, so still apply repo-id-only compatibility gates.
         return model_compat.unrunnable_reason(None, repo=repo)
     try:
-        cfg = json.load(open(cfg_path))
+        with open(cfg_path) as fh:
+            cfg = json.load(fh)
     except Exception:
         return None
     return model_compat.unrunnable_reason(cfg, repo=repo, model_dir=mdir,
@@ -103,10 +104,11 @@ def hf_gated(repo):
 def load_gated_cache():
     cache = {}
     if os.path.isfile(GATED_CACHE):
-        for line in open(GATED_CACHE):
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) == 2:
-                cache[parts[0]] = parts[1]
+        with open(GATED_CACHE) as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) == 2:
+                    cache[parts[0]] = parts[1]
     return cache
 
 
@@ -143,7 +145,8 @@ def main(argv):
     pools_local = {}
     keep_repos = []
     for pname, ppath in pools.items():
-        data = json.load(open(ppath))
+        with open(ppath) as fh:
+            data = json.load(fh)
         cands = data.get("candidates", [])
         local_keep, local_filt = [], []
         for c in cands:
@@ -182,7 +185,8 @@ def main(argv):
             out = dict(data)
             out["candidates"] = kept
             outpath = os.path.join(OUT_DIR, f"{pname}_filtered.json")
-            json.dump(out, open(outpath, "w"), indent=2)
+            with open(outpath, "w") as fh:
+                json.dump(out, fh, indent=2)
             grand[pname] = (len(cands), len(kept), len(cands) - len(kept),
                             counts, outpath)
 
