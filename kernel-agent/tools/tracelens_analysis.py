@@ -4604,9 +4604,20 @@ def generate_minimal_analysis_md(
         total_ms = (busy_ms or 0.0) + (idle_ms or 0.0) or None
     memcpy_ms = _row_field("exposed_memcpy_time", "time ms")
 
+    def _cand_weight(c: dict[str, Any]) -> float:
+        """GPU-time weight for ranking (gpu_pct, else duration_us); robust to null."""
+        for key in ("gpu_pct", "duration_us"):
+            v = c.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+        return 0.0
+
     top_cat = ""
     if candidates:
-        top_cat = candidates[0].get("kernel_category") or candidates[0].get("tracelens_category") or ""
+        # Pick the hottest candidate's category rather than assuming candidates[0]
+        # is time-sorted (robust to caller ordering).
+        _top = max(candidates, key=_cand_weight)
+        top_cat = _top.get("kernel_category") or _top.get("tracelens_category") or ""
 
     exec_summary = {
         "total_gpu_time_ms": total_ms,

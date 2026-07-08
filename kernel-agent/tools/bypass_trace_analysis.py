@@ -554,6 +554,12 @@ def main(argv: list[str] | None = None) -> int:
     # roofline into an end-to-end workload roofline + per-denoise-step split
     # (consuming the effective num_denoise_steps). Best-effort sidecar; never
     # blocks the per-kernel artifacts.
+    #
+    # NOTE: this is a WORKLOAD-level characterization aggregated from analyze[
+    # "kernels"] (all device kernels), intentionally INDEPENDENT of the per-kernel
+    # high-idle gate above -- that gate suppresses per-kernel rewrite CANDIDATES,
+    # but the workload compute/memory roofline stays valid and useful even in the
+    # high-idle regime, so it is still emitted.
     diffusion_roofline_path: str | None = None
     if (args.framework or "").lower() == "xdit":
         try:

@@ -55,6 +55,16 @@ def test_count_profiler_steps_gz_and_plain(tmp_path):
     assert ds.count_profiler_steps(str(plain)) == 3
 
 
+def test_count_profiler_steps_across_chunk_boundary(tmp_path, monkeypatch):
+    # Tiny chunks force ProfilerStep#N markers to straddle chunk boundaries; the
+    # overlap carry must still match them and the set must not double-count.
+    monkeypatch.setattr(ds, "_CHUNK_BYTES", 8)
+    names = ["ProfilerStep#1", "aten::mm", "ProfilerStep#2", "ProfilerStep#3", "ProfilerStep#2"]
+    gzp = tmp_path / "t.pt.trace.json.gz"
+    _write_trace(gzp, names, gz=True)
+    assert ds.count_profiler_steps(str(gzp)) == 3
+
+
 def test_count_profiler_steps_none_and_dir(tmp_path):
     no_steps = tmp_path / "n.json"
     _write_trace(no_steps, ["aten::mm", "aten::add"], gz=False)

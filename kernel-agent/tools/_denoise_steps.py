@@ -17,6 +17,11 @@ import re
 from pathlib import Path
 
 _PROFILER_STEP_RE = re.compile(rb"ProfilerStep#(\d+)")
+#: Streaming read chunk size; module-level so tests can shrink it to exercise the
+#: cross-chunk boundary overlap. ``ProfilerStep#<digits>`` is far shorter than this.
+_CHUNK_BYTES = 1 << 20  # 1 MiB
+#: Overlap kept between chunks so a marker split across the boundary still matches.
+_OVERLAP_BYTES = 64
 
 
 def resolve_perstep_divisor(inferred_steps: int | None, requested_steps: int | None) -> int | None:
@@ -46,9 +51,11 @@ def count_profiler_steps(trace_path: str) -> int:
     """Count distinct torch ``ProfilerStep#N`` iterations in a trace.
 
     A lightweight, JSON-parse-free scan (regex over the decompressed bytes) so it
-    stays cheap on large traces. Used as the per-step divisor source for the
-    TraceLens deterministic route, which (unlike bypass) does not run its own
-    steady-window step detection. Accepts a file or a directory (first trace).
+    stays cheap on large traces. Streams in bounded chunks (with a small overlap
+    so a marker split across a chunk boundary still matches) rather than reading
+    the whole decompressed trace into memory. Used as the per-step divisor source
+    for the TraceLens deterministic route, which (unlike bypass) does not run its
+    own steady-window step detection. Accepts a file or a directory (first trace).
 
     Args:
         trace_path: Path to a ``.json`` / ``.json.gz`` trace file or a directory.
@@ -63,10 +70,19 @@ def count_profiler_steps(trace_path: str) -> int:
         if not candidates:
             return 0
         p = candidates[0]
+    steps: set[bytes] = set()
     try:
         opener = gzip.open if str(p).endswith(".gz") else open
         with opener(p, "rb") as fh:
-            data = fh.read()
+            carry = b""
+            while True:
+                chunk = fh.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                buf = carry + chunk
+                for m in _PROFILER_STEP_RE.finditer(buf):
+                    steps.add(m.group(1))  # a set dedups matches re-seen in the overlap
+                carry = buf[-_OVERLAP_BYTES:]
     except OSError:
         return 0
-    return len({m.group(1) for m in _PROFILER_STEP_RE.finditer(data)})
+    return len(steps)
