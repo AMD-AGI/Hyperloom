@@ -51,6 +51,25 @@ def test_elementwise_is_memory_bound():
     assert "bandwidth_utilization_pct" in r
 
 
+def test_roofline_attainment_is_binding_side():
+    # compute-bound GEMM: attainment == compute utilization.
+    g = compute_roofline(
+        category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
+        gpu_time_us=500.0, call_count=1, gpu_type="mi300x",
+    )
+    assert g["bound_type"] == "compute_bound"
+    assert g["roofline_attainment_pct"] == g["compute_utilization_pct"]
+    # memory-bound elementwise: attainment == bandwidth utilization, NOT the
+    # compute-side efficiency_percent (which reads ~0 for a memory-bound kernel).
+    e = compute_roofline(
+        category="Elementwise", shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
+        gpu_time_us=200.0, call_count=1, gpu_type="mi300x",
+    )
+    assert e["bound_type"] == "memory_bound"
+    assert e["roofline_attainment_pct"] == e["bandwidth_utilization_pct"]
+    assert e["roofline_attainment_pct"] != e["efficiency_percent"]
+
+
 def test_convolution_estimates_bound():
     # VAE-style conv: input (2,320,64,64), weight (320,320,3,3).
     r = compute_roofline(

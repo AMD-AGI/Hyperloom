@@ -342,6 +342,7 @@ def build_candidates(
             "call_count": k.get("count", 0),
             "bound_type": _UNKNOWN_BOUND,
             "efficiency_percent": 0.0,
+            "roofline_attainment_pct": None,
             "flops_per_byte": None,
             "arithmetic_intensity": None,
             "compute_utilization_pct": None,
@@ -741,12 +742,16 @@ def render_analysis_md(
     }
 
     # Shared Top Hot Kernels rows (bypass models AI + analytical efficiency).
+    # Displayed Eff% is the binding-side roofline attainment (cross-route
+    # comparable with TraceLens); compute/bandwidth utilization stay in
+    # kernel_roofline.json. efficiency_percent (compute util) still drives the
+    # optimization-priority ranking below.
     hot_rows = [
         {
             "name": c.get("name"),
             "time_us": c.get("duration_us"),
             "gpu_pct": c.get("gpu_pct"),
-            "efficiency_percent": c.get("efficiency_percent"),
+            "efficiency_percent": c.get("roofline_attainment_pct"),
             "arithmetic_intensity": c.get("arithmetic_intensity"),
             "bound_type": c.get("bound_type"),
             "category": c.get("kernel_category"),
@@ -775,7 +780,7 @@ def render_analysis_md(
                         "e2e_pct": None,
                         "call_count": c.get("call_count"),
                         "flops_per_byte": c.get("flops_per_byte"),
-                        "efficiency_percent": c.get("efficiency_percent"),
+                        "efficiency_percent": c.get("roofline_attainment_pct"),
                         "bound_type": c.get("bound_type"),
                         "args": args,
                         "source_file": c.get("source_file"),
@@ -881,7 +886,7 @@ def _render_bypass_extra_sections(
         for i, c in enumerate(ranked, start=1):
             ai = c.get("arithmetic_intensity")
             ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "\u2014"
-            eff = c.get("efficiency_percent")
+            eff = c.get("roofline_attainment_pct")
             eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
             L.append(
                 f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {_canonical_category(c.get('kernel_category', ''))} "
@@ -931,11 +936,11 @@ def _render_bypass_extra_sections(
                 )
             L.append("")
             bound = c.get("bound_type") or "\u2014"
-            eff = c.get("efficiency_percent")
+            eff = c.get("roofline_attainment_pct")
             eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
             L.append(
                 f"**Impact**: {c['gpu_pct']:.2f}% of GPU time; bound={bound}, "
-                f"efficiency={eff_str}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
+                f"attainment={eff_str}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
                 f"(roofline_source={c.get('roofline_source', 'placeholder')})."
             )
             L.append("")
@@ -990,14 +995,14 @@ def _render_bypass_extra_sections(
             f"(shape provenance: {c.get('shape_provenance', 'unresolved')})."
         )
         L.append("")
-        _eff = c.get("efficiency_percent")
+        _eff = c.get("roofline_attainment_pct")
         _eff_s = f"{float(_eff):.1f}%" if isinstance(_eff, (int, float)) else _UNKNOWN_BOUND
         _ai = c.get("arithmetic_intensity")
         _ai_s = f"{float(_ai):.3g}" if isinstance(_ai, (int, float)) else _UNKNOWN_BOUND
         _bound = c.get("bound_type") or _UNKNOWN_BOUND
         L.append(
             f"**Roofline:** bound={_bound}, AI={_ai_s}, "
-            f"efficiency={_eff_s}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
+            f"attainment={_eff_s}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
             f"(roofline_source={c.get('roofline_source', 'placeholder')})."
         )
         L.append("")
@@ -1072,6 +1077,9 @@ def build_kernel_roofline(
                 "suggestion": c.get("suggestion") or "",
                 "recommended_actions": list(c.get("recommended_actions") or []),
                 "efficiency_percent": c["efficiency_percent"],
+                # Binding-side attainment (compute util if compute-bound else bw
+                # util): the cross-route-comparable efficiency (== TraceLens's).
+                "roofline_attainment_pct": c.get("roofline_attainment_pct"),
                 "arithmetic_intensity": c["arithmetic_intensity"],
                 "compute_utilization_pct": c["compute_utilization_pct"],
                 "bandwidth_utilization_pct": c["bandwidth_utilization_pct"],

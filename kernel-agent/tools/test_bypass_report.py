@@ -98,6 +98,8 @@ def test_build_kernel_roofline_shape():
     }
     for r in rows:
         assert tracelens_row_keys.issubset(r.keys())
+        # bypass superset also exposes the binding-side roofline attainment.
+        assert "roofline_attainment_pct" in r
         # bottleneck falls back to bound_type; recommended_actions is always a list.
         assert r["bottleneck"] == (r.get("bottleneck") or r["bound_type"])
         assert isinstance(r["recommended_actions"], list)

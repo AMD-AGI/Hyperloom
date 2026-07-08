@@ -283,6 +283,14 @@ def compute_roofline(
         out["bandwidth_utilization_pct"] = round(min(raw_bw, 100.0), 3)
         if raw_bw > 100.0:
             out["roofline_estimate_capped"] = True
+    # Roofline attainment = utilization on the BINDING side (compute util when
+    # compute-bound, bandwidth util when memory-bound). This is the cross-route-
+    # comparable "efficiency" (TraceLens reports the same binding-side attainment);
+    # ``efficiency_percent`` stays the compute-side utilization (drives the
+    # optimization-priority ranking) and so reads ~0 for memory-bound kernels.
+    _attain = out.get("compute_utilization_pct") if bound_type == "compute_bound" else out.get("bandwidth_utilization_pct")
+    if isinstance(_attain, (int, float)):
+        out["roofline_attainment_pct"] = _attain
     return out
 
 
