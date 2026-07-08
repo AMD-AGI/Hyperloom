@@ -1379,11 +1379,20 @@ def test_cli_multi_node_remaining_error_branches(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(mn_env, "export_ray_address_to_os", lambda: None)
     monkeypatch.setattr(opt_mn, "_replay_kernel_patches_for_multi_node", lambda args: None)
 
-    class _BadTraceRoot(Path):
+    class _BadTracePath:
+        def __init__(self, value: Path) -> None:
+            self.value = value
+
+        def __truediv__(self, child: str) -> "_BadTracePath":
+            return _BadTracePath(self.value / child)
+
+        def __str__(self) -> str:
+            return str(self.value)
+
         def mkdir(self, *args, **kwargs):
             raise OSError("readonly")
 
-    trace_root = _BadTraceRoot(tmp_path / "traces")
+    trace_root = _BadTracePath(tmp_path / "traces")
     monkeypatch.setattr(opt_mn, "mn_profile_trace_root", lambda: trace_root)
     opt_mn._provision_multi_node_rayjob_stack(
         argparse.Namespace(nodes=2, mn_backend="rayjob", rayjob_image="ray:tag", rayjob_gpus_per_node=8, rayjob_extra_env=[])
