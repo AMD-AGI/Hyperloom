@@ -1098,6 +1098,25 @@ class TestDiffusionComputeCeiling:
 
     # ── Finding 2: per denoising step only the DiT runs; memory ceiling uses
     #    DiT-only weight bytes, not the full checkpoint (encoder + VAE). ───────
+    def test_breakdown_flux_ceiling_when_load_model_meta_fails(self, tmp_path, monkeypatch):
+        # FLUX's single-file checkpoint layout can defeat load_model_meta
+        # (returns None), but the resolution-derived DiT meta alone still drives
+        # the compute + DiT-only memory ceiling -- the early bail must not
+        # suppress it. (End-to-end gap found profiling real FLUX.1-dev.)
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+        self._write_flux_configs(tmp_path)
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: None)
+        monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
+        monkeypatch.setattr(rc, "_read_diffusion_resolution", lambda state: (1024, 1024))
+        rt = RuntimeWorkload(
+            model_path=str(tmp_path), gpu_type="mi325x", precision="bf16",
+            framework="xdit", tp=1, concurrency=1, isl=0, osl=0, server_args="",
+        )
+        bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
+        assert bd.cmp_tok_per_sec > 0  # compute ceiling from DiT meta, no full-weight needed
+        assert bd.mem_tok_per_sec > 0  # memory ceiling from DiT-only bytes
+        assert bd.bound_kind in ("compute", "memory")
+
     def test_breakdown_memory_uses_dit_only_bytes(self, monkeypatch):
         import types
         import inference_optimizer.orchestrator.roofline_ceiling as rc

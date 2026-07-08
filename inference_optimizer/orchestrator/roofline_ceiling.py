@@ -1318,9 +1318,6 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
         The diffusion ``RooflineBreakdown``, or ``_EMPTY_BREAKDOWN`` when the
         model weights or step count are unavailable.
     """
-    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
-    if meta is None or meta.weight_bytes <= 0:
-        return _EMPTY_BREAKDOWN
     num_steps = _read_diffusion_num_steps(state)
     if num_steps <= 0:
         return _EMPTY_BREAKDOWN
@@ -1330,12 +1327,21 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     height, width = _read_diffusion_resolution(state)
     dit = _read_diffusion_dit_meta(runtime.model_path, height=height, width=width)
 
+    # We need at least one weight source: the DiT geometry (resolution/sample_size)
+    # OR the full-checkpoint size. FLUX's single-file checkpoint layout can defeat
+    # load_model_meta (returns None), but the DiT meta alone still drives the
+    # compute + DiT-only memory ceiling, so only bail when BOTH are missing.
+    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+    meta_bytes = int(meta.weight_bytes) if (meta is not None and meta.weight_bytes > 0) else 0
+    if dit is None and meta_bytes <= 0:
+        return _EMPTY_BREAKDOWN
+
     # Per denoising step only the DiT runs; the text encoder + VAE are one-time,
     # so per-step memory IO is the DiT-ONLY weight bytes (dit_params x dtype),
     # consistent with the DiT-only compute FLOPs. Fall back to the full checkpoint
     # only when the DiT geometry is unavailable (also the memory-only degrade).
     cmp_img_s = 0.0
-    mem_bytes = int(meta.weight_bytes)
+    mem_bytes = meta_bytes
     if dit is not None:
         dit_params, latent_tokens, num_layers, hidden = dit
         dit_weight_bytes = int(dit_params * _resolve_dtype_bytes(runtime.precision or "bf16"))
