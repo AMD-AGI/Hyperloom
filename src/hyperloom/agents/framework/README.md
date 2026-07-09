@@ -1,7 +1,7 @@
 # framework-agent
 
 vllm/sglang source-layer optimisation companion for
-[`inference_optimizer`](../src/hyperloom/inference_optimizer/). The live Hyperloom
+[`inference_optimizer`](../../inference_optimizer/). The live Hyperloom
 integration uses the FRAMEWORK discovery path:
 
 - **FRAMEWORK discovery** (`fa phase-discover`) — returns upstream PR
@@ -49,9 +49,9 @@ the always-allowed `aiter`).
 ## Quick start
 
 ```bash
-# Install (idempotent)
-cd Hyperloom/framework-agent
-bash scripts/install.sh        # or: pip install -e '.[test]'
+# Install from the repo root (idempotent)
+cd Hyperloom
+bash src/hyperloom/agents/framework/scripts/install.sh        # or: pip install -e '.[test]'
 
 # Live IO discovery path
 fa phase-discover --request /path/to/request.json --out -
@@ -71,7 +71,7 @@ fa kb search --domain framework_optimization --query "fp8 kv cache"
 ```bash
 pytest -q                      # all 160+ unit tests
 pytest -q tests/test_logging_setup.py tests/test_isolation.py \
-          tests/test_decision.py tests/test_explore_modes.py
+          tests/test_decision.py tests/test_explorer.py
 ```
 
 ## Used by inference_optimizer
@@ -96,13 +96,10 @@ inference_optimizer optimize \
 ```
 
 See `src/hyperloom/inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
-and `src/hyperloom/orchestrator/actions/executors/hyperloom.agents.framework.py`.
+and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
 
 ## Design references
 
-- [`framework-explorer-merged-design.md`](../claw-dev/docs-zh/framework-explorer-merged-design.md)
-  — PR exploration tool (existing).
-- [`hyperloom-framework-agent-design.md`](../claw-dev/docs-zh/hyperloom-framework-agent-design.md)
-  — 5th-role design (v1.3).
-- [`hyperloom-framework-agent-implementation-plan.md`](../claw-dev/docs-zh/hyperloom-framework-agent-implementation-plan.md)
-  — PR-A/B/C/D/E/F/G/H/I execution plan.
+The current runtime contract is documented in this directory's `SKILL.md`,
+`AGENTS.md`, and `references/` files. Historical design notes live outside the
+packaged Hyperloom tree.

@@ -13,7 +13,7 @@ There are two ways to get a GPU environment:
 
 **Prerequisites:**
 
-- An AMD GPU machine supporting **MI300X** or **MI355X**.
+- An AMD GPU machine supporting **MI300X**, **MI308X**, **MI325X**, or **MI355X**.
 - Access to an OpenAI-compatible (LiteLLM-style) LLM gateway: set **both** `SAFE_API_KEY` (your gateway API key) and `OPENAI_BASE_URL` (your gateway’s `/v1` endpoint). The Primus-SaFE LiteLLM gateway is one option (get your key via the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)), but any compatible gateway works.
 
 ### 1. Start the container
@@ -110,12 +110,14 @@ Optimize inference for this workload:
 - ISL: 1024
 - OSL: 1024
 - Goal: improve throughput by at least 10%
-- Budget: 24 hours
+- Budget: 2.0 hours   # example; raise for long optimization runs
 
 Before launch, run exactly:
 ```bash
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
+bash src/hyperloom/inference_optimizer/assets/install.sh
+source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 ```
 ````
 

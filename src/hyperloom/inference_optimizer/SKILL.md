@@ -118,7 +118,7 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
+`$HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens`; when unset,
 `src/hyperloom/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
@@ -307,13 +307,13 @@ Rules that look reasonable but break the current flow:
 Two commands: Step 1 implements **IR-2** (install gate), Step 2 launches.
 Both are idempotent; do not replicate them inside chat.
 
-### Credentials (env only)
+### Credentials
 
-`SAFE_API_KEY` and `OPENAI_BASE_URL` are the only credentials this skill
-needs and must be exported in the calling shell before running install
-or the CLI (typically by sourcing `$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh`
-after Step 1). `install.sh` and the CLI's `_preflight()` read them from
-`os.environ` only — no `.env` files are loaded.
+The common single-gateway setup uses `SAFE_API_KEY` and `OPENAI_BASE_URL`.
+Split-gateway deployments may provide provider-specific `ANTHROPIC_*` /
+`OPENAI_*` credentials instead. Shell-exported values win; `$REPO_ROOT/.env`
+is loaded only to fill missing values by `install.sh` and the CLI preflight.
+After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
@@ -342,7 +342,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | Component | Provided by |
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
-| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
+| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`) | `ensure_magpie` |
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
@@ -460,7 +460,7 @@ supply session metadata directly via CLI flags / env vars:
 | Model path | `--model` | — | required |
 | Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom) |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
-| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); defaults to `moe_mla` when unset. For richer advisory model context see Step 1.5 (`model_arch.json`) |
+| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
 
@@ -519,11 +519,11 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
-# to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
+# to $HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens and pin it to a
 # fixed SHA. Only export it as an operator override to point at a
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.

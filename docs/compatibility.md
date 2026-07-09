@@ -40,9 +40,9 @@ inside Primus-SaFE.
 
 | Image | GPU |
 |-------|-----|
-| `primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix` | MI300X |
-| `primussafe/sglang:v0.5.11-rocm720-mi35x-profilerfix` | MI355X |
-| `vllm/vllm-openai-rocm:v0.19.0` | MI300X / MI355X |
+| `primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix` | MI300X / MI308X / MI325X |
+| `primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix` | MI355X |
+| `primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix` | MI300X / MI308X / MI325X / MI355X |
 
 Browse all available SGLang tags at
 [hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags).

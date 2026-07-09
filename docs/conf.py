@@ -39,8 +39,8 @@ project = "Hyperloom"
 author = "AMD AGI"
 copyright = f"{datetime.now():%Y}, {author}"
 # Keep in sync with pyproject.toml [project].version.
-release = "0.6.0"
-version = "0.6"
+release = "0.8.0"
+version = "0.8"
 
 # -- General configuration ---------------------------------------------------
 extensions = [

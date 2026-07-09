@@ -56,7 +56,7 @@ Compatibility rules:
   Python-specific types in the wire shape).
 
 The `exporter_version` field carries the producing Hyperloom version
-(e.g. `"0.6.0"`) for incident triage and per-version filtering.
+(e.g. `"0.8.0"`) for incident triage and per-version filtering.
 
 ---
 
@@ -66,7 +66,7 @@ The `exporter_version` field carries the producing Hyperloom version
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
-  "exporter_version": "0.6.0",
+  "exporter_version": "0.8.0",
 
   "session":            { /* §3  SessionMeta */ },
   "workload":           { /* §4  Workload */ },
@@ -78,11 +78,23 @@ The `exporter_version` field carries the producing Hyperloom version
   "oob_invocations":    [ /* §10 Invocation[] */ ],
   "forge_invocations":  [ /* §9–10 Invocation[] — Kernel-Forge lane */ ],
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
-  "param_search":       { /* §12 ParamSearch */ },
+  "explore_search":     { /* §12 ExploreSearch */ },
+  "param_search":       { /* §12 compatibility alias */ },
   "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "attribution":        { /* §16 Gain attribution per stack entry */ },
+
+  "action_timeline":    [ /* additive native timeline rows */ ],
+  "specialist_runs":    [ /* additive specialist subprocess summaries */ ],
+  "kb_provenance":      { /* additive KB/gbrain provenance */ },
+  "gemm_tuning":        { /* additive GEMM-tuning summary */ },
+  "kernel_optimization_summary": { /* additive kernel summary */ },
+  "conc_sweep_summary": { /* additive concurrency-sweep summary */ },
+  "decision_journal":   { /* additive KEEP/REVERT decision rollup */ },
+  "model_info":         { /* additive model metadata */ },
+  "phase_segments":     [ /* additive phase timing segments */ ],
+  "roofline":           { /* additive roofline sidecar summary */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
   "source_files":       { /* §17 SourceFiles — raw artefact paths */ }
@@ -223,14 +235,14 @@ The same `kernel_id` appears in multiple lists as it progresses.
 
 ---
 
-## 12. `param_search`
+## 12. `explore_search` (`param_search` compatibility alias)
 
-The canonical ledger is `explore`, with `ParamSearchEntry` records for
+The canonical ledger is `explore_search`, with `ParamSearchEntry` records for
 every tested variant: `status` ∈ `accepted` / `rejected` / `tested`,
 the `extra_server_args` / `extra_envs` it injected, the
 `output_throughput` it measured, and the resulting `gain_pct`. The
-`params` and `backends` ledgers are compatibility aliases emitted for
-archived sessions and old readers. The section also includes
+`param_search`, `params`, and `backends` ledgers are compatibility aliases
+emitted for archived sessions and old readers. The section also includes
 `synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
 
 ---
@@ -294,7 +306,7 @@ investigation than the breakdown summarises.
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
-  "exporter_version": "0.6.0",
+  "exporter_version": "0.8.0",
 
   "session": {
     "session_id": "sess-20260517-1130",
@@ -308,9 +320,9 @@ investigation than the breakdown summarises.
     "host": "claw-sandbox-7",
     "code_revision": "a1b2c3d",
     "pid": 12345,
-    "session_dir": "/workspace/hyperloom",
+    "session_dir": "/workspace/hyperloom/DeepSeek-R1-0528/20260517T113000Z",
     "tick_count": 89,
-    "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    "image": "primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix"
   },
 
   "workload": {

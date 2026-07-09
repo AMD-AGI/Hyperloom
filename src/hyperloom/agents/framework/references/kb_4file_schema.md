@@ -1,9 +1,8 @@
 # framework-agent KB - 4-file schema
 
 > Reference for the knowledge base shape consumed by
-> `hyperloom.agents.framework.kb`. Derived from
-> `claw-dev/docs-zh/tbo-arbor-framework-kb-design.md`; this file is the
-> distilled contract used at runtime.
+> `hyperloom.agents.framework.kb`. This file is the distilled contract used at
+> runtime.
 
 ## Layout
 

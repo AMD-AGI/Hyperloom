@@ -145,7 +145,7 @@ the baseline benchmark fails with VRAM allocation errors.
 The Robustness agent classifies repeated OOMs as a `log_error_pattern`
 high-severity symptom and emits an `escalate_strategy_change` intent;
 check the latest finding in
-`$USER_DATA_PATH/agents/robustness/findings/<session_id>.jsonl` for
+`$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl` for
 context.
 
 ---
@@ -156,11 +156,11 @@ context.
 baseline files; logs mention a missing `profiler_mcp` or one of the
 other GEAK MCP packages.
 
-**Cause.** `install.sh` did not finish installing all five GEAK MCP
-packages (`rag-mcp`, `profiler-mcp`, `metrix-mcp`,
-`cross-session-memory-mcp`, `automated-test-discovery`). Common
-trigger: pip install failed on a transient registry hiccup and the
-installer continued.
+**Cause.** `install.sh` did not finish installing the GEAK MCP packages
+(`rag-mcp`, `profiler-mcp`, `cross-session-memory-mcp`,
+`automated-test-discovery`). `metrix-mcp` is no longer installed separately;
+its functionality is provided through `profiler-mcp`. Common trigger: pip
+install failed on a transient registry hiccup and the installer continued.
 
 **Fix.**
 
@@ -291,11 +291,10 @@ original session, or the session never reached the point of writing
    echo "$USER_DATA_PATH"
    find "$USER_DATA_PATH" -name manifest.json
    ```
-2. If you used a custom path the first time, re-export it before
-   resuming:
+2. If you used a custom path the first time, pass the actual session
+   directory explicitly:
    ```bash
-   export USER_DATA_PATH=/path/to/your/session
-   inference_optimizer optimize --resume
+   inference_optimizer optimize --resume --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.

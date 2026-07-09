@@ -8,7 +8,12 @@ Block 1-3 - Workload understanding and profiling: Submit your workload as the st
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent explores candidates — config overrides, code patches, backend switches, kernel rewrites — one change at a time: **Think → Implement → Benchmark → Decide**. Each result informs which candidate to try next. 
 
-In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), and OOB kernel optimization via Claude Code and OpenAI Codex relying on kernel optimization flow of [Apex](https://github.com/AMD-AGI/Apex)). Kernel profiling and validation is powered by [Magpie](https://github.com/AMD-AGI/Magpie), which relies on [IntelliKit](https://github.com/AMDResearch/intellikit) for some of low-level GPU profiling tools.
+In parallel, hot kernels are asynchronously optimized via external backends
+([Kernel-Forge](https://github.com/AMD-AGI/KernelForge), [GEAK](https://github.com/AMD-AGI/GEAK/tree/main),
+and OOB kernel optimization via Claude Code and OpenAI Codex). Kernel
+profiling and validation is powered by [Magpie](https://github.com/AMD-AGI/Magpie),
+which relies on [IntelliKit](https://github.com/AMDResearch/intellikit) for some
+low-level GPU profiling tools.
 
 Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the runtime writes the final report, reproducible session artifacts, and `session_breakdown.json` so downstream delivery workflows can package or review the optimized stack.
 
@@ -126,15 +131,18 @@ The skill file is the agent's instructions. It encodes the full optimization met
 Hyperloom/
 ├── src/hyperloom/                        # Single src-layout namespace
 │   ├── common/                           # Zero-dependency shared library (io/env/jsonio/...)
+│   │   └── llm/                          # Shared LLM adapter helpers
 │   ├── inference_optimizer/              # Inference optimization skill (sole entry point)
 │   │   ├── SKILL.md                      # Skill spec (Cursor/Claw entry point)
 │   │   ├── cli/                          # CLI entry: inference_optimizer optimize
 │   │   ├── session/                      # Session paths, manifest writer, single-optimizer lock
+│   │   ├── protocol/                     # Intent/action protocol contracts
 │   │   ├── actions/_meta/                # Action metadata YAML (loaded by ActionRegistry)
 │   │   ├── baseline_comparison/          # InferenceX baseline comparison and target analysis
 │   │   ├── breakdown/                    # session_breakdown.json builder + collectors/
 │   │   ├── multi_node/                   # Multi-node install/launch helpers
 │   │   ├── references/                   # Skill reference docs (kernel/framework/…)
+│   │   ├── data/                         # Framework/recipe reference data
 │   │   ├── tools/                        # Operator CLIs (dump_session_breakdown/event_counts/…)
 │   │   ├── experiments/                  # A/B and roofline-audit scripts
 │   │   ├── assets/                       # Install scripts, baseline/profile configs
@@ -163,11 +171,15 @@ Hyperloom/
 │           ├── SKILL.md                  # Kernel-agent operation spec
 │           ├── tools/                    # TraceLens analysis, kernel optimization, patch apply
 │           │   └── backends/             # GEAK/OOB submission (Ray-scheduled)
+│           ├── skills/                   # Kernel-local helper skills (e.g. unittest harness)
 │           ├── scripts/                  # Runtime setup scripts: install.sh, etc.
 │           └── tests/                    # Kernel-agent tool tests
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
 ├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts
+├── slides/                               # Presentation assets used by the README
+├── pyproject.toml                        # Package metadata and console scripts
+├── REUSE.toml                            # SPDX/REUSE license metadata
 ├── .env.template                         # Environment variables
 ├── CHANGELOG.md                          # Per-release notes
 ├── CONTRIBUTING.md                       # Contribution guidelines

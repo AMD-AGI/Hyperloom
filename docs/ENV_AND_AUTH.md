@@ -203,10 +203,11 @@ bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 ```
 
-`src/hyperloom/agents/kernel/scripts/install.sh` (invoked by preflight or manually) then
-installs runtime deps (Ray, GEAK, OOB CLIs, Magpie, etc.) and writes
-`$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Source that too when driving
-kernel-agent tools directly.
+`src/hyperloom/agents/kernel/scripts/install.sh` (chained by
+`src/hyperloom/inference_optimizer/assets/install.sh`, or run manually for
+standalone kernel-agent debugging) then installs runtime deps (Ray, GEAK, OOB
+CLIs, Magpie, etc.) and writes `$USER_DATA_PATH/runtime/kernel-agent.env.sh`.
+Source that too when driving kernel-agent tools directly.
 
 ### 4.1 Workspace (operator-facing)
 
@@ -240,9 +241,11 @@ Leave dependency vars **unset** unless you maintain your own checkouts.
 An explicit `TRACELENS_ROOT` / `INFERENCEX_PATH` pointing at a missing
 path fails preflight (issue #722 guard).
 
-> **Migration note.** `WORKSPACE_PATH` and `INFERENCE_OPTIMIZER_SESSION_DIR`
-> are **no longer read**. Rename launchers that still export them to
-> `USER_DATA_PATH`. See [UPGRADING.md](UPGRADING.md).
+> **Migration note.** `INFERENCE_OPTIMIZER_SESSION_DIR` is no longer read.
+> `WORKSPACE_PATH` remains only as a narrow compatibility fallback for critic
+> static assets and TraceLens workspace discovery. Rename launchers that still
+> use either variable for optimizer state to `USER_DATA_PATH`. See
+> [UPGRADING.md](UPGRADING.md).
 
 ---
 

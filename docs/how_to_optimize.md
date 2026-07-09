@@ -67,7 +67,7 @@ Optimize inference for this workload:
 - ISL: 1024
 - OSL: 1024
 - Goal: improve throughput by at least 10%
-- Budget: 24 hours
+- Budget: 2.0 hours
 
 Before launch, run exactly:
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'

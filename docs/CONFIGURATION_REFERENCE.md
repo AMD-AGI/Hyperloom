@@ -17,8 +17,8 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `SAFE_API_KEY`         | yes      | —       | AMD primus-safe LLM gateway key. Format `ak-...`. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
-| `OPENAI_BASE_URL`      | yes      | —       | LLM gateway URL. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
+| `SAFE_API_KEY`         | conditional | —    | AMD primus-safe LLM gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments may instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased). |
+| `OPENAI_BASE_URL`      | conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments may provide provider-specific base URLs instead. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`. |
 | `CURSOR_API_KEY`       | no       | unset   | Cursor SDK key (prefix `crsr_...`) for the OOB `cursor` kernel-opt backend. **Never inherited from `SAFE_API_KEY`.** When unset, Hyperloom auto-drops `cursor` from the default kernel-opt ladder.       |
 | `CURSOR_DEFAULT_MODEL` | no       | `claude-opus-4-7` | Override the default Cursor model id.                                                                                                                                                          |
 | `CLAUDE_MODEL`         | no       | `claude-opus-4-7` | Claude model id for OOB Claude attempts.                                                                                                                                                       |
@@ -71,7 +71,7 @@ read them when invoked standalone.
 |-------------------|-------------|----------------------------------------------------------------------|
 | `MODEL_PATH`      | —           | Path or HF id of the model to optimize.                              |
 | `FRAMEWORK`       | `sglang`    | `sglang`, `vllm`, or single-node-only `atom`. A session cannot mix.   |
-| `GPU_TYPE`        | auto-detect | `mi300x` / `mi325x` / `mi355x`.                                      |
+| `GPU_TYPE`        | auto-detect | `mi300x` / `mi308x` / `mi325x` / `mi355x`.                           |
 | `TARGET_GPU_TYPE` | mirrors `GPU_TYPE` | Set by the CLI; used by Magpie YAML rendering for script pinning. |
 | `MODEL_CLASS`     | unset       | Optional launcher hint. When unset, Coordinator boot infers and persists it from model metadata or model-path family keywords; the old live `classify` action is removed. |
 | `TP`              | `1`         | Tensor-parallel size.                                                |
@@ -252,8 +252,6 @@ internal-only — do not set them by hand:
 
 * `HYPERLOOM_KERNEL_AGENT_ROOT` — internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
-* `ANTHROPIC_BASE_URL` — set by preflight / split-gateway wiring at
-  process launch.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol — internal toggles for
   the test suite.
 

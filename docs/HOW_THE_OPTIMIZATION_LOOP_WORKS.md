@@ -49,11 +49,10 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK
+## FRAMEWORK_AGENT
 
-When enabled, FRAMEWORK is managed by the Coordinator. The only
-protected framework-agent integration is discovery via `fa
-phase-discover`.
+When enabled, FRAMEWORK_AGENT is managed by the Coordinator. The only
+protected framework-agent integration is discovery via `fa phase-discover`.
 
 For each candidate:
 

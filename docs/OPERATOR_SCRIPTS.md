@@ -5,8 +5,12 @@ A short reference for the operator-facing scripts under
 they are utilities you run by hand against a finished or in-progress
 session directory.
 
-All scripts respect the `$USER_DATA_PATH` env (default
-`/workspace/hyperloom`) when no explicit `--session-dir` is given. See
+Live-session scripts resolve the session directory from
+`INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` first, then fall back to
+`$USER_DATA_PATH` (default `/workspace/hyperloom`) when no explicit
+`--session-dir` is given. For historical or offline sessions, pass
+`--session-dir` explicitly because the default `per_model_ts` layout nests
+sessions under `$USER_DATA_PATH/<model>/<UTC_ts>/`. See
 [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §4.
 
 ---
@@ -122,13 +126,16 @@ Print recent action / proposal / kernel counts from a session's
 ### Usage
 
 ```bash
-python -m hyperloom.inference_optimizer.tools.event_counts            # default session_dir
+python -m hyperloom.inference_optimizer.tools.event_counts            # active session env/default
 python -m hyperloom.inference_optimizer.tools.event_counts /path/to/session
+python -m hyperloom.inference_optimizer.tools.event_counts /path/to/session --limit 2000
+python -m hyperloom.inference_optimizer.tools.event_counts /path/to/session --all
 ```
 
-Reads at most the last 500 events from
+Reads the last 500 events by default from
 `$SESSION_DIR/storage/coordinator.db` and emits a JSON object of
-`{category: count}`. Exit code 2 if the DB is missing.
+`{category: count}`. Use `--limit N` to change the window or `--all` to scan
+the full event log. Exit code 2 if the DB is missing.
 
 ### Example output
 
