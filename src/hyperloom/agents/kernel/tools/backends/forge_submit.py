@@ -99,6 +99,7 @@ def _resolve_gpu_target(candidate: dict) -> str:
         if m:
             return m.group(0)
     except Exception:
+        # Arch detection failed; fall back to the default gfx942 below.
         pass
     return "gfx942"
 
@@ -127,6 +128,7 @@ def _git_toplevel(path: str) -> str:
         if proc.returncode == 0:
             return proc.stdout.strip()
     except Exception:
+        # Probe command failed; return the empty string below.
         pass
     return ""
 
@@ -207,11 +209,13 @@ def _editable_roots() -> list[str]:
     try:
         scan_dirs.extend(site.getsitepackages())
     except Exception:
+        # site introspection is best-effort; skip if unavailable.
         pass
     if hasattr(site, "getusersitepackages"):
         try:
             scan_dirs.append(site.getusersitepackages())
         except Exception:
+            # site introspection is best-effort; skip if unavailable.
             pass
     # Venv / conda site-packages may not appear in sys.path when PYTHONPATH
     # is overridden and the venv is not activated. Probe conventional locations
@@ -338,10 +342,12 @@ def _release_repo_lock(lock: _RepoLock | None) -> None:
     try:
         fcntl.flock(lock.fd, fcntl.LOCK_UN)
     except OSError:
+        # Lock already released; nothing to undo.
         pass
     try:
         lock.close()
     except OSError:
+        # Lock fd already closed; nothing to release.
         pass
 
 
@@ -504,6 +510,7 @@ def _restore_inplace(restore: dict) -> None:
     try:
         Path(restore["source_file"]).write_bytes(restore["backup"])
     except OSError:
+        # Best-effort restore; a filesystem error here is non-fatal.
         pass
     # Delete the temp branch (safe now that HEAD points elsewhere).
     if restore.get("branch"):
@@ -1290,6 +1297,7 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
     try:
         shutil.copy2(worktree_kernel_file, primary)
     except OSError:
+        # Best-effort artifact copy; a filesystem error here is non-fatal.
         pass
 
     # Every file changed vs the pre-forge baseline (best-kept state == the
@@ -1310,6 +1318,7 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
         try:
             shutil.copy2(srcp, dstp)
         except OSError:
+            # Best-effort artifact copy; a filesystem error here is non-fatal.
             pass
 
     # Full multi-file patch (agent's net optimization, excludes pre-existing dirty).
@@ -1317,6 +1326,7 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
     try:
         (dst_dir / "forge.patch").write_text(patch.stdout or "")
     except OSError:
+        # Best-effort patch dump; a filesystem error here is non-fatal.
         pass
 
     return str(primary), changed
@@ -1906,6 +1916,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                 (output_dir / "optimized_versions" / "changed_files.txt").write_text(
                     "\n".join(changed_files) + "\n")
             except OSError:
+                # Best-effort manifest write; a filesystem error here is non-fatal.
                 pass
         _write_report(output_dir, baseline_ms, best_ms, improved)
         if loop_exc and baseline_ms is None:
