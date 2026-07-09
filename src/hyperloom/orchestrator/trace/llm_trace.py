@@ -59,6 +59,7 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "robustness",
         "proposal_scorer",
         "geak",
+        "geak_v3",
         "oob",
         "forge",
         "tracelens",
