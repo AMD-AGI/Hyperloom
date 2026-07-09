@@ -511,6 +511,9 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
 def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
     """#340: opt-out lets a non-AMD orchestration model pass when in catalog."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    # Pin a probe URL so the stubbed catalog probe runs without relying on a
+    # base-URL leaked from other tests (clean_url_env now restores os.environ).
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -528,6 +531,7 @@ def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsy
 def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys):
     """#340: under opt-out a catalog miss errors (no silent opus-4-6 fallback)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -575,6 +579,7 @@ def test_validate_claude_model_optout_off_still_hard_gates(monkeypatch, capsys):
 
 
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -682,6 +687,7 @@ def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monke
 
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):
     """Catalog has 4-6 only → arg rewritten with a WARN."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -699,6 +705,7 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
 
 def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     """Catalog missing both 4-7 and 4-6 → sys.exit(2)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
