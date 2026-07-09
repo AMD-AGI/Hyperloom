@@ -70,6 +70,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             try:
                 pid_file.unlink()
             except OSError:
+                # Stale PID file already removed; nothing to clean up.
                 pass
             continue
 
@@ -80,6 +81,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             try:
                 pid_file.unlink()
             except OSError:
+                # Stale PID file already removed; nothing to clean up.
                 pass
             continue
         try:
@@ -89,6 +91,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             try:
                 pid_file.unlink()
             except OSError:
+                # Stale PID file already removed; nothing to clean up.
                 pass
             continue
 
@@ -99,6 +102,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             try:
                 os.kill(pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
+                # Process already exited; nothing to signal.
                 pass
 
         time.sleep(grace_sec)
@@ -114,12 +118,14 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
+                    # Process already exited; nothing to signal.
                     pass
 
         summary["killed"].append(f"{pid_file.name}:{pid}")
         try:
             pid_file.unlink()
         except OSError:
+            # PID file already gone; nothing to clean up.
             pass
 
     # Clean up legacy rayjoin pid files (current launch no longer creates these).
@@ -134,10 +140,12 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
                 try:
                     os.killpg(os.getpgid(pid), signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
+                    # Process already exited; nothing to signal.
                     pass
         try:
             pid_file.unlink()
         except OSError:
+            # PID file already gone; nothing to clean up.
             pass
 
     return summary

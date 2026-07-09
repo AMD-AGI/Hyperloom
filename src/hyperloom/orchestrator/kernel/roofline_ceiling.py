@@ -664,6 +664,7 @@ def _read_total_size(model_path: Path) -> int | None:
             if size:
                 return int(size)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            # Unreadable/malformed size metadata; fall back to the file-size scan below.
             pass
     return _sum_weight_file_sizes(model_path, "*.safetensors") or _sum_weight_file_sizes(model_path, "*.bin")
 
