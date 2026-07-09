@@ -144,7 +144,4 @@ self-contained rewrite backend and does not depend on GEAK.
 
 GEAK ships its own documentation in-repo; see the
 [docs index](https://github.com/AMD-AGI/GEAK/tree/main/docs) covering
-[Quick start](https://github.com/AMD-AGI/GEAK/blob/main/docs/quick_start.md),
-[Configuration](https://github.com/AMD-AGI/GEAK/blob/main/docs/configuration.md),
-and the
-[Subagent guide](https://github.com/AMD-AGI/GEAK/blob/main/docs/subagent_guide.md).
+[Quick start](https://github.com/AMD-AGI/GEAK/blob/main/docs/quick_start.md).

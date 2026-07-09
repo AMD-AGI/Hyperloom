@@ -156,7 +156,7 @@ gateway. It requires a **separate** issuer key with prefix `crsr_...`:
 
 | Variable                | Default                  | Description                                                                                                                                                                       |
 |-------------------------|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CURSOR_API_KEY`        | unset                    | Cursor SDK key. **Never** inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset; set it to keep `cursor` in the ladder. |
+| `CURSOR_API_KEY`        | unset                    | Cursor SDK key. Never inherited from `SAFE_API_KEY`. When unset, `cursor` is dropped from the default backend ladder. |
 | `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7`        | Override the default Cursor model id.                                                                                                                                              |
 
 The selection notes carry `cursor_key_present: bool` for observability.
@@ -213,7 +213,7 @@ Source that too when driving kernel-agent tools directly.
 
 | Variable                  | Set by operator? | Default                          | Description                                                                 |
 |---------------------------|------------------|----------------------------------|-----------------------------------------------------------------------------|
-| `USER_DATA_PATH`          | recommended      | `/workspace/hyperloom`           | Writable root for session dirs, `runtime/`, `logs/`, optimizer artefacts. Replaces retired `WORKSPACE_PATH` / `INFERENCE_OPTIMIZER_SESSION_DIR`. |
+| `USER_DATA_PATH`          | recommended      | `/workspace/hyperloom`           | Writable root for sessions, `runtime/`, logs, and optimizer artefacts. |
 | `REPO_ROOT`               | rarely           | auto from script location        | This Hyperloom checkout (`.env`, skills, scripts).                          |
 | `LOCAL_SETUP_ENV`         | rarely           | `$USER_DATA_PATH/runtime/local-setup.env.sh` | Output of `local_setup.sh`; source in every fresh shell.          |
 | `KERNEL_AGENT_ENV`        | rarely           | `$USER_DATA_PATH/runtime/kernel-agent.env.sh` | Output of `install.sh`; exports resolved paths + LLM aliases.   |
@@ -231,9 +231,9 @@ shared WekaFS session storage does not collocate concurrent pods' clones.
 | Variable                  | Set by operator? | Default / auto-clone target      | Description                                                                 |
 |---------------------------|------------------|----------------------------------|-----------------------------------------------------------------------------|
 | `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely        | `/opt/hyperloom/open-source-repos` | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, GEAK, OOB. Writable `/opt` required unless overridden. |
-| `OOB_SRC`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge/OOB` (via `local_setup.sh`) | OOB kernel-opt backends (claude / codex / cursor). Derived from [KernelForge](https://github.com/AMD-AGI/KernelForge) checkout. |
-| `INFERENCEX_PATH`         | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX` | [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline / target analysis. Preflight can also clone here when unset. |
-| `TRACELENS_ROOT`          | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens` | [TraceLens](https://github.com/AMD-AGI/TraceLens) for profile & kernel detection; pinned to a fixed SHA on auto-clone. |
+| `OOB_SRC`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge/OOB` | OOB kernel-opt backends (claude / codex / cursor). |
+| `INFERENCEX_PATH`         | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX` | InferenceX checkout for baseline / target analysis. |
+| `TRACELENS_ROOT`          | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens` | TraceLens checkout for profile and kernel detection. Auto-clone pins a fixed SHA. |
 | `TRACELENS_INTERNAL_ROOT` | optional         | unset (open-source-only)         | Internal TraceLens extension (roofline gap, MI355+ MAF). Hyperloom never clones it — set only when you maintain a checkout. |
 | `MAGPIE_PATH`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/Magpie` | Magpie benchmark wrappers; installed by `install.sh` when missing.          |
 
