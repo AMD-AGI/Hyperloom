@@ -60,7 +60,15 @@ def stub_install_steps(monkeypatch, tmp_path):
 
 @pytest.fixture
 def clean_url_env(monkeypatch):
-    """Strip the URL env vars so each test starts from a known state."""
+    """Strip URL env vars and fully restore os.environ afterwards.
+
+    ``_preflight`` writes alias vars (OOB_API_KEY/GEAK_*/…) directly into
+    ``os.environ``; monkeypatch cannot roll those back, so snapshot and
+    restore the whole environ to stop cross-test leakage.
+    """
+    import os
+
+    snapshot = dict(os.environ)
     for var in (
         "ANTHROPIC_BASE_URL",
         "OPENAI_BASE_URL",
@@ -78,7 +86,11 @@ def clean_url_env(monkeypatch):
         "INFERENCEX_PATH",
     ):
         monkeypatch.delenv(var, raising=False)
-    return monkeypatch
+    try:
+        yield monkeypatch
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
 
 
 def test_derive_anthropic_base_url_strips_openai_v1_suffix():
