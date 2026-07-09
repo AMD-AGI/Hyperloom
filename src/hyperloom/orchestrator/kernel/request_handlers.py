@@ -2363,12 +2363,31 @@ def _resolve_fusion_decode_trace(state, payload: dict) -> str:
     trace. Hyperloom already captured one in PRELUDE (``state.last_profile_trace``),
     so reuse it instead of re-profiling. Explicit ``payload['trace_path']`` wins.
     """
+    def _trace_file(path_str: str) -> str:
+        path = Path(path_str)
+        if path.is_file():
+            return str(path)
+        if not path.is_dir():
+            return ""
+        candidates = sorted(
+            list(path.glob("*.trace.json.gz"))
+            + list(path.glob("*.trace.json"))
+            + list(path.glob("*.json.gz")),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return str(candidates[0]) if candidates else ""
+
     explicit = str(payload.get("trace_path") or "").strip()
-    if explicit and Path(explicit).is_file():
-        return explicit
+    if explicit:
+        resolved = _trace_file(explicit)
+        if resolved:
+            return resolved
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    if trace and Path(trace).is_file():
-        return trace
+    if trace:
+        resolved = _trace_file(trace)
+        if resolved:
+            return resolved
     return ""
 
 
