@@ -75,5 +75,6 @@ deployment, see [Hyperloom self-hosting and operations guide](https://github.com
 
 ## Next steps
 
-- To run Hyperloom on your own AMD GPU hardware instead, see [Install Hyperloom](hyperloom-installation.md).
+- To run Hyperloom on your own AMD GPU hardware instead, see
+  [Local Mode quickstart](local-mode.md) or [Bare-metal quickstart](bare-metal.md).
 - [Run a Hyperloom optimization](../how-to/optimize.md).

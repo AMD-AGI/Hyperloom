@@ -10,8 +10,10 @@ This topic assumes you have already completed installation. If you haven't:
 
 - **Hosted UI** — see [Quickstart — hosted UI](../install/quickstart.md). No
   local setup needed; launch directly from the browser.
-- **Local Mode or bare-metal** — see [Install Hyperloom](../install/hyperloom-installation.md)
-  first, then return here to launch your first run.
+- **Local Mode** — see [Local Mode quickstart](../install/local-mode.md), then
+  return here to launch your first run.
+- **Bare-metal** — see [Bare-metal quickstart](../install/bare-metal.md), then
+  return here to launch your first run.
 
 ## Launch from Cursor (Local Mode)
 

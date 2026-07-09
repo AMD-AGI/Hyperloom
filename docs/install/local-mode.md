@@ -85,67 +85,11 @@ AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform 
 
 ---
 
-## Launch Inference Optimization
+## Next Step
 
-After setup, open the Hyperloom workspace printed by `local_setup.sh` in Cursor, then paste the generated prompt template into Cursor Chat. Fill in the model path and adjust the other workload parameters before sending.
-
-`local_setup.sh` prints something like this when it finishes:
-
-````text
-Open this folder in Cursor as the workspace:
-  /path/to/Hyperloom
-
-Paste this into Cursor Chat and fill in your workload:
-
-@src/hyperloom/inference_optimizer/SKILL.md
-
-Optimize inference for this workload:
-- Model: /path/to/your/model   # <-- replace with the path to your downloaded model
-- Framework: sglang
-- GPU: MI300X
-- TP: 8
-- CONC: 64
-- ISL: 1024
-- OSL: 1024
-- Goal: improve throughput by at least 10%
-- Budget: 24 hours
-
-Before launch, run exactly:
-```bash
-source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
-export USER_DATA_PATH='/path/to/hyperloom-run'
-```
-````
-
-The fields you commonly edit:
-
-| Field | Maps to | Description | Default |
-|---|---|---|---|
-| `Model` | `--model` | Path to your model. | required |
-| `Framework` | `--framework` | `sglang` or `vllm` (do not mix within one session). | `sglang` |
-| `GPU` | `--gpu-type` | e.g. `MI300X`, `MI325X`, `MI355X`. | auto-detect |
-| `Goal` | `--target-gain` | Optional stop condition, such as a target throughput gain. | unset |
-| `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
-
-For the full list of workload fields, CLI flags, and defaults, see [Step 2 — Launch in `src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md). For first-launch errors, see that skill's §"Failure Handling".
-
-<details>
-<summary><strong>Resume an existing session</strong></summary>
-
-```text
-@src/hyperloom/inference_optimizer/SKILL.md
-
-Resume the existing Hyperloom optimization session.
-
-Requirements:
-1. Launch `inference_optimizer optimize --resume`; do not start a new session.
-2. Do not pass `--model`; read the model and workload from the saved manifest/state.
-3. Before launching, verify `manifest.json` and `state.json` exist.
-4. Report the log path, PID, initial health check result, current phase, cumulative gain, and best config.
-5. Monitor the process every 300s until the optimization is complete or failed.
-```
-
-</details>
+After setup, open the Hyperloom workspace printed by `local_setup.sh` in Cursor.
+Then follow [Run a Hyperloom optimization](../how-to/optimize.md) to launch,
+monitor, or resume a run.
 
 For the optional AMD Quark quantization prelude, see [Quantization with AMD Quark](../how-to/quantization-quark.md).
 
