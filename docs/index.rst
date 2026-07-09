@@ -36,7 +36,6 @@ automatically from the in-code Google-style docstrings via ``autodoc`` and
 
    how_to_optimize
    HOW_THE_OPTIMIZATION_LOOP_WORKS
-   HOWTO_RUN_GEAK_V4_END_TO_END
    OPERATIONS
    OPERATOR_SCRIPTS
    CONFIGURATION_REFERENCE
