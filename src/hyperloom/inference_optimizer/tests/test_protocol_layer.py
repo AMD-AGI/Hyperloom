@@ -49,7 +49,7 @@ def test_intent_type_v06_includes_review_verdict():
 
 
 def test_intent_type_no_objection_or_vote():
-    """v0.6: parliament removed entirely (DESIGN ADR-38)."""
+    """Parliament intent types are removed entirely."""
     values = {t.value for t in IntentType}
     assert "objection" not in values
     assert "vote" not in values
@@ -107,7 +107,7 @@ def test_emit_intent_tool_schema_is_complete():
 
 # message_bus
 def test_topic_allowlist_v06_changes():
-    """v0.6: review_verdict added; objection/vote/parliament removed."""
+    """review_verdict is allowed while objection/vote/parliament topics are removed."""
     assert "review_verdict" in TOPIC_ALLOWLIST
     assert "advice" in TOPIC_ALLOWLIST
     assert "objection" not in TOPIC_ALLOWLIST
@@ -170,7 +170,7 @@ async def test_message_bus_replay_for_returns_ascending(db):
 
 # resource_lock
 def test_known_lanes_v08_includes_research_lane():
-    """v0.8 M5 (KB_design §3.7) adds ``research_lane``; the four v0.6 serving lanes are unchanged. WS2 adds ``gpu_research_lane`` (GPU specialists ⊥ serving)."""
+    """The lane set includes ``research_lane`` and ``gpu_research_lane`` while preserving the serving lanes."""
     assert set(KNOWN_LANES) == {
         "server_lifecycle",
         "workspace_mutation",
@@ -240,7 +240,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
 
 @pytest.mark.asyncio
 async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db):
-    """benchmark_lane held → profile_lane acquire must fail (DESIGN §3.5.3)."""
+    """benchmark_lane held → profile_lane acquire must fail."""
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     bench = await locks.acquire_many(
         ["benchmark_lane"],

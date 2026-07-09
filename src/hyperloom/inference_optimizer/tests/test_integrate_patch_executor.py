@@ -676,7 +676,7 @@ async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, mon
 
 @pytest.mark.asyncio
 async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, monkeypatch):
-    """Patch clears gap #1 (shape_mismatch) but boot stops at gap #2 (missing_weight).
+    """Patch clears the shape_mismatch gap but boot stops at a new missing_weight gap.
 
     The server still does not fully boot (output_throughput=0), but the failure
     moved to a NEW, deeper actionable signature -> status='advanced': the patch
