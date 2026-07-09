@@ -286,7 +286,7 @@ def test_cli_real_executors_consistent_with_runs_actions():
     )
 
 
-# Phase 1 prompt-builder fields — see ActionMetadata docstring.
+# Prompt-builder fields — see ActionMetadata docstring.
 def test_every_action_has_non_empty_description(registry):
     for m in registry.all():
         assert m.description, f"{m.name}: description must be non-empty"

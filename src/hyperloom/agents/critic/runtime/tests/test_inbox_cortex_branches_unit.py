@@ -64,7 +64,7 @@ def test_parse_inbox_prompt_preamble_and_sections() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# cortex_kb_client                                                            #
+# cortex_kb_client #
 # --------------------------------------------------------------------------- #
 def test_cortex_normalise_and_init() -> None:
     assert _normalise_value(None) == ""  # line 77

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M6 — research_lane capacity + concurrent dispatcher tests (KB_design §3.7 + §3.13 M6)."""
+"""research_lane capacity + concurrent dispatcher tests."""
 
 from __future__ import annotations
 

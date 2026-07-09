@@ -2,7 +2,7 @@
 
 """Tests for the read-only ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias.
 
-tree-reform.MD P2.7: ``hyperloom.inference_optimizer.compat`` (the P2.1-era
+``hyperloom.inference_optimizer.compat`` (the P2.1-era
 re-export shim for these helpers) has been removed; all call sites now import
 the canonical implementation directly from ``hyperloom.common.payload_aliases``,
 which is what this test exercises.

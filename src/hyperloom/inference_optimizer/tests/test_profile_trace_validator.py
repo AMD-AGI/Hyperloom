@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``profile._validate_trace_structure`` (#210 / Deval's check_torch_trace.py)."""
+"""Tests for ``profile._validate_trace_structure`` (Deval's check_torch_trace.py)."""
 
 from __future__ import annotations
 
@@ -403,7 +403,7 @@ def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):
     )
     health = _validate_trace_structure(trace_dir, "sglang")
     assert health["per_kernel_attribution_degraded"] is True
-    # capture_traces/ is still intact — a capture-fold fallback (#431
+ # capture_traces/ is still intact — a capture-fold fallback (#431
     # proper fix) would have data to mine even though the live trace lost
     # per-kernel attribution.
     assert health["capture_traces_present"] is True

@@ -981,14 +981,14 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     )
 
 
-# Section: dedup_vllm_server_args (#520) — vLLM/atom single-value flag collapse
+# Section: dedup_vllm_server_args  — vLLM/atom single-value flag collapse
 
 
 class TestDedupVllmServerArgs:
     """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
 
     def test_duplicate_attention_backend_keeps_last(self):
-        # The exact #520 repro: YAML base + variant both inject the flag.
+ # The exact repro: YAML base + variant both inject the flag.
         out = _grid_runner.dedup_vllm_server_args(
             "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
             "vllm",
@@ -1071,7 +1071,7 @@ class TestDedupVllmServerArgs:
         assert out == "--attention-backend C"
 
     def test_json_space_value_flag_left_untouched(self):
-        # #520 review: a flag carrying a JSON/space value must NOT be tokenized
+ # a flag carrying a JSON/space value must NOT be tokenized
         # and re-joined (would drop quotes -> {temperature: 0.7}). Leave the
         # whole string verbatim, even with a duplicate single-value flag also
         # present (the unquoted $EXTRA_*_ARGS expansion can't round-trip it).

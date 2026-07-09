@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 KB_gaps/Gap-09 — structured gaps[] ledger tests.
+"""structured gaps[] ledger tests.
 
 Covers PR 5.1-5.6: the SharedState ``gaps`` field + write helpers,
 the PolicyGate lock, Coordinator ``_refresh_gaps`` extraction, the

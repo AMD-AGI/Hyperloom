@@ -61,7 +61,7 @@ def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
 
 
 def test_dispatcher_cortex_url_is_not_a_recipe_remote(tmp_path, monkeypatch) -> None:
-    # CORTEX_KB_URL / --cortex-kb-url now only feed the critic agent; they must
+ # CORTEX_KB_URL / --cortex-kb-url now only feed the critic agent; they must
     # NOT wire a recipe-KB remote. Without gbrain configured, the dispatcher
     # stays local-only even when a cortex URL is supplied.
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))

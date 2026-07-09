@@ -313,7 +313,7 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertIn('TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
-        # #722: clone AND pin the ref inside the temp sibling, then atomically
+ # clone AND pin the ref inside the temp sibling, then atomically
         # rename — never publish an unpinned/half-cloned $TRACELENS_ROOT.
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp"', install_text)
         self.assertIn('git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
@@ -562,7 +562,7 @@ class KernelAgentToolTests(unittest.TestCase):
                     "1.5",
                     "--accuracy-passed",
                     "true",
-                    # Well above the 1.05x KEEP threshold (issue #442).
+                    # Well above the 1.05x KEEP threshold.
                     "--micro-speedup",
                     "1.6",
                     "--dry-run",
@@ -634,7 +634,7 @@ class KernelAgentToolTests(unittest.TestCase):
             # A vendor BLAS binary (hipblasLt) carries no rewritable source,
             # so ``classify_patchability`` marks it non-routable. The
             # optimizer now short-circuits *before* backend selection
-            # (PR #314 "filter non-routable kernels") into a skipped/REVERT
+            # into a skipped/REVERT
             # result instead of running an empty backend ladder. The
             # invariant remains: no backend is dispatched and the proposal
             # is REVERT.

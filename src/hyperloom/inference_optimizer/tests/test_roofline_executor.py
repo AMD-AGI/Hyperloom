@@ -1249,7 +1249,7 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #431: cuda-graph folding -> trace_analyze ok but 0 hot kernels
+# cuda-graph folding -> trace_analyze ok but 0 hot kernels
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):

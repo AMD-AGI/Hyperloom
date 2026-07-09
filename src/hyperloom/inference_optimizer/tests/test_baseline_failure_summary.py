@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""``baseline_failed`` root-cause surfacing tests (issue #465).
+"""``baseline_failed`` root-cause surfacing tests.
 
 On ``baseline_failed`` the top-level ``final.json`` / report must headline the
 real terminal engine/worker fault from the last failed baseline attempt, not a

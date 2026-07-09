@@ -1007,7 +1007,7 @@ def test_note_specialist_dispatched_resets_only_its_anchor():
     s = SharedState()
     s.bump_domain_round_counters()
     s.bump_domain_round_counters()
-    # serving_specialist maps to the "framework" kb_anchor.
+ # serving_specialist maps to the "framework" kb_anchor.
     s.note_specialist_dispatched("serving_specialist")
     assert s.rounds_since_last_specialist["framework"] == 0
     # A different anchor is untouched.

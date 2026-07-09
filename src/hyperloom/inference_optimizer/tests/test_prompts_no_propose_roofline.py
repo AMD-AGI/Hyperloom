@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Blocker #3 guard — LLM-facing prompts must not instruct the model to propose ``roofline`` / ``profile``.
+"""LLM-facing prompts must not instruct the model to propose ``roofline`` / ``profile``.
 
 The Coordinator owns those analysis actions; PolicyGate R1 ``phase_incompatible``
 denies any LLM proposal, so prompts that tell the LLM to propose either cause a

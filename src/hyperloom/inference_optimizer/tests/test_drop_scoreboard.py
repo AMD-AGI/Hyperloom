@@ -143,7 +143,7 @@ def test_scoring_module_was_retired():
     assert not hasattr(scoring_pkg, "all_action_scores")
 
 
-# 4. Coordinator scoring surface fully removed (KB_gaps/Dead-B)
+# Coordinator scoring surface fully removed
 def test_coordinator_has_no_scoring_methods():
     """KB_gaps/Dead-B — every v0.6 scoreboard hook on Coordinator is removed."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator

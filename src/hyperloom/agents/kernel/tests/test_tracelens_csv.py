@@ -760,7 +760,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
 
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
-    # write_reports requires the upstream analysis.md (#203); provide a stub.
+    # write_reports requires the upstream analysis.md ; provide a stub.
     analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
     analysis_md.parent.mkdir(parents=True, exist_ok=True)
     analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
@@ -774,7 +774,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
-        # Hyperloom#314: hot_kernels carries only routable candidates; set the marker
+ # hot_kernels carries only routable candidates; set the marker
         # explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
@@ -963,7 +963,7 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "gpu_pct": 10.0,
         "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
-        # Per AMD-AGI/Hyperloom#314, see twin fixture above.
+ # Per AMD-AGI/Hyperloom#314, see twin fixture above.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -989,7 +989,7 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
     assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
 
 
-# #203 — write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
+# write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
 def _make_write_reports_args(trace_path):
     from argparse import Namespace
 
@@ -1093,7 +1093,7 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# #124 — SDK runner for TraceLens analysis-orchestrator skill
+# SDK runner for TraceLens analysis-orchestrator skill
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     skill = tmp_path / "analysis-orchestrator.md"
     trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
@@ -1255,7 +1255,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         captured["options"] = options.kwargs
         output_dir.mkdir(parents=True, exist_ok=True)
         # TraceLens contract: orchestrator writes ``analysis.md``.
-        # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
+ # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
@@ -1520,7 +1520,7 @@ def test_266_transcript_caps_oversized_fields():
 
 
 # ===========================================================================
-# T2 — analysis.md is the only contracted TraceLens output.
+# analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
     import asyncio
@@ -1624,7 +1624,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# #127 — splitter CLI must match the real split_inference_trace_annotation interface
+# splitter CLI must match the real split_inference_trace_annotation interface
 # (positional trace_path, -o, --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
@@ -3181,7 +3181,7 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
 
 
 # ===========================================================================
-# #420: task-group over-splitting — one device kernel fragmented across
+# task-group over-splitting — one device kernel fragmented across
 # multiple groups, each costing a redundant GEAK dispatch. Two fragmentation
 # sources:
 #   (1) native (.cu/.hip/.cpp) kernels have no Python AST def-line, so
@@ -3417,7 +3417,7 @@ def test_build_audit_summary_includes_task_groups():
     assert summary["task_group_count"] == 1
 
 
-# _default_workspace_path — USER_DATA_PATH rollout for TraceLens (#203); locks the fallback precedence.
+# _default_workspace_path — USER_DATA_PATH rollout for TraceLens ; locks the fallback precedence.
 def test_default_workspace_path_prefers_user_data_path(monkeypatch):
     """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
     monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")

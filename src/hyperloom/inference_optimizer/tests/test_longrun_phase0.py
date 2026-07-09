@@ -48,7 +48,7 @@ def _iso(dt: datetime) -> str:
 
 
 # ==========================================================================
-# R4 — SharedState ledger caps
+# SharedState ledger caps
 # ==========================================================================
 def test_intervention_mix_capped():
     st = SharedState()
@@ -107,7 +107,7 @@ def test_tested_ledger_cap_applied_on_merge():
 
 
 # ==========================================================================
-# R4 — DB retention (events + tasks), resume-safe
+# DB retention (events + tasks), resume-safe
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_prune_events_respects_min_cursor_and_recent_window(conn):
@@ -260,7 +260,7 @@ async def test_run_db_retention_aggregates(conn):
 
 
 # ==========================================================================
-# R5 — GPU lease reaper
+# GPU lease reaper
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_gpu_pool_reap_expired(conn):
@@ -348,7 +348,7 @@ def test_retry_policy_from_env(monkeypatch):
 
 
 # ==========================================================================
-# R5 — coordinator maintenance tick (cadence + wiring)
+# coordinator maintenance tick (cadence + wiring)
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypatch):

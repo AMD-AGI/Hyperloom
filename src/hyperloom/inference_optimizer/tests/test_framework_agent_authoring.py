@@ -1041,7 +1041,7 @@ def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
     assert kinds == ["framework_agent"]
 
 
-# --- #5-P2: cross-framework authoring seed / provenance --------------------
+# --- cross-framework authoring seed / provenance --------------------
 
 
 def test_authoring_specialist_cross_framework_seed(tmp_path: Path):

@@ -1337,7 +1337,7 @@ def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
     assert res is None
 
 
-# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
+# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names.
 
 
 def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path):

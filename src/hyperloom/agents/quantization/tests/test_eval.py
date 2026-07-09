@@ -13,7 +13,7 @@ from hyperloom.agents.quantization.driver.eval import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# resolve_threshold — priority chain (§3.1)
+# resolve_threshold — priority chain
 # ─────────────────────────────────────────────────────────────────────────────
 
 

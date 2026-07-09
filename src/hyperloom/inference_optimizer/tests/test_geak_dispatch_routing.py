@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""GEAK-dispatch correctness regressions (Hyperloom#601, #602).
+"""GEAK-dispatch correctness regressions.
 
 * #601 — a ``backends`` payload supplied as a JSON list (``["geak"]``) must be
   serialized into a bare ``--backends geak`` token, never ``str(["geak"])`` →
@@ -24,7 +24,7 @@ from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
 # --------------------------------------------------------------------------- #
-# #601 — --backends serialization
+# --backends serialization
 # --------------------------------------------------------------------------- #
 def test_backends_cli_arg_list_is_comma_joined_bare_names():
     assert krh._backends_cli_arg(["geak"]) == "geak"
@@ -49,7 +49,7 @@ def _bypass_single_kernel_guards(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, monkeypatch):
-    # Hyperloom#601 repro: a list backends payload must hit the subprocess as a
+ # a list backends payload must hit the subprocess as a
     # bare "geak" token, not the repr "['geak']".
     _bypass_single_kernel_guards(monkeypatch)
     captured: dict[str, list[str]] = {}
@@ -71,11 +71,11 @@ async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, 
 
 
 # --------------------------------------------------------------------------- #
-# #602 — timeout backend attribution
+# timeout backend attribution
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_timeout_result_is_attributed_to_dispatched_backend(tmp_path: Path, monkeypatch):
-    # Hyperloom#602 repro: a claude subprocess that overruns the outer timeout
+ # a claude subprocess that overruns the outer timeout
     # must be shaped into a failed result that carries backend="claude" (not
     # left backend-less for the GEAK fallback to claim).
     _bypass_single_kernel_guards(monkeypatch)
@@ -96,7 +96,7 @@ async def test_timeout_result_is_attributed_to_dispatched_backend(tmp_path: Path
 
 def test_record_kernel_invocations_claude_timeout_routes_to_oob(tmp_path: Path):
     # A backend-stamped (claude) no-attempts failure lands on the oob lane,
-    # never the geak lane. Hyperloom#602.
+ # never the geak lane. Hyperloom#602.
     result = {
         "kernel_id": "k008",
         "status": "failed",
@@ -113,7 +113,7 @@ def test_record_kernel_invocations_claude_timeout_routes_to_oob(tmp_path: Path):
 
 def test_record_kernel_invocations_unknown_backend_is_not_geak(tmp_path: Path):
     # A genuine pre-dispatch failure with no resolvable backend must NOT be
-    # fabricated as a GEAK invocation. Hyperloom#602.
+ # fabricated as a GEAK invocation. Hyperloom#602.
     result = {
         "kernel_id": "k001",
         "status": "failed",
@@ -144,7 +144,7 @@ def test_record_kernel_invocations_geak_still_records(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
-# #602 — per-kernel ladder budget (option 1)
+# per-kernel ladder budget (option 1)
 # --------------------------------------------------------------------------- #
 def test_kernel_ladder_budget_sec_priority(monkeypatch):
     monkeypatch.delenv("KERNEL_OPT_KERNEL_BUDGET_MIN", raising=False)
@@ -158,7 +158,7 @@ def test_kernel_ladder_budget_sec_priority(monkeypatch):
 @pytest.mark.asyncio
 async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkeypatch):
     # Option A: a timed-out backend (failed, not KEEP) does not abort the
-    # ladder — the next backend still runs (within budget). Hyperloom#602.
+ # ladder — the next backend still runs (within budget). Hyperloom#602.
     calls: list[str] = []
 
     async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
@@ -178,7 +178,7 @@ async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkey
 @pytest.mark.asyncio
 async def test_ladder_caps_backend_timeout_to_remaining_budget(tmp_path: Path, monkeypatch):
     # Each backend's subprocess timeout is capped to the time left in the
-    # per-kernel budget. Hyperloom#602.
+ # per-kernel budget. Hyperloom#602.
     seen: list[int | None] = []
 
     async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
@@ -199,7 +199,7 @@ async def test_ladder_caps_backend_timeout_to_remaining_budget(tmp_path: Path, m
 async def test_ladder_skips_backends_when_budget_exhausted(tmp_path: Path, monkeypatch):
     # When the per-kernel budget is already spent (e.g. forge hung to its hard
     # timeout), the remaining backends are skipped rather than overshooting the
-    # budget. Hyperloom#602.
+ # budget. Hyperloom#602.
     calls: list[str] = []
 
     async def _fake_single(payload, *, session_dir, timeout_override_sec=None):

@@ -90,7 +90,7 @@ def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
     (cap / "bs_1_rank0.json.gz").write_bytes(b"x")
     (cap / "bs_512_rank0.json.gz").write_bytes(b"x")
     (cap / "graph_capture_rank_0.json.gz").write_bytes(b"x")
-    # #735: vLLM capture sidecar that DOES end in .trace.json.gz — must still
+ # vLLM capture sidecar that DOES end in .trace.json.gz — must still
     # be treated as a capture sidecar (it lives under capture_traces/).
     (cap / "graph_capture_rank_0.123.pt.trace.json.gz").write_bytes(b"x")
     # A real main trace (NOT under capture_traces/) must NOT be returned.
