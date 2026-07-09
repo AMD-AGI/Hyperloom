@@ -1,0 +1,65 @@
+defaults:
+  numbered: False
+  maxdepth: 6
+root: index
+
+subtrees:
+- entries:
+  - file: what-is-hyperloom.md
+    title: What is Hyperloom?
+  - file: release-notes.md
+    title: Release notes
+  - file: compatibility.md
+    title: Compatibility matrix
+
+- caption: Install
+  entries:
+  - file: install/hyperloom-installation.md
+    title: Install Hyperloom
+  - file: install/quickstart.md
+    title: Quickstart — hosted UI
+
+- caption: Components
+  entries:
+  - file: components/index.md
+    title: Components
+    subtrees:
+    - entries:
+      - url: https://advanced-micro-devices-demo--131.com.readthedocs.build/projects/intellikit/en/131/index.html
+        title: IntelliKit
+      - url: https://advanced-micro-devices-demo--50.com.readthedocs.build/projects/magpie/en/50/
+        title: Magpie
+      - url: https://advanced-micro-devices-tracelens--772.com.readthedocs.build/en/772/
+        title: TraceLens
+      - url: https://advanced-micro-devices-demo--311.com.readthedocs.build/projects/geak/en/311/
+        title: GEAK
+      - url: https://advanced-micro-devices-agentkernelarena--55.com.readthedocs.build/en/55/
+        title: AgentKernelArena
+
+- caption: How to
+  entries:
+  - file: how-to/optimize.md
+    title: Run a Hyperloom optimization
+
+- caption: Conceptual
+  entries:
+  - file: conceptual/optimization-loop.md
+    title: Hyperloom optimization loop
+
+- caption: Reference
+  entries:
+  - file: reference/api-reference.rst
+    title: API reference
+  - file: reference/environment-variables.md
+    title: Environment variables
+  - file: reference/authentication.md
+    title: Authentication and credentials
+  - file: reference/troubleshooting.md
+    title: Troubleshooting
+
+- caption: About
+  entries:
+  - file: about.md
+    title: About
+  - file: license.rst
+    title: License

@@ -1,37 +1,47 @@
-# Compatibility Matrix
+---
+myst:
+  html_meta:
+    "description": "Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM), container images, and component dependencies."
+    "keywords": "Hyperloom, compatibility, AMD Instinct, MI300X, MI355X, SGLang, vLLM, ROCm, container images, GPU support"
+---
 
-This page lists the hardware, inference frameworks, and container images that
+# Hyperloom compatibility matrix
+
+This topic lists the hardware, inference frameworks, and container images that
 Hyperloom is validated against.
 
 ```{note}
 This matrix tracks the currently validated combinations. Other ROCm versions
-or framework builds may work but are not regularly tested.
+or framework builds might work but are not regularly tested.
 ```
 
 ## GPU support
 
+These AMD Instinct GPUs are validated with Hyperloom:
+
 | GPU | Architecture | Status |
 |-----|--------------|--------|
-| AMD Instinct MI300X | gfx942 | Supported |
-| AMD Instinct MI308X | gfx942 | Supported |
-| AMD Instinct MI325X | gfx942 | Supported |
-| AMD Instinct MI355X | gfx950 | Supported |
+| AMD Instinct™ MI300X GPU | gfx942 | Supported |
+| AMD Instinct™ MI325X GPU | gfx942 | Supported |
+| AMD Instinct™ MI355X GPU | gfx950 | Supported |
 
 ```{note}
-MI308X and MI325X share the gfx942/CDNA3 runner family with MI300X. Hyperloom
-keeps the resolved GPU type distinct (`mi308x` / `mi325x`), but Magpie benchmark
+MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom
+keeps the resolved GPU type distinct (`mi325x`), but Magpie benchmark
 rendering reuses the MI300X runner scripts and image family unless a dedicated
 image is supplied.
 ```
 
 ## Inference frameworks
 
-| Framework | Status | Notes |
-|-----------|--------|-------|
-| SGLang (ROCm) | Supported | Default framework |
-| vLLM (ROCm) | Supported | Do not mix frameworks within one session |
-| Atom (ROCm) | Supported | Single-node only (multi-node rejected by the IR-8 guard) |
-| xDiT (diffusion) | Supported | Diffusion pipeline; throughput reported in img/s, no serving server |
+These inference frameworks are supported:
+
+| Framework | ROCm version | Status | Notes |
+|-----------|--------------|--------|-------|
+| SGLang (ROCm) | 7.2.0 | Supported | Default framework |
+| vLLM (ROCm) | 7.2.0 | Supported | Do not mix frameworks within one session |
+| Atom (ROCm) | 7.2.0 | Supported | Single-node only (multi-node rejected by the IR-8 guard) |
+| xDiT (diffusion) | 7.2.0 | Supported | Diffusion pipeline; throughput reported in img/s, no serving server |
 
 ## Container images
 
@@ -51,10 +61,13 @@ Browse all available SGLang tags at
 
 ## Component dependencies
 
+These are the Hyperloom components:
+
 | Component | Source |
 |-----------|--------|
 | TraceLens | <https://github.com/AMD-AGI/TraceLens> |
 | Magpie | <https://github.com/AMD-AGI/Magpie> |
 | IntelliKit | <https://github.com/AMDResearch/intellikit> |
 | GEAK | <https://github.com/AMD-AGI/GEAK> |
+| AgentKernelArena |<https://github.com/AMD-AGI/AgentKernelArena> |
 | AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |

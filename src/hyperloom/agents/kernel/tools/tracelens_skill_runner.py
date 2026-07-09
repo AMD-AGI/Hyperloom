@@ -522,7 +522,8 @@ async def run_tracelens_skill(
         analysis_mode (str): The requested analysis mode.
         capture_folder (Path | None): Graph-capture folder for inference runs.
         budget_minutes (float): Soft time budget for the run (informational).
-        model (str | None): Optional model override; defaults to the SDK default.
+        model (str | None): Optional model override; defaults to
+            :data:`DEFAULT_MODEL` when unset/empty.
         sdk_query_factory (Callable[..., Any] | None): Optional injected query
             factory (used by tests); imported from the SDK when ``None``.
         sdk_options_cls (Any | None): Optional injected options class (used by
@@ -575,8 +576,10 @@ async def run_tracelens_skill(
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
     }
-    if model:
-        kwargs["model"] = model
+    # Defensive fallback for full-suite/test-order runs where module globals can
+    # be mutated; keep model resolution stable even if DEFAULT_MODEL is missing.
+    resolved_model = (model or "").strip() or str(globals().get("DEFAULT_MODEL", "claude-opus-4-7")).strip()
+    kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)
 

@@ -1,12 +1,12 @@
 # ROCm Hyperloom
 
-An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it explores candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — one change at a time, always measuring against the real workload and prioritizing the next move from prior results and KB-driven priors. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
+An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it explores candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — one change at a time, always measuring against the real workload and prioritizing the next move from prior results and KB-driven priors. The search strategy — depth-first exploration of a heuristic-scored action tree, where each result reshapes subsequent candidate scoring and failures propagate as diagnostic constraints — is based on **[Arbor](https://arxiv.org/abs/2606.12563)** \[1\]. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
 Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom uses the public TraceLens package (`TRACELENS_ROOT`) by default (open-source-only report). An optional internal TraceLens extension — roofline numbers, gains estimates, and MI355/MI455 MAF data — can be enabled by internal users who set `TRACELENS_INTERNAL_ROOT` to point at their own internal checkout (path self-provided); leave it unset to stay on the open-source-only report. There is no separate on/off toggle.
 
-Block 4 - Code Optimization Loop: The core of Hyperloom. The agent explores candidates — config overrides, code patches, backend switches, kernel rewrites — one change at a time: **Think → Implement → Benchmark → Decide**. Each result informs which candidate to try next. 
+Block 4 - Code Optimization Loop: The core of Hyperloom. The agent explores candidates — config overrides, code patches, backend switches, kernel rewrites — one change at a time: **Think → Implement → Benchmark → Decide**. Each result informs which candidate to try next, with depth-first search over a scored action tree (per [Arbor](https://arxiv.org/abs/2606.12563) \[1\]).
 
 In parallel, hot kernels are asynchronously optimized via external backends
 ([Kernel-Forge](https://github.com/AMD-AGI/KernelForge), [GEAK](https://github.com/AMD-AGI/GEAK/tree/main),
@@ -24,7 +24,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[Local Mode Quickstart (Cursor)](docs/QUICKSTART_LOCAL_MODE.md)** | Run Hyperloom in Docker on your own AMD GPU machine and drive it from Cursor |
 | **[Bare-Metal Quickstart (No Docker)](docs/QUICKSTART_BAREMETAL.md)** | Install Hyperloom directly on a ROCm host — no container |
 | **[Quantization (AMD Quark)](docs/QUANTIZATION_QUARK.md)** | Optional `--quantize` prelude: Quark checkout requirement and `QUARK_ROOT` resolution |
-| **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Conversational orchestration, phase sequencing, action gates, and KB-driven priors |
+| **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | DFS over a heuristic-scored action tree \[1\]; dynamic specialist construction per bottleneck; KB built from open-source PRs (sglang, aiter, triton) and session outcomes; Orchestrator / Domain Specialists / Critic architecture; convergent discovery across specialists |
 | **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
 | **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
@@ -187,6 +187,12 @@ Hyperloom/
 ├── SECURITY.md                           # Vulnerability disclosure policy
 └── README.md
 ```
+
+---
+
+## References
+
+\[1\] Prakriya, N., Hou, C., Gong, Z., Zhao, H., Zhao, X., Li, M., Gu, Z., & Barsoum, E. (2026). **Arbor: Tree Search as a Cognition Layer for Autonomous Agents**. arXiv:2606.12563. https://arxiv.org/abs/2606.12563
 
 ---
 

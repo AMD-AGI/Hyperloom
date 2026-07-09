@@ -1,18 +1,24 @@
+---
+myst:
+    html_meta:
+        "description": "Learn about TraceLens, Hyperloom's trace analysis library. Covers hierarchical GPU performance breakdowns, roofline modeling, multi-GPU analysis, and trace comparison."
+        "keywords": "TraceLens, Hyperloom, GPU performance, trace analysis, roofline modeling, PyTorch profiler, JAX, rocprofv3, AMD GPU, ROCm, benchmarking, LLM inference, vLLM, SGLang"
+---
 # TraceLens
 
-TraceLens is a Python library focused on **automating analysis from trace
-files**. It turns raw PyTorch / JAX / rocprofv3 traces into hierarchical
+TraceLens is a Python library focused on automating analysis from trace
+files. It turns raw PyTorch / JAX / rocprofv3 traces into hierarchical
 performance breakdowns, roofline metrics, and multi-GPU communication analysis.
 
-Within Hyperloom, TraceLens is the profiling brain of the **workload
-understanding** stage: it consumes traces collected by [Magpie](magpie.md),
+Within Hyperloom, TraceLens is the profiling brain of the workload
+understanding stage: it consumes traces collected by [Magpie](magpie.md),
 captures bottlenecks, and derives the roofline targets that seed the
 optimization search tree.
 
-- **Source:** <https://github.com/AMD-AGI/TraceLens>
-- **License:** MIT
+- **Source**: <https://github.com/AMD-AGI/TraceLens>
+- **License**: MIT
 
-## Overview
+## Capabilities and modules
 
 TraceLens provides a top-down view of GPU performance and a hackable SDK:
 
@@ -33,6 +39,8 @@ The package is organized into composable modules: `Trace2Tree`, `TreePerf`,
 `Reporting`, and an `Agent` layer for agentic analysis.
 
 ## Installation
+
+Install TraceLens directly from the GitHub repository using pip.
 
 ```bash
 pip install git+https://github.com/AMD-AGI/TraceLens.git
@@ -61,6 +69,8 @@ report.
 
 ## Usage
 
+TraceLens provides CLI entry points for generating performance reports, comparing traces, and running agentic analysis.
+
 ### Generate a report from a PyTorch trace
 
 ```bash
@@ -72,6 +82,8 @@ and roofline metrics.
 
 ### Supported profile formats
 
+TraceLens supports the following trace formats.
+
 | Format | Producer | CLI entry point |
 |--------|----------|-----------------|
 | PyTorch | `torch.profiler` | `TraceLens_generate_perf_report_pytorch` |
@@ -81,6 +93,8 @@ and roofline metrics.
 | rocprofv3 pftrace | Perfetto-style | `TraceLens_generate_perf_report_pftrace_hip_api` |
 
 ### Compare two reports
+
+Compare two TraceLens Excel reports to quantify the impact of a change.
 
 ```bash
 TraceLens_compare_perf_reports_pytorch baseline.xlsx candidate.xlsx \
@@ -104,7 +118,7 @@ TraceLens-specific runtime flags through
 `src/hyperloom/orchestrator/actions/executors/_server_patcher.py` and the
 workload environment helpers. The generated report feeds the roofline ceilings
 and bottleneck list used to score candidate optimizations. See
-[How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORKS.md).
+[Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
 ## API reference
 
