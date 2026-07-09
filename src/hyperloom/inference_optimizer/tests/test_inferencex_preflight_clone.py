@@ -139,8 +139,8 @@ def test_inferencex_checkout_ok_requires_benchmark_lib(tmp_path):
 def test_preflight_detects_checkout_via_validity_not_isdir():
     """Detection and post-clone guards must use the validity helper, not a
     bare ``is_dir()`` that would accept a half-cloned stub."""
-    # tree-reform.MD P2.4 follow-up: _preflight (and its InferenceX detection
-    # loop) now lives in cli/preflight.py, not cli/__init__.py.
+    # _preflight and its InferenceX detection loop live in cli/preflight.py,
+    # not cli/__init__.py.
     src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     assert "_inferencex_checkout_ok(candidate)" in src
     assert "_inferencex_checkout_ok(inferencex_path)" in src

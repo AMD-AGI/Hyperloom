@@ -25,7 +25,7 @@ from ._common import (
 
 
 
-# §7 / §8 GEAK / OOB invocations
+# GEAK / OOB invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
     """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render.
 
@@ -889,7 +889,7 @@ def collect_kernel_lifecycle(
     warnings: list[str],
     forge: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Collect the §9 kernel-lifecycle section.
+    """Collect the kernel-lifecycle section.
 
     Bundles the five per-kernel views — detected, recommended, optimized,
     adopted, and rejected — into one section.
@@ -916,7 +916,7 @@ def collect_kernel_lifecycle(
     }
 
 
-# Kernel Optimization Summary (Breakdown panel integration spec §A1; PR #399)
+# Kernel Optimization Summary.
 _KERNEL_OPT_SUMMARY_REL_PATH = "reports/kernel_optimization_summary.json"
 
 
@@ -924,7 +924,7 @@ def collect_kernel_optimization_summary(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Mirror ``reports/kernel_optimization_summary.json`` into its section (spec §A1).
+    """Mirror ``reports/kernel_optimization_summary.json`` into its section.
 
     Missing → ``{}`` (quiet); malformed → ``{}`` + warning. Otherwise
     mirrored verbatim (producer additions ride through) apart from shape
@@ -957,7 +957,7 @@ def collect_kernel_optimization_summary(
         warnings.append("kernel_optimization_summary.by_kernel is not a list; dropping entries")
         out["by_kernel"] = []
     else:
-        # Drop non-dict rows; pass the rest through verbatim (shapes per §A1.4).
+        # Drop non-dict rows; pass the rest through verbatim.
         out["by_kernel"] = [r for r in raw_by_kernel if isinstance(r, dict)]
 
     for key in (
@@ -982,7 +982,7 @@ def collect_kernel_optimization_summary(
     return out
 
 
-# Conc Sweep Summary (Breakdown panel integration spec §A2; PR #399)
+# Conc Sweep Summary.
 _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 
 _CONC_SWEEP_VARIANT_RE = re.compile(r"^(baseline|optimized)_conc(\d+)$")
@@ -1172,7 +1172,7 @@ def collect_conc_sweep_summary(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Mirror ``reports/conc_sweep_summary.json`` into its section (spec §A2).
+    """Mirror ``reports/conc_sweep_summary.json`` into its section.
 
     Missing → ``{}`` (quiet); malformed → ``{}`` + warning. Otherwise
     mirrored verbatim (only ``comparison`` shape-guarded) + ``report_path``.

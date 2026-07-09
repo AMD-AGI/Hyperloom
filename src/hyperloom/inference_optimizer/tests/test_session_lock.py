@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the single-optimizer session lock (issue #592).
+"""Tests for the single-optimizer session lock.
 
 The lock guarantees that a second ``optimize`` / ``--resume`` attaching to the
 same ``session_dir`` cannot run, so a misfiring robustness monitor can never

@@ -438,7 +438,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 ):
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
-    # PR-I (M4 main merge): disable the default min_gpu_pct gate so the test focuses on the backend-fallback ladder.
+    # Disable the default min_gpu_pct gate so the test focuses on the backend-fallback ladder.
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
