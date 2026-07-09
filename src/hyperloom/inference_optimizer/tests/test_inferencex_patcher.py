@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
 
 @pytest.fixture(autouse=True)
 def _isolate_inferencex_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every test hermetic w.r.t. the #210 discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
+    """Make every test hermetic w.r.t. the discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
@@ -383,7 +383,7 @@ def test_discover_inferencex_roots_includes_both_when_paths_differ(
     tmp_path,
     monkeypatch,
 ):
-    """The #210 case: distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_PATH/InferenceX`` both show up so both get patched."""
+    """Distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_PATH/InferenceX`` both show up so both get patched."""
     inferencex_external = tmp_path / "external" / "InferenceX"
     inferencex_external.mkdir(parents=True)
     magpie_dir = tmp_path / "workspace" / "Magpie"
@@ -422,7 +422,7 @@ def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
     tmp_path,
     monkeypatch,
 ):
-    """End-to-end #210 invariant: distinct roots → both ``benchmark_serving.py`` files get patched."""
+    """Distinct roots → both ``benchmark_serving.py`` files get patched."""
     external = tmp_path / "external" / "InferenceX"
     external.mkdir(parents=True)
     magpie = tmp_path / "Magpie"
