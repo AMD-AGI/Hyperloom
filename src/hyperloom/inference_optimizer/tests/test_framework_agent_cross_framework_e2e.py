@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end contract test for the #5-P1 cross-framework path.
+"""End-to-end contract test for the cross-framework path.
 
 Code review flagged that the three seams were only tested in isolation:
 discovery-tagging, tagging->audit detection, and audit->specialist prompt each

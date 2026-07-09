@@ -106,7 +106,7 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "ANTHROPIC_BASE_URL",
         "http://127.0.0.1:4002/api/v1/llm-proxy",
     )
-    # Key aliases start unset so SAFE_API_KEY fills them (gap-fill semantics).
+ # Key aliases start unset so SAFE_API_KEY fills them (gap-fill semantics).
     for name in (
         "OPENAI_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -178,7 +178,7 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     # Explicit provider keys are preserved.
     assert cli.os.environ["OPENAI_API_KEY"] == "sk-openai-user"
     assert cli.os.environ["ANTHROPIC_API_KEY"] == "sk-ant-user"
-    # Unset aliases are still gap-filled from SAFE_API_KEY.
+ # Unset aliases are still gap-filled from SAFE_API_KEY.
     assert cli.os.environ["ANTHROPIC_AUTH_TOKEN"] == "safe-key"
     assert cli.os.environ["GEAK_API_KEY"] == "safe-key"
 
@@ -291,7 +291,7 @@ def test_is_stale_proxy_url_matches_legacy_only():
     assert not cli._is_stale_proxy_url(None)
 
 
-# _sync_geak_config_base_url (#521): GEAK reads $GEAK_CONFIG yaml, not env.
+# _sync_geak_config_base_url : GEAK reads $GEAK_CONFIG yaml, not env.
 _GEAK_CFG_TEMPLATE = """model:
   model_class: litellm
   model_name: openai/claude-opus-4-7
@@ -897,7 +897,7 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
 
 # Merged from test_v08_ir3_preflight.py
 
-"""KB_design_continue §3.3 / IR-3 — preflight soft-degrade tests."""
+"""preflight soft-degrade tests."""
 
 
 import argparse

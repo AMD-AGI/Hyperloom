@@ -296,7 +296,7 @@ def test_detect_glm_moe_dsa_now_recognized(tmp_path):
     # zai-org GLM-5.x (glm_moe_dsa): the current stack (transformers 5.12.1 +
     # vLLM 0.24.0) registers it (AutoConfig resolves GlmMoeDsaConfig, vLLM
     # ModelRegistry registers GlmMoeDsaForCausalLM; gfx942 sparse-MLA falls back
-    # to Triton via vllm-project/vllm#45782). It was removed from the
+ # to Triton via vllm-project/vllm#45782). It was removed from the
     # unrecognized blocklist, so it is no longer fail-fasted by the gate.
     m = tmp_path / "glm_moe_dsa"
     _write_config(
@@ -327,7 +327,7 @@ def test_detect_gemma4_now_recognized(tmp_path):
 
 
 def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
-    # #649 does not add Bailing filters; keep these out of the fail-fast gate.
+ # #649 does not add Bailing filters; keep these out of the fail-fast gate.
     for model_type, arch in (
         ("bailing_moe", "BailingMoeV2ForCausalLM"),
         ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
@@ -344,7 +344,7 @@ def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
 
 
 def test_detect_ovis_next_left_to_runtime_scope(tmp_path):
-    # #649 does not add Ovis filters; keep this out of the fail-fast gate.
+ # #649 does not add Ovis filters; keep this out of the fail-fast gate.
     m = tmp_path / "ovis"
     _write_config(
         m,
