@@ -203,6 +203,21 @@ class DispatcherCollaborator:
             await self.locks.reap_dead_holders()
         except Exception:  # noqa: BLE001
             log.exception("dispatcher: dead-holder lease reap failed")
+        # TTL-expiry self-heal (runs EVERY tick, complements reclaim_dead_running):
+        # covers tasks whose holder PID was recycled (undetectable as dead) or whose
+        # holder record is missing. The method is idempotent and skips lease_ttl_sec=0
+        # rows; running per-tick is safe. maintenance_watchdog (every 50 ticks) keeps
+        # running as a double-safety net.
+        try:
+            expired_tasks = await self.tasks.reclaim_expired_running(reason="pump_watchdog")
+            if expired_tasks:
+                log.warning(
+                    "dispatcher: reclaimed %d expired-running task(s): %s",
+                    len(expired_tasks),
+                    ", ".join(t[:12] for t in expired_tasks),
+                )
+        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+            log.exception("dispatcher: expired-running task reclaim failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
         # fast task can complete and be reaped (leaving ``inflight``) before its
