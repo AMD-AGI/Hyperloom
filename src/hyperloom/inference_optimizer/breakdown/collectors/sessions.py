@@ -650,6 +650,7 @@ def collect_session(
             start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
             elapsed_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
         except (ValueError, TypeError):
+            # Malformed timestamp; skip elapsed-time computation.
             pass
     image = _detect_image_for_session(manifest)
     if image is None:

@@ -15,11 +15,6 @@ from ..state.optimization_journal import (
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
-from ..policy.gate import (
-    PolicyDenied,
-)
-from ..state.task_registry import Task
-from ..actions.executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
@@ -35,6 +30,11 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     format_exc_brief,
     serialize_verdict_advisory,
 )
+from ..policy.gate import (
+    PolicyDenied,
+)
+from ..state.task_registry import Task
+from ..actions.executors.benchmark_result import is_valid_measurement
 
 from .coordinator import (
     _AUDIT_ACTIONS,

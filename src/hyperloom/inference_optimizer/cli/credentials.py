@@ -165,31 +165,6 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
-# A leftover install-time reverse-proxy that some environments bake in
-# (``127.0.0.1:4002``). It is never reachable at runtime, so unlike a genuine
-# operator tunnel it must be force-rewritten to the gateway rather than
-# preserved as an "operator override".
-_STALE_PROXY_URL_RE = re.compile(r"^https?://127\.0\.0\.1:4002(?:[/:?#]|$)")
-
-
-def _is_stale_proxy_url(url: str | None) -> bool:
-    """Return ``True`` for a leftover ``127.0.0.1:4002`` install-time proxy URL.
-
-    Only the legacy ``4002`` reverse-proxy is treated as stale; a genuine
-    operator reverse tunnel on another port (e.g. ``18444``) or any external
-    gateway is *not* stale and must be preserved.
-
-    Args:
-        url (str | None): The candidate base URL (may be empty or ``None``).
-
-    Returns:
-        bool: ``True`` only for the legacy ``127.0.0.1:4002`` proxy.
-    """
-    if not url:
-        return False
-    return _STALE_PROXY_URL_RE.match(url.strip()) is not None
-
-
 # Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
 # written by kernel-agent/scripts/install.sh, but tolerant of any indent).
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
@@ -261,6 +236,27 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
     if path.endswith("/v1"):
         path = path[: -len("/v1")]
     return urlunparse(parsed._replace(path=path))
+
+
+def _is_stale_proxy_url(value: str | None) -> bool:
+    """Return true for the retired local llm-proxy endpoint.
+
+    The old installer wrote ``127.0.0.1:4002`` as a local proxy default. Modern
+    operator tunnels may also be loopback URLs, so only that legacy port is
+    treated as stale and force-rewritten by preflight.
+    """
+    if not value:
+        return False
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(value).strip())
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return False
+    try:
+        return parsed.port == 4002
+    except ValueError:
+        return False
+
 
 def _resolve_llm_endpoints() -> tuple[str, str]:
     """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.

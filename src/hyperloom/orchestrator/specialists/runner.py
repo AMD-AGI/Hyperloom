@@ -159,7 +159,7 @@ class _PreparedRun:
     gap: str = ""
     max_turns: int = 0
     # Resolved dispatch profile (scope / mode / bench / lane).
-    profile: "SpecialistProfile" = field(default_factory=lambda: SpecialistProfile())
+    profile: "SpecialistProfile" = field(default_factory=SpecialistProfile)
     workspace: Path | None = None
     worktree: Path | None = None
     worktree_base: Path | None = None

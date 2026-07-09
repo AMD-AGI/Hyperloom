@@ -152,6 +152,7 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
             try:
                 proc.kill()
             except ProcessLookupError:
+                # Process already exited; nothing to signal.
                 pass
             await proc.wait()
             return False

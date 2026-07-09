@@ -547,7 +547,6 @@ class TestHyperloomArchSpec:
         # default_arch_output_path writes under <root>/TraceLens/Agent/Analysis/utils/arch/
         out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
         assert out is not None and out.is_file()
-        import json
 
         data = json.loads(out.read_text())
         assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1686.0)
@@ -559,7 +558,6 @@ class TestValidateTraceStructureScriptable:
 
     def _write_trace(self, trace_dir, *, with_kernels: bool) -> None:
         import gzip
-        import json
 
         if with_kernels:
             # A healthy diffusion trace: real cpu_op + kernel events, but still

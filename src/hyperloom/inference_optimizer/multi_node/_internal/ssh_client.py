@@ -97,6 +97,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
         try:
             p.unlink()
         except FileNotFoundError:
+            # File already absent; nothing to remove.
             pass
     proc = subprocess.run(
         [

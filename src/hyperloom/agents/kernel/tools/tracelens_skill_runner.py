@@ -1688,14 +1688,17 @@ def aggregate_by_source_function(
         try:
             bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
         except (TypeError, ValueError):
+            # Malformed metric value; skip this contribution.
             pass
         try:
             bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
         except (TypeError, ValueError):
+            # Malformed metric value; skip this contribution.
             pass
         try:
             bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
+            # Malformed metric value; skip this contribution.
             pass
 
     ordered = sorted(

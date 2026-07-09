@@ -13,12 +13,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 import httpx
 
 from ..signals import Symptom, SymptomSeverity
-from ..state_store import DetectorStateView
+if TYPE_CHECKING:
+    from ..state_store import DetectorStateView
 
 
 log = logging.getLogger(__name__)
@@ -306,10 +307,12 @@ class LlmRcaEngine:
         try:
             self._usage_in += int(usage.get("prompt_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Malformed usage value; skip this token count.
             pass
         try:
             self._usage_out += int(usage.get("completion_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Malformed usage value; skip this token count.
             pass
 
     def set_tick(self, tick_id: int) -> None:

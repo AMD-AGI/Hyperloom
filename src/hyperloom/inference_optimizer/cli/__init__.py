@@ -958,7 +958,7 @@ def _validate_and_resolve_claude_model(
         f"Refusing to start.",
         file=sys.stderr,
     )
-    sys.exit(2)
+    raise SystemExit(2)
 
 
 def _smoke_test_codex_model(
