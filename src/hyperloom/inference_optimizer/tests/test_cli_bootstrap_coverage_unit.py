@@ -63,11 +63,11 @@ def _args(**overrides):
     return argparse.Namespace(**base)
 
 
-def test_seed_shared_state_populates_perfskills_and_cli_overrides(
+def test_seed_shared_state_populates_geak_and_cli_overrides(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge, perfskills")
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge, geak")
     monkeypatch.setenv("CLAW_SESSION_ID", "claw-1")
     monkeypatch.setenv("SANDBOX_USER_ID", "user-1")
     monkeypatch.setenv("FRAMEWORK", "vllm")
@@ -107,7 +107,7 @@ def test_seed_shared_state_populates_perfskills_and_cli_overrides(
     assert state.isl == 8192
     assert state.osl == 1024
     assert state.max_model_len == 13312
-    assert state.kernel_optimizer == "perfskills"
+    assert state.kernel_optimizer == "geak"
     assert state.research_lane_capacity == 16
     assert state.gpu_specialist_capacity == 8
     assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
@@ -255,7 +255,7 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
         pruned_families=["a"],
         crash_count=2,
     )
-    state.optimization_stack = [{"action": "perfskills_e2e"}]
+    state.optimization_stack = [{"action": "geak_e2e"}]
 
     cb._print_final_summary(state, "baseline_failed", tmp_path)
 

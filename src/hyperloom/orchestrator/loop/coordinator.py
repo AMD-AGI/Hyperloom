@@ -246,70 +246,6 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
 
-# The GEAK used by the GEAK-e2e (PerfSkills) whole-pipeline optimizer is a
-# distinct variant from the kernel-agent's generic per-kernel ``geak`` backend.
-# Its kernel_journey.json labels everything plainly ``geak`` (versions key,
-# dispatch backends, attempt backend, verification.best_backend), which would
-# collide with — and be indistinguishable from — the generic ``geak`` lane in
-# ``session_breakdown.json`` (the ``versions`` map is keyed by tool name, last
-# write wins). We relabel it to ``geak_v4`` on the way into the breakdown so SBD
-# and trace keep the two provenances separate. The raw interface file is left
-# untouched.
-PERFSKILLS_GEAK_BACKEND: str = "geak_v4"
-
-
-def _relabel_perfskills_geak_journey(journey: dict[str, Any]) -> None:
-    """Relabel the PerfSkills GEAK-e2e ``geak`` provenance to ``geak_v4`` in place.
-
-    Rewrites every ``geak`` token the GEAK-e2e ``kernel_journey.json`` carries
-    (the ``versions`` key, each kernel's ``dispatch.backends`` and
-    ``backend_result`` attempt/verification backends, and the discovery
-    ``recommended_backends``) to :data:`PERFSKILLS_GEAK_BACKEND`, so the
-    assembled breakdown never conflates it with the kernel-agent's generic
-    ``geak`` lane. Best-effort and structure-preserving: unknown shapes are
-    skipped, non-``geak`` tokens are left untouched.
-
-    Args:
-        journey (dict[str, Any]): the parsed GEAK-e2e ``kernel_journey.json``
-            (mutated in place).
-    """
-    def _swap(name: Any) -> Any:
-        return PERFSKILLS_GEAK_BACKEND if str(name or "").lower() == "geak" else name
-
-    def _swap_list(values: Any) -> list[Any]:
-        return [_swap(v) for v in values] if isinstance(values, list) else values
-
-    # Top-level ``versions`` map: re-key geak -> geak_v4 and fix its ``tool``.
-    versions = journey.get("versions")
-    if isinstance(versions, dict) and "geak" in versions:
-        meta = versions.pop("geak")
-        if isinstance(meta, dict):
-            meta["tool"] = PERFSKILLS_GEAK_BACKEND
-        versions[PERFSKILLS_GEAK_BACKEND] = meta
-
-    for run in journey.get("discovery_runs") or []:
-        if not isinstance(run, dict):
-            continue
-        for hk in run.get("hot_kernels") or []:
-            if isinstance(hk, dict) and "recommended_backends" in hk:
-                hk["recommended_backends"] = _swap_list(hk.get("recommended_backends"))
-
-    for k in journey.get("kernels") or []:
-        if not isinstance(k, dict):
-            continue
-        disp = k.get("dispatch")
-        if isinstance(disp, dict) and "backends" in disp:
-            disp["backends"] = _swap_list(disp.get("backends"))
-        br = k.get("backend_result")
-        if isinstance(br, dict):
-            for att in br.get("attempts") or []:
-                if isinstance(att, dict) and "backend" in att:
-                    att["backend"] = _swap(att.get("backend"))
-            verification = br.get("verification")
-            if isinstance(verification, dict) and "best_backend" in verification:
-                verification["best_backend"] = _swap(verification.get("best_backend"))
-
-
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None.
 
@@ -1043,7 +979,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
         "_auto_enqueue_pending_integrations": "phase_kernel_stack",
         "_maybe_reprofile_for_kernel": "phase_kernel",
-        "_perfskills_enabled": "phase_kernel",
+        "_geak_enabled": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
         "_run_bf16_dense_gemm_fallback": "phase_kernel",
         "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
@@ -1051,15 +987,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_bf16_dense_gemm_fallback_attempted": "phase_kernel",
         "_is_bf16_dense_gemm_fallback_attempt": "phase_kernel",
         "_resolve_bench_protocol": "phase_kernel",
-        "_perfskills_timeouts": "phase_kernel",
-        "_run_perfskills_kernel_phase": "phase_kernel",
-        "_perfskills_win_already_recorded": "phase_kernel",
-        "_perfskills_legacy_promote": "phase_kernel",
-        "_parse_perfskills_accepted_config": "phase_kernel",
-        "_record_perfskills_candidate": "phase_kernel",
-        "_promote_perfskills_from_candidate": "phase_kernel",
-        "_promote_perfskills_result": "phase_kernel",
-        "_record_perfskills_kernel_journey": "phase_kernel",
+        "_geak_timeouts": "phase_kernel",
+        "_run_geak_kernel_phase": "phase_kernel",
+        "_geak_win_already_recorded": "phase_kernel",
+        "_geak_legacy_promote": "phase_kernel",
+        "_parse_geak_accepted_config": "phase_kernel",
+        "_record_geak_candidate": "phase_kernel",
+        "_promote_geak_from_candidate": "phase_kernel",
+        "_promote_geak_result": "phase_kernel",
+        "_record_geak_kernel_journey": "phase_kernel",
         "_ck_blockscale_switch_eligible": "phase_kernel",
         "_ck_switch_precision_is_fp8": "phase_kernel",
         "_handle_gemm_tuning_result": "phase_kernel",
@@ -1251,7 +1187,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resume_recover_pending_integrate": "resume_helper",
         "_resume_recover_orphaned_keeps": "resume_helper",
         "_enqueue_internal_stack_rebench": "resume_helper",
-        "_validate_perfskills_via_geak_harness": "resume_helper",
+        "_validate_geak_via_geak_harness": "resume_helper",
         "resumed_from": "resume_helper",
         "_replay_resume_if_needed": "resume_helper",
         "_maybe_run_maintenance_tick": "maintenance",
@@ -1603,9 +1539,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # optimization_stack actions that change kernel-level performance and thus
     # warrant a post-opt roofline: source-patch integrate plus GEMM tuning and
-    # perfskills. Pure param-search (explore/sweep) is excluded.
+    # geak. Pure param-search (explore/sweep) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset(
-        {"integrate", "integrate_patch", "gemm_tuning", "perfskills_e2e"}
+        {"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
     )
 
 

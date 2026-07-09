@@ -1,4 +1,4 @@
-# How to run GEAK v4 end-to-end (analysis.md → kernel speedup → combined-patch E2E)
+# How to run GEAK end-to-end (analysis.md → kernel speedup → combined-patch E2E)
 
 A complete, copy-paste walkthrough for a newcomer. It takes you from a TraceLens
 `analysis.md` to per-kernel optimized patches and a final **end-to-end (E2E)
@@ -13,7 +13,7 @@ It generalizes to **any workload/model** (not just Llama). Anywhere you see
 
 ```
 TraceLens analysis.md  ─┐
-                        ├─►  HL dispatch  ──►  GEAK v4 workflow  ──►  per-kernel patch
+                        ├─►  HL dispatch  ──►  GEAK e2e workflow ──►  per-kernel patch
 HL kernel_candidates ──┘     (builds the          (optimizes each        (.diff / .py)
                               PROMPT)               kernel, 1/GPU)              │
                                                                                ▼
@@ -34,10 +34,11 @@ Two ideas you must internalize:
    gain (Amdahl's law). So after optimizing every hot kernel, you apply **all**
    the optimized patches **together** and remeasure the serving throughput.
 
-GEAK **v4** specifically is an agentic optimizer (Director / TechLead / specialist
-Engineers running budgeted rounds with independent verify + integrate) that runs
-via the Claude Code **Workflow** tool — a `.js` orchestration script, not a shell
-binary. **No installation/build of GEAK v4 is required**; you just run the script.
+GEAK (the e2e whole-pipeline optimizer) is an agentic optimizer (Director /
+TechLead / specialist Engineers running budgeted rounds with independent verify +
+integrate) that runs via the Claude Code **Workflow** tool — a `.js` orchestration
+script, not a shell binary. **No installation/build of GEAK is required**; you just
+run the script.
 
 ---
 
@@ -49,7 +50,7 @@ remote — nothing is local-only.
 | Repo | Remote | Branch (clone this) | PR | Purpose |
 |---|---|---|---|---|
 | **Hyperloom (HL)** | `github.com/AMD-AGI/Hyperloom` | `feat/dispatch-prompt-extra-context-clean` | [#703](https://github.com/AMD-AGI/Hyperloom/pull/703) | builds `kernel_candidates.json` + the enriched dispatch prompt; ships the `apply_and_bench.py` E2E primitive; enforces GEAK prompt-only dispatch; **runs the combined E2E autonomously** after the GEAK batch (commit `f2216a9`) |
-| **GEAK v4** | `github.com/AMD-AGI/GEAK` | `feat/kernel-workflow-from-analysis` | [#306](https://github.com/AMD-AGI/GEAK/pull/306) | the v4 from-analysis workflow variant (`kernel_workflow_from_analysis.js`); branched off `GEAK_v4` |
+| **GEAK (e2e)** | `github.com/AMD-AGI/GEAK` | `feat/kernel-workflow-from-analysis` | [#306](https://github.com/AMD-AGI/GEAK/pull/306) | the from-analysis workflow variant (`kernel_workflow_from_analysis.js`); branched off the upstream `GEAK_v4` branch |
 | **GEAK v3** (only if you also run v3) | `github.com/AMD-AGI/GEAK` | `fix/ccache-298-on-322` | [#299](https://github.com/AMD-AGI/GEAK/pull/299) | ccache + MAX_JOBS so aiter/CK `.cu` recompiles finish in budget; pinned sha `39472353` |
 
 ```bash
@@ -57,7 +58,7 @@ remote — nothing is local-only.
 git clone -b feat/dispatch-prompt-extra-context-clean \
   https://github.com/AMD-AGI/Hyperloom.git HL_fresh
 
-# GEAK v4 (the optimizer this doc runs)
+# GEAK e2e optimizer (the optimizer this doc runs)
 git clone -b feat/kernel-workflow-from-analysis \
   https://github.com/AMD-AGI/GEAK.git GEAK_v4_fresh
 
@@ -66,7 +67,7 @@ git clone -b fix/ccache-298-on-322 \
   https://github.com/AMD-AGI/GEAK.git GEAK_pr299
 ```
 
-> GEAK **v4 needs no build/install** — the workflow is the `.js` script run via the
+> GEAK **needs no build/install** — the workflow is the `.js` script run via the
 > Claude Code Workflow tool. HL needs its normal `src/hyperloom/agents/kernel/scripts/install.sh`
 > (it produces the runtime env + GEAK config used for dispatch).
 
@@ -74,12 +75,12 @@ git clone -b fix/ccache-298-on-322 \
 
 | Thing | Value used in our runs | Notes |
 |---|---|---|
-| GEAK v4 repo | `<clone>/GEAK_v4_fresh` | no install; run the workflow `.js` directly |
-| v4 from-analysis script | `<clone>/GEAK_v4_fresh/kernel_workflow/kernel_workflow_from_analysis.js` | the variant that starts from analysis.md (see §7) |
+| GEAK e2e repo | `<clone>/GEAK_v4_fresh` | no install; run the workflow `.js` directly |
+| from-analysis script | `<clone>/GEAK_v4_fresh/kernel_workflow/kernel_workflow_from_analysis.js` | the variant that starts from analysis.md (see §7) |
 | HL checkout | `<clone>/HL_fresh` (branch `feat/dispatch-prompt-extra-context-clean`) | candidates + dispatch prompt + `apply_and_bench.py` |
 | Kernel repo under optimization | `/sgl-workspace/aiter` | the repo whose `.cu` / `.py` kernels get rewritten |
 | Serving stack | sglang (or vllm) | for the E2E A/B |
-| GPUs | 8× MI300X (gfx942) | v4 runs 1 kernel per GPU in parallel |
+| GPUs | 8× MI300X (gfx942) | GEAK runs 1 kernel per GPU in parallel |
 | Model gateway | global gateway; `GEAK_USER=<you>@amd.com`, `ANTHROPIC_CUSTOM_HEADERS` | otherwise HTTP 400 (see your env setup script) |
 
 **Always clean stray processes before a run** (zombies hold GPU memory and skew
@@ -138,8 +139,8 @@ sibling `perf_report_csvs/` directory is also consumed (per-kernel CSVs).
 
 HL parses `analysis.md` into structured candidates (the hot kernels, their
 captured shapes, source paths, dedup'd task groups) and writes
-`kernel_candidates.json`. This is the **same** file that feeds GEAK v3, so v4 is
-an apples-to-apples optimizer on identical info.
+`kernel_candidates.json`. This is the **same** file that feeds per-kernel GEAK
+(geak_v3), so the e2e GEAK is an apples-to-apples optimizer on identical info.
 
 ```bash
 cd /wekafs/sapmajum/PROJECTS/OUTS/mixtral_autonomous
@@ -181,9 +182,9 @@ grep -cE 'test_pa.py|test_quant.py|Known benchmark/test' "$PF"   # -> 0  (no op_
 
 ---
 
-## 5. Run GEAK v4 on each hot kernel (1 kernel per GPU)
+## 5. Run GEAK on each hot kernel (1 kernel per GPU)
 
-v4 runs via the Claude Code **Workflow** tool. Invoke the from-analysis variant
+GEAK runs via the Claude Code **Workflow** tool. Invoke the from-analysis variant
 once per target kernel (`seed_target` selects the task group: `tg001`, `tg002`, …).
 
 ```json
@@ -193,7 +194,7 @@ once per target kernel (`seed_target` selects the task group: `tg001`, `tg002`, 
   "args": {
     "kernel_path":            "/sgl-workspace/aiter",          // repo holding the kernel source
     "workflow_dir":           "/wekafs/sapmajum/PROJECTS/GEAK_v4_fresh/kernel_workflow",
-    "exp_root":               "<ABS/path>/v4_<workload>/exp",  // where v4 writes its run artifacts
+    "exp_root":               "<ABS/path>/geak_<workload>/exp",  // where GEAK writes its run artifacts
     "analysis_md_path":       "<.../tracelens/analysis.md>",   // SAME file from §3
     "kernel_candidates_path": "<session-dir>/kernel-agent-run/kernel_candidates.json",  // from §4
     "dispatch_prompt_path":   "<session-dir>/.../prompts/geak-<id>.md",  // the EXACT enriched prompt from §4 (authoritative)
@@ -207,18 +208,18 @@ once per target kernel (`seed_target` selects the task group: `tg001`, `tg002`, 
 ```
 
 Key arg notes:
-- `dispatch_prompt_path` is the **authoritative** input — v4 reads the verbatim HL
+- `dispatch_prompt_path` is the **authoritative** input — GEAK reads the verbatim HL
   dispatch prompt FIRST (device source + VERBATIM captured shapes "do NOT invent"
-  + WORKLOAD CONTEXT). This is what makes v4 build its harness from the real
+  + WORKLOAD CONTEXT). This is what makes GEAK build its harness from the real
   serving shapes instead of self-inventing them.
-- `analysis_md_path` + `kernel_candidates_path` seed v4's roadmap (replacing
-  stock v4's own Analyze/Profile — see §7).
+- `analysis_md_path` + `kernel_candidates_path` seed GEAK's roadmap (replacing
+  stock GEAK's own Analyze/Profile — see §7).
 - Run it **once per kernel**: `seed_target: "tg001"`, then again `"tg002"`, etc.
   Each occupies its own GPU; you can launch them concurrently.
 
-**What v4 returns:** `final_geomean` (Director-validated FULL_BENCHMARK verified
+**What GEAK returns:** `final_geomean` (Director-validated FULL_BENCHMARK verified
 speedup) and the paths to the report + the optimized patch
-(`<exp_root>/.../final_patch.diff`). v4 builds its own harness + baseline, runs
+(`<exp_root>/.../final_patch.diff`). GEAK builds its own harness + baseline, runs
 budgeted optimize rounds, independently verifies, and writes the patch.
 
 Collect, per kernel: the verified speedup and the `final_patch.diff` path. You'll
@@ -261,7 +262,7 @@ manual `apply_and_bench` call.** (HL commit `f2216a9` on #703.)
 
 So the normal flow is: run §4 (dispatch through HL) and read the `combined_e2e`
 block. The manual path below is only for re-measuring an existing run, a custom
-patch selection, or v4 runs driven outside HL's batch handler.
+patch selection, or GEAK runs driven outside HL's batch handler.
 
 ### 6b. Manual (fallback) — explicit `apply_and_bench`
 
@@ -305,19 +306,19 @@ combined E2E result.
 
 ---
 
-## 7. (Background) why the "from-analysis" v4 variant exists
+## 7. (Background) why the "from-analysis" variant exists
 
-Stock v4 (`kernel_workflow.js`) runs its OWN `Analyze` (re-derives the roadmap)
-and `Profile` (rocprof) phases. That would make v4 optimize against a *different*
+Stock GEAK (`kernel_workflow.js`) runs its OWN `Analyze` (re-derives the roadmap)
+and `Profile` (rocprof) phases. That would make GEAK optimize against a *different*
 analysis than the one in your `analysis.md`. The variant
 `kernel_workflow_from_analysis.js` replaces those two phases with a **`Seed`**
 phase: the TechLead reads ONLY `analysis_md_path` + `kernel_candidates_path` (+
-the authoritative `dispatch_prompt_path`) and maps them into v4's roadmap — no
+the authoritative `dispatch_prompt_path`) and maps them into GEAK's roadmap — no
 re-trace, no re-profile. Everything after (Setup, Benchmark/harness build,
-Optimize loop, Verify, Merge, Report) is byte-identical to stock v4.
+Optimize loop, Verify, Merge, Report) is byte-identical to stock GEAK.
 
-Use the variant whenever you want v4 to act on a pre-computed TraceLens/HL
-analysis (the normal case here, and required for a fair v3-vs-v4 comparison).
+Use the variant whenever you want GEAK to act on a pre-computed TraceLens/HL
+analysis (the normal case here, and required for a fair per-kernel-vs-e2e comparison).
 
 ---
 

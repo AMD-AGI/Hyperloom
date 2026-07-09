@@ -29,7 +29,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _merge_cumulative_extra_sglang_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
-    _perfskills_revalidation_decision,
+    _geak_revalidation_decision,
     _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
     format_exc_brief,
@@ -1193,18 +1193,18 @@ class WritebackCollaborator:
             if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
-                # A PerfSkills revalidation (2b) must not blindly stamp validated
+                # A GEAK revalidation (2b) must not blindly stamp validated
                 # from the measured tput: assert the ran config's identity + that
                 # the optimization actually engaged, else replay via the GEAK
                 # harness (2a). Generic (native) revalidations keep the original
                 # unconditional watermark reconciliation below.
-                if bool((task.params or {}).get("perfskills_fallback")):
+                if bool((task.params or {}).get("geak_fallback")):
                     got_hash = ""
                     if isinstance(best_winner, dict):
                         got_hash = str(best_winner.get("fingerprint") or "")
                     if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
                         got_hash = str(winners[0].get("fingerprint") or "")
-                    decision = _perfskills_revalidation_decision(
+                    decision = _geak_revalidation_decision(
                         measured=measured,
                         baseline=self.shared_state.baseline_tput,
                         got_hash=got_hash,
@@ -1212,7 +1212,7 @@ class WritebackCollaborator:
                         min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
                     if decision == "validated":
-                        if self._perfskills_legacy_promote():
+                        if self._geak_legacy_promote():
                             # Legacy: current_best/stack were written up front by
                             # the provisional promote; here we only stamp the
                             # same-harness validated watermark.
@@ -1223,24 +1223,24 @@ class WritebackCollaborator:
                             )
                             self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
                             self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                            self.shared_state.cumulative_gain_provenance = "perfskills_orch_harness_validated"
+                            self.shared_state.cumulative_gain_provenance = "geak_orch_harness_validated"
                             self.shared_state.resume_pending_revalidation = False
                         else:
                             # Rebench-first: THIS is where the headline is first
                             # written - from the measured orchestrator-harness
                             # rebench. Lifts current_best + optimization_stack +
-                            # the validated gain and clears perfskills_pending.
+                            # the validated gain and clears geak_pending.
                             ps = (
-                                self.shared_state.perfskills_result
+                                self.shared_state.geak_result
                                 if isinstance(
-                                    getattr(self.shared_state, "perfskills_result", None), dict
+                                    getattr(self.shared_state, "geak_result", None), dict
                                 )
                                 else {}
                             )
-                            self._promote_perfskills_from_candidate(
+                            self._promote_geak_from_candidate(
                                 ps,
                                 measured_tput=float(measured),
-                                provenance="perfskills_orch_harness_validated",
+                                provenance="geak_orch_harness_validated",
                             )
                     else:
                         # 2b inconclusive (config-identity or engagement) -> GEAK
@@ -1248,14 +1248,14 @@ class WritebackCollaborator:
                         # it on success. Best-effort so a fallback failure never
                         # crashes the reactor (provisional gain + warning remain).
                         log.warning(
-                            "perfskills 2b revalidation inconclusive "
+                            "geak 2b revalidation inconclusive "
                             "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
                             measured, got_hash, (task.params or {}).get("expected_cfg_hash"),
                         )
                         try:
-                            await self._validate_perfskills_via_geak_harness(reason="2b_inconclusive")
+                            await self._validate_geak_via_geak_harness(reason="2b_inconclusive")
                         except Exception:  # noqa: BLE001 - defensive
-                            log.exception("perfskills 2a GEAK-harness fallback failed")
+                            log.exception("geak 2a GEAK-harness fallback failed")
                     changed = True
                 else:
                     if measured_ok and self.shared_state.baseline_tput > 0:
@@ -1374,7 +1374,7 @@ class WritebackCollaborator:
                     "provenance": "integrate_patch",
                     "scope": "source_patch",
                     # Durable source-layer handles so current_best stays
-                    # relaunchable (and reproducible in the PerfSkills baseline)
+                    # relaunchable (and reproducible in the GEAK baseline)
                     # regardless of later git hygiene on the shared live tree.
                     "source_snapshot": result.get("source_snapshot") or "",
                     "framework_root": result.get("framework_root") or "",

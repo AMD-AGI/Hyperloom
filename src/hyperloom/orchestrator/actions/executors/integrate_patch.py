@@ -2060,7 +2060,7 @@ class IntegratePatchExecutor:
         # session-scoped, self-contained directory so a later candidate's
         # ``git reset``/``clean``/``stash pop`` on the shared live tree cannot
         # wipe it (the root cause of current_best becoming unrelaunchable and
-        # the PerfSkills baseline falling back to the stock framework). Generic:
+        # the GEAK baseline falling back to the stock framework). Generic:
         # keyed on the touched patch targets + applied artifacts, never on a
         # specific file. Best-effort — a snapshot failure never blocks the KEEP.
         source_snapshot_dir = ""

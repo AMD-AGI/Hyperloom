@@ -26,7 +26,7 @@ import kernel_optimization as ko  # noqa: E402
 
 def test_parse_backends_accepts_forge():
     assert ko.parse_backends("forge") == ["forge"]
-    assert ko.parse_backends("geak,forge") == ["geak", "forge"]
+    assert ko.parse_backends("geak_v3,forge") == ["geak_v3", "forge"]
 
 
 def test_parse_backends_still_rejects_unknown():
@@ -36,11 +36,11 @@ def test_parse_backends_still_rejects_unknown():
 
 def test_parse_backends_tolerates_stringified_list():
     # Hyperloom#601: an upstream dispatch slip can hand the repr() of a Python
-    # list to --backends ("['geak']") instead of a bare name. parse_backends
+    # list to --backends ("['geak_v3']") instead of a bare name. parse_backends
     # must recover the inner token rather than rejecting a valid backend.
-    assert ko.parse_backends("['geak']") == ["geak"]
-    assert ko.parse_backends('["geak"]') == ["geak"]
-    assert ko.parse_backends("['geak', 'claude']") == ["geak", "claude"]
+    assert ko.parse_backends("['geak_v3']") == ["geak_v3"]
+    assert ko.parse_backends('["geak_v3"]') == ["geak_v3"]
+    assert ko.parse_backends("['geak_v3', 'claude']") == ["geak_v3", "claude"]
 
 
 def test_parse_backends_stringified_list_still_rejects_unknown():
@@ -76,7 +76,7 @@ def test_fellow_compiled_enabled_by_default(monkeypatch):
     assert forge_submit._fellow_for_source_type("hipblaslt") == "hipblaslt-fellow"
     # Still None for genuinely unsupported types.
     assert forge_submit._fellow_for_source_type("vendor_binary") is None
-    # Opt-out disables compiled fellows (revert to triton-only -> geak fallback).
+    # Opt-out disables compiled fellows (revert to triton-only -> geak_v3 fallback).
     monkeypatch.setenv("FORGE_DISABLE_COMPILED_FELLOWS", "1")
     assert forge_submit._fellow_for_source_type("hip_cpp") is None
     assert forge_submit._fellow_for_source_type("ck") is None
@@ -96,8 +96,8 @@ def test_choose_backends_respects_forge_only_order(monkeypatch):
 
 
 def test_choose_backends_no_double_geak(monkeypatch):
-    selected, _ = ko.choose_backends(_backends_args("forge,geak"), {})
-    assert selected == ["forge", "geak"]
+    selected, _ = ko.choose_backends(_backends_args("forge,geak_v3"), {})
+    assert selected == ["forge", "geak_v3"]
 
 
 def test_report_anchors_roundtrip(tmp_path):

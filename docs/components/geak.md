@@ -131,7 +131,7 @@ For the full CLI reference and examples, see the
 GEAK is wired in as a kernel-rewrite backend of the kernel agent:
 
 - `kernel-agent/tools/kernel_optimization.py` selects the backend ladder
-  (defaulting to `forge,geak`; OOB backends such as `claude`, `codex`, and
+  (defaulting to `forge,geak_v3`; OOB backends such as `claude`, `codex`, and
   `cursor` require an explicit backend override) and builds the GEAK task
   prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
   vocabulary and rendering the `--test-command` and budget.

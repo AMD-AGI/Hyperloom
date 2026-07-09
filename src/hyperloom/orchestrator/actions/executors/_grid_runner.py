@@ -567,7 +567,7 @@ def _build_variant_yaml(
         envs[str(k)] = str(v)
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels (same mechanism as the
-    # perfskills sweep's OVERLAY_PYTHONPATH). Inert for env/flag variants where
+    # geak sweep's OVERLAY_PYTHONPATH). Inert for env/flag variants where
     # ``overlay_pythonpath`` is unset. getattr-guarded so non-GridVariant callers
     # (or older payloads) never break.
     _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()

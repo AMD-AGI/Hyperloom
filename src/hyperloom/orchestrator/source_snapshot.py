@@ -5,17 +5,17 @@ Root-cause this addresses: ``current_best``'s source-code / artifact wins
 non-cyclic run, left uncommitted. A later candidate's routine ``git
 reset --hard`` / ``git clean -fd`` / ``git stash pop`` on that same shared tree
 silently discarded them, so the realized best could no longer be relaunched and
-the PerfSkills handoff had no durable source artifact to reference (it fell back
+the GEAK handoff had no durable source artifact to reference (it fell back
 to the stock installed framework).
 
 The fix is to stop treating the mutable live tree as the source of truth: every
 KEEP snapshots its *realized* file contents into a session-scoped, self-contained
 directory that no later git hygiene can touch. Both the orchestrator (resume /
-relaunch) and PerfSkills (baseline ref) rebuild an identical tree from the
+relaunch) and GEAK (baseline ref) rebuild an identical tree from the
 snapshot via :func:`materialize_source_layer`.
 
 The on-disk format is the cross-tool contract (Hyperloom writes it; the GEAK/
-PerfSkills side re-implements the same trivial reader), so neither side needs to
+GEAK side re-implements the same trivial reader), so neither side needs to
 import the other::
 
     <snapshot_dir>/manifest.json   # {framework_root, base_sha, files:[{rel,op}]}

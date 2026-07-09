@@ -492,14 +492,14 @@ except (TypeError, ValueError):
     _MIN_KERNEL_ENGAGED_GAIN_PCT = 2.0
 
 # |measurement_divergence_pct| above this (GEAK vs orchestrator on the SAME
-# config) is logged as a measurement-mismatch warning at perfskills promote.
+# config) is logged as a measurement-mismatch warning at geak promote.
 # Reporting only — never gates scheduling. Overridable via env.
 try:
-    _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT: float = float(
+    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = float(
         os.environ.get("INFERENCE_OPTIMIZER_MEASUREMENT_DIVERGENCE_WARN_PCT", "").strip() or "3.0"
     )
 except (TypeError, ValueError):
-    _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT = 3.0
+    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT = 3.0
 
 
 def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
@@ -535,7 +535,7 @@ def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
     return envs, " ".join(flag_tokens).strip()
 
 
-def _perfskills_revalidation_decision(
+def _geak_revalidation_decision(
     *,
     measured: Any,
     baseline: Any,
@@ -543,7 +543,7 @@ def _perfskills_revalidation_decision(
     expected_hash: str,
     min_engaged_gain_pct: float,
 ) -> str:
-    """Decide a perfskills same-harness (2b) rebench outcome.
+    """Decide a geak same-harness (2b) rebench outcome.
 
     Returns ``"validated"`` only when BOTH hold:
       * config identity — the ran variant's fingerprint matches the expected
@@ -575,8 +575,8 @@ def _perfskills_revalidation_decision(
     return "validated" if (cfg_ok and engaged) else "fallback"
 
 
-def _perfskills_sweep_measured_tput(res: dict[str, Any]) -> float | None:
-    """Extract a single measured throughput from a ``sweep_via_perfskills`` result.
+def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
+    """Extract a single measured throughput from a ``sweep_via_geak`` result.
 
     Used by the GEAK-harness (2a) rebench to source the MEASURED headline
     throughput (rather than GEAK's self-reported speedup). Prefers
@@ -609,7 +609,7 @@ def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
     Handles both ``--flag value`` and ``--flag=value`` forms. Hyperloom keeps
     serving-fidelity knobs (``--max-model-len``, ``--gpu-memory-utilization``)
     as raw flags inside the baseline server-args string rather than as
-    structured fields, so the perfskills handoff must recover them from there.
+    structured fields, so the geak handoff must recover them from there.
 
     Args:
         server_args: The full server-args string (e.g. baseline EXTRA_VLLM_ARGS).
@@ -639,7 +639,7 @@ def _resolve_serving_fidelity(
     baseline_server_args: str,
     state_max_model_len: int = 0,
 ) -> dict[str, Any]:
-    """Resolve serving-fidelity knobs to forward in the perfskills handoff.
+    """Resolve serving-fidelity knobs to forward in the geak handoff.
 
     Returns a dict carrying ONLY the resolved keys (``max_model_len`` int and/or
     ``mem_fraction`` float). Unresolved knobs are OMITTED so the GEAK vllm
@@ -819,7 +819,7 @@ def _scrape_resolved_launch_flags(
     Selection is by THROUGHPUT, not recency: we find the benchmark whose measured
     ``output_throughput`` equals ``target_tput`` (``current_best``'s number) and
     scrape ITS sibling server log — i.e. replay the exact launch that produced
-    the throughput we are asking PerfSkills to reproduce. This is deterministic
+    the throughput we are asking GEAK to reproduce. This is deterministic
     and never mistakes a profiling/roofline or losing-candidate launch for the
     baseline. Falls back to the most recent clean launch when no throughput
     match exists (or ``target_tput<=0``).
@@ -848,7 +848,7 @@ def _scrape_resolved_launch_flags(
             for rp in _glob.glob(
                 str(runs_root / "**" / "inferencex_result.json"), recursive=True
             ):
-                if "perfskills" in rp or "_baseline_source_overlay" in rp:
+                if "geak" in rp or "_baseline_source_overlay" in rp:
                     continue
                 try:
                     tp = float(
@@ -874,7 +874,7 @@ def _scrape_resolved_launch_flags(
         candidates: list[tuple[float, str]] = []
         for name in ("server.log", "benchmark_stderr.log"):
             for p in _glob.glob(str(runs_root / "**" / name), recursive=True):
-                if "perfskills" in p or "_baseline_source_overlay" in p:
+                if "geak" in p or "_baseline_source_overlay" in p:
                     continue
                 try:
                     candidates.append((os.path.getmtime(p), p))

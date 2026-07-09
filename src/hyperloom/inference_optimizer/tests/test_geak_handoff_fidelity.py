@@ -1,5 +1,5 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
-"""Serving-launch fidelity forwarding for the PerfSkills(GEAK) handoff (#805).
+"""Serving-launch fidelity forwarding for the GEAK(GEAK) handoff (#805).
 
 Guards that Hyperloom forwards the SAME max-model-len / gpu-mem-util its Magpie
 baseline served with, so GEAK/e2e launches the IDENTICAL vLLM engine (else it
@@ -9,7 +9,7 @@ case, e.g. gpt-oss ``--max-model-len 2248 --gpu-memory-utilization 0.9``), not
 only from a dedicated CLI field, and are OMITTED when unresolved so the GEAK
 adapter keeps its own defaults.
 
-Run: python3 -m pytest inference_optimizer/tests/test_perfskills_handoff_fidelity.py -v
+Run: python3 -m pytest inference_optimizer/tests/test_geak_handoff_fidelity.py -v
 """
 
 from __future__ import annotations

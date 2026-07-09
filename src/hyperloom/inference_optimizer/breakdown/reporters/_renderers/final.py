@@ -45,13 +45,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     action_path = f.get("action_path") or []
     gain_provenance = str(f.get("cumulative_gain_provenance") or "")
     revalidation_pending = bool(f.get("revalidation_pending"))
-    # A PerfSkills(GEAK) e2e candidate that self-reported a win but was NOT
+    # A GEAK(GEAK) e2e candidate that self-reported a win but was NOT
     # confirmed by a main-flow rebench: it is deliberately excluded from the
     # headline (current_best / action_path / validated gain). Surface it as an
     # audit-only note + warning so the report neither hides it nor lets its
     # self-reported number masquerade as a validated headline gain.
-    perfskills_pending = f.get("perfskills_pending") if isinstance(f.get("perfskills_pending"), dict) else {}
-    pending_awaiting = perfskills_pending.get("status") == "awaiting_rebench"
+    geak_pending = f.get("geak_pending") if isinstance(f.get("geak_pending"), dict) else {}
+    pending_awaiting = geak_pending.get("status") == "awaiting_rebench"
     # The gain is PROVISIONAL (not same-harness-validated) when its provenance
     # says so, or a revalidation is pending and no positive validated number
     # exists yet. In that case we must NOT present the (zeroed/absent) validated
@@ -60,7 +60,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     is_provisional = ("provisional" in gain_provenance) or (
         revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
     )
-    # A pending PerfSkills candidate with no positive validated gain yet means the
+    # A pending GEAK candidate with no positive validated gain yet means the
     # headline is genuinely unvalidated — suppress the "Validated cumulative gain:
     # +0.00%" line (which reads like the optimization did nothing) and let the
     # audit note below carry the (self-reported, not-yet-confirmed) number.
@@ -114,18 +114,18 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             facts.append(
                 f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
             )
-    if perfskills_pending and perfskills_pending.get("status") == "awaiting_rebench":
-        self_gain = perfskills_pending.get("self_reported_gain_pct")
+    if geak_pending and geak_pending.get("status") == "awaiting_rebench":
+        self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = (
             fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
         )
         facts.append(
-            f"PerfSkills candidate (self-reported {self_gain_str}) is AWAITING a "
+            f"GEAK candidate (self-reported {self_gain_str}) is AWAITING a "
             "main-flow rebench — excluded from the headline gain and final stack "
             "until a measured rebench validates it."
         )
         warnings.append(
-            "A PerfSkills(GEAK) e2e candidate self-reported a win but has NOT been "
+            "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been "
             "confirmed by a same-harness main-flow rebench, so it is intentionally "
             "kept out of current_best / action_path / the validated gain. Its "
             "self-reported number is audit-only and must not be presented as the "
@@ -157,7 +157,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("cumulative_gain_pct_per_round_sum", gain_round),
             ("cumulative_gain_provenance", gain_provenance or None),
             ("revalidation_pending", revalidation_pending or None),
-            ("perfskills_pending", perfskills_pending or None),
+            ("geak_pending", geak_pending or None),
             ("validated_at_stack_len", val_stack_len),
             ("validated_ts", val_ts),
             ("stack_changed_after_validation", stack_changed),

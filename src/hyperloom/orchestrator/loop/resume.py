@@ -16,7 +16,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _merge_cumulative_extra_sglang_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
-    _perfskills_sweep_measured_tput,
+    _geak_sweep_measured_tput,
     _resolve_roofline_watermark_ratio,
     _scrape_resolved_launch_flags,
     _split_env_and_flags,
@@ -174,7 +174,7 @@ class ResumeCollaborator:
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
           * ``launch_recipe`` — the baseline Magpie recipe to launch from.
 
-        This is the single source of truth the PerfSkills handoff forwards so the
+        This is the single source of truth the GEAK handoff forwards so the
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
@@ -435,7 +435,7 @@ class ResumeCollaborator:
                 "scope": "source_patch",
                 # Same durable source-layer handles as the primary KEEP lift so a
                 # source_patch recovered on THIS path is equally reproducible in
-                # the PerfSkills baseline (no path is left snapshot-less).
+                # the GEAK baseline (no path is left snapshot-less).
                 "source_snapshot": result.get("source_snapshot") or "",
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
@@ -655,7 +655,7 @@ class ResumeCollaborator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
-        # fix-point 7 (2b) — when the win is a PerfSkills e2e result, source the
+        # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
         # revalidation config from result.json (the SINGLE source of truth), NOT
         # from stack materialization. This guarantees the same-harness rebench
         # launches byte-for-byte the config GEAK optimized (flags + parsed env +
@@ -663,7 +663,7 @@ class ResumeCollaborator:
         # tuned-config / kernel / flag winner — no case-by-case markers. The
         # consumer (_promote_to_shared_state) asserts config identity + effect
         # before stamping validated, and falls back to 2a (GEAK harness) on miss.
-        ps = self.shared_state.perfskills_result if isinstance(getattr(self.shared_state, "perfskills_result", None), dict) else {}
+        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = str(ps.get("final_overlay") or "").strip()
         if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
@@ -683,16 +683,16 @@ class ResumeCollaborator:
                 params_ps: dict[str, Any] = {
                     "source": "resume_stack_revalidate",
                     "reason": reason,
-                    "perfskills_fallback": True,
+                    "geak_fallback": True,
                     "expected_cfg_hash": expected_cfg_hash,
                     "grid": [
                         {
-                            "name": "perfskills_revalidate",
+                            "name": "geak_revalidate",
                             "extra_args": ps_flags,
                             "extra_envs": dict(ps_envs),
                             "overlay_pythonpath": ps_overlay,
-                            "provenance": "perfskills_revalidate",
-                            "note": "same-harness config-identity revalidation of the perfskills e2e win",
+                            "provenance": "geak_revalidate",
+                            "note": "same-harness config-identity revalidation of the geak e2e win",
                         }
                     ],
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
@@ -703,9 +703,9 @@ class ResumeCollaborator:
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
-                    idempotency_key="perfskills-revalidate",
+                    idempotency_key="geak-revalidate",
                 )
-                return {"task_id": task.task_id, "existing": bool(existing), "mode": "perfskills_2b"}
+                return {"task_id": task.task_id, "existing": bool(existing), "mode": "geak_2b"}
 
         rebuilt = self._materialize_stack_config_for_resume()
         args = str(rebuilt.get("extra_server_args") or "").strip()
@@ -740,8 +740,8 @@ class ResumeCollaborator:
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 
-    async def _validate_perfskills_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        """2a fallback - validate the perfskills win by REPLAYING it through
+    async def _validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
+        """2a fallback - validate the geak win by REPLAYING it through
         GEAK's own ``bench_e2e.sh`` (the harness that produced the headline
         result), so the optimized config engages BY CONSTRUCTION regardless of
         winner kind (tuned-config / kernel / overlay / flag). Because the replay
@@ -758,9 +758,9 @@ class ResumeCollaborator:
         Returns:
             A summary dict describing whether validation succeeded.
         """
-        ps = self.shared_state.perfskills_result if isinstance(getattr(self.shared_state, "perfskills_result", None), dict) else {}
+        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok":
-            return {"validated": False, "skipped": True, "reason": "no_perfskills_result"}
+            return {"validated": False, "skipped": True, "reason": "no_geak_result"}
         am = ps.get("alignment_metrics") or {}
         # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
@@ -790,17 +790,17 @@ class ResumeCollaborator:
         except (TypeError, ValueError):
             conc, isl, osl = 64, 1024, 1024
         from hyperloom.inference_optimizer.session.session_paths import runs_dir
-        from ..actions.executors._perfskills_sweep import sweep_via_perfskills
+        from ..actions.executors._geak_sweep import sweep_via_geak
 
         try:
             timeout = int(os.environ.get("SWEEP_VARIANT_TIMEOUT_SEC", "").strip() or "2400")
         except (TypeError, ValueError):
             timeout = 2400
-        res = await sweep_via_perfskills(
+        res = await sweep_via_geak(
             result=ps,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
-            output_root=runs_dir(self.session_dir, "sweep", "revalidate_perfskills"),
+            output_root=runs_dir(self.session_dir, "sweep", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts
@@ -808,13 +808,13 @@ class ResumeCollaborator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            if self._perfskills_legacy_promote():
+            if self._geak_legacy_promote():
                 # Legacy: current_best/stack were written up front; stamp the
                 # same-harness validated watermark from GEAK's OWN headline speedup.
                 self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
                 self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
                 self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                self.shared_state.cumulative_gain_provenance = "perfskills_same_harness_geak"
+                self.shared_state.cumulative_gain_provenance = "geak_same_harness_geak"
                 self.shared_state.resume_pending_revalidation = False
                 gain_out = (geak_sp - 1.0) * 100.0
             else:
@@ -822,27 +822,27 @@ class ResumeCollaborator:
                 # throughput (engages by construction via the launch-script replay),
                 # keeping the leaderboard number a same-harness total rather than a
                 # self-reported speedup.
-                measured = _perfskills_sweep_measured_tput(res)
+                measured = _geak_sweep_measured_tput(res)
                 if measured is None:
                     log.warning(
-                        "perfskills 2a: succeeded sweep but no measurable throughput; "
+                        "geak 2a: succeeded sweep but no measurable throughput; "
                         "candidate stays pending"
                     )
                     return {"validated": False, "status": res.get("status"), "reason": reason}
-                self._promote_perfskills_from_candidate(
+                self._promote_geak_from_candidate(
                     ps,
                     measured_tput=measured,
-                    provenance="perfskills_same_harness_geak",
+                    provenance="geak_same_harness_geak",
                 )
                 base = float(self.shared_state.baseline_tput or 0.0)
                 gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive
-                log.exception("perfskills 2a: SharedState.save failed")
+                log.exception("geak 2a: SharedState.save failed")
             return {"validated": True, "gain": gain_out, "reason": reason}
         log.warning(
-            "perfskills 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
+            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
             res.get("status"), geak_sp, reason,
         )
         return {"validated": False, "status": res.get("status"), "reason": reason}
@@ -850,7 +850,7 @@ class ResumeCollaborator:
     async def _resume_reenter_kernel_if_needed(self) -> None:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
-        Phase-entry side effects (the PerfSkills delegation + its ``result.json``
+        Phase-entry side effects (the GEAK delegation + its ``result.json``
         crash-recovery) are bound to a phase *transition* via
         ``_on_phase_entered``; a resume only restores ``phase`` from state.json
         and never re-enters the current phase. Without this, a session that
@@ -859,7 +859,7 @@ class ResumeCollaborator:
 
         General across every crash timing (not case-by-case): the decision is
         driven purely by whether THIS KERNEL phase's history row already carries
-        a ``perfskills`` completion record, so it self-classifies:
+        a ``geak`` completion record, so it self-classifies:
 
           * completed-this-phase -> only re-arm (+persist) the ``skip_to_sweep``
             hint the delegation sets, so the phase machine winds down to SWEEP
@@ -869,7 +869,7 @@ class ResumeCollaborator:
             re-runs the e2e only when there is genuinely nothing to recover
             (run_e2e itself then continues from the pinned eval_dir on disk).
 
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the PerfSkills
+        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
         backend selected.
         """
         from ..phases.machine_state import (
@@ -882,13 +882,13 @@ class ResumeCollaborator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._kernel_enabled() and self._perfskills_enabled()):
+        if not (self._kernel_enabled() and self._geak_enabled()):
             return
         history = state.phase_history or []
         row = history[-1] if history else {}
         evidence = row.get("evidence") if isinstance(row, dict) else {}
         completed_this_phase = isinstance(evidence, dict) and isinstance(
-            evidence.get("perfskills"), dict
+            evidence.get("geak"), dict
         )
         if completed_this_phase:
             # The delegation landed during this phase but the SWEEP transition
@@ -904,12 +904,12 @@ class ResumeCollaborator:
                         "resume: save after re-arming skip_to_sweep failed"
                     )
                 log.info(
-                    "resume: KERNEL PerfSkills already completed this phase; "
+                    "resume: KERNEL GEAK already completed this phase; "
                     "re-armed skip_to_sweep hint (lost before SWEEP transition)."
                 )
             return
         log.info(
-            "resume: re-entering KERNEL PerfSkills delegation (no completion "
+            "resume: re-entering KERNEL GEAK delegation (no completion "
             "evidence on the current phase row); recover-from-disk or re-run."
         )
         try:
