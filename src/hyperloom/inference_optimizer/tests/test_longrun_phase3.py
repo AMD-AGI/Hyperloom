@@ -16,7 +16,6 @@ All deterministic + offline.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -269,130 +268,15 @@ async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator)
 
 
 # ==========================================================================
-# Dispatcher pump: every-tick expired-running reclaim
+# Expired-running reclaim wiring
+#
+# The every-tick reclaim was previously invoked from the dispatcher pump
+# (``_pump_dispatcher_once``); it has since been consolidated into the periodic
+# in-process maintenance watchdog (``_maybe_run_maintenance_tick`` →
+# ``reclaim_expired_running(reason="maintenance_watchdog")`` in
+# ``orchestrator/loop/maintenance.py``). The reclaim logic itself is covered by
+# ``test_reclaim_expired_running_orphan`` / ``test_reclaim_leaves_fresh_and_no_ttl_running``
+# / ``test_reclaim_respects_lease_window`` above; the maintenance-tick wiring is
+# covered by ``test_longrun_phase0``. The former pump-path tests were removed
+# alongside that consolidation.
 # ==========================================================================
-
-async def _build_minimal_coord(tmp_path: Path, monkeypatch):
-    """Build a minimal Coordinator with no real GPU pool (capacity=0)."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    for _var in (
-        "TP",
-        "ROCR_VISIBLE_DEVICES",
-        "HIP_VISIBLE_DEVICES",
-        "CUDA_VISIBLE_DEVICES",
-        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY",
-        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES",
-    ):
-        monkeypatch.delenv(_var, raising=False)
-
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-
-    sd = _msd()
-    state = SharedState(session_id="pump-test")
-    state.gpu_specialist_capacity = 0
-    state.save(sd)
-
-    idle_plan = ScriptedPlan(turns=[])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "kernel_agent": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
-    }
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return Coordinator(
-        session_dir=sd,
-        backends=backends,
-        role_registry=default_role_registry(),
-        cortex_kb=None,
-        knowledge_plane=None,
-    )
-
-
-@pytest.mark.asyncio
-async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
-    """_pump_dispatcher_once flips an orphaned expired-running task to failed.
-
-    Verifies the every-tick reclaim_expired_running call added to the pump
-    (pump_watchdog path) so a zombie task whose TTL has elapsed is retired
-    within a single tick — not after the next maintenance cadence (every 50 ticks).
-    """
-    coord = await _build_minimal_coord(tmp_path, monkeypatch)
-
-    # Orphaned task: lease_ttl_sec=60, updated_at backdated far enough that
-    # updated_at + 60 < now → TTL has expired.
-    orphan = await coord.tasks.create(
-        kind="integrate_patch",
-        params={},
-        idempotency_key="zombie-orphan",
-        lease_ttl_sec=60,
-    )
-    await coord.tasks.transition(orphan.task_id, "running")
-    stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    await coord.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (stale_ts, orphan.task_id),
-    )
-
-    # In-window task: lease_ttl_sec=3600, updated_at = now → age ≈ 0s < 3600s.
-    live = await coord.tasks.create(
-        kind="integrate_patch",
-        params={},
-        idempotency_key="live-running",
-        lease_ttl_sec=3600,
-    )
-    await coord.tasks.transition(live.task_id, "running")
-
-    # No-TTL task (lease_ttl_sec=0): never reclaimed.
-    no_ttl = await coord.tasks.create(
-        kind="sweep",
-        params={},
-        idempotency_key="no-ttl-running",
-        lease_ttl_sec=0,
-    )
-    await coord.tasks.transition(no_ttl.task_id, "running")
-
-    await coord._pump_dispatcher_once()
-
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed", (
-        "orphaned expired-running task must be failed by the pump"
-    )
-    assert (await coord.tasks.get(live.task_id)).state == "running", (
-        "in-window running task must not be reclaimed"
-    )
-    assert (await coord.tasks.get(no_ttl.task_id)).state == "running", (
-        "no-TTL running task must never be reclaimed"
-    )
-
-
-@pytest.mark.asyncio
-async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
-    """Running the pump twice on an already-failed task is a no-op (idempotent)."""
-    coord = await _build_minimal_coord(tmp_path, monkeypatch)
-
-    orphan = await coord.tasks.create(
-        kind="integrate_patch",
-        params={},
-        idempotency_key="zombie-idem",
-        lease_ttl_sec=60,
-    )
-    await coord.tasks.transition(orphan.task_id, "running")
-    stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    await coord.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (stale_ts, orphan.task_id),
-    )
-
-    await coord._pump_dispatcher_once()
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed"
-
-    # Second pump call must not raise and the task stays failed.
-    await coord._pump_dispatcher_once()
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed"
