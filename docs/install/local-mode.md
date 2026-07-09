@@ -115,9 +115,16 @@ bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
 
 - `SAFE_API_KEY` — your key from the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
-- `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). It **must be an absolute path** and can point at any location with enough space.
+- `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). Use an absolute path pointing at any location with enough space (relative paths are not rejected by `local_setup.sh`, but an absolute path avoids ambiguity across the runtime).
 
-When it finishes, `local_setup.sh` prints the workspace path to open in Cursor, a prompt template to paste into Cursor Chat (with a `Model:` field to fill in), and the env file to source before launch.
+When it finishes, `local_setup.sh` prints the workspace path to open in Cursor, a prompt template to paste into Cursor Chat (it includes a `- Model: /path/to/your/model` line to fill in), and the env file to source before launch.
+
+> **Before the first launch**, you must also run the runtime installer and source
+> the kernel-agent env (per the SKILL IR-2 preflight): `local_setup.sh` only
+> clones dependencies. The prompt in
+> [Run a Hyperloom optimization](../how-to/optimize.md) already chains
+> `install.sh` + `source .../runtime/kernel-agent.env.sh`; follow it rather than
+> launching straight after Step 4.
 
 ---
 
@@ -125,7 +132,7 @@ When it finishes, `local_setup.sh` prints the workspace path to open in Cursor, 
 
 AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform instead of their own machine:
 
-1. Create an Authoring Pod on Primus-SaFE Authoring and select an SGLang or vLLM image. On this platform, use the Harbor mirror prefix `harbor.<datacenter_name>.primus-safe.amd.com/proxy/primussafe/sglang:<tag>` (the internal mirror of the Docker Hub images above).
+1. Create an Authoring Pod on Primus-SaFE Authoring and select an SGLang or vLLM image. On this platform, use the Harbor mirror prefix `harbor.<datacenter_name>.primus-safe.amd.com/proxy/primussafe/<image>:<tag>` (the internal mirror of the Docker Hub images above) — for example `.../proxy/primussafe/sglang:<tag>` or `.../proxy/primussafe/vllm-openai-rocm:<tag>`.
 2. When the Pod is ready, connect to it with Cursor Remote SSH (follow the connection instructions shown in the Primus-SaFE Authoring UI).
 3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-configure-credentials) and [Step 4](#4-bootstrap-dependency-checkouts) above to clone Hyperloom and run the bootstrap.
 
@@ -161,9 +168,9 @@ Shell `export` always wins over `.env` — see [Credential precedence](../refere
 
 For setups beyond the single-gateway default above, see [Authentication and credentials](../reference/authentication.md):
 
-- **Split Anthropic + OpenAI entrypoints** — [Split entrypoints](../reference/authentication.md#split-entrypoints-native-anthropic--openai)
-- **Non-AMD / self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd--self-hosted-gateway)
-- **Optional `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL`** — [Cursor SDK kernel-opt backend](../reference/authentication.md#cursor_api_key--cursor-sdk-kernel-opt-backend)
+- **Split Anthropic + OpenAI entrypoints** — [Split entrypoints](../reference/authentication.md#split-entrypoints-native-anthropic-openai)
+- **Non-AMD / self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd-self-hosted-gateway)
+- **Optional `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL`** — [Cursor SDK kernel-opt backend](../reference/authentication.md#cursor-api-key-cursor-sdk-kernel-opt-backend)
 - **Optional `TRACELENS_INTERNAL_ROOT`** — [Dependency checkout variables](../reference/authentication.md#dependency-checkout-variables)
 
 </details>

@@ -57,6 +57,6 @@ advanced to `0.8.0` to match the runtime. See
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
 [Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v0.3...HEAD
-[0.8.0]: https://github.com/AMD-AGI/Hyperloom/compare/v0.3...HEAD
+[0.8.0]: https://github.com/AMD-AGI/Hyperloom/blob/main/docs/release-notes.md
 [v0.3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.3
 [v0.2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.2

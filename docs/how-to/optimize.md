@@ -56,12 +56,13 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — benchmark concurrency level | Start with `64`; Hyperloom sweeps other values during SWEEP phase |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `8`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `1,2,4,8,16,32,64,128`) |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
-See the [README](https://github.com/AMD-AGI/Hyperloom/blob/main/README.md) for
-the full prompt field reference (every field maps to a CLI flag).
+See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
+for the full prompt field reference (every field maps to a CLI flag defined in
+`cli/parser.py`).
 
 ## Monitor the run
 

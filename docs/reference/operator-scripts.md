@@ -11,9 +11,13 @@ A short reference for the operator-facing scripts under
 they are utilities you run by hand against a finished or in-progress
 session directory.
 
-When no explicit `--session-dir` is given, scripts resolve the active session
-from `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`, then `USER_DATA_PATH`, then the
-default `/workspace/hyperloom`. See [Hyperloom authentication and credentials](authentication.md).
+When no explicit `--session-dir` is given, scripts resolve the active session in
+two steps: `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` when set, otherwise the
+workspace root (`USER_DATA_PATH`, falling back to `/workspace/hyperloom`). This
+does **not** auto-discover the latest `$USER_DATA_PATH/<model>/<ts>/` per-session
+subdir — under the per-model timestamp layout, pass `--session-dir` explicitly
+(or rely on `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`, which the CLI sets during
+a run). See [Hyperloom authentication and credentials](authentication.md).
 
 ---
 
@@ -168,17 +172,21 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 
 ---
 
-## A/B (comparative) testing helper scripts (advanced)
+## Additional operator tools
 
-The same tools package also contains:
+The same tools package also contains smaller utilities that are useful during
+incident response or launch validation:
 
-* `ab_torch_compile_kernels.py`
-* `ab_torch_compile_magpie.py`
-
-These are internal A/B harnesses used during torch.compile
-investigation work; they are not part of the customer-facing workflow
-and are documented in their respective module docstrings. Treat them
-as reference implementations rather than supported operator tools.
+* `backfill_langfuse.py` — replay one finished session's `reports/trace/` into
+  Langfuse after the fact:
+  `python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD> [--dry-run]`.
+* `preflight_optimizer.py` — launcher-side local preflight for stale processes,
+  ROCm visibility, disk, and model path checks:
+  `python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH`.
+* `read_optimizer_state.py` — concise `state.json` / lifecycle summary:
+  `python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR`.
+* `robustness_monitor.sh.example` — shell example for polling robustness
+  findings around a session; copy/adapt it for local operator workflows.
 
 ---
 

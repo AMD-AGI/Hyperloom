@@ -42,7 +42,7 @@ These inference frameworks are supported:
 | SGLang (ROCm) | 7.2.0 | Supported | Default framework |
 | vLLM (ROCm) | 7.2.0 | Supported | Do not mix frameworks within one session |
 | Atom (ROCm) | 7.2.0 | Supported | Single-node only (multi-node rejected by the IR-8 guard) |
-| xDiT (diffusion) | 7.2.0 | Supported | Diffusion pipeline; throughput reported in img/s, no serving server |
+| xDiT (diffusion) | 7.2.0 | Supported | Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency `e2el_mean_ms` (ms). |
 
 ## Container images
 
@@ -71,5 +71,5 @@ These are the Hyperloom components:
 | IntelliKit | <https://github.com/AMDResearch/intellikit> |
 | KernelForge | <https://github.com/AMD-AGI/KernelForge> |
 | GEAK | <https://github.com/AMD-AGI/GEAK> |
-| AgentKernelArena |<https://github.com/AMD-AGI/AgentKernelArena> |
+| AgentKernelArena (optional; not in the default install / optimization loop) |<https://github.com/AMD-AGI/AgentKernelArena> |
 | AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |

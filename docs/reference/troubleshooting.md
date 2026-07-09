@@ -350,8 +350,8 @@ resolver order.
 marker and the run proceeds without an external reference (no "vs
 B200" number in the report).
 
-**Cause**: `--compare-against-gpu` was not supplied. Since v0.6, the
-`classify` action no longer derives this automatically.
+**Cause**: `--compare-against-gpu` was not supplied. The removed `classify`
+action no longer derives this automatically.
 
 **Fix**: Add the flag at launch:
 

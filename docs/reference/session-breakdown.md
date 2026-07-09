@@ -70,8 +70,9 @@ Compatibility rules:
 * All values are JSON-serializable (no dataclasses, enums, or
   Python-specific types in the wire shape).
 
-The `exporter_version` field carries the producing Hyperloom version
-(for example, `"0.6.0"`) for incident triage and per-version filtering.
+The `exporter_version` field carries the exporter implementation version
+(currently `"session-breakdown-1.0.0"`), independent of the Hyperloom package
+version, for incident triage and per-version filtering.
 
 ---
 
@@ -102,9 +103,33 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "attribution":        { /* §16 Gain attribution per stack entry */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
-  "source_files":       { /* §17 SourceFiles — raw artefact paths */ }
+  "source_files":       { /* §17 SourceFiles — raw artefact paths */ },
+
+  /* Optional sections — present when the run produced the relevant data.
+     Consumers MUST tolerate their absence (total=False TypedDict). */
+  "model_info":                  { /* model architecture summary */ },
+  "phase_segments":              [ /* per-phase segment records */ ],
+  "explore_search":              { /* EXPLORE dedup ledger */ },
+  "perfskills":                  { /* perf-skill telemetry */ },
+  "kb_provenance":               { /* KB read/write provenance */ },
+  "specialist_runs":             [ /* specialist sub-agent runs */ ],
+  "optimization_stack":          { /* accepted KEEP stack */ },
+  "gemm_tuning":                 { /* FP8 GEMM tuning results */ },
+  "kernel_roofline":             { /* kernel roofline snapshot */ },
+  "kernel_optimization_summary": { /* kernel-opt rollup */ },
+  "conc_sweep_summary":          { /* post-run concurrency sweep */ },
+  "roofline":                    { /* roofline analysis */ },
+  "roofline_progress":           [ /* roofline watermark crossings */ ],
+  "decision_trace":              { /* KEEP/REVERT decisions + token rollup */ },
+  "token_usage":                 { /* LLM token spend rollup (see below) */ },
+  "langfuse":                    { /* Langfuse push receipt */ },
+  "kernel_journey":              { /* kernel lifecycle journey */ },
+  "versions":                    { /* component/version stamps */ }
 }
 ```
+
+The `session` (SessionMeta) section also carries `user_data_path` and a
+`recovery` sub-object in addition to the fields documented in §3.
 
 All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session

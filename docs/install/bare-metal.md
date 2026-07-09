@@ -45,7 +45,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-xxxxx
 ```
 
-> To change the artifact directory, set `USER_DATA_PATH` in `.env` (default `/workspace/hyperloom`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
+> To change the artifact directory (default `/workspace/hyperloom`), `export USER_DATA_PATH=...` in your shell before running the installer, or pass `--user-data-path`. The bare-metal installer reads `USER_DATA_PATH` from the shell environment, **not** from `.env` (only LLM credentials are read from `.env`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
 
 ## 3. Run the bare-metal installer
 
@@ -72,6 +72,6 @@ When the install finishes, the script writes a single combined env file and prin
 source '<path printed by install_baremetal.sh>'
 ```
 
-The default location is usually `/workspace/hyperloom/runtime/hyperloom.env.sh`, but use the printed path if you changed `USER_DATA_PATH` in `.env` or passed `--user-data-path`.
+The default location is usually `/workspace/hyperloom/runtime/hyperloom.env.sh`, but use the printed path if you exported a custom `USER_DATA_PATH` or passed `--user-data-path`.
 
-Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Launch Inference Optimization](local-mode.md#launch-inference-optimization).
+Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Run a Hyperloom optimization](../how-to/optimize.md).

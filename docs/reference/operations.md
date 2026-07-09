@@ -215,6 +215,18 @@ ingest it whole on session end.
 4. Robustness writes a fresh `findings/<session>.jsonl` segment; old
    segments remain.
 
+> To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
+> that exited abnormally — without re-running the optimization loop — use the
+> dedicated subcommand instead of `--resume`:
+> ```bash
+> inference_optimizer recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+> ```
+> `--force` re-runs even when the session already looks complete;
+> `--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
+> generations (use only when the live emitter never ran, or it duplicates
+> generations). `--resume` = keep optimizing; `recover-session` = rebuild the
+> breakdown artifact.
+
 ### Scenario B: PV lost or corrupted
 
 1. The session is unrecoverable. Restart from scratch with a fresh

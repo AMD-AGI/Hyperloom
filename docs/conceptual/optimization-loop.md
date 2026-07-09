@@ -28,11 +28,17 @@ observable session artifacts and subprocess JSON bridges are.
 
 ## Phase order
 
-The Coordinator moves monotonically through the live phase chain:
+The Coordinator advances through the live phase chain:
 
 ```text
 PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
+
+For a normal single-pass run (`--max-hours <= 24`) the chain is traversed
+once. Cyclic macro-cycling is enabled by default
+(`INFERENCE_OPTIMIZER_CYCLIC_PHASES`): with a large or unbounded budget
+(`--max-hours > 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_AGENT` /
+`EXPLORE` for another pass instead of closing.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
@@ -58,8 +64,10 @@ metadata at boot. There is no separate live `classify` action.
 ## FRAMEWORK_AGENT
 
 When enabled, the `FRAMEWORK_AGENT` phase (framework-PR enablement) is managed
-by the Coordinator. The only protected framework-agent integration is discovery
-via `fa phase-discover`.
+by the Coordinator. It covers discovery/ranking/audit via `fa phase-discover`,
+plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
+default), enablement repair, and Critic review of each candidate — discovery is
+one integration among several, not the only one.
 
 For each candidate:
 

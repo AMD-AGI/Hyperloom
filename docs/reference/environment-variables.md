@@ -92,11 +92,12 @@ read them when invoked standalone.
 | `GPU_TYPE`        | Auto-detect | `mi300x` / `mi308x` / `mi325x` / `mi355x`.                           |
 | `TARGET_GPU_TYPE` | Mirrors `GPU_TYPE` | Set by the CLI; used by Magpie YAML rendering for script pinning. |
 | `MODEL_CLASS`     | Unset       | Optional launcher hint. When unset, Coordinator boot infers and persists it from model metadata or model-path family keywords; the old live `classify` action is removed. |
-| `TP`              | `1`         | Tensor-parallel size.                                                |
-| `CONC`            | `8`         | Benchmark concurrency.                                               |
+| `TP`              | `1`         | Tensor-parallel size (`--tp`).                                       |
+| `EP`              | `1`         | Expert-parallel size for MoE (`--ep`); `>=2` enables true expert parallelism. |
+| `CONC`            | `8`         | Baseline benchmark concurrency (`--conc`). A comma ladder seeds the concurrency sweep. |
 | `ISL`             | `256`       | Input sequence length.                                               |
 | `OSL`             | `256`       | Output sequence length.                                              |
-| `MAX_MODEL_LEN`   | `8192`      | Server-side max sequence length.                                     |
+| `MAX_MODEL_LEN`   | Auto (`ISL+OSL+4096`) | Server-side max sequence length. When unset, auto-derived as `ISL+OSL+4096` (default `4608`) and then clamped to the model's native context; only an explicit value or model cap yields other numbers. |
 | `PRECISION`       | `bf16`      | Model precision (`bf16`, `fp8`, `mxfp4`, ...).                       |
 | `RANDOM_RANGE_RATIO` | Unset    | Optional Magpie random-range jitter.                                 |
 | `ROCR_VISIBLE_DEVICES` | Inherited | Standard ROCm visible-device mask.                                  |
@@ -115,6 +116,34 @@ The following variables control the kernel optimization backend ladder.
 | `KERNEL_OPT_BACKEND_ORDER`     | Unset                         | Comma-separated override for the kernel-opt backend ladder. Values: `forge`, `geak`, `claude`, `codex`, `cursor`. When unset, the auto-derived default is `forge,geak,claude,codex,cursor`; `cursor` is dropped from that default when `CURSOR_API_KEY` is unset.                    |
 | `KERNEL_OPT_MAX_PARALLEL`      | `8` (GPU-adaptive cap)        | Max parallel kernel-opt attempts per request (per-kernel race fan-out). The runtime caps this by visible GPUs and per-attempt GPU reservation when it can detect them.                                                                                                                            |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
+
+---
+
+## Multi-node / prefill-decode (PD)
+
+These are read by the CLI (`cli/parser.py`) for `--nodes>=2` RayJob / Dynamo
+runs and prefill-decode disaggregation. Each has an equivalent CLI flag.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODES` / `INFERENCE_OPTIMIZER_NODES` | `1` | Total GPU nodes for the inference RayJob (`--nodes`). Resolution: `--nodes` > `INFERENCE_OPTIMIZER_NODES` > `NODES` > `1`. |
+| `INFERENCE_OPTIMIZER_MN_BACKEND` | `rayjob` | Multi-node backend (`--mn-backend`): `rayjob` or `dynamo`. |
+| `INFERENCE_OPTIMIZER_RAYJOB_IMAGE` | Unset | Container image for the multi-node RayJob (`--rayjob-image`); required when `--nodes>=2`. |
+| `INFERENCE_OPTIMIZER_GPUS_PER_NODE` | `8` | GPUs per RayJob pod (`--rayjob-gpus-per-node`). |
+| `PD_MODE` | `colocated` | Prefill-decode mode; `--pd-mode` always defaults to `colocated` regardless of inherited env. |
+| `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `0` | Prefill / decode node counts (disaggregated only). |
+| `PD_PREFILL_TP` / `PD_DECODE_TP` | `0` (= `--tp`) | TP for the prefill / decode groups. |
+| `PD_TRANSFER_BACKEND` | Unset | KV transfer backend (sglang: `mooncake`/`nixl`; vllm: `NixlConnector`/…). |
+| `PD_IB_DEVICE` | Unset | Comma-separated IB/RoCE device list; empty uses `$NCCL_IB_HCA`. |
+
+---
+
+## Quantization prelude
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Master switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
+| `QUARK_ROOT` | `/wekafs/hyperloom/Quark` | AMD Quark checkout used by the quantization-agent. |
 
 ---
 
@@ -139,9 +168,11 @@ The following variables configure the Critic, Robustness, and knowledge base com
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store. Overridden by `--local-kb-root`. See [Integrate Recipe/Cortex knowledge base in Hyperloom](integrate-kb.md).             |
-| `CORTEX_KB_URL`                       | Unset                  | Optional remote Cortex KB service URL. Also set by `--cortex-kb-url`. No remote KB is contacted unless this is configured.            |
-| `RECIPE_KB_MIRROR_MODE`               | Unset                  | Advanced mirroring mode for remote KB integrations.                                                                                   |
+| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store (always the write target). Overridden by `--local-kb-root`. See [Integrate Recipe/Cortex knowledge base in Hyperloom](integrate-kb.md).             |
+| `GBRAIN_BASE_URL`                     | Unset                  | Base URL of the gbrain recipe-snapshot page store — the **read** side of the recipe KB. When unset, recipe reads are local-only.       |
+| `GBRAIN_TOKEN`                        | Unset                  | Bearer token for `GBRAIN_BASE_URL`.                                                                                                   |
+| `RECIPE_KB_MIRROR_MODE`               | `external`             | `external` (default): an out-of-band CronJob ingests the local store into gbrain. `inline`: best-effort mirror each local write into gbrain in-process (local write stays authoritative). |
+| `CORTEX_KB_URL`                       | Unset                  | Optional Cortex KB URL used **only** by the Critic agent's per-proposal assess enrichment (`/v2/reasoning/assess`) — *not* the recipe KB. Also set by `--cortex-kb-url`. No Cortex call is made unless configured. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |

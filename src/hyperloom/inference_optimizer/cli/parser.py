@@ -185,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = argparse.ArgumentParser(
         prog="inference_optimizer",
-        description="Inference Optimizer v0.6 — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
+        description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
     p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
