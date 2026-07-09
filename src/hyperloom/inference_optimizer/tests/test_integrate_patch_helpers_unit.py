@@ -171,7 +171,7 @@ def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
     assert ip._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
 
 
-# ---- Issue 6: deletion-only KEEP patches are staged for commit -------------
+# ---- Deletion-only KEEP patches are staged for commit ----------------------
 def test_patch_touched_paths_emits_deleted_path(tmp_path):
     """A pure-deletion patch emits the OLD path so git add -A stages the removal.
 
@@ -345,7 +345,7 @@ def test_resolve_patch_paths_from_done_payload(tmp_path):
     assert out[0].name == "x.patch"
 
 
-# ---- Issue 5a: path containment -------------------------------------------
+# ---- Path containment ------------------------------------------------------
 def test_resolve_patch_paths_drops_outside_workspace(tmp_path):
     """An absolute patch path outside the specialist workspace is dropped."""
     workspace = tmp_path / "ws"

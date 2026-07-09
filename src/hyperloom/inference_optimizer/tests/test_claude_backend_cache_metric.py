@@ -104,7 +104,7 @@ async def test_cache_metrics_extracted_from_result_message_usage():
 
 @pytest.mark.asyncio
 async def test_cache_read_only_means_cache_hit():
-    """`cache_read > 0` and `cache_creation == 0` means the prefix was fully served from cache (the §10.3 success signal)."""
+    """`cache_read > 0` and `cache_creation == 0` means the prefix was fully served from cache."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(

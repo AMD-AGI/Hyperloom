@@ -33,7 +33,7 @@ from typing import Any
 
 
 # Sentinel markers (keep in sync with _server_patcher._discover_sglang_plan).
-# A pod counts as patched iff ALL markers are present (PR-D §4: avoids false
+# A pod counts as patched iff ALL markers are present; this avoids false
 # positives when upstream merges one identifier but not the whole patch).
 _SENTINEL_RELPATH = "python/sglang/srt/managers/scheduler_profiler_mixin.py"
 _SENTINEL_MARKERS: tuple[str, ...] = (

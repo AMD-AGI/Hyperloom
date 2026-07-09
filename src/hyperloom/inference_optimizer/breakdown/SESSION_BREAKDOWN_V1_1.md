@@ -166,4 +166,4 @@ Replayed sessions (2026-05-20):
 | `breakdown/reporters/_renderers/decision_journal.py` | markdown section |
 | `breakdown/reporters/_renderers/kernel_profiling.py` | markdown section |
 | `breakdown/reporters/compose.py` | section groups |
-| `scripts/dump_session_breakdown.py` | `--detail-level` |
+| `hyperloom.inference_optimizer.tools.dump_session_breakdown` | `--detail-level` |

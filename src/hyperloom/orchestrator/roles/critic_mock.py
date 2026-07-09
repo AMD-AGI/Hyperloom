@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 
-# DESIGN §13.1 inbox rendering format.
+# Inbox rendering format.
 _PROPOSAL_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$",
     re.MULTILINE,

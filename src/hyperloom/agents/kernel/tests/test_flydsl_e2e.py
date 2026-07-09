@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end regression test for the FlyDSL kernel path (issue #211 §5).
+"""End-to-end regression test for the FlyDSL kernel path.
 
 Drives the ``flydsl_naive_gemm.py`` fixture through the full classification + enrichment pipeline.
 """
