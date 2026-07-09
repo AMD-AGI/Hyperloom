@@ -613,15 +613,16 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 # their npm CLIs (codex/claude), and the OOB harness itself via ``oob-mcp-server``.
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
+    # The whole-pipeline GEAK e2e optimizer — the CANONICAL ``geak`` (formerly
+    # ``geak_v4`` / perfskills). Its checkout lives under $GEAK_ROOT (the GEAK
+    # e2e clone) and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # GEAK-e2e (PerfSkills) variant. Resolved the same way as the generic geak
-    # (its repo git SHA), but the GEAK_v4 checkout lives under $PERFSKILLS_ROOT
-    # (the GEAK-e2e clone), NOT $GEAK_ROOT (the single-kernel v3.2.x clone). When
-    # a producer omits an explicit root_dir, the fallback must point at the
-    # GEAK_v4 checkout, else versions["geak_v4"] mis-records the generic GEAK SHA.
-    "geak_v4": {"root_env": "PERFSKILLS_ROOT", "version": "git_short"},
-    "mini": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    "geak-gaagent": {"root_env": "GEAK_ROOT", "version": "git_short"},
+    # The legacy per-kernel single-kernel GEAK backend (v3.2.x). Its checkout
+    # lives under $GEAK_V3_ROOT, kept distinct from the e2e ``geak`` above so
+    # versions["geak_v3"] records the v3 clone's SHA, not the e2e clone's.
+    "geak_v3": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
+    "mini": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
+    "geak-gaagent": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
     # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
     # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
     # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).

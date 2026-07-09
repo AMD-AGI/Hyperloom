@@ -2,7 +2,7 @@
 
 """ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude.
 
-An in-process MCP server registers ``emit_intent`` (DESIGN §14.2) so each
+An in-process MCP server registers ``emit_intent`` so each
 ``ToolUseBlock`` becomes one validated :class:`Intent`. SDK import is lazy
 (clear :class:`BackendError` if missing); ``sdk_query_factory`` /
 ``sdk_options_cls`` / ``mcp_*_factory`` are test seams that bypass the real
@@ -225,7 +225,7 @@ class ClaudeBackend:
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
         if self.conversational:
             # A persistent ReAct turn may call several read-only context
-            # tools (plan Step 2) before emitting an intent, so give the
+            # tools before emitting an intent, so give the
             # in-tick agentic loop more turns and a longer wall-clock
             # budget than the stateless default. Operators can still
             # override the timeout via the env var below.
@@ -632,7 +632,7 @@ class ClaudeBackend:
         the latest `ResultMessage.usage` dict, and the SDK ``session_id``.
 
         `usage` (cache_creation/read_input_tokens) measures prompt-cache
-        effectiveness against the SECTION-A/B stable-prefix design (§5.1, §8.8).
+        effectiveness against the SECTION-A/B stable-prefix design.
 
         Args:
             prompt: The composed prompt to stream to the SDK.

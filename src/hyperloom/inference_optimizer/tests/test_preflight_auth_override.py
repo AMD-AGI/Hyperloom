@@ -186,7 +186,7 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     # Explicit provider keys are preserved.
     assert cli.os.environ["OPENAI_API_KEY"] == "sk-openai-user"
     assert cli.os.environ["ANTHROPIC_API_KEY"] == "sk-ant-user"
-    # Unset aliases are still gap-filled from SAFE_API_KEY.
+ # Unset aliases are still gap-filled from SAFE_API_KEY.
     assert cli.os.environ["ANTHROPIC_AUTH_TOKEN"] == "safe-key"
     assert cli.os.environ["GEAK_API_KEY"] == "safe-key"
 
@@ -239,7 +239,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     clean_url_env,
     stub_install_steps,
 ):
-    """#521: an operator-pinned GEAK/OOB tunnel URL survives preflight.
+    """An operator-pinned GEAK/OOB tunnel URL survives preflight.
 
     GEAK runs in a separate network namespace that cannot reach the gateway
     directly; the operator points GEAK_BASE_URL at the host-local reverse
@@ -267,7 +267,39 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     assert cli.os.environ["LLM_API_BASE"] == gateway
 
 
-# _sync_geak_config_base_url (#521): GEAK reads $GEAK_CONFIG yaml, not env.
+def test_preflight_rewrites_stale_proxy_even_when_operator_set(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A leftover 127.0.0.1:4002 value is force-rewritten, not preserved."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/api/v1/llm-proxy/v1",
+    )
+    monkeypatch.setenv(
+        "GEAK_BASE_URL",
+        "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
+    )
+
+    resolved = cli._preflight()
+
+    assert cli.os.environ["GEAK_BASE_URL"] == resolved[1]
+    assert "127.0.0.1:4002" not in cli.os.environ["GEAK_BASE_URL"]
+
+
+def test_is_stale_proxy_url_matches_legacy_only():
+    assert cli._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+    assert not cli._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
+    assert not cli._is_stale_proxy_url("https://gateway.example/v1")
+    assert not cli._is_stale_proxy_url("")
+    assert not cli._is_stale_proxy_url(None)
+
+
+# _sync_geak_config_base_url : GEAK reads $GEAK_CONFIG yaml, not env.
 _GEAK_CFG_TEMPLATE = """model:
   model_class: litellm
   model_name: openai/claude-opus-4-7
@@ -509,7 +541,7 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
 
 
 def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
-    """#340: opt-out lets a non-AMD orchestration model pass when in catalog."""
+    """Opt-out lets a non-AMD orchestration model pass when in catalog."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     # Pin a probe URL so the stubbed catalog probe runs without relying on a
     # base-URL leaked from other tests (clean_url_env now restores os.environ).
@@ -529,7 +561,7 @@ def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsy
 
 
 def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys):
-    """#340: under opt-out a catalog miss errors (no silent opus-4-6 fallback)."""
+    """Under opt-out a catalog miss errors with no silent opus-4-6 fallback."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
@@ -548,7 +580,7 @@ def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys
 
 
 def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
-    """#340: opt-out with an empty model id aborts before the probe."""
+    """Opt-out with an empty model id aborts before the probe."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
 
     def _no_probe(**kwargs):
@@ -880,7 +912,7 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
 
 # Merged from test_v08_ir3_preflight.py
 
-"""KB_design_continue §3.3 / IR-3 — preflight soft-degrade tests."""
+"""preflight soft-degrade tests."""
 
 
 import argparse

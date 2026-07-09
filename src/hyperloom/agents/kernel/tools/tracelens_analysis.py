@@ -690,7 +690,6 @@ def _resolve_tracelens_model() -> str:
         return raw
     return raw.lower().replace(".", "-")
 
-
 def _resolve_arch_benchmark_timeout_s() -> int:
     """Return the GPU arch microbenchmark timeout in seconds (floor 600s).
 
@@ -1407,7 +1406,7 @@ def source_type_for(name: str, source_file: str) -> str:
             ``triton``, ``python``, ``vendor_binary``, or ``unknown``.
     """
     lower_name = name.lower()
-    # PR #668: synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
+    # Synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
     if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
         return "flydsl"
     if is_runtime_generated_kernel(name, source_file):
@@ -1488,7 +1487,7 @@ def _aiter_csrc_root() -> str:
 
 
 def _flydsl_reusable_roots() -> tuple[str, ...]:
-    """Resolve FlyDSL checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+    """Resolve FlyDSL checkout root(s) for moe_flydsl pseudo-ops.
 
     ``$DSL2_ROOT`` / ``$FLYDSL_ROOT`` take precedence over the WekaFS default.
 
@@ -3725,7 +3724,7 @@ def _finalize_candidates(
             # Re-resolve repo in case the upgraded path lives in a different repo.
             item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
             item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
-            # PR #668 FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
+            # FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
             # MoE kernel source before the patchability gate so FlyDSL routes to GEAK.
             if item["source_type"] == "flydsl":
                 _sf = str(item.get("source_file") or "").strip()
@@ -3773,9 +3772,12 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # forge then GEAK; append cursor only when CURSOR_API_KEY is provisioned.
+    # forge then the per-kernel GEAK backend (geak_v3); append cursor only when
+    # CURSOR_API_KEY is provisioned. Uses ``geak_v3`` (not ``geak``) because the
+    # per-kernel ladder token was renamed when the e2e optimizer took over ``geak``;
+    # parse_backends/choose_backends reject bare ``geak`` on the per-kernel path.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
-    return ["forge", "geak", "claude", "codex"] + cursor_tail
+    return ["forge", "geak_v3", "claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
@@ -3970,7 +3972,7 @@ def _run_deterministic_tracelens_steps(
     csv_dir = output_dir / "perf_report_csvs"
     csv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: perf report. Serving frameworks use the inference report (adds
+    # Perf report. Serving frameworks use the inference report (adds
     # steady-state phase columns, call stacks, pseudo-ops, graph-capture replay).
     # Scriptable image frameworks (xDiT diffusion) have no steady-state decode
     # phase and no capture sidecar, so use the plain pytorch report, which is
@@ -4024,7 +4026,7 @@ def _run_deterministic_tracelens_steps(
     if rc != 0:
         return rc
 
-    # Step 7: category analysis scripts. The TraceLens manifest uses analyzer
+    # Category analysis scripts. The TraceLens manifest uses analyzer
     # category names (e.g. sdpa_fwd / norm_bwd), while the Python modules are
     # shared by families (sdpa_analysis / norm_analysis).
     manifest_path = output_dir / "category_data" / "category_manifest.json"
@@ -4062,7 +4064,7 @@ def _run_deterministic_tracelens_steps(
                     f"with rc={rc_cat}; continuing with remaining categories",
                 )
 
-    # Step 7.5: generate_priority_data
+    # generate_priority_data
     priority_cmd = [
         sys.executable,
         "-c",
@@ -4273,7 +4275,7 @@ def deterministic_extract_hot_kernels(
 
     candidates: list[dict[str, Any]] = []
 
-    # --- Phase 1: Collect candidates from priority_data findings ---
+    # Collect candidates from priority_data findings
     for finding in findings:
         global_rank = finding.get("global_rank", 0)
         category = finding.get("category", "")
@@ -4359,7 +4361,7 @@ def deterministic_extract_hot_kernels(
             }
             candidates.append(candidate)
 
-    # --- Phase 2: Include "other" category ops with actionable source files ---
+    # Include "other" category ops with actionable source files
     # These are often the largest GPU-time consumers (e.g. Triton fused_moe,
     # 75% of GPU time) but don't appear in priority_data because TraceLens
     # categorizes them as "other" with no efficiency model.
@@ -4442,7 +4444,7 @@ def deterministic_extract_hot_kernels(
         }
         candidates.append(candidate)
 
-    # --- Phase 3: Sort all candidates by GPU time (duration) descending ---
+    # Sort all candidates by GPU time (duration) descending
     candidates.sort(key=lambda c: c.get("duration_us", 0), reverse=True)
 
     return candidates[:top_k]
@@ -5079,7 +5081,7 @@ _FLYDSL_BUFFER_LOAD_MARKERS = (
 def _resolve_flydsl_source_fallback() -> str:
     """Resolve the real FlyDSL MoE kernel source for synthetic pseudo-ops.
 
-    Used for PR #668 pseudo-ops, looking for
+    Used for FlyDSL pseudo-ops, looking for
     ``$DSL2_ROOT/kernels/moe_gemm_2stage.py`` and known fallback roots.
 
     Returns:
@@ -5197,7 +5199,7 @@ def enrich_candidates_with_runtime_metadata(
                 for key, value in model_params.items():
                     params.setdefault(key, value)
         if item.get("source_type") == "flydsl":
-            # PR #668 pseudo-ops carry no real source_file; inject the FlyDSL MoE kernel source.
+            # FlyDSL pseudo-ops carry no real source_file; inject the FlyDSL MoE kernel source.
             _sf2 = str(item.get("source_file") or "").strip()
             if (not _sf2) or (not os.path.isfile(_sf2)):
                 fb = _resolve_flydsl_source_fallback()
@@ -5375,7 +5377,7 @@ def build_audit_summary(
         else:
             compact["skip_reason"] = cand.get("skip_reason") or "unknown"
             skipped.append(compact)
-    # PR-B §1: compact task_group projections for the audit view (full rows live on kernel_candidates.json).
+    # Compact task_group projections for the audit view (full rows live on kernel_candidates.json).
     group_entries: list[dict[str, Any]] = []
     for group in task_groups or []:
         if not isinstance(group, dict):
@@ -5453,7 +5455,7 @@ def write_reports(
         "trace_files": [str(p) for p in trace_files],
         "created_at": utc_now(),
     }
-    # PR-B §1: aggregate reusable candidates into source-function task groups (additive; hot_kernels keeps full order).
+    # Aggregate reusable candidates into source-function task groups (additive; hot_kernels keeps full order).
     source_root_str = getattr(args, "source_root", None)
     task_groups = build_task_groups(candidates, source_root=source_root_str)
     report = {
@@ -5489,7 +5491,7 @@ def write_reports(
         },
     )
 
-    # PR-A §3: per-run audit sidecar (tasks routed vs skipped w/ reason); PR-B adds task_groups[].
+    # Per-run audit sidecar (tasks routed vs skipped w/ reason); includes task_groups[].
     summary = build_audit_summary(
         candidates,
         trace_input=str(Path(args.trace_input).resolve()),
@@ -6641,7 +6643,7 @@ def main() -> int:
         artifacts["cli_log_path"] = str(log_path)
         artifacts["status_path"] = str(status_path)
 
-        # Surface the contracted ``analysis.md`` exit path so consumers can read it alongside hot_kernels (PR #155).
+        # Surface the contracted ``analysis.md`` exit path so consumers can read it alongside hot_kernels.
         analysis_report_path = ""
         for cand_key in ("tracelens_agent_report", "trace_report_path"):
             if artifacts.get(cand_key):

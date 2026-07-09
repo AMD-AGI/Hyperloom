@@ -55,7 +55,7 @@ class ClosePhase(PhaseHandler):
         return "time_exhausted"
 
     def _session_integrated_kernel_patch(self) -> bool:
-        """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/perfskills entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
+        """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/geak_e2e entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
 
         Returns:
             ``True`` when at least one kernel-level optimization landed.
@@ -153,7 +153,7 @@ class ClosePhase(PhaseHandler):
 
         # CLOSE-entry auto-roofline (former N31) deleted in favour of EXPLORE/KERNEL-entry hooks.
 
-        # Step 0: post-optimization roofline (best-effort). Only when this
+        # Post-optimization roofline (best-effort). Only when this
         # session integrated a kernel/source patch, profile the final optimized
         # service once and write reports/kernel_roofline_opt.json so the
         # before/after kernel roofline chart (baseline kernel_roofline.json vs
@@ -164,7 +164,7 @@ class ClosePhase(PhaseHandler):
         except Exception as exc:  # noqa: BLE001 — best-effort; never block close
             log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
 
-        # Step 1: report
+        # Report.
         try:
             self._emit_lifecycle(
                 step="report",
@@ -224,7 +224,7 @@ class ClosePhase(PhaseHandler):
                 detail=repr(exc)[:240],
             )
 
-        # Step 2: session_breakdown
+        # Session breakdown.
         try:
             bd_task = await self._enqueue_internal_session_breakdown_task(
                 reason="close_phase_entry",
@@ -252,8 +252,8 @@ class ClosePhase(PhaseHandler):
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 2.5: Langfuse flush + receipt splice --------
-        # MUST run before the artifact package (step 2.6): flush_session
+        # ---------------- Langfuse flush + receipt splice -------------------
+        # MUST run before the artifact package: flush_session
         # reconciles out-of-process children + flips the receipt to final
         # counts, and patch_breakdown_langfuse splices that post-flush
         # receipt back into session_breakdown.json. If this ran AFTER
@@ -283,7 +283,7 @@ class ClosePhase(PhaseHandler):
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 2.6: artifact package -> /workspace -------
+        # ---------------- Artifact package -> /workspace ------------------
         # Bundle the curated result/report/analysis files (incl. the
         # session_breakdown just written in step 2) into a single zip
         # placed under ``/workspace`` so the Claw sandbox sync ships it
@@ -319,8 +319,8 @@ class ClosePhase(PhaseHandler):
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 4: fact finalize (Cortex commit) ----------
-        # The canonical step-4 "Cortex session commit": writes
+        # ---------------- Fact finalize (Cortex commit) -------------------
+        # The canonical "Cortex session commit": writes
         # update_recipe + finalises the local journal (final_throughput /
         # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
         try:
@@ -337,7 +337,7 @@ class ClosePhase(PhaseHandler):
         # Record a skipped ``ndjson_drain`` close-step for ledger consumers (v2 RecipeKB is local-only).
         await self._record_close_step("ndjson_drain", status="skipped")
 
-        # Step 5: mark done
+        # Mark done.
         self.shared_state.close_sequence_done = True
         # CLOSE must set stop_reason so the main run loop terminates next tick (else it ticks forever).
         # Idempotent backstop to the early persist; re-derive rather than hard-code time_exhausted.

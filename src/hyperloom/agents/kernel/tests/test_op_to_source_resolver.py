@@ -363,7 +363,7 @@ def test_expand_op_fanout_single_leaf_does_not_split(tla, monkeypatch) -> None:
 
 
 def test_expand_op_fanout_explicit_framework_selects_matching_source(tla, monkeypatch) -> None:
-    """An explicit ``framework`` routes to that container's source (#1 regression).
+    """An explicit ``framework`` routes to that container's source.
 
     The same op carries both ``vllm`` and ``sglang`` editable sources at distinct
     ``.cu`` paths and neither is on disk, so only the explicit framework decides.
@@ -392,7 +392,7 @@ def test_expand_op_fanout_explicit_framework_selects_matching_source(tla, monkey
 
 
 def test_finalize_candidates_threads_framework_to_resolver(tla, monkeypatch) -> None:
-    """``_finalize_candidates(framework=...)`` selects the matching container's source (#1)."""
+    """``_finalize_candidates(framework=...)`` selects the matching container's source."""
     mapping = {
         "aiter::foo": _entry(
             "single",

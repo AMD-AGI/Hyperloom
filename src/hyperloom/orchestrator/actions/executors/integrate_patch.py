@@ -1365,7 +1365,7 @@ class IntegratePatchExecutor:
         done_payload = _read_done_payload(specialist_workspace)
         _stamp_framework_kb_provenance(done_payload, params=params, shared_state=shared_state)
 
-        # Enablement environment setup (Q3): replay allowlisted install-only
+        # Enablement environment setup: replay allowlisted install-only
         # commands (base stacked from prior rounds + this specialist's
         # ``setup_commands``) BEFORE applying patches / booting, so a package or
         # tool a specialist relied on (e.g. a newer ``transformers`` for a new
@@ -1548,7 +1548,7 @@ class IntegratePatchExecutor:
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
 
-        # Stage 1: apply patches (best-effort with -3 fallback for git trees;
+        # Apply patches (best-effort with -3 fallback for git trees;
         # backup-based patch apply for non-git roots such as wheel installs).
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
@@ -1595,7 +1595,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 1b: install non-diff tuned artifacts (after patches, before
+        # Install non-diff tuned artifacts (after patches, before
         # config_changes). On any artifact error, roll back artifacts + patches
         # and surface a clean apply_failed (not an opaque git_apply_failed).
         if artifact_specs:
@@ -1624,7 +1624,7 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 }
 
-        # Stage 2: layer config_changes onto the launch env (via the
+        # Layer config_changes onto the launch env (via the
         # variant's ``extra_envs`` knob).
         config_changes_applied = dict(config_changes)
 
@@ -1667,7 +1667,7 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 })
 
-        # Stage 3: optionally skip the bench (test / smoke).
+        # Optionally skip the bench (test / smoke).
         if params.get("apply_only"):
             return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "applied_no_bench",
@@ -1680,7 +1680,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 4: bench the patched config via run_grid (1 variant).
+        # Bench the patched config via run_grid (1 variant).
         try:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
@@ -1718,7 +1718,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 5 (enablement): RUNNABILITY + minimal-correctness gate. A
+        # Enablement gate: RUNNABILITY + minimal-correctness gate. A
         # positive ``output_throughput`` means the server booted and served at
         # least one request. Accuracy is compared against an absolute floor
         # (``ENABLEMENT_ACCURACY_FLOOR``). Three states:
@@ -1874,7 +1874,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 5: KEEP / REVERT decision.
+        # KEEP / REVERT decision.
         # The Coordinator seeds ``base_tput`` per-dispatch, but a direct
         # invocation (resume path / test / external caller) may bypass that and
         # leave it 0.0, which would make ``delta_pct`` None and auto-REVERT a
@@ -1900,7 +1900,7 @@ class IntegratePatchExecutor:
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         # KEEP requires delta_pct ≥ keep_threshold AND the accuracy gate.
-        # Step 4 / Q5: framework-authored source patches require the accuracy
+        # Framework-authored source patches require the accuracy
         # gate (gated on the framework authoring markers so generic EXPLORE
         # integrate_patch keeps its prior throughput-only behaviour).
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
@@ -1933,7 +1933,7 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
-            # G8: distinguish "accuracy required but unevaluated" from a
+            # Distinguish "accuracy required but unevaluated" from a
             # throughput/regression revert.
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
@@ -1994,7 +1994,7 @@ class IntegratePatchExecutor:
                     reasons.append("accuracy regression on rebench")
                 elif rb_acc_block and rb_acc_reason:
                     reasons.append(rb_acc_reason)
-                # G8 parity: distinguish "accuracy required but unevaluated on the
+                # Distinguish "accuracy required but unevaluated on the
                 # stable rebench" from a measured regression / stability revert.
                 rb_revert_status = (
                     "accuracy_unavailable_reject"
@@ -2056,6 +2056,52 @@ class IntegratePatchExecutor:
                     )
         except Exception:  # noqa: BLE001 — commit durability is best-effort
             log.exception("integrate_patch: commit-on-KEEP raised")
+        # Durability: snapshot the KEEP's realized source layer into a
+        # session-scoped, self-contained directory so a later candidate's
+        # ``git reset``/``clean``/``stash pop`` on the shared live tree cannot
+        # wipe it (the root cause of current_best becoming unrelaunchable and
+        # the GEAK baseline falling back to the stock framework). Generic:
+        # keyed on the touched patch targets + applied artifacts, never on a
+        # specific file. Best-effort — a snapshot failure never blocks the KEEP.
+        source_snapshot_dir = ""
+        source_base_sha = ""
+        try:
+            from ...source_snapshot import snapshot_source_layer
+
+            if framework_root is not None:
+                # HEAD is the clean base: KEEP edits are uncommitted (non-cyclic)
+                # so HEAD == pre-apply sha; in cyclic mode HEAD already includes
+                # them and the overlay is idempotent on re-checkout. Either way
+                # this is the base the snapshot files overlay onto.
+                _cp = _run_git_cp(
+                    ["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0
+                )
+                if _cp is not None and getattr(_cp, "returncode", 1) == 0:
+                    source_base_sha = (_cp.stdout or "").strip()
+                rel_paths = list(_patch_touched_paths(framework_root, applied))
+                rel_paths += [
+                    str(a.get("rel_target") or "")
+                    for a in (applied_artifacts or [])
+                    if isinstance(a, dict)
+                ]
+                dest = (
+                    self.session_dir
+                    / "optimization_stack"
+                    / "src"
+                    / (specialist_task_id or str(getattr(ctx.task, "task_id", "") or "keep"))
+                )
+                snap = snapshot_source_layer(
+                    framework_root=framework_root,
+                    base_sha=source_base_sha,
+                    rel_paths=rel_paths,
+                    dest_dir=dest,
+                    provenance="integrate_patch",
+                    extra={"specialist_task_id": specialist_task_id},
+                )
+                if snap:
+                    source_snapshot_dir = str(snap.get("snapshot_dir") or "")
+        except Exception:  # noqa: BLE001 — snapshot is best-effort durability
+            log.exception("integrate_patch: source-layer snapshot failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -2071,6 +2117,11 @@ class IntegratePatchExecutor:
             "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            # Durable source-layer snapshot handles (consumed by the coordinator
+            # lift -> optimization_stack entry -> env_spec -> handoff).
+            "source_snapshot": source_snapshot_dir,
+            "framework_root": str(framework_root or ""),
+            "base_sha": source_base_sha,
         })
 
     # Helpers

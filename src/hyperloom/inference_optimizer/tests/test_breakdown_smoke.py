@@ -166,7 +166,7 @@ def _build_fixture(sd: Path) -> None:
                         "arithmetic_intensity": 4.0,
                         "source_file": "/path/to/rmsnorm.py",
                         "reusable_native_kernel": True,
-                        "recommended_backends": ["claude", "geak"],
+                        "recommended_backends": ["claude", "geak_v3"],
                         "recommended_actions": ["run_optimization"],
                     },
                 ],
@@ -468,7 +468,7 @@ def test_session_meta_emitted_without_ci(fixture_session: Path) -> None:
     meta = bd["session_meta"]
     # code_revision is sourced from the manifest and must always be present.
     assert meta["code_revision"] == "86d2ed3"
-    # Mirrors the §1 session code_revision so pulse's COALESCE resolves either.
+    # Mirrors the session code_revision so pulse's COALESCE resolves either.
     assert meta["code_revision"] == bd["session"]["code_revision"]
     # Field contract the CI backfill used to write.
     for key in ("image", "image_id", "session_duration_seconds"):
@@ -686,10 +686,7 @@ def test_no_kernel_agent_runs_returns_empty_invocations(tmp_path: Path) -> None:
 
 
 def test_baseline_resolves_container_workspace_path(tmp_path: Path) -> None:
-    """A container-path ``last_baseline.workspace`` must still resolve under the on-disk ``session_dir``.
-
-    Regression for handoff doc §8 TODO #2.
-    """
+    """A container-path ``last_baseline.workspace`` must still resolve under the on-disk ``session_dir``."""
     sd = tmp_path / "session"
     sd.mkdir(parents=True)
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "ttft"})
@@ -779,10 +776,7 @@ def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
 
 
 def test_source_files_drops_empty_kernel_attempts(tmp_path: Path) -> None:
-    """``source_files.kernel_attempts`` must not appear when the session has no kernel-agent runs.
-
-    Regression for handoff doc §8 TODO #6.
-    """
+    """``source_files.kernel_attempts`` must not appear when the session has no kernel-agent runs."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "no-kernels"})
     _write_json(
@@ -899,7 +893,7 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
     assert attr["method"] == "missing"
 
 
-# A1.0a: framework surfaces in source_breakdown + phase_breakdown
+# framework surfaces in source_breakdown + phase_breakdown
 # Regression: framework KEEPs used to fall into the legacy ``other`` bucket
 # and disappear from ``source_breakdown``; these tests pin the new behaviour.
 def test_attribution_framework_surfaces_in_source_breakdown(
@@ -1061,7 +1055,7 @@ def test_attribution_framework_agent_phase_fallback_when_no_phase_history(
     assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
 
 
-# A1.0d: gemm_tuning surfaces in source_breakdown + phase_breakdown
+# gemm_tuning surfaces in source_breakdown + phase_breakdown
 # Regression: gemm_tuning KEEPs used to fall into ``"other"`` and disappear
 # from per-source totals (same shape of bug as framework).
 def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
@@ -1139,7 +1133,7 @@ def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
     assert sb["gemm_tuning_pct_of_total"] == 0.0
 
 
-# A1.0e: replay_warm_recipe surfaces in source_breakdown
+# replay_warm_recipe surfaces in source_breakdown
 # Regression: replay_warm_recipe KEEPs used to fall into ``"other"`` (which is
 # never emitted), so a pure warm-recipe-replay session showed a validated_total
 # with no per-source split to back it. It now gets its own headline row.
@@ -1345,8 +1339,8 @@ def test_attribution_gemm_tuning_falls_back_to_variant_name_then_question_mark(
     assert by_tuned["?"] == pytest.approx(1.0)
 
 
-# A1.0b: phase_breakdown.explore.by_domain key normalization
-# Pre-PR-B raw ``provenance`` strings landed in ``by_domain`` verbatim; the
+# phase_breakdown.explore.by_domain key normalization
+# Raw ``provenance`` strings used to land in ``by_domain`` verbatim; the
 # collector now strips ``specialist:`` and folds ``legacy:*`` into ``legacy_*``.
 def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
     tmp_path: Path,
@@ -1498,7 +1492,7 @@ def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
     assert by_domain["llm_direct"] == pytest.approx(3.0)
 
 
-# A1.0c: capability_summary.specialist.by_specialist per-domain split
+# capability_summary.specialist.by_specialist per-domain split
 def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -1598,7 +1592,7 @@ def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
     assert bs["compiler_specialist"]["keeps"] == 1
 
 
-# A1.1: kernel_roofline (Dashboard-Roofline integration spec §1)
+# kernel_roofline collector
 # Collector mirrors ``<sd>/reports/kernel_roofline.json``; every field is
 # optional and collectors must not raise when it is missing or malformed.
 def _kernel_roofline_progress_fixture(tmp_path: Path, payload: dict | None) -> Path:
@@ -1737,7 +1731,7 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
     assert not any("kernel_roofline" in w for w in bd["warnings"])
 
 
-# kernel_optimization_summary (Breakdown panel integration spec §A1; PR #399)
+# kernel_optimization_summary collector
 # Collector mirrors ``<sd>/reports/kernel_optimization_summary.json`` verbatim
 # (light shape guards only) so the dashboard reads sbd alone.
 def _report_fixture(tmp_path: Path, rel_path: str, payload: dict | None) -> Path:
@@ -1811,7 +1805,7 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
                 "verification": {"compile_passed": False, "correctness_passed": None, "micro_speedup": 1.0},
                 "backend_ladder": [
                     {
-                        "backend": "geak",
+                        "backend": "geak_v3",
                         "status": "failed",
                         "produced_artifact": False,
                         "elapsed_sec": 213.5,
@@ -1916,7 +1910,7 @@ def test_kernel_opt_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
     assert any("kernel_optimization_summary" in w and "not a JSON object" in w for w in bd["warnings"])
 
 
-# conc_sweep_summary (Breakdown panel integration spec §A2; PR #399)
+# conc_sweep_summary collector
 def test_conc_sweep_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
     """No report → empty dict, no warning."""
     sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", None)
@@ -2043,7 +2037,7 @@ def test_conc_sweep_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
     assert any("conc_sweep_summary" in w and "not a JSON object" in w for w in bd["warnings"])
 
 
-# A1.2: roofline_progress (Dashboard-Roofline integration spec §2)
+# roofline_progress collector
 # Renamed from the top-level ``roofline`` key to coexist with the list-shaped
 # ``roofline`` consumed by the markdown-report renderer.
 def _roofline_progress_fixture(
@@ -2264,7 +2258,7 @@ def test_roofline_progress_failure_streak_passes_through(tmp_path: Path) -> None
     assert rl["roofline_failure_streak"] == 3
 
 
-# A1.3: roofline + roofline_progress coexist (post name-clash fix)
+# roofline + roofline_progress coexist (post name-clash fix)
 # Regression: two collectors were both registered as ``collect_roofline`` and
 # the markdown-report list silently evaluated to empty; both surfaces now coexist.
 def test_roofline_and_roofline_progress_coexist_independently(
@@ -2337,7 +2331,7 @@ def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
     assert len(bd["roofline_progress"]["trajectory"]) == 2
 
 
-# A1.4: optimization_stack passthrough (raw KEEP ledger)
+# optimization_stack passthrough (raw KEEP ledger)
 # Mirrors ``state.optimization_stack[]`` to the sbd top level so downstream
 # tooling reads full per-entry evidence without round-tripping to state.json.
 def test_optimization_stack_empty_when_state_has_no_stack(tmp_path: Path) -> None:
@@ -3060,7 +3054,7 @@ def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
 
 # Merged from test_v08_observability.py
 
-"""v0.8 §3.12 — observability / breakdown schema v2 tests (KB_design §3.12, Inv-12.1/12.2)."""
+"""Observability and breakdown schema v2 tests."""
 
 
 import json
@@ -3127,7 +3121,7 @@ def test_schema_version_is_v2():
 
 
 def test_build_writes_schema_v2_with_v1_aliases(tmp_path):
-    """KB_design §3.12 §5 — the v2 file carries v1-reader aliases (Inv-12.1)."""
+    """The v2 file carries v1-reader aliases."""
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state())
@@ -3141,7 +3135,7 @@ def test_build_writes_schema_v2_with_v1_aliases(tmp_path):
 
 
 def test_v1_reader_does_not_crash_on_v2_payload(tmp_path):
-    """KB_design §3.12 §9 — a v1 reader consumes a v2 payload without raising."""
+    """A v1 reader consumes a v2 payload without raising."""
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state(specialist_rounds=[_specialist_round()]))
@@ -3213,7 +3207,7 @@ def test_specialist_runs_populated_from_state(tmp_path):
 
 
 def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
-    """KB_design §3.12 §4.3 — captures the transcript path (default) or body (``include_transcripts=True``)."""
+    """Captures the transcript path (default) or body (``include_transcripts=True``)."""
     sd = tmp_path / "session"
     sd.mkdir()
     transcript_dir = sd / "runs" / "specialist" / "t-abc"
@@ -3236,7 +3230,7 @@ def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
 
 
 def test_build_respects_env_var_for_transcripts(tmp_path, monkeypatch):
-    """KB_design §3.12 §7 step 5 — the CLI env var drives transcripts when ``include_transcripts`` isn't passed."""
+    """The CLI env var drives transcripts when ``include_transcripts`` isn't passed."""
     sd = tmp_path / "session"
     sd.mkdir()
     transcript_dir = sd / "runs" / "specialist" / "t-abc"
@@ -3248,7 +3242,7 @@ def test_build_respects_env_var_for_transcripts(tmp_path, monkeypatch):
     assert b["specialist_runs"][0]["transcripts"][0].get("body") == '{"x":1}'
 
 
-# 3. capability_summary.specialist row (Inv-12.2 single source)
+# 3. capability_summary.specialist row (single source)
 def test_capability_summary_specialist_row_when_no_rounds(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -3294,7 +3288,7 @@ def test_capability_summary_specialist_agrees_with_specialist_runs(tmp_path):
     assert spec["tested"] == 6
     assert spec["keeps"] == 2
     assert spec["status"] == "kept"
-    # Cross-check (Inv-12.2): aggregate via specialist_runs matches.
+    # Cross-check: aggregate via specialist_runs matches.
     runs = b["specialist_runs"]
     assert sum(r["proposals_total"] for r in runs) == spec["tested"]
     assert sum(r["proposals_kept"] for r in runs) == spec["keeps"]

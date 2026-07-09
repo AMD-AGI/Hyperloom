@@ -22,20 +22,20 @@ import tracelens_skill_runner as tlr  # noqa: E402
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):
-    """Issue #667: the candidate-build pool defaults to a large value, not 10."""
+    """The candidate-build pool defaults to a large value, not 10."""
     monkeypatch.delenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", raising=False)
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
     assert tla._default_top_k() > 10
 
 
 def test_default_top_k_env_override(monkeypatch):
-    """Issue #667: HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
+    """HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "25")
     assert tla._default_top_k() == 25
 
 
 def test_default_top_k_zero_means_unbounded(monkeypatch):
-    """Issue #667: 0/negative disables the build-time cap (huge internal cap)."""
+    """Zero or negative disables the build-time cap (huge internal cap)."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "0")
     assert tla._default_top_k() >= 1_000_000
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "-5")
@@ -43,7 +43,7 @@ def test_default_top_k_zero_means_unbounded(monkeypatch):
 
 
 def test_default_top_k_invalid_falls_back(monkeypatch):
-    """Issue #667: a non-integer env value falls back to the default pool."""
+    """A non-integer env value falls back to the default pool."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "not-an-int")
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
@@ -251,7 +251,7 @@ def test_deterministic_main_fails_before_high_idle_gate(
 
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
-    """The exact event that ranked #1 in the buggy resume3/4 trace."""
+    """The exact event that ranked first in the buggy resume trace."""
     sync_event = {
         "name": "torch/cuda/streams.py(222): synchronize",
         "cat": "python_function",
@@ -324,7 +324,7 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# Issue #769 regression: the torch.profiler Chrome-trace category for a GPU
+# Regression: the torch.profiler Chrome-trace category for a GPU
 # kernel is literally "kernel". A global rename (#734 / commit 33ac6cc) once
 # replaced this data-format literal with "kernel_agent", so is_kernel_event
 # matched nothing and count_gpu_kernel_events returned 0 for every healthy
@@ -402,10 +402,10 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
     assert tla.is_reusable_native_kernel(candidate) is True
     # Without CURSOR_API_KEY: recommendation excludes cursor (auto-skip).
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex"]
     # With CURSOR_API_KEY: cursor is appended to the recommendation tail.
     monkeypatch.setenv("CURSOR_API_KEY", "crsr_test_dummy")
-    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex", "cursor"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex", "cursor"]
 
 
 def test_recommend_backends_includes_geak_for_python_source():
@@ -416,7 +416,7 @@ def test_recommend_backends_includes_geak_for_python_source():
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex"]
 
 
 def test_recommend_backends_includes_geak_for_unknown_source():
@@ -427,7 +427,7 @@ def test_recommend_backends_includes_geak_for_unknown_source():
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex"]
 
 
 def test_recommend_backends_geak_precedes_llm_backends():
@@ -439,8 +439,8 @@ def test_recommend_backends_geak_precedes_llm_backends():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder[:2] == ["forge", "geak"], f"forge then GEAK must lead the ladder, got {ladder}"
-    assert ladder.index("geak") < ladder.index("claude"), ladder
+    assert ladder[:2] == ["forge", "geak_v3"], f"forge then GEAK must lead the ladder, got {ladder}"
+    assert ladder.index("geak_v3") < ladder.index("claude"), ladder
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -500,7 +500,7 @@ def test_125_derive_category_normalizations():
 
 
 def test_125_finalize_outputs_source_path_field():
-    """_finalize_candidates exposes source_path mirror of source_file (#125)."""
+    """_finalize_candidates exposes the source_path mirror of source_file."""
     candidates = [
         {
             "name": "rmsnorm_kernel",
@@ -654,7 +654,7 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
 
 
 def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
-    """#599: other_bucket fallback candidates use exact op-name CSV shapes."""
+    """other_bucket fallback candidates use exact op-name CSV shapes."""
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "ops_unique_args.csv").write_text(
@@ -760,7 +760,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
 
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
-    # write_reports requires the upstream analysis.md (#203); provide a stub.
+    # write_reports requires the upstream analysis.md ; provide a stub.
     analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
     analysis_md.parent.mkdir(parents=True, exist_ok=True)
     analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
@@ -774,7 +774,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
-        # Hyperloom#314: hot_kernels carries only routable candidates; set the marker
+ # hot_kernels carries only routable candidates; set the marker
         # explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
@@ -963,7 +963,7 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "gpu_pct": 10.0,
         "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
-        # Per AMD-AGI/Hyperloom#314, see twin fixture above.
+ # Per AMD-AGI/Hyperloom#314, see twin fixture above.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -989,7 +989,7 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
     assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
 
 
-# #203 — write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
+# write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
 def _make_write_reports_args(trace_path):
     from argparse import Namespace
 
@@ -1005,7 +1005,7 @@ def _make_write_reports_args(trace_path):
 
 
 def test_write_reports_raises_when_analysis_md_missing(tmp_path):
-    """#203: write_reports refuses to fabricate a Markdown when analysis.md is missing."""
+    """write_reports refuses to fabricate a Markdown when analysis.md is missing."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -1023,7 +1023,7 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
-    """#203: a passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
+    """A passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -1042,7 +1042,7 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
 
 
 def test_write_reports_does_not_create_filename_aliases(tmp_path):
-    """#203: ``analysis.md`` is the single exit; legacy aliases must not be written."""
+    """``analysis.md`` is the single exit; legacy aliases must not be written."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -1070,7 +1070,7 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
 
 
 def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
-    """#203: Hyperloom must not rewrite the upstream report's contents (byte-identity check)."""
+    """Hyperloom must not rewrite the upstream report's contents (byte-identity check)."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -1172,7 +1172,7 @@ def test_write_reports_tracelens_report_hot_kernels_is_full_set(tmp_path):
     assert [c["kernel_id"] for c in report["hot_kernels"]] == ["k001", "k002", "k003", "k004"]
 
 
-# #124 — SDK runner for TraceLens analysis-orchestrator skill
+# SDK runner for TraceLens analysis-orchestrator skill
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     skill = tmp_path / "analysis-orchestrator.md"
     trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
@@ -1236,7 +1236,7 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
 
 
 def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
-    """#126/#124 regression: a CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
+    """A CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
     import gzip
     import json as _json
     from unittest.mock import patch
@@ -1334,7 +1334,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         captured["options"] = options.kwargs
         output_dir.mkdir(parents=True, exist_ok=True)
         # TraceLens contract: orchestrator writes ``analysis.md``.
-        # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
+ # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
@@ -1429,7 +1429,7 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
 
 
 def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
-    """#266: the SDK runner must persist a full stream-JSON transcript
+    """The SDK runner must persist a full stream-JSON transcript
     (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
     operator can inspect the agent's lifecycle and the artifacts it
     produced *during* execution. The transcript path is surfaced via
@@ -1521,7 +1521,7 @@ def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
 
 
 def test_266_transcript_failure_never_aborts_run(tmp_path):
-    """#266: transcript capture is best-effort — a serialization or IO
+    """Transcript capture is best-effort — a serialization or IO
     error on the logging side must never abort an otherwise-successful
     TraceLens run. ``analysis.md`` is still the contracted exit point."""
     import asyncio
@@ -1570,7 +1570,7 @@ def test_266_transcript_failure_never_aborts_run(tmp_path):
 
 
 def test_266_transcript_caps_oversized_fields():
-    """#266: a megabyte tool_result / text block must be truncated so the
+    """A megabyte tool_result / text block must be truncated so the
     diagnostic transcript cannot grow unbounded. The cap applies to direct
     string fields and to strings nested inside tool inputs/results."""
     cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
@@ -1599,7 +1599,7 @@ def test_266_transcript_caps_oversized_fields():
 
 
 # ===========================================================================
-# T2 — analysis.md is the only contracted TraceLens output.
+# analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
     import asyncio
@@ -1703,7 +1703,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# #127 — splitter CLI must match the real split_inference_trace_annotation interface
+# splitter CLI must match the real split_inference_trace_annotation interface
 # (positional trace_path, -o, --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
@@ -1827,7 +1827,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "trace_split_no_steady_state" in result["error"]
 
 
-# #194 §3 — splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
+# Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
 # selection uses the analytic PD ratio instead of an empirical heuristic.
 def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
     """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
@@ -1975,7 +1975,7 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# parse_analysis_md — TraceLens final-report contract (#155 review)
+# parse_analysis_md — TraceLens final-report contract
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
 )
@@ -2056,7 +2056,7 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
     assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
 
 
-# docx §2 — Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
+# Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
 def _write_two_pitem_analysis_md(md: Path) -> None:
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -2103,7 +2103,7 @@ def _write_two_pitem_analysis_md(md: Path) -> None:
 
 
 def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """docx §2: within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
+    """Within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -2122,7 +2122,7 @@ def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
 
 
 def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """docx §2 budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
+    """Budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -2134,7 +2134,7 @@ def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
     )
 
 
-# normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
+# normalize_upstream_category — TraceLens orchestrator_prepare.py enum
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -2198,7 +2198,7 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
-# PR-A §1: _extract_pitem_prose extracts Reasoning / Resolution / Impact
+# _extract_pitem_prose extracts Reasoning / Resolution / Impact.
 _SYNTHETIC_PITEM_BODY = """\
 #### 🔴 P1: RMSNorm fused with quantization (Triton)
 
@@ -2448,7 +2448,7 @@ def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
     assert tlr.parse_analysis_md(md, top_k=10) == []
 
 
-# PR-A §2: classify_patchability gate + skip_reason audit field
+# classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
     """Previously-reusable candidate stays reusable; skip_reason is empty."""
     cand = {
@@ -2630,7 +2630,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
             "skip_reason": "",
             "gpu_pct": 12.5,
             "tracelens_pitem_rank": 1,
-            "recommended_backends": ["geak", "claude", "codex"],
+            "recommended_backends": ["geak_v3", "claude", "codex"],
         },
         {
             "kernel_id": "k002",
@@ -2673,7 +2673,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
     assert "source file" in aten_entry["skip_reason"]
     # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
-    assert summary["tasks"][0]["recommended_backends"] == ["geak", "claude", "codex"]
+    assert summary["tasks"][0]["recommended_backends"] == ["geak_v3", "claude", "codex"]
 
 
 def test_build_audit_summary_handles_empty_input():
@@ -2684,7 +2684,7 @@ def test_build_audit_summary_handles_empty_input():
     assert summary["skipped"] == []
 
 
-# PR-B §1: source-function aggregation
+# Source-function aggregation.
 def test_parse_launcher_path_extracts_python_frame():
     """``<path>(<line>): <fn>`` is the canonical TraceLens shape."""
     path, line, func = tlr._parse_launcher_path(
@@ -3260,7 +3260,7 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
 
 
 # ===========================================================================
-# #420: task-group over-splitting — one device kernel fragmented across
+# task-group over-splitting — one device kernel fragmented across
 # multiple groups, each costing a redundant GEAK dispatch. Two fragmentation
 # sources:
 #   (1) native (.cu/.hip/.cpp) kernels have no Python AST def-line, so
@@ -3295,7 +3295,7 @@ def test_is_native_source_detects_device_extensions():
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """#420 core: a native .cu kernel invoked from two call sites reports
+    """A native .cu kernel invoked from two call sites reports
     two different ``#L`` lines (no Python AST def-line exists, so the
     reported line is the call site). The OLD key ``(op, path, line, fn)``
     split one kernel into two task_groups — two redundant GEAK dispatches.
@@ -3332,7 +3332,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """#420 real-world case (Qwen3-32B rmsnorm_quant from the issue):
+    """Real-world Qwen3-32B rmsnorm_quant case:
     k005/k006/k007 are three instantiations of ONE ``__global__`` template
     (``add_rmsnorm_quant_kernel``) living in ONE .cu. TraceLens names them
     with DIFFERENT Itanium-mangled operation symbols — a mangled symbol,
@@ -3419,7 +3419,7 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
 
 
 def test_aggregate_canonicalizes_native_source_path():
-    """#420: the same .cu file reached via a non-normalized path
+    """The same .cu file reached via a non-normalized path
     (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one
     group rather than splitting on the literal path string."""
     cands = [
@@ -3443,7 +3443,7 @@ def test_aggregate_canonicalizes_native_source_path():
     assert set(groups[0]["kernel_ids"]) == {"k001", "k002"}
 
 
-# PR-B §1 + §2: build_task_groups (tracelens_analysis.py wrapper)
+# build_task_groups (tracelens_analysis.py wrapper)
 # ===========================================================================
 def test_build_task_groups_filters_non_reusable():
     """build_task_groups skips candidates with reusable_native_kernel=False
@@ -3473,7 +3473,7 @@ def test_build_task_groups_filters_non_reusable():
     assert "k002" not in groups[0]["kernel_ids"]
 
 
-# PR-B §1: summary.json carries task_groups[] view
+# summary.json carries task_groups[] view.
 def test_build_audit_summary_includes_task_groups():
     summary = tla.build_audit_summary(
         candidates=[],
@@ -3496,7 +3496,7 @@ def test_build_audit_summary_includes_task_groups():
     assert summary["task_group_count"] == 1
 
 
-# _default_workspace_path — USER_DATA_PATH rollout for TraceLens (#203); locks the fallback precedence.
+# _default_workspace_path — USER_DATA_PATH rollout for TraceLens ; locks the fallback precedence.
 def test_default_workspace_path_prefers_user_data_path(monkeypatch):
     """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
     monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
@@ -3525,7 +3525,7 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     assert tla._default_workspace_path() == "/legacy/workspace"
 
 
-# T3 — Idle-% sanity gate on the Executive Summary (§1/§2). High idle => pivot to params;
+# Idle-% sanity gate on the Executive Summary. High idle => pivot to params;
 # default threshold 80% (overridable via HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD).
 
 _EXEC_SUMMARY_LOW_IDLE = """\
