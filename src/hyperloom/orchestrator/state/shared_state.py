@@ -1266,7 +1266,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # the emitter throttles (on-change or slow refresh) and swallows any
         # failure, so a Langfuse hiccup never blocks or slows the save path.
         try:
-            from .trace.langfuse_emitter import record_status as _lf_record_status
+            from ..trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
         except Exception:  # noqa: BLE001 — status mirror must never block save
