@@ -494,6 +494,13 @@ class KernelPhase(PhaseHandler):
             "orchestrator_best_tput_same_config": float(
                 (state.current_best or {}).get("tput") or 0.0
             ) if isinstance(getattr(state, "current_best", None), dict) else 0.0,
+            # Serving-launch fidelity: forward the same max-model-len / mem-util production
+            # (Magpie) served with, so GEAK's baseline launches the SAME engine and its baseline
+            # matches raw_baseline_tput (else the accepted SP config crashes and GEAK re-baselines
+            # on a slower stack default -> kernel wins never translate e2e). Both optional: when
+            # unset the GEAK vllm adapter applies its own production-faithful defaults.
+            "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
+            "mem_fraction": float(getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)),
             "exp_root": str(self.session_dir / "geak"),
             # Pin a stable, macro-cycle-scoped eval_dir so a resumed / re-entered
             # KERNEL reuses the SAME on-disk workflow artifacts (continue-from-disk)

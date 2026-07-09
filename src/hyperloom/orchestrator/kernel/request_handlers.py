@@ -3008,7 +3008,7 @@ def _backend_order(payload: dict) -> list[str]:
     2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
     3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
        ``KERNEL_OPT_BACKEND_ORDER``.
-    4. The built-in GEAK-first default ladder.
+    4. The built-in forge-first default ladder.
 
     All backend names are normalized to lowercase before filtering, so
     values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
@@ -3027,7 +3027,7 @@ def _backend_order(payload: dict) -> list[str]:
     if order:
         explicit = True
     else:
-        # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
+        # Ignore legacy payload["backends"]; the default ladder (forge first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
     # `forge` (Kernel-Forge autonomous-loop backend) is first in

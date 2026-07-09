@@ -344,7 +344,7 @@ Fix one of:
   1. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
   2. Export directly into the shell before re-running:
-       export SAFE_API_KEY=sk-xxxxx
+       export SAFE_API_KEY=ak-your-safe-apikey
        export OPENAI_BASE_URL=https://gateway.example.com/v1
 EOF
   exit 2
