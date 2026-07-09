@@ -4,7 +4,7 @@
 
 Coordinator-side glue exposing the PR Monitor (wraps
 :class:`PRMonitorClient`) for specialist prompt assembly. Stateless.
-KB_design §3.6 §4.3: specialists use direct MCP access, not this facade.
+Specialists use direct MCP access, not this facade.
 """
 
 from __future__ import annotations
@@ -267,7 +267,7 @@ class KnowledgePlane:
     ) -> dict[str, tuple[list[PRSummary], list[str]]]:
         """Batch-warm the PR feed for every known specialist domain.
 
-        Called once per EXPLORE phase entry (KB_design §3.6 §5.2). Returns a
+        Called once per EXPLORE phase entry. Returns a
         ``{domain: (prs, warnings)}`` map; aggregated warnings stashed on
         :attr:`last_warnings`. Fail-soft.
 

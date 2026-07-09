@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Import-lint guard for ``hyperloom.common`` (tree-reform.MD §7 "防环规则").
+"""Import-lint guard for ``hyperloom.common`` ("防环规则").
 
 ``hyperloom.common`` is the zero-dependency shared library: it may import only
 the stdlib (plus ``httpx`` for the future ``llm`` submodule) and must NEVER

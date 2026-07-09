@@ -1,4 +1,4 @@
-"""Tests for the unified KB-interface convergence (KB_query_design.MD).
+"""Tests for the unified KB-interface convergence.
 
 Covers the cross-cutting behaviour that the cortex-KB and gbrain
 adapters now share:

@@ -28,7 +28,7 @@ from ._common import (
 
 
 
-# §5 Phase timeline
+# Phase timeline
 # Action labels whose ``<action>_attempts`` lists feed the timeline +
 # capability tallies. Carries both the merged ``explore`` and the legacy
 # ``backends`` / ``params`` / ``validate_stack`` names; missing lists skip.
@@ -242,7 +242,7 @@ def collect_phase_timeline(
     return deduped
 
 
-# §6 Capability summary
+# Capability summary
 def _capability_for_action(
     state: dict[str, Any],
     action: str,
@@ -563,7 +563,7 @@ def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
     return {d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0} for d in _SPECIALIST_DOMAIN_KEYS}
 
 
-# §14 Attribution
+# Attribution
 # Catalogue of the 7 SpecialistDomain.key strings, inlined (not imported)
 # to keep breakdown free of orchestrator deps for offline use.
 _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
@@ -577,7 +577,7 @@ _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
 )
 
 
-# §16 Phase segments — phase state machine
+# Phase segments — phase state machine
 def collect_phase_segments(
     state: dict[str, Any],
     phase_timeline: list[dict[str, Any]],
@@ -731,7 +731,7 @@ def collect_phase_segments(
             target["actions"].append(ev)
 
     if proxy_seen:
-        # KB_gaps/Gap-15 / KB_design §3.14 R-09 — session-level marker for legacy-proxy exits.
+        # Session-level marker for legacy-proxy exits.
         warnings.append(
             "plateau_proxy_provisional: legacy params_no_promote_streak "
             "proxy fired (R-09); set INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 "
