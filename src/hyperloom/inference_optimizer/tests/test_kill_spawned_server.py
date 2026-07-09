@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_subprocess_kill.kill_my_spawned_server`` and the BaselineExecutor integration (``bugs.md`` §B).
+"""Tests for ``_subprocess_kill.kill_my_spawned_server`` and the BaselineExecutor integration.
 
 Covers the no-op / already-exited cases, the same-session-group refusal guard,
-SIGTERM→grace→SIGKILL ordering, and grandchild reaping (the bugs.md §B leak).
+SIGTERM→grace→SIGKILL ordering, and grandchild reaping.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
 
 
 def test_kill_my_spawned_server_reaps_grandchildren():
-    """bugs.md §B: a child that spawns a grandchild leaves no surviving descendant after the helper returns."""
+    """A child that spawns a grandchild leaves no surviving descendant after the helper returns."""
     proc = subprocess.Popen(
         [
             sys.executable,

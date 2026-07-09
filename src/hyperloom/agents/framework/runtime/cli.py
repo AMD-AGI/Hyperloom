@@ -17,7 +17,7 @@ Subcommands:
   Reads a JSON ``--request`` and writes a JSON ``--out``
   (critic-agent style).
 * ``fa phase-audit`` - static local-source judging of whether a candidate
-  PR is already present in the framework source roots (Step 2); optional
+  PR is already present in the framework source roots; optional
   opt-in single chat-completion refine. Reads/writes JSON like
   ``phase-discover``.
 """
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 # _emit_json intentionally does NOT delegate to
 # hyperloom.common.subprocess_bridge.emit_json: this copy additionally
 # creates --out's parent directory before writing, which the shared
-# implementation does not do (see subprocess_bridge.py's module docstring
-# for the divergence rationale, per tree-reform-lessons.MD §2.1).
+# implementation does not do; see subprocess_bridge.py's module docstring
+# for the divergence rationale.
 def _emit_json(obj: Any, out: str | None) -> None:
     """Serialize obj as JSON to stdout or a file path.
 

@@ -1073,7 +1073,7 @@ class ExploreExecutor:
                     # fresh cold boot (legacy). cleanup=false keeps it hot for the
                     # warm stack-rebench round below. ``soft_deadline_sec`` is the
                     # overtime kill, anchored on the WARM measure time when
-                    # warm-decision is active (stack-rebench omits it, Q4).
+                    # warm-decision is active; stack-rebench omits it.
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,

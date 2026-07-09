@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-A6 (Arbor-into-Hyperloom): per-domain specialist prompt templates.
+"""Per-domain specialist prompt templates.
 
 Pins that every domain has a focus template, each rendered prompt mentions
-its signature techniques, and the M5 active set covers all domains.
+its signature techniques, and the active set covers all domains.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ def test_specialist_domain_keys_covers_all_active_domains():
     domains + static_recon_specialist + enablement_specialist +
     cross_framework_rewrite_specialist).
 
-    tree-reform.MD P2.7: ``SPECIALIST_DOMAINS_M5`` was a misleading alias that
-    had become byte-for-byte identical to ``SPECIALIST_DOMAIN_KEYS`` (the
-    catalogue had grown to fully cover the once-narrower M5 active set), so it
-    was removed and every reference switched to the canonical constant.
+    ``SPECIALIST_DOMAINS_M5`` was a misleading alias that had become
+    byte-for-byte identical to ``SPECIALIST_DOMAIN_KEYS`` (the catalogue had
+    grown to fully cover the once-narrower active set), so it was removed and
+    every reference switched to the canonical constant.
     """
     assert len(SPECIALIST_DOMAIN_KEYS) == 10
 
@@ -341,7 +341,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
 
 # Merged from test_v08_m5_specialist.py
 
-"""v0.8 M5 — Specialist sub-agent framework tests (KB_design §3.5 + §3.13 M5)."""
+"""Specialist sub-agent framework tests."""
 
 
 from dataclasses import dataclass
@@ -432,13 +432,13 @@ def _valid_done_payload(
 # 1. specialist_domains catalogue
 def test_specialist_domains_catalogue_has_ten_entries():
     """Ten entries: seven legacy domains + static_recon_specialist +
-    enablement_specialist + cross_framework_rewrite_specialist (#5-P2)."""
+    enablement_specialist + cross_framework_rewrite_specialist."""
     assert len(SPECIALIST_DOMAINS) == 10
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
 def test_serving_specialist_is_M5_active():
-    """PR-A6 widened the M5 active set to the full catalogue (every domain now has a focus template)."""
+    """The active set covers the full catalogue (every domain now has a focus template)."""
     assert "serving_specialist" in SPECIALIST_DOMAIN_KEYS
 
 
@@ -747,7 +747,7 @@ def test_R3_specialist_done_confidence_out_of_range_denied(gate):
     assert exc.value.rule == "specialist_done_source"
 
 
-# 5. research_lane lane registration (KB_design §3.7)
+# research_lane lane registration.
 def test_research_lane_in_known_lanes():
     assert "research_lane" in KNOWN_LANES
 
@@ -864,7 +864,7 @@ async def test_specialist_runner_happy_path(tmp_path):
 
 @pytest.mark.asyncio
 async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
-    """When the backend never emits specialist_done, the runner caps at max_turns and synthesises an empty done (Inv-5.3)."""
+    """When the backend never emits specialist_done, the runner caps at max_turns and synthesises an empty done."""
     # Plan keeps emitting heartbeats; never produces a done.
     heartbeat_intent = Intent(
         type=IntentType.SEND_MESSAGE,
@@ -954,11 +954,11 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
 
 
 def test_specialist_tool_denylist_excludes_kb_write_paths():
-    """The denylist still captures every cortex_kb write surface (Coordinator is the sole KB writer); PR-A2 lifted Edit/Write/MultiEdit out so specialists can patch their isolated worktree."""
+    """The denylist still captures every cortex_kb write surface (Coordinator is the sole KB writer); Edit/Write/MultiEdit were lifted out so specialists can patch their isolated worktree."""
     for forbidden in ("mcp__cortex_kb__propose_point",):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS
-    # PR-A2: write tools are in the default whitelist, not the denylist.
+    # Write tools are in the default whitelist, not the denylist.
     for write_tool in ("Edit", "Write", "MultiEdit"):
         assert write_tool not in SPECIALIST_TOOL_DENYLIST
         assert write_tool in DEFAULT_SPECIALIST_TOOLS

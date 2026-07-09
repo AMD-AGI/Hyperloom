@@ -15,8 +15,7 @@ from __future__ import annotations
 import os
 
 # Master switch for live Langfuse push. Default OFF: the local jsonl ledger
-# is always written; Langfuse is an opt-in parallel sink. Documented in
-# CONFIGURATION_REFERENCE.md §9.
+# is always written; Langfuse is an opt-in parallel sink.
 ENV_LANGFUSE_ENABLE = "HYPERLOOM_LANGFUSE_ENABLE"
 
 # Langfuse connection credentials (official langfuse SDK variable names).

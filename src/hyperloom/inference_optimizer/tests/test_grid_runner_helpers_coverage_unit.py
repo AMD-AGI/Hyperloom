@@ -13,9 +13,9 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
-# tree-reform.MD P2.2: compatibility-filter helpers were extracted to the
-# ``_grid_variant_filter`` sibling; patch them there (apply_compatibility_filter
-# resolves them in that module's namespace, not via the _grid_runner re-export).
+# compatibility-filter helpers live in the ``_grid_variant_filter`` sibling;
+# patch them there (apply_compatibility_filter resolves them in that module's
+# namespace, not via the _grid_runner re-export).
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 
