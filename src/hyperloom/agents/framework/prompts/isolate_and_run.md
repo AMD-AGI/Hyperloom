@@ -33,15 +33,15 @@ For every kept candidate:
 ## Tool surface
 
 ```python
-from framework_agent.explorer import explore
+from hyperloom.agents.framework.explorer import explore
 # or for stateless reuse:
-from framework_agent.runtime.tools_api import (
+from hyperloom.agents.framework.runtime.tools_api import (
     fetch_pr_audit_material,
     evaluate_candidate_outcome,
 )
 ```
 
-For driving the full pipeline at once, `framework_agent.explorer.explore(req,
+For driving the full pipeline at once, `hyperloom.agents.framework.explorer.explore(req,
 execute=...)` is the canonical entry. For piecewise control, mix the
 `tools_api` helpers above.
 

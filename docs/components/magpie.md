@@ -58,17 +58,17 @@ pip install -e .
 ```
 
 ```{note}
-Hyperloom installs Magpie for you during install/preflight rather than using
-`local_setup.sh`. `inference_optimizer/scripts/install.sh` clones it (pinned to
-`MAGPIE_REF`, default under `$MAGPIE_DIR`) and editable-installs it, while also
+Hyperloom installs Magpie for you during install/preflight rather than via
+`src/hyperloom/inference_optimizer/assets/local_setup.sh`. `src/hyperloom/inference_optimizer/assets/install.sh` clones it (pinned to
+`MAGPIE_REF`, default under `$MAGPIE_PATH`) and editable-installs it, while also
 applying the Hyperloom atomic benchmark-script patch when needed.
-`inference_optimizer/cli.py` can also clone + `pip install -e` Magpie on
+`src/hyperloom/inference_optimizer/cli/preflight.py` can also clone + `pip install -e` Magpie on
 preflight if it is not importable; that fallback clone uses the repository
 default branch rather than the install-time `MAGPIE_REF` pin. Magpie subprocesses
 are launched with the interpreter
 resolved from `$MAGPIE_PYTHON` (validated to be able to `import Magpie`, else
 auto-detected; see
-`inference_optimizer/orchestrator/action_executors/_grid_runner.py`).
+`src/hyperloom/orchestrator/actions/executors/_grid_runner.py`).
 ```
 
 ## Usage
@@ -103,7 +103,7 @@ python -m Magpie.mcp
 
 The optimization loop drives Magpie's benchmark mode as a subprocess. The
 grid runner builds the command line and launches one run per variant in
-`inference_optimizer/orchestrator/action_executors/_grid_runner.py`:
+`src/hyperloom/orchestrator/actions/executors/_grid_runner.py`:
 
 ```python
 cmd = [
@@ -116,7 +116,7 @@ cmd = [
 
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. To make concurrent benchmark runs
-robust, `inference_optimizer/orchestrator/action_executors/_magpie_patcher.py`
+robust, `src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py`
 applies an idempotent, atomic-write patch to Magpie's cloned `benchmarker.py`
 (`_prepare_benchmark_scripts`) so a concurrent reader never sees a half-copied
 script. See [Hyperloom optimization loop](../conceptual/optimization-loop.md) for more information.
