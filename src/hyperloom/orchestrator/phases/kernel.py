@@ -462,6 +462,13 @@ class KernelPhase(PhaseHandler):
             "accepted_env": accepted_env,
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
             "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            # Serving-launch fidelity: forward the same max-model-len / mem-util production
+            # (Magpie) served with, so GEAK's baseline launches the SAME engine and its baseline
+            # matches raw_baseline_tput (else the accepted SP config crashes and GEAK re-baselines
+            # on a slower stack default -> kernel wins never translate e2e). Both optional: when
+            # unset the GEAK vllm adapter applies its own production-faithful defaults.
+            "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
+            "mem_fraction": float(getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)),
             "exp_root": str(self.session_dir / "perfskills"),
             # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
             # benchmark_serving.py) so final/sweep numbers are cross-harness comparable.
