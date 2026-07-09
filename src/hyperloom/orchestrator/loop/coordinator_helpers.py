@@ -18,6 +18,17 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# Leading-underscore module "constants" below are read only from *other*
+# modules (e.g. ``phases/kernel.py``, ``loop/writeback.py`` import them
+# directly) rather than from within this file. Static analysis that only
+# tracks in-module reads (e.g. CodeQL's unused-global-variable check) can't
+# see that cross-module usage on its own, so list them here to mark them as
+# intentionally exported.
+__all__ = [
+    "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
+    "_MIN_KERNEL_ENGAGED_GAIN_PCT",
+]
+
 
 def format_exc_brief(exc: BaseException, limit: int | None = None) -> str:
     """Render an exception as ``"TypeName: message"``, optionally truncated.
