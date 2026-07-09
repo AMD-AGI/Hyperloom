@@ -479,6 +479,10 @@ PY
   log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
   log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
 
+  if [ "$SGLANG_ROCM_EXTRA" = "rocm700" ] && [ "$py_mm" != "3.10" ]; then
+    die "SGLANG_ROCM_EXTRA=rocm700 currently supports Python 3.10 AMD wheels only; Python ${py_mm} would use source install and can pull mismatched ROCm 7.2 Triton."
+  fi
+
   if [ "$CHECK_ONLY" -eq 1 ]; then
     _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
     _py_has "$py" aiter && log "aiter import OK" || warn "aiter missing (check-only; would clone/install ${AITER_REPO}@${AITER_REF})"

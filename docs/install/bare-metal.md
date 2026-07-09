@@ -66,7 +66,7 @@ The script reads credentials from `.env` automatically. Common options and envir
 | `ROCM_PATH=/opt/rocm-<version>` / `HIP_PATH=...` | Point AITER and source builds at the matching ROCm compiler and headers. |
 | `LD_LIBRARY_PATH=/opt/rocm-<version>/lib:$LD_LIBRARY_PATH` | Make the matching ROCm user-space libraries visible to torch and framework extensions. |
 | `SGLANG_ROCM_PYPI_VERSION=7.0.0` | Select the AMD SGLang wheel repository version (default `7.2.0`). |
-| `SGLANG_ROCM_EXTRA=rocm700` | Select the AMD SGLang ROCm extra (default `rocm720`). |
+| `SGLANG_ROCM_EXTRA=rocm700` | Select the AMD SGLang ROCm extra (default `rocm720`). The `rocm700` path is supported only with Python 3.10 AMD wheels. |
 | `AITER_REF=v0.1.14.post1` | Override the AITER source tag. By default, `rocm700` selects `v0.1.14.post1`; `rocm720` selects `v0.1.16.post3`. |
 | `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` | Skip the install-time GEAK RAG index build. Useful for smoke tests or hosts where model/index build is flaky. |
 | `KERNEL_AGENT_RAG_INDEX_STRICT=1` | Fail the install if the GEAK RAG index build fails. By default the installer warns and continues. |
@@ -75,7 +75,7 @@ The script reads credentials from `.env` automatically. Common options and envir
 
 ### ROCm 7.0 user-space on an older compatible host driver
 
-If the host driver cannot be restarted or upgraded but supports ROCm 7.0 user-space, install ROCm 7.0 user-space libraries side by side and point the installer at them:
+If the host driver cannot be restarted or upgraded but supports ROCm 7.0 user-space, install ROCm 7.0 user-space libraries side by side and point the installer at them. This path requires Python 3.10 because the installer uses the AMD `amd-sglang[rocm700]` wheel; non-3.10 Python would take the source-install path and is rejected to avoid pulling mismatched ROCm 7.2 Triton.
 
 ```bash
 export PYTHON=/opt/hyperloom/venv-rocm70/bin/python
