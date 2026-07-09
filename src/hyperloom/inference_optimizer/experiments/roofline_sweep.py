@@ -221,6 +221,7 @@ class SglangServer:
                         print(f"[server] ready on port {self.port}", flush=True)
                         return
             except Exception:
+                # Server not ready yet; retry after the sleep below.
                 pass
             time.sleep(5)
         raise RuntimeError(f"sglang server did not become ready in {self.ready_timeout_sec}s")
@@ -241,6 +242,7 @@ class SglangServer:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
                 self.proc.wait(timeout=10)
         except ProcessLookupError:
+            # Process already exited; nothing to signal.
             pass
         print(f"[server] stopped (port {self.port})", flush=True)
 

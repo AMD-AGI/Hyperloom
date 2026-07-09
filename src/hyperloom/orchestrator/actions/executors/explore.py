@@ -707,6 +707,7 @@ class ExploreExecutor:
                 seed_isl = int(params.get("isl") or _yaml_envs.get("ISL") or os.environ.get("ISL") or 0)
                 seed_osl = int(params.get("osl") or _yaml_envs.get("OSL") or os.environ.get("OSL") or 0)
             except (TypeError, ValueError):
+                # Non-integer seed hint; fall back to the default grid below.
                 pass
             seed = _default_grid_for_framework(
                 framework,

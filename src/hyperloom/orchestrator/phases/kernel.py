@@ -603,6 +603,7 @@ class KernelPhase(PhaseHandler):
                 try:
                     os.killpg(os.getpgid(p.pid), sig)
                 except (ProcessLookupError, PermissionError):
+                    # Process already exited; nothing to signal.
                     pass
 
             try:

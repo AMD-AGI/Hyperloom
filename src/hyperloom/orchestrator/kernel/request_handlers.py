@@ -1498,6 +1498,7 @@ def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except (OSError, json.JSONDecodeError, ValueError):
+        # Config file missing/corrupt; return the empty dict below.
         pass
     return {}
 
@@ -2548,6 +2549,7 @@ async def trace_analyze_handler(
                 if int(num_denoise) > 0:
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
+                # Invalid num-denoise value; omit the flag.
                 pass
         # Forward the local model dir + precision so the diffusion roofline
         # sidecar can emit an a-priori analytic compute ceiling (approach-a),

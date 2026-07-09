@@ -84,6 +84,7 @@ def _atomic_write(target: Path, content: str) -> None:
     try:
         shutil.copystat(target, tmp_path)
     except OSError:
+        # copystat is best-effort metadata; ignore if the FS rejects it.
         pass
     tmp_path.replace(target)
 

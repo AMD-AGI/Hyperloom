@@ -197,6 +197,7 @@ def _load_default_prompt_prefix() -> str:
         if _PROMPT_PREFIX_FILE.is_file():
             return _PROMPT_PREFIX_FILE.read_text(encoding="utf-8")
     except OSError:
+        # Prefix file unreadable; fall back to the empty prefix below.
         pass
     return ""
 
