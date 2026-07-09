@@ -162,7 +162,7 @@ package to populate `session_breakdown.json` for downstream consumers
 
 Master switch (default **off**) for live Langfuse trace push.
 
-- **SDK install**: when this flag is on, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
+- **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, oob, robustness, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
@@ -175,7 +175,7 @@ Master switch (default **off**) for live Langfuse trace push.
 
   This lets an operator confirm post-hoc whether a run reached Langfuse.
 
-#### Langfuse and artifact-package — security and known limitations
+### Langfuse and artifact-package — security and known limitations
 
 * **Sensitive data surface**: When live push is on, `conversations.jsonl`
   (and Langfuse Generations) carry full prompt/response text. `redact_secrets`

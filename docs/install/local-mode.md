@@ -46,11 +46,11 @@ With Cursor already connected to your remote GPU host and the container running,
 
 > If you do not have the Dev Containers extension yet, install it from the [Dev Containers extension page](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) (make sure it is installed in the remote environment).
 
-<img src="figs/cursor_dev_containers_attach.png" alt="Cursor command palette: Dev Containers: Attach to Running Container" width="700" />
+<img src="../images/cursor_dev_containers_attach.png" alt="Cursor command palette: Dev Containers: Attach to Running Container" width="700" />
 
 Select the container you started (`hyperloom-local`):
 
-<img src="figs/cursor_select_container.png" alt="Selecting the hyperloom-local container to attach to" width="700" />
+<img src="../images/cursor_select_container.png" alt="Selecting the hyperloom-local container to attach to" width="700" />
 
 Cursor opens a new window attached to the running container. Open a workspace folder inside the container to continue.
 
@@ -65,11 +65,11 @@ export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1  #
 export USER_DATA_PATH=/workspace/hyperloom && mkdir -p "$USER_DATA_PATH"
 bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
-> **Tip:** Instead of exporting these variables each session, you can persist credentials in a `.env` file. See [Appendix — Environment configuration (.env)](#appendix-environment-configuration-env) for the basic recipe, or [Auth & Environment Guide](ENV_AND_AUTH.md) for the full reference.
+> **Tip:** Instead of exporting these variables each session, you can persist credentials in a `.env` file. See the appendix below for the basic recipe, or [Authentication and credentials](../reference/authentication.md) for the full reference.
 
-- `SAFE_API_KEY` — your key from the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the [`.env` appendix](#appendix-environment-configuration-env).
+- `SAFE_API_KEY` — your key from the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
 - `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). It **must be an absolute path** and can point at any location with enough space.
-- Not using the Primus-SaFE gateway? See **ENV_AND_AUTH.md §2.3** (Non-AMD / self-hosted gateway) for self-hosted gateways and model overrides: [ENV_AND_AUTH.md](ENV_AND_AUTH.md).
+- Not using the Primus-SaFE gateway? See [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd--self-hosted-gateway) for self-hosted gateways and model overrides.
 
 When it finishes, `local_setup.sh` prints the workspace path to open in Cursor, a prompt template to paste into Cursor Chat (with a `Model:` field to fill in), and the env file to source before launch.
 
@@ -127,7 +127,7 @@ The fields you commonly edit:
 | `Goal` | `--target-gain` | Optional stop condition, such as a target throughput gain. | unset |
 | `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
 
-For the full list of workload fields, CLI flags, and defaults, see [Step 2 — Launch in `src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md). For first-launch errors, see that skill's §"Failure Handling".
+For the full list of workload fields, CLI flags, and defaults, see [Step 2 — Launch in `src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md). For first-launch errors, see that skill's §"Failure Handling".
 
 <details>
 <summary><strong>Resume an existing session</strong></summary>
@@ -147,7 +147,7 @@ Requirements:
 
 </details>
 
-For the optional AMD Quark quantization prelude, see [Quantization (AMD Quark)](QUANTIZATION_QUARK.md).
+For the optional AMD Quark quantization prelude, see [Quantization with AMD Quark](../how-to/quantization-quark.md).
 
 ## Appendix — Environment configuration (.env)
 
@@ -162,19 +162,19 @@ cp .env.template .env
 
 Edit `.env`:
 
-```env
+```text
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
 ```
 
-Shell `export` always wins over `.env` — see [ENV_AND_AUTH.md §1](ENV_AND_AUTH.md#1-credential-precedence).
+Shell `export` always wins over `.env` — see [Credential precedence](../reference/authentication.md#credential-precedence).
 
-For setups beyond the single-gateway default above, see [Auth & Environment Guide](ENV_AND_AUTH.md):
+For setups beyond the single-gateway default above, see [Authentication and credentials](../reference/authentication.md):
 
-- **Split Anthropic + OpenAI entrypoints** — [ENV_AND_AUTH.md §2.2](ENV_AND_AUTH.md#22-split-entrypoints-native-anthropic-openai)
-- **Non-AMD / self-hosted gateway + custom models** — **ENV_AND_AUTH.md §2.3**: [ENV_AND_AUTH.md](ENV_AND_AUTH.md)
-- **Optional `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL`** (Cursor kernel-opt backend) — [ENV_AND_AUTH.md §3.1](ENV_AND_AUTH.md#31-cursor_api_key-cursor-sdk-kernel-opt-backend)
-- **Optional `TRACELENS_INTERNAL_ROOT`** (internal TraceLens extension) — [ENV_AND_AUTH.md §4.2](ENV_AND_AUTH.md#42-dependency-checkouts-auto-provisioned)
+- **Split Anthropic + OpenAI entrypoints** — [Split entrypoints](../reference/authentication.md#split-entrypoints-native-anthropic--openai)
+- **Non-AMD / self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd--self-hosted-gateway)
+- **Optional `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL`** — [Cursor SDK kernel-opt backend](../reference/authentication.md#cursor_api_key--cursor-sdk-kernel-opt-backend)
+- **Optional `TRACELENS_INTERNAL_ROOT`** — [Dependency checkout variables](../reference/authentication.md#dependency-checkout-variables)
 
 </details>
 

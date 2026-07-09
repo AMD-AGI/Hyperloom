@@ -58,7 +58,18 @@ copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved
 version = version_number
 release = version_number
 
-external_toc_path = "./sphinx/_toc.yml.in"  # Defines Table of Content structure definition path
+external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
+
+exclude_patterns = [
+    "_build",
+    "_templates",
+]
+
+suppress_warnings = [
+    # Autosummary-generated API pages contain toctrees; external-toc warns even
+    # though those pages are generated implementation details.
+    "etoc.toctree",
+]
 
 """
 Doxygen Settings

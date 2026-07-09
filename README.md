@@ -57,13 +57,13 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ## Quickstart — Local Mode (Cursor)
 
-Local Mode runs Hyperloom in a Docker container on your AMD GPU machine. Cursor attaches to the container and launches optimization. See **[docs/install/hyperloom-installation.md](docs/install/hyperloom-installation.md)** for the full setup guide.
+Local Mode runs Hyperloom in a Docker container on your AMD GPU machine. Cursor attaches to the container and launches optimization. See **[docs/install/local-mode.md](docs/install/local-mode.md)** for the full setup guide.
 
 ---
 
 ## Quickstart — Bare-Metal (No Docker)
 
-Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `src/hyperloom/inference_optimizer/assets/install_baremetal.sh`, then drive it from Cursor. See **[docs/install/hyperloom-installation.md](docs/install/hyperloom-installation.md)** for the setup guide.
+Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `src/hyperloom/inference_optimizer/assets/install_baremetal.sh`, then drive it from Cursor. See **[docs/install/bare-metal.md](docs/install/bare-metal.md)** for the setup guide.
 
 ---
 

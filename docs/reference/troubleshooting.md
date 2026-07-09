@@ -9,10 +9,10 @@ myst:
 A consolidated symptom → cause → fix index for the failures Hyperloom
 users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
-[`inference_optimizer/SKILL.md`](../../src/hyperloom/inference_optimizer/SKILL.md),
-[`kernel/SKILL.md`](../../src/hyperloom/agents/kernel/SKILL.md),
-[`critic/SKILL.md`](../../src/hyperloom/agents/critic/SKILL.md),
-[`robustness/SKILL.md`](../../src/hyperloom/agents/robustness/SKILL.md).
+[`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
+[`kernel/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/kernel/SKILL.md),
+[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
+[`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
 
 ---
 
@@ -421,4 +421,4 @@ If the steps above did not resolve your issue, use the following options to get 
   `session_breakdown.json` (or partial state.json) for the failed
   session, and the relevant log excerpt.
 * For security-relevant issues, follow the disclosure process in
-  [`SECURITY.md`](../../SECURITY.md) instead.
+  [`SECURITY.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/SECURITY.md) instead.

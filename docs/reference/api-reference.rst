@@ -17,6 +17,5 @@ documented via their in-code docstrings rather than these autosummary pages.
 
 .. autosummary::
    :toctree: generated
-   :recursive:
 
    hyperloom

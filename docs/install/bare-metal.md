@@ -31,21 +31,21 @@ Edit `.env` and pick one of the two setups:
 
 - **Single gateway (default)** — fill in the two ready-to-use lines:
 
-```env
+```text
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
 ```
 
 - **Split (native OpenAI / Anthropic)** — uncomment the matching lines in the template, fill them in, and point `OPENAI_BASE_URL` at the GPT-side endpoint:
 
-```env
+```text
 ANTHROPIC_BASE_URL=https://api.anthropic.com
 ANTHROPIC_API_KEY=sk-ant-xxxxx
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-xxxxx
 ```
 
-> To change the artifact directory, set `USER_DATA_PATH` in `.env` (default `/workspace/hyperloom`). See [Auth & Environment Guide](ENV_AND_AUTH.md) for credentials and [Path environment](ENV_AND_AUTH.md#4-path-environment) for path variables.
+> To change the artifact directory, set `USER_DATA_PATH` in `.env` (default `/workspace/hyperloom`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
 
 ## 3. Run the bare-metal installer
 
@@ -74,4 +74,4 @@ source '<path printed by install_baremetal.sh>'
 
 The default location is usually `/workspace/hyperloom/runtime/hyperloom.env.sh`, but use the printed path if you changed `USER_DATA_PATH` in `.env` or passed `--user-data-path`.
 
-Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Launch Inference Optimization](QUICKSTART_LOCAL_MODE.md#launch-inference-optimization).
+Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Launch Inference Optimization](local-mode.md#launch-inference-optimization).
