@@ -212,3 +212,66 @@ def test_highlight_topics():
     # fallback branch
     other = rp._highlight({"a": 1, "b": "two", "c": [1, 2]}, "weird_topic", "ag")
     assert "a" in other["summary"]
+
+
+# ---- _explain_stop_reason ----
+def test_explain_stop_reason_robustness_escalated():
+    msg = rp._explain_stop_reason("robustness_escalated")
+    assert msg
+    assert "robustness" in msg.lower()
+
+
+def test_explain_stop_reason_target_reached():
+    assert "target" in rp._explain_stop_reason("target_reached").lower()
+
+
+def test_explain_stop_reason_unknown_is_empty():
+    assert rp._explain_stop_reason("some_unmapped_reason") == ""
+    assert rp._explain_stop_reason("") == ""
+
+
+def test_format_md_renders_stop_explanation():
+    md = rp._format_md(
+        {
+            "session_id": "s",
+            "model_name": "m",
+            "model_path": "/m",
+            "stop_reason": "robustness_escalated",
+            "stop_reason_explanation": "Robustness escalated: stopped early to protect validated gains.",
+            "max_minutes": 60,
+            "report_generated_at": "t0",
+            "framework": "sglang",
+            "current_best": {},
+            "baseline_tput": 100.0,
+            "cumulative_gain": 0.0,
+            "cumulative_gain_validated": 0.0,
+            "cumulative_gain_validated_stack_len": 0,
+            "optimization_stack_len": 0,
+            "crash_count": 0,
+            "pruned_families": [],
+            "event_counts_by_topic": {},
+            "highlights": [],
+        }
+    )
+    assert "Why it stopped" in md
+    assert "Robustness escalated" in md
+
+
+# ---- stop_reason explanation vocabulary coverage (M1) ----
+def test_every_stop_reason_vocab_member_has_explanation():
+    from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
+
+    missing = sorted(r for r in STOP_REASON_VOCAB if not rp._explain_stop_reason(r))
+    assert missing == [], f"stop reasons without an explanation: {missing}"
+
+
+def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
+    # A KV-cache OOM message can also contain the generic "out of memory"
+    # phrase; the more specific bucket must win (L1).
+    assert (
+        rp._classify_root_cause_type(
+            "kv_cache_oom",
+            "CUDA out of memory; no GPU memory for the KV cache",
+        )
+        == "kv_cache_oom"
+    )
