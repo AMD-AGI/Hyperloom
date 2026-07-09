@@ -214,7 +214,7 @@ def test_no_levers_silent_when_validated_gain_present():
 
 
 # ---------------------------------------------------------------------------
-# PR-B Fix 2: in-flight kernel-opt short-circuits no_levers_found
+# In-flight kernel-opt short-circuits no_levers_found.
 # ---------------------------------------------------------------------------
 def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
     """In-flight kernel_opt (``kernel_opt_attempts_count > 0``) with empty stack must short-circuit so Orch doesn't race to report. Repro: Qwen3-30B-A3B-Base 20260522T093903Z."""
@@ -260,7 +260,7 @@ def test_no_levers_silent_when_keep_pending_integrate():
 
 
 def test_no_levers_silent_before_explore_started():
-    """Cold-start guard (PR #239 followup 97318ee): before explore starts, stack=0 + gain=0 are by-construction, so ``no_levers_found`` must stay silent. Repro: primus-claw-20260522034541-xkk9f turn=7."""
+    """Cold-start guard: before explore starts, stack=0 + gain=0 are by-construction, so ``no_levers_found`` must stay silent."""
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,

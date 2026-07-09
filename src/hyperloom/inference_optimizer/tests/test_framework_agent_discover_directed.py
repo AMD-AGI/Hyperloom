@@ -47,7 +47,7 @@ class _CoordinatorStub:
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _build_framework_working_memory = Coordinator._build_framework_working_memory
     _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
-    # #5-P2 cross-framework discovery lane is default-on; the real discovery merge
+    # cross-framework discovery lane is default-on; the real discovery merge
     # calls this reverse-lookup on every repo it queries.
     _framework_agent_repo_url_origin_framework = staticmethod(
         Coordinator._framework_agent_repo_url_origin_framework

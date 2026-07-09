@@ -865,7 +865,7 @@ class ResultRecorder:
         return out
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
-        """Materialise the recipe-shaped view of :class:`SharedState` (kg-usage-guide §7.4; defensive getattr).
+        """Materialise the recipe-shaped view of :class:`SharedState` (defensive getattr).
 
         Returns:
             A recipe-shaped attrs dict (best_config, what_worked, what_failed,

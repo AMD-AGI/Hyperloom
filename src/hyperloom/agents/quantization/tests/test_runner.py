@@ -5,6 +5,8 @@ Uses ``FakeSDK`` / ``FakeOptions`` from conftest to bypass the real SDK.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hyperloom.agents.quantization.driver.runner import (
@@ -163,6 +165,35 @@ async def test_run_one_attempt_sets_cwd_to_quark_root(tmp_path, fake_sdk, fake_o
     options = fake_sdk.received_options[0]
     assert options.kwargs.get("cwd") == str(qr)
     assert options.kwargs.get("allowed_tools") == DEFAULT_ALLOWED_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_run_one_attempt_passes_quark_py310_env_to_sdk_options(tmp_path, fake_sdk, fake_options_cls, monkeypatch):
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("x", encoding="utf-8")
+    qr = tmp_path / "qr"
+    qr.mkdir()
+    monkeypatch.setenv("PYTHONPATH", "/existing/pythonpath")
+    monkeypatch.delenv("PIP_IGNORE_REQUIRES_PYTHON", raising=False)
+
+    await run_one_attempt(
+        user_prompt="x",
+        workspace=tmp_path / "ws",
+        quark_root=qr,
+        skill_path=skill,
+        sdk_query_factory=fake_sdk,
+        sdk_options_cls=fake_options_cls,
+    )
+
+    compat_dir = tmp_path / "ws" / ".hyperloom_quark_py310_compat"
+    sitecustomize = compat_dir / "sitecustomize.py"
+    env = fake_sdk.received_options[0].kwargs["env"]
+    assert sitecustomize.is_file()
+    assert "typing.Self" in sitecustomize.read_text(encoding="utf-8")
+    assert env["PYTHONPATH"] == f"{compat_dir}{os.pathsep}/existing/pythonpath"
+    assert env["PIP_IGNORE_REQUIRES_PYTHON"] == "1"
+    assert os.environ["PYTHONPATH"] == "/existing/pythonpath"
+    assert "PIP_IGNORE_REQUIRES_PYTHON" not in os.environ
 
 
 @pytest.mark.asyncio

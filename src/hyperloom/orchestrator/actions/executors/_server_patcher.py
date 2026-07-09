@@ -49,7 +49,7 @@ _GIT_TIMEOUT_SEC = 30
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 
 # TraceLens-shipped manifest filename(s). When present in the SGLang patches
-# dir, the manifest is the source of truth for supported versions (#194 §5),
+# dir, the manifest is the source of truth for supported versions,
 # bypassing the hardcoded default; operator env pins still win. Format: one
 # version per line, ``#`` comments, blank lines ignored.
 _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
@@ -181,29 +181,71 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
     return "sglang_" + "_".join(numeric)
 
 
+def _sglang_subdir_version_tuple(name: str) -> tuple[int, ...] | None:
+    """Parse a ``sglang_0_5_11`` patch subdir name back into ``(0, 5, 11)``.
+
+    Returns ``None`` when the name is not a versioned SGLang subdir.
+    """
+    prefix = "sglang_"
+    if not name.startswith(prefix):
+        return None
+    numeric: list[int] = []
+    for part in name[len(prefix):].split("_"):
+        if part.isdigit():
+            numeric.append(int(part))
+        else:
+            break
+    return tuple(numeric) if len(numeric) >= 2 else None
+
+
 def _resolve_sglang_patches_dir(
     patches_root: Path,
     version: str,
 ) -> Path | None:
     """Locate the SGLang patches dir for the running ``sglang`` version.
 
-    Requires the per-version subdir layout (``sglang_0_5_11/``, ...); the flat
-    v0.3 layout is unsupported. Returns the subdir when it exists and has at
-    least one ``*.patch``, else ``None`` (caller fail-softs).
+    Order (mirrors :func:`_resolve_vllm_patch_file`): exact ``sglang_X_Y_Z``
+    subdir > highest same-minor subdir whose version is <= running > nearest
+    subdir whose version is <= running (never a newer one). Only subdirs with
+    at least one ``*.patch`` qualify; ``_apply_atomic``'s ``git apply --check``
+    still guards a genuinely incompatible pick. Returns ``None`` when nothing
+    qualifies (caller fail-softs).
 
     Args:
         patches_root: Root directory holding the per-version patch subdirs.
         version: The running ``sglang`` version string.
 
     Returns:
-        The resolved patches subdir, or ``None`` when it is missing or empty.
+        The resolved patches subdir, or ``None`` when none qualifies.
     """
     subdir_name = _versioned_patches_subdir_name(version)
-    if subdir_name is None:
+    if subdir_name is not None:
+        candidate = patches_root / subdir_name
+        if candidate.is_dir() and any(candidate.glob("*.patch")):
+            return candidate
+
+    # Graceful fallback to the nearest not-newer patched subdir.
+    if not patches_root.is_dir():
         return None
-    candidate = patches_root / subdir_name
-    if candidate.is_dir() and any(candidate.glob("*.patch")):
-        return candidate
+    running = _version_tuple(version)
+    if running is None:
+        return None
+    available: dict[tuple[int, ...], Path] = {}
+    for d in patches_root.iterdir():
+        if not d.is_dir() or not any(d.glob("*.patch")):
+            continue
+        vt = _sglang_subdir_version_tuple(d.name)
+        if vt:
+            available[vt] = d
+    if not available:
+        return None
+    if len(running) >= 2:
+        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
+        if same_minor:
+            return available[max(same_minor)]
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
     return None
 
 

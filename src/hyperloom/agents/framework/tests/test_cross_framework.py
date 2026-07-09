@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for hyperloom.agents.framework.cross_framework (#5-P1 cross-framework audit).
+"""Tests for hyperloom.agents.framework.cross_framework (cross-framework audit).
 
 Hermetic: redirects the KB root via FRAMEWORK_AGENT_KB_DIR so the seeded
 ``cross_framework_map.jsonl`` and persisted ``semantic_audit.json`` never

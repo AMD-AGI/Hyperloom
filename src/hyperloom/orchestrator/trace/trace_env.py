@@ -5,7 +5,7 @@
 Centralizes the (otherwise scattered) bool parsing for the trace package so
 the Langfuse toggle reads identically everywhere. Hyperloom has no global
 ``env.py``; the convention is documented in
-``docs/CONFIGURATION_REFERENCE.md`` and prefixed ``HYPERLOOM_*`` for
+``docs/reference/environment-variables.md`` and prefixed ``HYPERLOOM_*`` for
 cross-component escape hatches. This module owns only the trace-related
 names.
 """
@@ -15,8 +15,7 @@ from __future__ import annotations
 import os
 
 # Master switch for live Langfuse push. Default OFF: the local jsonl ledger
-# is always written; Langfuse is an opt-in parallel sink. Documented in
-# CONFIGURATION_REFERENCE.md §9.
+# is always written; Langfuse is an opt-in parallel sink.
 ENV_LANGFUSE_ENABLE = "HYPERLOOM_LANGFUSE_ENABLE"
 
 # Langfuse connection credentials (official langfuse SDK variable names).

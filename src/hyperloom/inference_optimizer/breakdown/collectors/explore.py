@@ -31,7 +31,7 @@ from ._common import (
 
 
 
-# §10 Explore search ledger
+# Explore search ledger
 def _shape_ledger(
     ledger: dict[str, Any] | None,
     *,
@@ -264,7 +264,7 @@ def collect_explore_search(
 collect_param_search = collect_explore_search
 
 
-# §11 Sweep
+# Sweep
 _VARIANT_NAME_RE = re.compile(r"variant_(\d+)_conc(\d+)_isl(\d+)_osl(\d+)", re.IGNORECASE)
 
 
@@ -354,7 +354,7 @@ def collect_sweep(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §11 sweep section.
+    """Collect the sweep section.
 
     Merges the in-state ``last_sweep`` summary (grid size, best-overall,
     per-conc bests, pareto front) with the variant points discovered on disk.

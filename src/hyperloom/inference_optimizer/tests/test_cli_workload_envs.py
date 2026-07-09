@@ -117,7 +117,7 @@ def test_multi_node_always_exports_workload_envs(monkeypatch):
 
 
 def test_operator_server_args_env_routes_to_vllm_args(tmp_path, monkeypatch):
-    """#573: one server-args injection point must reach vLLM YAML materialization."""
+    """One server-args injection point must reach vLLM YAML materialization."""
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_SERVER_ARGS",
         "--gpu-memory-utilization 0.85 --kv-cache-dtype fp8_e4m3",
@@ -155,7 +155,7 @@ def test_conc_env_ladder_materializes_as_single_baseline_and_sweep_ladder(
     tmp_path,
     monkeypatch,
 ):
-    """#573: CONC=4,16,128 is recognized as a ladder, not crashed by int()."""
+    """CONC=4,16,128 is recognized as a ladder, not crashed by int()."""
     monkeypatch.setenv("CONC", "4,16,128")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
     src = tmp_path / "cfg.yaml"
@@ -185,7 +185,7 @@ def test_conc_env_ladder_parser_default_feeds_sweep_without_env_mutation(monkeyp
 
 
 def test_explicit_max_model_len_wins_over_auto(tmp_path, monkeypatch):
-    """#573: explicit --max-model-len / $MAX_MODEL_LEN must not be recomputed."""
+    """Explicit --max-model-len / $MAX_MODEL_LEN must not be recomputed."""
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"max_position_embeddings": 4096}', encoding="utf-8")

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Kernel-decision write-owner functions (tree-reform.MD P2.2).
+"""Kernel-decision write-owner functions.
 
 Extracted from :mod:`.kernel_request_handlers` (which re-exports every name
 here so its module namespace / monkeypatch surface is unchanged). SharedState

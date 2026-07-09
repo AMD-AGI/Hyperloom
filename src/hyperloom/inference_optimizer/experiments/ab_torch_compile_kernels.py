@@ -36,8 +36,8 @@ from typing import Any
 
 import yaml
 
-# tree-reform.MD P2.5: kernel-agent was promoted into the in-tree
-# hyperloom src-layout namespace (src/hyperloom/agents/kernel).
+# kernel-agent lives in the in-tree hyperloom src-layout namespace
+# (src/hyperloom/agents/kernel).
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _TL = _REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "tracelens_analysis.py"
 if _TL.is_file():

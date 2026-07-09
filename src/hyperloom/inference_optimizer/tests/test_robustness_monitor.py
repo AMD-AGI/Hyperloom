@@ -251,7 +251,7 @@ def test_monitor_resume_is_pinned_to_resolved_session_dir():
     assert '--resume --resume-from "$session_dir"' in text
 
 
-# --- Issue #592: robust liveness + cold-start grace (no spurious resume) -----
+# --- Robust liveness + cold-start grace (no spurious resume) ----------------
 
 
 @pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")

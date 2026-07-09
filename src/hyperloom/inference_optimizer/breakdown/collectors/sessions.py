@@ -534,7 +534,7 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
     return stop_reason == "time_exhausted" and close_stop_reason != "time_exhausted"
 
 
-# §1 Session metadata
+# Session metadata
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     """Project SharedState's crash / interruption / resume signals.
 
@@ -542,9 +542,9 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     steward, entered degraded mode, or has an accepted stack awaiting
     post-resume revalidation — but none of it reaches the breakdown, so a
     resumed run reads as if it proceeded monotonically. This folds those
-    signals into the §1 ``session.recovery`` block so a reader can see the run
+    signals into the ``session.recovery`` block so a reader can see the run
     was interrupted and continued (the context behind gaps like an empty
-    ``perfskills_result`` lost to a kill before the tick-boundary save). Pure /
+    ``geak_result`` lost to a kill before the tick-boundary save). Pure /
     best-effort: unparseable fields are skipped, never raised.
 
     Args:
@@ -618,7 +618,7 @@ def collect_session(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §1 session-identification + lifecycle section.
+    """Collect the session-identification + lifecycle section.
 
     Merges identifiers and timing from ``state`` and ``manifest`` (state
     taking precedence on overlapping fields), computes ``elapsed_minutes``
@@ -680,29 +680,29 @@ def collect_session(
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history so a resumed run is not read as
-        # a clean monotonic one (context behind e.g. an empty perfskills_result).
+        # a clean monotonic one (context behind e.g. an empty geak_result).
         "recovery": _collect_recovery(state),
     }
 
 
-# §1b session_meta enrichment
+# session_meta enrichment
 def collect_session_meta(
     manifest: dict[str, Any],
     session_section: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §1b ``session_meta`` enrichment block.
+    """Collect the ``session_meta`` enrichment block.
 
     Historically this block was injected post-export by ``ci/optimize_submit.py``
     (``_backfill_ci_metrics_file``), so any session that never went through that
     CI path landed in pulse without a ``session_meta``. The exporter now always
-    emits it straight from the manifest + resolved §1 ``session`` section, so the
+    emits it straight from the manifest + resolved ``session`` section, so the
     block no longer depends on CI; the CI step degrades to a gap-filler for the
     fields the sandbox could not know (e.g. ``category``).
 
     Args:
         manifest (dict[str, Any]): Parsed ``manifest.json``.
-        session_section (dict[str, Any]): The already-built §1 ``session`` dict.
+        session_section (dict[str, Any]): The already-built ``session`` dict.
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
@@ -727,13 +727,13 @@ def collect_session_meta(
     }
 
 
-# §2 Workload
+# Workload
 def collect_workload(
     state: dict[str, Any],
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §2 workload-description section.
+    """Collect the workload-description section.
 
     Merges framework name / model / GPU / parallelism fields from ``state`` and
     ``manifest`` (state preferred) plus the workload knobs (``conc`` / ``isl``
@@ -768,12 +768,12 @@ def collect_workload(
     }
 
 
-# §2b Model basics
+# Model basics
 def collect_model_info(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §2b ``model_info`` section (state.model_info passthrough).
+    """Collect the ``model_info`` section (state.model_info passthrough).
 
     The summary is computed once at launch (``cli_bootstrap`` →
     ``summarize_model_config``) and persisted on ``state.model_info``, so the
@@ -794,13 +794,13 @@ def collect_model_info(
     return dict(info) if isinstance(info, dict) else {}
 
 
-# §3 Baseline
+# Baseline
 def collect_baseline(
     session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §3 baseline-measurement section.
+    """Collect the baseline-measurement section.
 
     Resolves the baseline workspace (re-rooting container-style paths under
     ``session_dir``), reads ttft / e2el from its ``benchmark_report.json``,
@@ -1052,13 +1052,13 @@ def _reconstruct_baseline_attempts(
     return out
 
 
-# §4 Final (validated)
+# Final (validated)
 def collect_final(
     session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §4 final (validated) configuration section.
+    """Collect the final (validated) configuration section.
 
     Reads ``current_best`` plus the validated cumulative-gain bookkeeping,
     builds the ordered ``action_path`` from ``optimization_stack``, and — when
@@ -1144,6 +1144,22 @@ def collect_final(
         "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
+        # Provenance/basis of the recorded gain so the renderer can tell a
+        # same-harness-validated number from a cross-harness PROVISIONAL one
+        # (e.g. a geak e2e win pending its same-harness rebench). Empty on
+        # native/legacy sessions (renders as validated, unchanged).
+        "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),
+        "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
+        # A GEAK(GEAK) e2e candidate whose self-reported win has NOT yet
+        # been confirmed by a main-flow rebench. Present => the renderer surfaces
+        # it as an audit-only note and EXCLUDES it from the headline gain (the
+        # candidate is intentionally absent from current_best / action_path until
+        # a measured rebench validates it). Empty on native/validated sessions.
+        "geak_pending": (
+            dict(state.get("geak_pending") or {})
+            if isinstance(state.get("geak_pending"), dict)
+            else {}
+        ),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation": stack_len > val_stack_len > 0,

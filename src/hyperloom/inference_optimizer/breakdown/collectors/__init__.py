@@ -174,10 +174,10 @@ from .telemetry import (
     _normalize_specialist_domain_breakdown as _normalize_specialist_domain_breakdown,
     _domain_for_task as _domain_for_task,
 )
-from .perfskills import (
-    _perfskills_accepted_kernels_from_journey as _perfskills_accepted_kernels_from_journey,
-    _perfskills_reconstruct_from_disk as _perfskills_reconstruct_from_disk,
-    collect_perfskills as collect_perfskills,
+from .geak import (
+    _geak_accepted_kernels_from_journey as _geak_accepted_kernels_from_journey,
+    _geak_reconstruct_from_disk as _geak_reconstruct_from_disk,
+    collect_geak as collect_geak,
 )
 
 __all__ = [
@@ -192,7 +192,7 @@ __all__ = [
     'collect_kernel_invocations',
     'collect_kernel_lifecycle',
     'collect_param_search',
-    'collect_perfskills',
+    'collect_geak',
     'collect_phase_segments',
     'collect_phase_timeline',
     'collect_session',

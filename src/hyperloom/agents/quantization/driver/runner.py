@@ -18,6 +18,7 @@ user_prompt)`` into a templated prompt and hands it to the SDK.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -28,6 +29,16 @@ DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # ~ Quark workflow has 4 STOPs + validator + eval; generous
 
 SKILL_RELATIVE_PATH = "SKILL.md"
+QUARK_PY310_COMPAT_DIR = ".hyperloom_quark_py310_compat"
+QUARK_PY310_SITE_CUSTOMIZE = """\
+import datetime as _datetime
+import typing as _typing
+
+from typing_extensions import Self as _Self
+
+_typing.Self = _Self
+_datetime.UTC = _datetime.timezone.utc
+"""
 
 
 @dataclass
@@ -105,6 +116,36 @@ def resolve_skill_path(package_root: Path | None = None) -> Path:
     # level up at the package root (a runtime contract, not a driver detail).
     root = package_root if package_root is not None else Path(__file__).resolve().parent.parent
     return root / SKILL_RELATIVE_PATH
+
+
+def _prepare_quark_py310_compat(workspace: Path) -> Path:
+    """Create a workspace-local Python 3.10 compatibility shim for Quark 0.12.
+
+    Quark release/0.12 uses a small number of Python 3.11 symbols
+    (``typing.Self`` and ``datetime.UTC``). Hyperloom deployments may still run
+    the optimizer from a Python 3.10 venv, so inject the missing symbols via
+    ``sitecustomize`` without modifying the Quark checkout.
+    """
+
+    compat_dir = workspace / QUARK_PY310_COMPAT_DIR
+    compat_dir.mkdir(parents=True, exist_ok=True)
+    (compat_dir / "sitecustomize.py").write_text(QUARK_PY310_SITE_CUSTOMIZE, encoding="utf-8")
+    return compat_dir
+
+
+def _prepend_pythonpath(path: Path, current: str | None) -> str:
+    prefix = str(path)
+    return prefix if not current else prefix + os.pathsep + current
+
+
+def _quark_py310_compat_env(workspace: Path, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return child-process env exposing Quark's Python 3.10 shim."""
+
+    env = dict(os.environ if base_env is None else base_env)
+    compat_dir = _prepare_quark_py310_compat(workspace)
+    env["PYTHONPATH"] = _prepend_pythonpath(compat_dir, env.get("PYTHONPATH"))
+    env["PIP_IGNORE_REQUIRES_PYTHON"] = "1"
+    return env
 
 
 def build_attempt_prompt(
@@ -269,6 +310,7 @@ async def run_one_attempt(
         "system_prompt": system_prompt,
         "allowed_tools": allowed_tools or DEFAULT_ALLOWED_TOOLS,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
+        "env": _quark_py310_compat_env(workspace),
     }
     if model:
         kwargs["model"] = model
@@ -276,11 +318,24 @@ async def run_one_attempt(
 
     try:
         options = sdk_options_cls(**kwargs)
-    except TypeError:
+    except TypeError as exc:
         # Older SDK builds may not support cwd; prompt + SKILL.md use absolute
         # paths so retrying without cwd is safe.
         kwargs.pop("cwd", None)
-        options = sdk_options_cls(**kwargs)
+        try:
+            options = sdk_options_cls(**kwargs)
+        except TypeError as env_exc:
+            # The Quark py310 shim must be passed to SDK-spawned tools without
+            # mutating process-global os.environ across async awaits. If this
+            # SDK predates the env option, fail clearly instead of silently
+            # running Quark 0.12 in an incompatible Python 3.10 environment.
+            if "env" in kwargs:
+                raise RuntimeError(
+                    "claude_agent_sdk.ClaudeAgentOptions does not support env; "
+                    "upgrade claude-agent-sdk so Hyperloom can pass the Quark "
+                    "Python 3.10 compatibility shim to SDK subprocesses"
+                ) from env_exc
+            raise env_exc from exc
 
     chunks: list[str] = []
     sdk_error = ""

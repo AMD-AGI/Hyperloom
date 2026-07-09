@@ -13,9 +13,9 @@ from hyperloom.agents.quantization.driver.outcomes import (
 )
 
 
-# The 30 rows from Appendix §A, grouped by category. Numbers are the table
+# The outcome rows grouped by category. Numbers are the table
 # IDs; the enum stores them by name only (the row number is implicit in the
-# §A documentation).
+# outcome documentation).
 _AUTO_RECOVER_NAMES = {
     "intent_parse_failed",  # #8
     "analysis_artifact_invalid_or_missing",  # #10
@@ -91,7 +91,7 @@ def test_success_tags_include_none_and_eval_accepted():
 
 def test_ask_retryable_subset_of_ask():
     assert ASK_RETRYABLE.issubset(ASK)
-    # The four CI-auto-retry rows per design §A bottom of table.
+    # The four CI-auto-retry rows.
     assert {o.value for o in ASK_RETRYABLE} == {
         "exec_oom",
         "export_crashed",
@@ -112,5 +112,5 @@ def test_enum_is_string_valued():
 
 
 def test_enum_size_is_32_total():
-    # 30 rows from §A + eval_gap_accepted narrative tag + upstream_change_required.
+    # Outcome rows + eval_gap_accepted narrative tag + upstream_change_required.
     assert len(list(OutcomeId)) == 32

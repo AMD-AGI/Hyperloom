@@ -199,7 +199,7 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     archive = history[0]
     assert archive["version"] == 1
     assert archive["snapshot"]["best_throughput"] == 1000.0
-    # ``replaced_by`` carries the triggering write's provenance for audit (boundary doc §4.2).
+    # ``replaced_by`` carries the triggering write's provenance for audit.
     assert archive["replaced_by"] == {
         "source": "second",
         "generator": "ut",

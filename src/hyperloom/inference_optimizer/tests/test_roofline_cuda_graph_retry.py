@@ -140,7 +140,7 @@ async def test_vllm_eager_retry_uses_framework_env(tmp_path, monkeypatch):
     assert "--disable-cuda-graph" not in retry_args
 
 
-# #735: a profile that produced only CUDA-graph capture sidecars (capture-only
+# a profile that produced only CUDA-graph capture sidecars (capture-only
 # fallback) carries no per-iteration annotations; the steady-state splitter
 # would die downstream with the misleading trace_split_no_steady_state. The
 # roofline retry must treat this as transient: re-profile (escalating to eager),
@@ -162,7 +162,7 @@ async def test_capture_only_profile_retries_then_succeeds(tmp_path):
     seen = await _run(tmp_path, _CAPTURE_ONLY)
     assert len(seen) >= 2
     # The retry must NOT escalate to eager — graph-capture is the robust mode
-    # and eager would change the measured workload (#735).
+    # and eager would change the measured workload .
     assert "--disable-cuda-graph" not in str(seen[1].get("base_extra_args", ""))
     assert "--enforce-eager" not in str(seen[1].get("base_extra_args", ""))
 

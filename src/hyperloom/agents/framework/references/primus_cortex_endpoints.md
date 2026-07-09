@@ -1,9 +1,9 @@
 # Primus Cortex PR Monitor - endpoints used by framework-agent
 
 > Technical reference for the four primus-cortex-pr-monitor REST
-> endpoints that `framework_agent.sources.primus_cortex` talks to.
+> endpoints that `hyperloom.agents.framework.sources.primus_cortex` talks to.
 > Distilled from the upstream `primus-cortex-pr-monitor-access.md`
-> service doc + the live `framework_agent.sources.primus_cortex`
+> service doc + the live `hyperloom.agents.framework.sources.primus_cortex`
 > implementation; this file is the authoritative contract from
 > framework-agent's point of view.
 

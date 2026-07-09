@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Conformance tests for §4 of the local-kb-recipe-snapshot requirements doc (one test per requirement bullet)."""
+"""Conformance tests for local KB recipe snapshot requirements (one test per requirement bullet)."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _ns(**overrides: Any) -> argparse.Namespace:
     return argparse.Namespace(**fields)
 
 
-# §4 Item 1 — Canonical id is generated correctly from the 5-tuple
+# Canonical id is generated correctly from the 5-tuple.
 def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
         model="DeepSeek-R1",
@@ -72,13 +72,13 @@ def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
         recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
 
 
-# §4 Item 2 — Local KB root is ${USER_DATA_PATH}/kb
+# Local KB root is ${USER_DATA_PATH}/kb.
 def test_item2_default_local_kb_root_is_user_data_path_kb(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Default resolution lands at ``${USER_DATA_PATH}/kb`` (requirements doc §2)."""
+    """Default resolution lands at ``${USER_DATA_PATH}/kb``."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     args = _ns()
     assert _resolve_local_kb_root(args) == tmp_path / "kb"
@@ -95,7 +95,7 @@ def test_item2_explicit_flag_wins_over_user_data_path(
     assert _resolve_local_kb_root(args) == tmp_path / "alt-root"
 
 
-# §4 Item 3 — No centralized KB configured: both reads and writes go local
+# No centralized KB configured: both reads and writes go local.
 def test_item3_no_central_url_reads_and_writes_go_local(
     env_clean: None,
     tmp_path: Path,
@@ -126,7 +126,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     assert row["best_throughput"] == 12345.0
 
 
-# §4 Item 4 — Centralized KB available: reads go centralized, writes still local
+# Centralized KB available: reads go centralized, writes still local.
 def test_item4_central_kb_reads_central_writes_local(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -189,7 +189,7 @@ def test_item4_central_kb_reads_central_writes_local(
     assert out["best_throughput"] == 99999.0  # remote wins
 
 
-# §4 Item 5 — Centralized KB unavailable: reads fall back to local, writes still local
+# Centralized KB unavailable: reads fall back to local, writes still local.
 def test_item5_unreachable_central_falls_back_to_local(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -247,7 +247,7 @@ def test_item5_unreachable_central_falls_back_to_local(
     assert out["best_throughput"] == 33333.0  # local hit
 
 
-# §4 Item 6 — Local recipe files or directories can disambiguate the 5-tuple
+# Local recipe files or directories can disambiguate the 5-tuple.
 def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     """Two recipes differing in any single dimension land in distinct on-disk locations."""
     store = LocalRecipeStore(root=tmp_path)
@@ -318,7 +318,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
     assert expected.is_file()
 
 
-# §4 Item 7 — When model contains '/', the local path is still safe
+# When model contains '/', the local path is still safe.
 def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     """A model arg like ``/hyperloom/models/Qwen-...`` must NOT split into path segments (slug basenames it first)."""
     store = LocalRecipeStore(root=tmp_path)
@@ -378,7 +378,7 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     assert expected.is_file()
 
 
-# §4 Item 8 — Session writes merge with existing recipe history
+# Session writes merge with existing recipe history.
 def test_item8_second_put_preserves_what_worked_when_not_overridden(
     tmp_path: Path,
 ) -> None:
@@ -475,7 +475,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
     assert history[0]["snapshot"]["best_throughput"] == 1.0
 
 
-# §4 Item 9 — Final local KB file data fields stay consistent with the Arbor recipe
+# Final local KB file data fields stay consistent with the Arbor recipe.
 def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     """The persisted ``recipe.json`` uses arbor field names, NOT the v2 wire spec's findings/failures/gaps/body/metrics."""
     store = LocalRecipeStore(root=tmp_path)

@@ -1244,8 +1244,8 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
     """create-dynamo must NOT bake *_API_KEY / SAFE_API_KEY / *_BASE_URL into the
     new inference pod's container env; only operator --extra-env is forwarded."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-    # tree-reform.MD P2.2: cmd_create_dynamo (and its ssh_client/workload_spec
-    # usage) moved to the ``commands.dynamo`` sibling; patch it there.
+    # cmd_create_dynamo and its ssh_client/workload_spec usage live in the
+    # ``commands.dynamo`` sibling; patch it there.
     from hyperloom.inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
     # Credentials present in the controller env (would previously fan out).

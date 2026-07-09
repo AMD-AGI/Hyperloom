@@ -83,7 +83,7 @@ def test_extract_last_json_none_on_empty_or_no_brace_or_malformed():
     assert ssh_runtime._extract_last_json('{"a": }') is None  # invalid JSON
 
 
-# -- GEAK pod-runner defaults (PR #768 review: kernel scoring + skip-profile) ----
+# -- GEAK pod-runner defaults ----
 import os as _os  # noqa: E402
 import stat as _stat  # noqa: E402
 import subprocess as _sp  # noqa: E402

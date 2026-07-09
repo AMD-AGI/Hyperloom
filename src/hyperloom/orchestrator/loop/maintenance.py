@@ -156,7 +156,7 @@ class MaintenanceCollaborator:
         phase_changed: bool = False,
         force: bool = False,
     ) -> bool:
-        """Compact the orchestration conversation into durable memory (plan Step 4).
+        """Compact the orchestration conversation into durable memory.
 
         Returns True when a checkpoint was taken. Best-effort. ``force`` bypasses
         the throttle policy (used by the R6 cycle-boundary soft restart) but

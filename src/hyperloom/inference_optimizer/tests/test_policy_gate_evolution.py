@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.11 — PolicyGate evolution tests."""
+"""PolicyGate evolution tests."""
 
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
 ---
 myst:
   html_meta:
-    "description": "About Hyperloom: project background, Apache 2.0 license, security and conduct policies, and links to the repository and key resources."
-    "keywords": "Hyperloom, AMD AGI, ROCm, LLM inference, Apache 2.0, open source, GPU, AI optimization"
+    "description": "About Hyperloom: project background, MIT license, security and conduct policies, and links to the repository and key resources."
+    "keywords": "Hyperloom, AMD AGI, ROCm, LLM inference, MIT, open source, GPU, AI optimization"
 ---
 
 # About Hyperloom

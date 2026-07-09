@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M4 — Knowledge plane + PR Monitor tests (KB_design §3.6 + §3.13 M4)."""
+"""Knowledge plane and PR Monitor tests."""
 
 from __future__ import annotations
 
@@ -280,7 +280,7 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS
-    # 12-tool surface per primus-cortex-pr-monitor-access.md §"Available Tools".
+    # 12-tool PR-Monitor surface.
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 

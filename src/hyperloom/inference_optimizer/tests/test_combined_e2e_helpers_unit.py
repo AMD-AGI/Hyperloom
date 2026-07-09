@@ -100,7 +100,7 @@ def test_resolve_model_path_empty_and_unresolvable():
 
 def test_combined_e2e_skips_when_flag_off():
     # no combined_e2e flag -> None (no-op), even with everything else present
-    assert krh._run_combined_e2e_sync([], {"backend_order": "geak", "model_path": "m"}, _P()) is None
+    assert krh._run_combined_e2e_sync([], {"backend_order": "geak_v3", "model_path": "m"}, _P()) is None
 
 
 def test_combined_e2e_skips_non_geak_backend():
@@ -111,7 +111,7 @@ def test_combined_e2e_skips_non_geak_backend():
 
 
 def test_combined_e2e_skips_without_model():
-    assert krh._run_combined_e2e_sync([], {"combined_e2e": True, "backend_order": "geak"}, _P()) is None
+    assert krh._run_combined_e2e_sync([], {"combined_e2e": True, "backend_order": "geak_v3"}, _P()) is None
 
 
 class _P:
@@ -130,7 +130,7 @@ class _P:
 def _passing_payload():
     return {
         "combined_e2e": True,
-        "backend_order": "geak",
+        "backend_order": "geak_v3",
         "model_path": "/tmp/m",
         "serving_config": {"tp": 1, "isl": 1024, "osl": 1024, "framework": "sglang"},
     }

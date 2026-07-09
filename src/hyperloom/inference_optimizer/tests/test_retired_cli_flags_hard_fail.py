@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Blocker #4 — retired CLI flags must hard-fail with a migration hint."""
+"""retired CLI flags must hard-fail with a migration hint."""
 
 from __future__ import annotations
 

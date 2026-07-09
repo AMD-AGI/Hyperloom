@@ -38,7 +38,7 @@ def test_repo_url_for_framework_unknown_returns_empty():
 
 
 def test_fac_repo_url_for_framework_is_the_canonical_repo_map():
-    """tree-reform.MD P2.5: framework-agent is always importable alongside orchestrator now
+    """framework-agent is always importable alongside orchestrator
     (both live under the single installed ``hyperloom`` distribution), so ``client.py``'s
     ``repo_url_for_framework`` is a direct re-export of the canonical
     ``hyperloom.agents.framework.repo_map`` implementation -- no more IO-only ImportError

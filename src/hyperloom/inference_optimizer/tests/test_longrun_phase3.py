@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase 3 (resilience — periodic soft restart) acceptance tests — R6.
+"""Long-run resilience and periodic soft restart acceptance tests.
 
 Covers:
 * ``TaskRegistry.reclaim_expired_running`` (lease-expiry watchdog): orphaned
@@ -38,7 +38,7 @@ def conn(tmp_path):
 
 
 # ==========================================================================
-# R6 — TaskRegistry.reclaim_expired_running (watchdog)
+# TaskRegistry.reclaim_expired_running (watchdog)
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_reclaim_expired_running_orphan(conn):
@@ -102,7 +102,7 @@ async def test_reclaim_respects_lease_window(conn):
 
 
 # ==========================================================================
-# R6 — cycle-boundary soft restart
+# cycle-boundary soft restart
 # ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):

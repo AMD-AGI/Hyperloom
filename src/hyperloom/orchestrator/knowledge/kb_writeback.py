@@ -7,7 +7,7 @@ Appends structured records as JSON-Lines under
 reads them to skip already-integrated PRs). :data:`KB_ROOT` is
 monkeypatchable in tests.
 
-Design §16 (gbrain outcomes write-back, revised): Hyperloom's role is
+Gbrain outcomes write-back: Hyperloom's role is
 LOCAL-ONLY — it never talks to gbrain directly. ``lessons.jsonl`` is a
 fixed, shared (not session-scoped) append-only file that a separate
 ``Primus-Claw/knowledge/pr`` worker task tails and mirrors into gbrain's
@@ -54,7 +54,7 @@ LESSONS_FILE: str = "lessons.jsonl"
 OUTCOME_INTEGRATED: str = "integrated"
 OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
-# Step 3: candidate skipped because the semantic audit found it already present
+# Candidate skipped because the semantic audit found it already present
 # in the live tree (cross-session dedup so later runs don't re-audit it).
 OUTCOME_ALREADY_PRESENT: str = "already_present"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(

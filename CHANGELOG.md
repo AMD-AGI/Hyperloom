@@ -15,9 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   stale subprocesses (process-group SIGTERM/SIGKILL) so the run never
   leaks zombie agents.
 - Add repository governance docs (LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md).
-- Add documentation guides under `docs/`: `ENV_AND_AUTH.md`, `KB_GUIDE.md`, `CONFIGURATION_REFERENCE.md`, `INTEGRATION_SESSION_BREAKDOWN.md`, `OPERATIONS.md`, `OPERATOR_SCRIPTS.md`, `TROUBLESHOOTING.md`, `UPGRADING.md`.
-- Refresh `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` and add `inference_optimizer/README.md` as a package-level entry point.
-- README now links to the new guides via a "Learn More" doc index and lists `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the repo-tree.
+- Add structured Sphinx documentation under `docs/`: install guides, how-to
+  guides, reference material, component pages, release notes, and compatibility
+  docs.
+- Refresh the optimization-loop documentation under
+  `docs/conceptual/optimization-loop.md` and add
+  `src/hyperloom/inference_optimizer/README.md` as a package-level entry point.
+- README now links to the structured docs via a "Learn More" index and lists
+  `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the
+  repo tree.
 - **fix(orchestrator)**: drop pre-M4 `select_kernels` request alias and the
   legacy `SharedState.last_select_kernels` / `record_select_kernels` mirror.
   Only the canonical `trace_analyze` kind / `last_trace_analyze` cache
@@ -28,6 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   instructed the LLM to re-emit the request). Resume of a stale
   `state.json` carrying `last_select_kernels` silently drops the slot
   via `_legacy_drop_fields`.
+
+## [0.8.0]
+Current packaged version (`pyproject.toml`). Changes since `v0.3` are tracked
+under **[Unreleased]** above pending a tagged release; the version number was
+advanced to `0.8.0` to match the runtime. See
+[release notes](docs/release-notes.md) for the user-facing summary.
 
 ## [v0.3] - 2026-05-14
 ### Added
@@ -45,5 +57,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
 [Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v0.3...HEAD
+[0.8.0]: https://github.com/AMD-AGI/Hyperloom/blob/main/docs/release-notes.md
 [v0.3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.3
 [v0.2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.2

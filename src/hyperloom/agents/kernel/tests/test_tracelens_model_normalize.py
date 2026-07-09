@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""#574 — TraceLens SDK model id normalization.
+"""TraceLens SDK model id normalization.
 
 ``_resolve_tracelens_model`` must map the runtime image's dot-form
 ``ANTHROPIC_MODEL`` (e.g. ``Claude-Opus-4.7``) to the dash form

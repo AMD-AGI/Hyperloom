@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``CriticAgentBackend._run_reasoning_loop`` — issue #170 web tools (web_search / web_fetch) integration.
+"""Tests for ``CriticAgentBackend._run_reasoning_loop`` — web tools (web_search / web_fetch) integration.
 
 Reuses the runtime-subprocess fake from ``test_critic_agent_backend`` so the
 focus stays on the LLM tool-call loop. Web tool clients are injected via
@@ -23,10 +23,9 @@ from hyperloom.inference_optimizer.tests.test_critic_agent_backend import (
 )
 
 
-# tree-reform.MD P2.5: critic-agent's ``runtime`` package is now promoted into
-# the ``hyperloom`` src-layout namespace (installed alongside everything
-# else), so its on-disk root is resolved from this package's own tree rather
-# than a sibling checkout.
+# critic-agent's ``runtime`` package lives in the ``hyperloom`` src-layout
+# namespace, so its on-disk root is resolved from this package's own tree
+# rather than a sibling checkout.
 REAL_CRITIC_AGENT_ROOT = Path(__file__).resolve().parents[2] / "agents" / "critic"
 
 

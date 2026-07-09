@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ResourceLockManager + SqliteLeaseBackend (KB_design §3.7).
+"""ResourceLockManager + SqliteLeaseBackend.
 
 ``acquire_many`` is a single ``BEGIN IMMEDIATE`` all-or-nothing batch acquire;
-cross-lane mutual exclusion (DESIGN §3.5.3) co-acquires conflicting lanes.
+cross-lane mutual exclusion co-acquires conflicting lanes.
 Leases are keyed on ``(lane, holder_id)``, supporting multiple holders per
 lane; the manager raises :class:`LaneFull` at capacity vs :class:`LaneBusy`
 on a cross-lane conflict. ``benchmark_lane`` holds at most one holder via the
@@ -115,7 +115,7 @@ class Lease:
 
 
 class LaneBusy(RuntimeError):
-    """Raised by ``acquire_many`` on a cross-lane conflict (Inv-7.1, KB_design §3.7 §5.1); kept distinct from capacity."""
+    """Raised by ``acquire_many`` on a cross-lane conflict (Inv-7.1); kept distinct from capacity."""
 
     def __init__(self, busy_lanes: list[str]):
         """Initialise with the lanes that triggered the cross-lane conflict.
@@ -147,7 +147,7 @@ class StaleLeaseError(RuntimeError):
 
 
 class SqliteLeaseBackend:
-    """Default ``ResourceLockBackend`` (DESIGN §3.5.4 / ADR-42); ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
+    """Default ``ResourceLockBackend`` (ADR-42); ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
     def __init__(self, db: SqliteConnection):
         """Bind the backend to a SQLite connection.
@@ -583,7 +583,7 @@ class ResourceLockManager:
         return lease
 
     async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
-        """Non-blocking variant of :meth:`acquire_many` (KB_design §3.7 §4.3).
+        """Non-blocking variant of :meth:`acquire_many`.
 
         Returns the :class:`Lease` on success, ``None`` when any lane is
         busy or full (both LaneBusy and LaneFull map to None; retry next tick).

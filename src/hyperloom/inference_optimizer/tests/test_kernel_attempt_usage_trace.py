@@ -1,18 +1,18 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Token-trace coverage for the out-of-process geak / oob kernel backends.
+"""Token-trace coverage for the out-of-process geak_v3 / oob kernel backends.
 
 GEAK and OOB run as kernel-agent subprocesses; their token usage only
 survives as text in each attempt's ``*_stdout.log`` (surfaced on the
 result as ``attempts[].optimized_path``). :func:`_trace_kernel_attempt_usage`
-mines that log with the matching parser (``geak`` → litellm/OpenAI usage,
+mines that log with the matching parser (``geak_v3`` → litellm/OpenAI usage,
 ``oob`` → ``oob run --json`` usage) and folds the counts into the same
 ``llm_calls.jsonl`` ledger as the in-process backends.
 
 Contract pinned here:
 
-* a geak attempt whose stdout carries an OpenAI-shape ``usage`` lands a
-  ``component=geak`` token row keyed to the kernel id;
+* a geak_v3 attempt whose stdout carries an OpenAI-shape ``usage`` lands a
+  ``component=geak_v3`` token row keyed to the kernel id;
 * an oob attempt whose ``--json`` stdout carries ``usage`` lands a
   ``component=oob`` row;
 * backends that emit no usage (and non-traced backends like claude) stay a
@@ -48,11 +48,11 @@ def _attempt(backend: str, log_path: Path, *, write: str | None = None) -> dict:
     }
 
 
-def test_geak_attempt_usage_lands_token_row(tmp_path: Path) -> None:
-    """A geak attempt with litellm/OpenAI-shape usage yields a geak row."""
+def test_geak_v3_attempt_usage_lands_token_row(tmp_path: Path) -> None:
+    """A geak_v3 attempt with litellm/OpenAI-shape usage yields a geak_v3 row."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
-    log = tmp_path / "geak-1234_stdout.log"
+    log = tmp_path / "geak_v3-1234_stdout.log"
     stdout = json.dumps(
         {
             "result": "optimized kernel",
@@ -61,13 +61,13 @@ def test_geak_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     )
     result = {
         "kernel_id": "k007",
-        "attempts": [_attempt("geak", log, write=stdout)],
+        "attempts": [_attempt("geak_v3", log, write=stdout)],
     }
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
     rows = _read_rows(session_dir)
     assert len(rows) == 1
     row = rows[0]
-    assert row["component"] == "geak"
+    assert row["component"] == "geak_v3"
     assert row["task_id"] == "k007"
     assert row["input_tokens"] == 1200
     assert row["output_tokens"] == 340
@@ -204,13 +204,13 @@ def test_forge_steps_noop_without_marker(tmp_path: Path) -> None:
 
 
 def test_no_usage_block_is_silent_noop(tmp_path: Path) -> None:
-    """A geak/oob attempt with no recoverable usage writes no row (no zeros)."""
+    """A geak_v3/oob attempt with no recoverable usage writes no row (no zeros)."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
-    log = tmp_path / "geak-none_stdout.log"
+    log = tmp_path / "geak_v3-none_stdout.log"
     result = {
         "kernel_id": "k001",
-        "attempts": [_attempt("geak", log, write="just some prose, no JSON usage")],
+        "attempts": [_attempt("geak_v3", log, write="just some prose, no JSON usage")],
     }
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
     assert _read_rows(session_dir) == []
@@ -242,25 +242,25 @@ def test_missing_log_path_never_raises(tmp_path: Path) -> None:
     assert _read_rows(session_dir) == []
 
 
-def test_mixed_attempts_only_traces_geak_oob_with_usage(tmp_path: Path) -> None:
-    """A multi-backend ladder traces only the geak/oob attempts that report usage."""
+def test_mixed_attempts_only_traces_geak_v3_oob_with_usage(tmp_path: Path) -> None:
+    """A multi-backend ladder traces only the geak_v3/oob attempts that report usage."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
-    geak_log = tmp_path / "geak_stdout.log"
+    geak_v3_log = tmp_path / "geak_v3_stdout.log"
     oob_log = tmp_path / "oob_stdout.log"
     claude_log = tmp_path / "claude_stdout.log"
     result = {
         "kernel_id": "k010",
         "attempts": [
             _attempt("claude", claude_log, write=json.dumps({"usage": {"input_tokens": 1, "output_tokens": 1}})),
-            _attempt("geak", geak_log, write=json.dumps({"usage": {"prompt_tokens": 10, "completion_tokens": 20}})),
+            _attempt("geak_v3", geak_v3_log, write=json.dumps({"usage": {"prompt_tokens": 10, "completion_tokens": 20}})),
             _attempt("oob", oob_log, write=json.dumps({"usage": {"input_tokens": 30, "output_tokens": 40}})),
         ],
     }
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
     rows = _read_rows(session_dir)
     components = sorted(r["component"] for r in rows)
-    assert components == ["geak", "oob"]
+    assert components == ["geak_v3", "oob"]
 
 
 def test_result_without_attempts_is_noop(tmp_path: Path) -> None:

@@ -2,7 +2,7 @@
 
 """Specialist sub-agent domain catalogue.
 
-LLM sub-agent form factor parameterized by a ``domain`` (§3.5 §5) — a stable
+LLM sub-agent form factor parameterized by a ``domain`` — a stable
 id used by PolicyGate R2. A runtime constant, not per-domain yaml.
 
 Field reference:

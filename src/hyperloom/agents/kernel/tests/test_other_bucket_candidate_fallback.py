@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the high-GPU-time ``other``-bucket candidate recovery (#514).
+"""Tests for the high-GPU-time ``other``-bucket candidate recovery .
 
 Hyperloom builds candidates only from analysis.md reasoning-candidate (P-item)
 blocks; TraceLens never emits such a block for a kernel it files under the
@@ -143,7 +143,7 @@ def test_recover_skips_below_threshold(tmp_path):
 
 
 def test_recover_surfaces_high_time_non_other_category(tmp_path):
-    # Gate broadened (#515): a high-time op in a *rooflined* category that is
+    # Gate broadened : a high-time op in a *rooflined* category that is
     # nonetheless missing from analysis.md candidates IS recovered (previously
     # this was skipped because it was not an "other"-bucket op).
     _write(
@@ -293,7 +293,7 @@ def test_classify_patchability_marks_triton_sglang_kernel_reusable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# REAL ops_summary.csv schema (#515): the columns TraceLens actually emits.
+# REAL ops_summary.csv schema : the columns TraceLens actually emits.
 # The simplified `name,op category,gpu time (ms)` schema above does NOT exercise
 # the real `Categories` (list-repr) / `total_direct_kernel_time_ms` /
 # `Percentage (%)` columns, which is exactly the gap that left load_ops_ranking

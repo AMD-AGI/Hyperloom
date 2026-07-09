@@ -698,7 +698,7 @@ def _silent_backends() -> dict[str, object]:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    """v0.8 §3.9 Inv-9.1 — scoreboard retired; no-op kept for back-compat."""
+    """Scoreboard retired; no-op kept for back-compat."""
     return None
 
 

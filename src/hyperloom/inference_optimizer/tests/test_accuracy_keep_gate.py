@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Step 4 — accuracy-gate KEEP enforcement helper."""
+"""accuracy-gate KEEP enforcement helper."""
 
 from __future__ import annotations
 

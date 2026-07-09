@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.5 / M5 / KB_gaps/Gap-01 — specialist sub-agent integration smoke test exercising the cli → Coordinator → SubAgentRunner → SpecialistRunner chain with real wiring."""
+"""Specialist sub-agent integration smoke test exercising the cli → Coordinator → SubAgentRunner → SpecialistRunner chain with real wiring."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def _build_args(**overrides) -> argparse.Namespace:
         specialist_max_turns=4,
         specialist_per_turn_max_seconds=300.0,
         research_lane_capacity=1,
-        # PR-A2: use the in-process ClaudeBackend path so mocks work end-to-end.
+        # Use the in-process ClaudeBackend path so mocks work end-to-end.
         specialist_dispatch_mode="inprocess",
         specialist_mcp_config=None,
     )
@@ -89,7 +89,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 
 
 def test_build_specialist_executor_returns_callable(tmp_path: Path):
-    """Gap-01 — the cli factory must produce a callable executor."""
+    """The cli factory must produce a callable executor."""
     from hyperloom.inference_optimizer.cli import _build_specialist_executor
 
     plane = _FakeKnowledgePlane()
@@ -105,7 +105,7 @@ def test_build_specialist_executor_returns_callable(tmp_path: Path):
 # 2. cli._register_executors wires 'specialist' kind end-to-end
 @pytest.mark.asyncio
 async def test_register_executors_registers_specialist_kind(tmp_path: Path):
-    """Gap-01 regression: ``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
+    """``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
     from hyperloom.inference_optimizer.cli import (
         _build_specialist_executor,
         _register_executors,
@@ -337,7 +337,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     assert len(sd["proposal_set"]) == 1
     assert sd["proposal_set"][0]["variant_name"] == "moe_expert_parallel"
 
-    # On-disk artefacts (Inv-5.3 requires a transcript per specialist).
+    # On-disk artefacts (a transcript per specialist is required).
     workspace = tmp_path / "runs" / "specialist" / "task-int-1"
     assert (workspace / "prompt.md").exists()
     assert (workspace / "specialist_done.json").exists()
@@ -359,7 +359,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
 async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
     tmp_path: Path,
 ):
-    """When the runner exhausts max_turns without a specialist_done, the adapter synthesises a well-formed empty dict (Inv-5.3)."""
+    """When the runner exhausts max_turns without a specialist_done, the adapter synthesises a well-formed empty dict."""
     from hyperloom.inference_optimizer.cli import _build_specialist_executor
 
     # Backend keeps emitting heartbeats; never produces a done.
@@ -400,7 +400,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
     sd = result_dict["specialist_done"]
     assert sd["empty"] is True
     assert sd["proposal_set"] == []
-    # Transcript + done file still on disk (Inv-5.3: some specialist_done is always written).
+    # Transcript + done file still on disk (some specialist_done is always written).
     workspace = tmp_path / "runs" / "specialist" / "task-stale-1"
     assert (workspace / "specialist_done.json").exists()
 
@@ -462,5 +462,5 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli falls back to --claude-model.
     assert args.specialist_model is None
-    # PR-A2/A3: subprocess dispatch is the production default.
+    # Subprocess dispatch is the production default.
     assert args.specialist_dispatch_mode == "subprocess"

@@ -1,11 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""#266 method-1 lifecycle-event infrastructure.
+"""Lifecycle-event infrastructure.
 
 Covers the operator-facing phase/step boundary log:
 
 * ``phase_state.lifecycle_label`` resolves the human-friendly names used
-  in issue #266 (TraceLens / GEAK / Integrate / Report), falls back to the
+ for TraceLens / GEAK / Integrate / Report, falls back to the
   phase-label table, then to the verbatim name.
 * ``phase_state.make_lifecycle_event`` produces a canonical row (seq / ts /
   phase upper-cased / step / label default / status upper-cased / artifact
@@ -37,7 +37,7 @@ from hyperloom.orchestrator.state.shared_state import (
 # pure helpers
 # ===========================================================================
 def test_lifecycle_label_resolves_human_labels():
-    # The five #266 pipeline names map to the internal step/handler names.
+ # The five #266 pipeline names map to the internal step/handler names.
     assert lifecycle_label("trace_analyze") == "TraceLens"
     assert lifecycle_label("roofline") == "TraceLens"
     assert lifecycle_label("run_optimization") == "GEAK"

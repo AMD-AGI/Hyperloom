@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M2 — phase state machine tests (KB_design §3.2 + §3.8 + §3.11 R1)."""
+"""phase state machine tests."""
 
 from __future__ import annotations
 
@@ -254,12 +254,12 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "baseline_failed",
         "emergency",
         "coordinator_exception",
-        # v0.8 additions
+        # schema additions
         "crash_threshold_exceeded",
         "user_stop_requested",
         "cortex_drain_failed",
         "plateau_explore",
-        # #522: fast baseline arg-error stop reason
+ # fast baseline arg-error stop reason
         "baseline_arg_error",
     ):
         assert phase_state.is_valid_stop_reason(reason), reason
@@ -267,7 +267,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
 
 
 def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
-    """#522: baseline_arg_error must survive set_stop_reason (not map to unknown)."""
+    """baseline_arg_error must survive set_stop_reason and not map to unknown."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="t", model_name="m", model_path="m")

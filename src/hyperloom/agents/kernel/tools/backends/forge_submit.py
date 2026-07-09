@@ -481,7 +481,7 @@ def _restore_inplace(restore: dict) -> None:
     orig_branch = restore.get("orig_branch") or ""
     orig_head = restore.get("orig_head") or ""
     base_commit = restore.get("base_commit") or orig_head
-    # Step 1: restore every file that differs from the pre-forge baseline back to
+    # Restore every file that differs from the pre-forge baseline back to
     # its base_commit content (working tree + index). This undoes ALL the agent's
     # tracked edits, including sibling files outside source_file. Done while still
     # on the temp branch so base_commit is reachable.
@@ -491,7 +491,7 @@ def _restore_inplace(restore: dict) -> None:
             rel = rel.strip()
             if rel:
                 _run(["git", "-C", repo, "checkout", base_commit, "--", rel], timeout=30)
-    # Step 2: move HEAD back to the original ref WITHOUT touching the working tree.
+    # Move HEAD back to the original ref WITHOUT touching the working tree.
     if orig_branch and orig_branch != "HEAD":
         # Was on a named branch: point HEAD back at it via symbolic-ref.
         _run(["git", "-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"], timeout=30)
@@ -501,18 +501,18 @@ def _restore_inplace(restore: dict) -> None:
         # tracked files to orig_head and clobber pre-existing dirty; a plain
         # `update-ref HEAD` would follow the symref and move the temp branch).
         _run(["git", "-C", repo, "update-ref", "--no-deref", "HEAD", orig_head], timeout=30)
-    # Step 3: reset the index to match orig_head (without touching working tree)
+    # Reset the index to match orig_head (without touching working tree)
     # so `git status` reflects the same dirty state as before forge ran.
     if orig_head:
         _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
-    # Step 4: belt-and-suspenders — ensure the primary source_file is exactly the
+    # Belt-and-suspenders: ensure the primary source_file is exactly the
     # pre-forge bytes even if the git restore above raced or partially applied.
     try:
         Path(restore["source_file"]).write_bytes(restore["backup"])
     except OSError:
         # Best-effort restore; a filesystem error here is non-fatal.
         pass
-    # Step 5: delete the temp branch (safe now that HEAD points elsewhere).
+    # Delete the temp branch (safe now that HEAD points elsewhere).
     if restore.get("branch"):
         _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
     # Release the per-repo in-place lock last, after the repo is fully restored.
@@ -616,8 +616,8 @@ def main():
     m = re.search(r"allclose\\s*[:=]\\s*(true|false)", low)
     # aiter test_common.checkAllclose logs "[checkAllclose ... passed~]" on
     # success and "... failed!" on mismatch — neither emits a Forge-contract
-    # "allclose:" line, so translate it explicitly (root cause of attention/
-    # aiter kernels reporting NO CORRECTNESS METRIC and failing Stage 1).
+    # "allclose:" line, so translate it explicitly to avoid false missing
+    # correctness metrics for attention/aiter kernels.
     aiter_pass = ("checkallclose" in low and "passed" in low and "failed" not in low)
     aiter_fail = ("checkallclose" in low and "failed" in low)
     if any(k in low for k in ("mismatch", "not close", "correctness failed", "validation failed")) or aiter_fail:

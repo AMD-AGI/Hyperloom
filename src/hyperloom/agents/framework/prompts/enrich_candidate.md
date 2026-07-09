@@ -30,9 +30,9 @@ Branch / tag / commit-SHA refs (anything that does **not** start with
 ## Tool surface
 
 ```python
-from framework_agent.sources.primus_cortex import pr_get, pr_files
+from hyperloom.agents.framework.sources.primus_cortex import pr_get, pr_files
 # higher-level wrapper (used by the explorer):
-from framework_agent.explorer import _enrich_candidate_via_primus
+from hyperloom.agents.framework.explorer import _enrich_candidate_via_primus
 ```
 
 ## Procedure

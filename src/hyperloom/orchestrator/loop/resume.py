@@ -4,10 +4,26 @@
 
 from __future__ import annotations
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from ..state.shared_state import SharedState
-from .coordinator_helpers import _merge_cumulative_extra_sglang_args
+from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
+    _BASELINE_FINGERPRINT_KEYS,
+    _baseline_params_fingerprint,
+    _dedupe_extra_server_args,
+    _infer_model_class_from_config,
+    _merge_cumulative_extra_sglang_args,
+    _parse_baseline_workload_extra,
+    _parse_iso_unix,
+    _geak_sweep_measured_tput,
+    _resolve_roofline_watermark_ratio,
+    _scrape_resolved_launch_flags,
+    _split_env_and_flags,
+    effective_closing_grace_sec,
+    format_exc_brief,
+    serialize_verdict_advisory,
+)
 
 from .coordinator import (
     PendingProposal,
@@ -97,6 +113,7 @@ class ResumeCollaborator:
         stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
         args = ""
         envs: dict[str, str] = {}
+        overlay = ""
         tput: float | None = None
         variant_name = ""
         action = "resume_reconstructed"
@@ -107,7 +124,26 @@ class ResumeCollaborator:
             args = _merge_cumulative_extra_sglang_args(args, candidate, full)
             raw_envs = entry.get("extra_envs") or {}
             if isinstance(raw_envs, Mapping):
-                envs.update({str(k): str(v) for k, v in raw_envs.items()})
+                for k, v in raw_envs.items():
+                    ks = str(k)
+                    # A flag mis-stored under extra_envs (e.g. a ``--compilation-config``
+                    # key from an integrate_patch entry) is a SERVER ARG, not an env
+                    # var — the grid runner would otherwise inject it verbatim as an
+                    # env the backend ignores, silently dropping it from the rebuilt
+                    # config. Route any ``-``-prefixed key back into extra_server_args
+                    # so the materialized stack reproduces the real launch. General:
+                    # keyed on the ``-`` prefix, never on a specific flag name.
+                    if ks.startswith("-"):
+                        tok = ks if v in ("", None) else f"{ks}={v}"
+                        args = _merge_cumulative_extra_sglang_args(args, "", tok)
+                    else:
+                        envs[ks] = str(v)
+            # Carry the authored-kernel overlay (PYTHONPATH prefix) so a native
+            # rebuild of an overlay winner actually loads the built kernels
+            # instead of measuring the un-optimized stack. Last non-empty wins.
+            entry_overlay = str(entry.get("final_overlay") or "").strip()
+            if entry_overlay:
+                overlay = entry_overlay
             if isinstance(entry.get("tput"), (int, float)) and float(entry["tput"]) > 0:
                 tput = float(entry["tput"])
             variant_name = str(entry.get("variant_name") or variant_name or "")
@@ -118,9 +154,98 @@ class ResumeCollaborator:
             "variant_name": variant_name,
             "extra_server_args": args,
             "extra_envs": envs,
+            "final_overlay": overlay,
             "tput": tput,
             "workspace": workspace,
             "optimization_stack": stack,
+        }
+
+    def build_env_spec(self) -> dict[str, Any]:
+        """Fully-reproducible descriptor of ``current_best``'s launch environment.
+
+        Layers, in the order a consumer must apply them to reconstruct the exact
+        stack ``current_best`` was measured on:
+
+          * ``config``  — cumulative server args + env vars (the reversible layer).
+          * ``source_snapshots`` — ordered durable source-layer snapshots
+            (``scope=source_patch`` entries), each a self-contained directory
+            (see :mod:`source_snapshot`) that reconstructs the patched framework
+            tree independent of the mutable live checkout.
+          * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
+          * ``launch_recipe`` — the baseline Magpie recipe to launch from.
+
+        This is the single source of truth the GEAK handoff forwards so the
+        baseline ref is materialized from the SAME layers as ``current_best``
+        (not just its flags/env), closing the cross-harness baseline gap.
+        """
+        materialized = self._materialize_stack_config_for_resume()
+        stack = [
+            e
+            for e in (getattr(self.shared_state, "optimization_stack", []) or [])
+            if isinstance(e, dict)
+        ]
+        source_snapshots: list[dict[str, Any]] = []
+        for entry in stack:
+            if entry.get("scope") != "source_patch":
+                continue
+            snap = str(entry.get("source_snapshot") or "").strip()
+            if not snap:
+                # A source_patch with no durable snapshot (e.g. a pre-fix legacy
+                # KEEP) is surfaced so the consumer can flag an unreproducible
+                # baseline rather than silently launch a weaker stock tree.
+                source_snapshots.append(
+                    {
+                        "id": str(entry.get("variant_name") or entry.get("name") or ""),
+                        "snapshot_dir": "",
+                        "framework_root": str(entry.get("framework_root") or ""),
+                        "base_sha": str(entry.get("base_sha") or ""),
+                        "reproducible": False,
+                    }
+                )
+                continue
+            source_snapshots.append(
+                {
+                    "id": str(entry.get("variant_name") or entry.get("name") or ""),
+                    "snapshot_dir": snap,
+                    "framework_root": str(entry.get("framework_root") or ""),
+                    "base_sha": str(entry.get("base_sha") or ""),
+                    "reproducible": True,
+                }
+            )
+        # FULL resolved engine config (not just the current_best delta): the
+        # complete server-launch flag set the orchestrator actually ran, scraped
+        # from the authoritative launched argv. This is what closes the CONFIG
+        # layer of the cross-harness baseline gap — mem-fraction, radix cache,
+        # chunked-prefill and every other engine knob the recipe/delta never
+        # carried. ``extra_server_args``/``extra_envs`` remain the current_best
+        # DELTA (a consumer merges the delta on top, delta winning on conflict).
+        server_launch_flags = ""
+        try:
+            cb_now = getattr(self.shared_state, "current_best", None)
+            _target_tput = (
+                float((cb_now or {}).get("tput") or 0.0)
+                if isinstance(cb_now, Mapping)
+                else 0.0
+            )
+            server_launch_flags = _scrape_resolved_launch_flags(
+                getattr(self, "session_dir", ""),
+                str(os.environ.get("FRAMEWORK", "") or "sglang"),
+                target_tput=_target_tput,
+            )
+        except Exception:  # noqa: BLE001 — additive; never block env_spec
+            server_launch_flags = ""
+        return {
+            "schema_version": 1,
+            "config": {
+                "extra_server_args": materialized.get("extra_server_args") or "",
+                "extra_envs": dict(materialized.get("extra_envs") or {}),
+                # Authoritative, COMPLETE engine flags (run-specific stripped);
+                # empty => consumer keeps its own adapter defaults (prior behavior).
+                "server_launch_flags": server_launch_flags,
+            },
+            "source_snapshots": source_snapshots,
+            "overlay_pythonpath": materialized.get("final_overlay") or "",
+            "launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
         }
 
     async def _resume_consistency_pass(self) -> dict[str, Any]:
@@ -308,6 +433,12 @@ class ResumeCollaborator:
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",
                 "scope": "source_patch",
+                # Same durable source-layer handles as the primary KEEP lift so a
+                # source_patch recovered on THIS path is equally reproducible in
+                # the GEAK baseline (no path is left snapshot-less).
+                "source_snapshot": result.get("source_snapshot") or "",
+                "framework_root": result.get("framework_root") or "",
+                "base_sha": result.get("base_sha") or "",
             }
         else:
             return False
@@ -524,9 +655,62 @@ class ResumeCollaborator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
+        # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
+        # revalidation config from result.json (the SINGLE source of truth), NOT
+        # from stack materialization. This guarantees the same-harness rebench
+        # launches byte-for-byte the config GEAK optimized (flags + parsed env +
+        # authored overlay), independent of whether the optimization is a MoE
+        # tuned-config / kernel / flag winner — no case-by-case markers. The
+        # consumer (_promote_to_shared_state) asserts config identity + effect
+        # before stamping validated, and falls back to 2a (GEAK harness) on miss.
+        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        ps_cfg = ps.get("accepted_config") or {}
+        ps_overlay = str(ps.get("final_overlay") or "").strip()
+        if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+
+            ps_flags = str(ps_cfg.get("flags") or "").strip()
+            ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
+            if _ps_extra_flags:
+                ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            if ps_flags or ps_envs or ps_overlay:
+                # Identity hash uses the SAME (args, envs) contract the grid
+                # executor fingerprints with (overlay is NOT part of the hash,
+                # matching _grid_runner.variant_fingerprint) so expected == the
+                # ran variant's fingerprint by construction, and any executor-side
+                # drop/alter of config is caught downstream.
+                expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
+                params_ps: dict[str, Any] = {
+                    "source": "resume_stack_revalidate",
+                    "reason": reason,
+                    "geak_fallback": True,
+                    "expected_cfg_hash": expected_cfg_hash,
+                    "grid": [
+                        {
+                            "name": "geak_revalidate",
+                            "extra_args": ps_flags,
+                            "extra_envs": dict(ps_envs),
+                            "overlay_pythonpath": ps_overlay,
+                            "provenance": "geak_revalidate",
+                            "note": "same-harness config-identity revalidation of the geak e2e win",
+                        }
+                    ],
+                    "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                    "enable_stack_rebench": False,
+                }
+                if self.shared_state.baseline_config_path:
+                    params_ps["config_path"] = self.shared_state.baseline_config_path
+                task, existing = await self.tasks.create_or_return_existing(
+                    kind="explore",
+                    params=params_ps,
+                    idempotency_key="geak-revalidate",
+                )
+                return {"task_id": task.task_id, "existing": bool(existing), "mode": "geak_2b"}
+
         rebuilt = self._materialize_stack_config_for_resume()
         args = str(rebuilt.get("extra_server_args") or "").strip()
         envs = rebuilt.get("extra_envs") or {}
+        overlay = str(rebuilt.get("final_overlay") or "").strip()
         if not (args or envs):
             return {"skipped": True, "reason": "empty_stack"}
         params: dict[str, Any] = {
@@ -537,6 +721,9 @@ class ResumeCollaborator:
                     "name": "resume_stack_revalidate",
                     "extra_args": args,
                     "extra_envs": dict(envs),
+                    # Carry the overlay so an authored-kernel native stack rebuild
+                    # loads the built kernels (inert when empty).
+                    "overlay_pythonpath": overlay,
                     "provenance": "resume_stack_revalidate",
                     "note": "post-resume full-stack end-to-end revalidation",
                 }
@@ -552,6 +739,183 @@ class ResumeCollaborator:
             idempotency_key="resume-stack-revalidate",
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
+
+    async def _validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
+        """2a fallback - validate the geak win by REPLAYING it through
+        GEAK's own ``bench_e2e.sh`` (the harness that produced the headline
+        result), so the optimized config engages BY CONSTRUCTION regardless of
+        winner kind (tuned-config / kernel / overlay / flag). Because the replay
+        reproduces the optimized config from ``result.json`` directly, a
+        ``succeeded`` status is itself the engagement proof. The validated gain
+        is the SAME-harness A/B ``hot_geak_speedup`` (numerator + denominator
+        both measured by GEAK), which is harness-internal and clean - recorded
+        under a distinct provenance because it is a same-harness MARGINAL, not an
+        over-raw total. Used only when 2b (orchestrator harness) is inconclusive.
+
+        Args:
+            reason: Human-readable reason stamped in logs/return.
+
+        Returns:
+            A summary dict describing whether validation succeeded.
+        """
+        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        if str(ps.get("status") or "") != "ok":
+            return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        am = ps.get("alignment_metrics") or {}
+        # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
+        # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
+        # else the hot within-GEAK ratio; see run_e2e final-basis selection). This
+        # makes Hyperloom's same-harness validated gain EQUAL to GEAK's headline
+        # number - using the raw hot A/B instead would report a higher figure than
+        # GEAK itself claims and reopen the alignment gap this path exists to close.
+        # Falls back to the explicit within-GEAK ratios when throughput_speedup is
+        # missing (older result.json), preferring the promoted basis.
+        try:
+            geak_sp = float(ps.get("throughput_speedup") or 0.0)
+        except (TypeError, ValueError):
+            geak_sp = 0.0
+        if geak_sp <= 0:
+            basis = str(am.get("final_basis") or ps.get("final_throughput_basis") or "hot")
+            fallback_key = "cold_geak_speedup" if basis == "cold" else "hot_geak_speedup"
+            try:
+                geak_sp = float(am.get(fallback_key) or am.get("hot_geak_speedup") or 0.0)
+            except (TypeError, ValueError):
+                geak_sp = 0.0
+        regimes = ps.get("validated_regimes") or []
+        reg = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
+        try:
+            conc = int(reg.get("conc") or 64)
+            isl = int(reg.get("isl") or 1024)
+            osl = int(reg.get("osl") or 1024)
+        except (TypeError, ValueError):
+            conc, isl, osl = 64, 1024, 1024
+        from hyperloom.inference_optimizer.session.session_paths import runs_dir
+        from ..actions.executors._geak_sweep import sweep_via_geak
+
+        try:
+            timeout = int(os.environ.get("SWEEP_VARIANT_TIMEOUT_SEC", "").strip() or "2400")
+        except (TypeError, ValueError):
+            timeout = 2400
+        res = await sweep_via_geak(
+            result=ps,
+            conc_values=[conc],
+            isl_osl_configs=[f"{isl}:{osl}"],
+            output_root=runs_dir(self.session_dir, "sweep", "revalidate_geak"),
+            variant_timeout_sec=timeout,
+            repeats=3,
+            # Single-point validated replay pins the headline protocol (num_prompts
+            # etc.) so it is protocol-identical to the reported result.
+            pin_num_prompts=True,
+        )
+        if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
+            if self._geak_legacy_promote():
+                # Legacy: current_best/stack were written up front; stamp the
+                # same-harness validated watermark from GEAK's OWN headline speedup.
+                self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
+                self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                self.shared_state.cumulative_gain_provenance = "geak_same_harness_geak"
+                self.shared_state.resume_pending_revalidation = False
+                gain_out = (geak_sp - 1.0) * 100.0
+            else:
+                # Rebench-first: write the headline from the GEAK-harness MEASURED
+                # throughput (engages by construction via the launch-script replay),
+                # keeping the leaderboard number a same-harness total rather than a
+                # self-reported speedup.
+                measured = _geak_sweep_measured_tput(res)
+                if measured is None:
+                    log.warning(
+                        "geak 2a: succeeded sweep but no measurable throughput; "
+                        "candidate stays pending"
+                    )
+                    return {"validated": False, "status": res.get("status"), "reason": reason}
+                self._promote_geak_from_candidate(
+                    ps,
+                    measured_tput=measured,
+                    provenance="geak_same_harness_geak",
+                )
+                base = float(self.shared_state.baseline_tput or 0.0)
+                gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 - defensive
+                log.exception("geak 2a: SharedState.save failed")
+            return {"validated": True, "gain": gain_out, "reason": reason}
+        log.warning(
+            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
+            res.get("status"), geak_sp, reason,
+        )
+        return {"validated": False, "status": res.get("status"), "reason": reason}
+
+    async def _resume_reenter_kernel_if_needed(self) -> None:
+        """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
+
+        Phase-entry side effects (the GEAK delegation + its ``result.json``
+        crash-recovery) are bound to a phase *transition* via
+        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
+        and never re-enters the current phase. Without this, a session that
+        crashed mid ``KERNEL_AGENT`` sits idle until the phase budget cap fires,
+        then hands SWEEP an empty result — the whole delegation is silently lost.
+
+        General across every crash timing (not case-by-case): the decision is
+        driven purely by whether THIS KERNEL phase's history row already carries
+        a ``geak`` completion record, so it self-classifies:
+
+          * completed-this-phase -> only re-arm (+persist) the ``skip_to_sweep``
+            hint the delegation sets, so the phase machine winds down to SWEEP
+            with no e2e re-run;
+          * not-completed -> re-enter ``_on_enter_kernel``; its own entry guard
+            promotes an existing OK ``result.json`` (crash-before-handback) and
+            re-runs the e2e only when there is genuinely nothing to recover
+            (run_e2e itself then continues from the pinned eval_dir on disk).
+
+        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
+        backend selected.
+        """
+        from ..phases.machine_state import (
+            ESCALATE_HINT_SKIP_TO_SWEEP,
+            PHASE_KERNEL_AGENT,
+        )
+
+        if not self._resumed_from.get("is_resume"):
+            return
+        state = self.shared_state
+        if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
+            return
+        if not (self._kernel_enabled() and self._geak_enabled()):
+            return
+        history = state.phase_history or []
+        row = history[-1] if history else {}
+        evidence = row.get("evidence") if isinstance(row, dict) else {}
+        completed_this_phase = isinstance(evidence, dict) and isinstance(
+            evidence.get("geak"), dict
+        )
+        if completed_this_phase:
+            # The delegation landed during this phase but the SWEEP transition
+            # never persisted (crash between the hook and the next tick). Re-arm
+            # the wind-down hint + persist so the phase machine advances.
+            cur = str(getattr(state, "pending_escalate_hint", "") or "").strip()
+            if cur != ESCALATE_HINT_SKIP_TO_SWEEP:
+                state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+                try:
+                    state.save(self.session_dir)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "resume: save after re-arming skip_to_sweep failed"
+                    )
+                log.info(
+                    "resume: KERNEL GEAK already completed this phase; "
+                    "re-armed skip_to_sweep hint (lost before SWEEP transition)."
+                )
+            return
+        log.info(
+            "resume: re-entering KERNEL GEAK delegation (no completion "
+            "evidence on the current phase row); recover-from-disk or re-run."
+        )
+        try:
+            await self._on_enter_kernel(from_phase="resume")
+        except Exception:  # noqa: BLE001 — resume re-entry must never kill the session
+            log.exception("resume: KERNEL re-entry hook failed")
 
     @property
     def resumed_from(self) -> dict[str, Any]:
@@ -570,3 +934,7 @@ class ResumeCollaborator:
             return
         await self.replay_for_resume()
         await self._resume_consistency_pass()
+        # Re-fire the KERNEL delegation hook when resuming parked in KERNEL_AGENT
+        # (phase-entry side effects are bound to transitions, not resume). Runs
+        # after the consistency pass so current_best/stack are already rebuilt.
+        await self._resume_reenter_kernel_if_needed()
