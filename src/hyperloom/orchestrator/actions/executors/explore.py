@@ -647,11 +647,6 @@ class ExploreExecutor:
             )
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
-        if baseline_runtime_sec > 0 and overtime_kill_ratio > 0:
-            overtime_deadline_sec: float | None = baseline_runtime_sec * overtime_kill_ratio
-        else:
-            overtime_deadline_sec = None
-
         # Per-variant hard cap precedence: explicit
         # ``params['variant_timeout_sec']`` → auto-derive from baseline
         # runtime + kill ratio (see ``_compute_explore_variant_timeout``) →
@@ -711,6 +706,7 @@ class ExploreExecutor:
                 seed_isl = int(params.get("isl") or _yaml_envs.get("ISL") or os.environ.get("ISL") or 0)
                 seed_osl = int(params.get("osl") or _yaml_envs.get("OSL") or os.environ.get("OSL") or 0)
             except (TypeError, ValueError):
+                # Non-integer seed hint; fall back to the default grid below.
                 pass
             seed = _default_grid_for_framework(
                 framework,

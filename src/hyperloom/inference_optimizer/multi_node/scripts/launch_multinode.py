@@ -702,6 +702,7 @@ def _wait_health(
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):
+            # Server not ready yet; retry after the sleep below.
             pass
         # Bail early if rank 0 died, else we wait the full 1800s on a corpse.
         if rank0_pid is not None and rank0_pid > 0:
@@ -1017,6 +1018,7 @@ def main() -> int:
                 try:
                     os.killpg(os.getpgid(p2), 15)
                 except (ProcessLookupError, PermissionError):
+                    # Process already exited; nothing to signal.
                     pass
             return 1
 
