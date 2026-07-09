@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase 3 (resilience — periodic soft restart) acceptance tests — R6.
+"""Long-run resilience and periodic soft restart acceptance tests.
 
 Covers:
 * ``TaskRegistry.reclaim_expired_running`` (lease-expiry watchdog): orphaned

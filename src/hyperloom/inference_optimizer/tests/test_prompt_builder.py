@@ -316,7 +316,7 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
     registry,
     rules_path,
 ):
-    """#144 Layer 2: the ``run_optimization`` example must NOT pin ``backends: 'claude'`` (the LLM would echo it, forcing Claude-only)."""
+    """The ``run_optimization`` example must NOT pin ``backends: 'claude'`` because the LLM would echo it, forcing Claude-only."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -341,7 +341,7 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
 
 
 def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path):
-    """The kernel-opt section must document that backends are auto-picked (guards against re-pinning, #144)."""
+    """The kernel-opt section must document that backends are auto-picked to guard against re-pinning."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,

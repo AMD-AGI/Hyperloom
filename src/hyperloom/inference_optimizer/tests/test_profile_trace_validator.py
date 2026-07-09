@@ -123,7 +123,7 @@ def _build_healthy_layout(tmp_path: Path) -> Path:
 
 
 def test_validator_no_warnings_on_healthy_layout(tmp_path, caplog):
-    """The reference healthy layout (#210) must not trip any of the 6 checks."""
+    """The reference healthy layout must not trip any of the 6 checks."""
     trace_dir = _build_healthy_layout(tmp_path)
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
@@ -136,7 +136,7 @@ def test_validator_warns_on_extend_decode_files_without_steady_state(
     tmp_path,
     caplog,
 ):
-    """#210 symptom: ``_extend_*`` / ``_decode_*`` split files signal
+    """``_extend_*`` / ``_decode_*`` split files signal
     ``profile_by_stage=True`` leaked through."""
     trace_dir = _build_healthy_layout(tmp_path)
     split = trace_dir / "trace_split"
@@ -285,7 +285,7 @@ def test_validator_warns_when_kernel_shape_profiler_absent_in_sglang(
     tmp_path,
     caplog,
 ):
-    """A sglang trace lacking ``kernel_shape_profiler`` warns (PR #207 patch missing)."""
+    """A sglang trace lacking ``kernel_shape_profiler`` warns when the server-side patcher is missing."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
@@ -385,7 +385,7 @@ def test_trace_health_healthy_layout_not_zero_ops(tmp_path):
 
 
 def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):
-    """#431 core symptom: the main trace carries NO execute_* /
+    """The main trace carries NO execute_* /
     user_annotation events (per-kernel device activity folded into
     hipGraphLaunch wrappers under cuda-graph capture). trace_health must
     flag ``per_kernel_attribution_degraded=True`` so the kernel pipeline
@@ -422,7 +422,7 @@ def test_trace_health_capture_traces_absent(tmp_path):
 
 
 def test_trace_health_return_shape_backward_compatible(tmp_path):
-    """Validator now returns a structured dict (issue #431) while staying
+    """Validator returns a structured dict while staying
     backward compatible: existing callers that ignore the return value are
     unaffected (it never raises)."""
     trace_dir = _build_healthy_layout(tmp_path)

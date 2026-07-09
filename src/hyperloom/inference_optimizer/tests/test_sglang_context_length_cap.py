@@ -195,7 +195,7 @@ def test_inject_uses_cap_below_native_window(tmp_path):
 # the run's explicit --max-model-len, otherwise sglang gets a self-contradictory
 # config (context-length above the configured max).
 def test_inject_clamps_to_max_model_len(tmp_path):
-    """#697 repro: a huge native window + ISL/OSL whose cap exceeds an explicit
+    """A huge native window + ISL/OSL whose cap exceeds an explicit
     --max-model-len must clamp --context-length down to --max-model-len."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     # cap = 80000 + 2000 + 2048 = 84048, but max_model_len pins the ceiling.
@@ -235,7 +235,7 @@ def test_inject_ignores_absent_or_nonpositive_max_model_len(tmp_path, bad):
 
 
 def test_materialize_sglang_clamps_context_length_to_max_model_len(tmp_path, monkeypatch):
-    """#697 end-to-end: an explicit MAX_MODEL_LEN env caps the injected
+    """An explicit MAX_MODEL_LEN env caps the injected
     --context-length at the production choke point."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     monkeypatch.setenv("ISL", "80000")
