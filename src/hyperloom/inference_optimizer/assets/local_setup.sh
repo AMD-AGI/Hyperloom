@@ -31,8 +31,8 @@ KERNEL_FORGE_REPO="${KERNEL_FORGE_REPO:-https://github.com/AMD-AGI/KernelForge.g
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
-# TraceLens v0.7.0 integration (#474): head of release/hyperloom_integration_v0.7.0.
-TRACELENS_REF="${TRACELENS_REF:-35bbb6380cf69a2655ee28260b02b5f2dc481744}"
+# TraceLens v0.8.0 integration (#474): head of release/hyperloom_integration_v0.8.0.
+TRACELENS_REF="${TRACELENS_REF:-48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3}"
 # Optional operator hint for a pre-existing manual checkout. Left EMPTY by
 # default: the pod-local ${_open_source_root}/TraceLens is the sole implicit
 # default (resolved in resolve_tracelens), so a stale /workspace/TraceLens is

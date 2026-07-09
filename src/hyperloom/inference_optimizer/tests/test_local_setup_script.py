@@ -612,7 +612,7 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
     assert str(expected_deps / "KernelForge") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "35bbb6380cf69a2655ee28260b02b5f2dc481744" in result.stdout
+    assert "48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3" in result.stdout
 
 
 def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:

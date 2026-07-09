@@ -4621,7 +4621,7 @@ def run_command(
 # Defaults kept in sync with kernel-agent/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
+_TRACELENS_REF_DEFAULT = "48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"
 
 
 def _default_tracelens_root() -> Path:
