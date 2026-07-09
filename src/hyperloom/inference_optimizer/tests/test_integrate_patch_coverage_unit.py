@@ -503,7 +503,7 @@ async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, m
     """A same-framework config-lever deliverable has no ``specialist:serving:
     framework`` provenance on its own (only the cross-framework prompt path
     emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB
-    write still fires. Regression test for the #3 leaderboard's real-run gap
+    write still fires. Regression test for the leaderboard's real-run gap
     where config-lever KEEPs never reached ``lessons.jsonl``.
     """
     session = tmp_path / "s"

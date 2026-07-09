@@ -482,7 +482,7 @@ async def test_single_proposal_yields_matching_verdict(
     assert (fake_session_dir / "critic-workdir" / "000000" / "review.json").is_file()
     assert (fake_session_dir / "critic-workdir" / "000000" / "emit.json").is_file()
 
-    # Item 2: the critic's token row records the reviewed proposal msg_id(s)
+    # The critic's token row records the reviewed proposal msg_id(s)
     # so the collector can attribute the review cost to that decision.
     import json as _json
     from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
@@ -496,7 +496,7 @@ async def test_single_proposal_yields_matching_verdict(
     assert critic_rows
     assert critic_rows[0]["reviewed_msg_ids"] == ["abc1"]
 
-    # Default kb_mode injected into the runtime env.
+ # Default kb_mode injected into the runtime env.
     env = runtime_calls[0].env
     assert env["CRITIC_KB_CLIENT_MODE"] == "inmemory"
     assert env["CRITIC_SESSION_MEMORY_DIR"].endswith("critic-session-memory")
@@ -797,7 +797,7 @@ async def test_kb_live_without_url_raises(
         kb_mode="live",
         kb_env={},
     )
-    # No KB_BASE_URL in env either: ensure it's truly absent.
+ # No KB_BASE_URL in env either: ensure it's truly absent.
     saved = os.environ.pop("KB_BASE_URL", None)
     try:
         with pytest.raises(BackendError, match="KB_BASE_URL"):
@@ -1246,7 +1246,7 @@ def _heartbeat() -> Intent:
     )
 
 
-# E2E: scripted Orchestration → real CriticAgentBackend → approved
+# scripted Orchestration → real CriticAgentBackend → approved
 @pytest.mark.asyncio
 async def test_critic_agent_real_runtime_clears_proposal(
     session_dir: Path,

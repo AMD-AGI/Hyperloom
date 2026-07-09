@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots` (PR #321).
+"""Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`.
 
-After PR #321 retired ``last_trace_analyze_baseline``, ``final.json``'s
+After ``last_trace_analyze_baseline`` was retired, ``final.json``'s
 ``roofline_comparison`` block is built from the append-only
 ``SharedState.roofline_snapshots`` history, and the markdown section drops the
 retired N31 trigger wording.
@@ -205,7 +205,7 @@ def test_format_section_zero_snapshots_says_none_captured():
 
 
 def test_format_section_single_snapshot_no_n31_wording(tmp_path):
-    """A single-snapshot section drops the 'none captured' + N31 wording and explains the PR #321 watermark mechanism."""
+    """A single-snapshot section drops the 'none captured' + N31 wording and explains the watermark mechanism."""
     p = tmp_path / "analysis.md"
     p.write_text(
         "# TraceLens\n\n## Executive Summary\n\nbody\n",
@@ -295,7 +295,7 @@ def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
     assert snap["kernel_roofline_path"] == ""
 
 
-# Decode-roofline ceiling propagation (Step 2).
+# Decode-roofline ceiling propagation.
 def _snapshot_with_ceiling(
     *,
     snapshot_id: int,

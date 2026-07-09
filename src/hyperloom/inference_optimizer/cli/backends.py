@@ -141,8 +141,8 @@ def _build_backends(
         )
 
     backends: dict[str, Any] = {
-        # Orchestration runs as a persistent ReAct conversation (plan
-        # Step 1): the same Claude session is resumed across ticks so the
+        # Orchestration runs as a persistent ReAct conversation: the same
+        # Claude session is resumed across ticks so the
         # model's plan / chain-of-thought persists instead of being
         # re-derived from a full state dump each turn. The conversational
         # floors (max_turns / call_timeout) are applied inside

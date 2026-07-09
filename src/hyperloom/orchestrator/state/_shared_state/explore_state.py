@@ -23,7 +23,7 @@ Fields::
     baseline_accuracy   float — GSM8K score after `baseline`
     current_best        dict  — {action: str, tput: float, accuracy: float}
     cumulative_gain     float — % over baseline
-    stop_reason         str   — set when graceful stop fires (§9)
+    stop_reason         str   — set when graceful stop fires
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent
                                 exception is recorded; also appends to
@@ -99,7 +99,7 @@ class _ExploreStateMixin:
         *,
         empty: bool,
     ) -> int:
-        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold lives in ``KB_design §3.9``, not here).
+        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold is configured elsewhere, not here).
 
         Args:
             domain (str): The specialist domain; blank normalizes to

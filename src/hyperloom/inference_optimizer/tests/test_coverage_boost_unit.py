@@ -37,7 +37,7 @@ def test_gain_math_branches() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.kb_writeback                                                    #
+# orchestrator.kb_writeback #
 # --------------------------------------------------------------------------- #
 def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback

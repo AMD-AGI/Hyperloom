@@ -113,7 +113,7 @@ def test_resolve_scheme_known_returns_prompt():
 
 
 def test_resolve_scheme_has_no_hardcoded_defaults():
-    # Issue #453 §4: the agent must not bake in kv_cache / exclude_layers
+    # The agent must not bake in kv_cache / exclude_layers
     # defaults — Quark's intake + plan skill supplies those.
     p = qs.resolve_scheme_prompt("fp8")
     assert "lm_head" not in p
@@ -129,7 +129,7 @@ def test_resolve_scheme_unknown_raises():
 
 def test_scheme_choices_match_supported_set():
     assert qs.QUANT_SCHEME_CHOICES == ["none", "fp8", "ptpc_fp8", "mxfp4", "mxfp4_fp8"]
-    # int8 / int4 dropped per issue #453 §4.
+    # int8 / int4 are no longer supported choices.
     assert "int8" not in qs.QUANT_SCHEME_CHOICES
 
 

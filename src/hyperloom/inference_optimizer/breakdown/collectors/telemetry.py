@@ -27,12 +27,12 @@ from ._common import (
 
 
 
-# §12 Critic / Robustness
+# Critic / Robustness
 def collect_critic_robustness(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §12 critic / robustness section.
+    """Collect the critic / robustness section.
 
     Walks ``critic-workdir/<iter>/`` for review + emit JSON (verdict, topic,
     truncated summary, artifact paths) and ``robustness-workdir/<iter>/`` for
@@ -125,7 +125,7 @@ def _critic_kb_writes_summary(
     }
 
 
-# §13 Telemetry
+# Telemetry
 def _scan_all_benchmark_reports(session_dir: Path) -> Iterable[Path]:
     """Find every ``benchmark_*/benchmark_report.json`` under ``runs/``.
 
@@ -247,7 +247,7 @@ def _collect_lane_timeline(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """v0.8 M6 (KB_design §3.12 §4.5) — per-lane capacity/occupancy summary from ``storage/coordinator.db``.
+    """Per-lane capacity/occupancy summary from ``storage/coordinator.db``.
 
     One row per lane (capacity, live_holders, lease_expired_count). The
     per-tick holders timeline is deferred; the aggregates suffice for the
@@ -388,7 +388,7 @@ def collect_telemetry(
     }
 
 
-# §15 KB Provenance — Cortex KB integration audit
+# KB Provenance — Cortex KB integration audit
 def collect_kb_provenance(
     session_dir: Path,
     state: dict[str, Any],

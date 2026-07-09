@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Issue #464 — end-to-end proof that a non-graceful exit still yields final.json.
+"""End-to-end proof that a non-graceful exit still yields final.json.
 
 Unlike the unit tests in ``test_breakdown_exporter_unit.py`` (which exercise
 ``write_minimal_final_json`` in isolation), these tests launch a *real*

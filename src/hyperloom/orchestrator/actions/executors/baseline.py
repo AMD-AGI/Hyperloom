@@ -1225,7 +1225,7 @@ class BaselineExecutor:
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
-        # Phase 0+1: apply warm-replay code patches before server launch.
+        # Apply warm-replay code patches before server launch.
         # Record pre-apply HEAD so patches are reverted after the benchmark
         # completes (or fails), preventing residue in the shared checkout.
         patch_target = effective_inferencex_path or ix_env

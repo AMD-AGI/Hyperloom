@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Throughput percentage-gain helpers (tree-reform.MD §7 — ``gain_math``).
+"""Throughput percentage-gain helpers (``gain_math``).
 
 Relocated from ``hyperloom.orchestrator.gain_math`` (P2.1); that re-export
 shim was removed in P2.7 once all callers were updated to import directly

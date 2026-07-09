@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Step 2 — ``fa phase-audit`` static local-source judging.
+"""``fa phase-audit`` static local-source judging.
 
 Hermetic: no network / LLM. The opt-in LLM layer is exercised only via the
 no-credentials skip path.

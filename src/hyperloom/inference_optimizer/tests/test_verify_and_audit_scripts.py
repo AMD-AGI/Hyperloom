@@ -169,7 +169,7 @@ def test_verify_fail_on_missing_state_json(tmp_path, capsys):
     assert "state.json not found" in out
 
 
-# verify rendering — §10.3 v2 criteria + tabular data
+# verify rendering: v2 criteria + tabular data.
 def test_verify_renders_v2_quality_criteria(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))

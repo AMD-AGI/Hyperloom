@@ -125,7 +125,7 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
 def _atomic_write(path: Path, text: str) -> None:
     """Write text to a file atomically via a temp file and rename.
 
-    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.io.atomic_write_text`.
+    Delegates to :func:`hyperloom.common.io.atomic_write_text`.
 
     Args:
         path: Destination file path.

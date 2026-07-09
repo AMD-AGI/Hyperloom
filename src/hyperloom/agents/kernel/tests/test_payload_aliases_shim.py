@@ -61,9 +61,8 @@ def test_shim_has_no_hyperloom_import():
     """Static guard: the shim's source must not *import* ``hyperloom``.
 
     A re-export (``from hyperloom.common... import ...``) would defeat the
-    standalone contract documented in tree-reform-lessons.MD §13 even though
-    the module technically still exists on disk. (Docstring/comment mentions
-    of ``hyperloom`` explaining the rationale are fine.)
+    standalone contract even though the module technically still exists on disk.
+    (Docstring/comment mentions of ``hyperloom`` explaining the rationale are fine.)
     """
     source = (_TOOLS_DIR / "_payload_aliases.py").read_text(encoding="utf-8")
     assert "import hyperloom" not in source

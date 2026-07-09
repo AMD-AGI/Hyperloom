@@ -28,11 +28,10 @@ ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 
-# tree-reform.MD P2.4: this module lives one level deeper than before (moved
-# from ``inference_optimizer/paths.py`` into ``inference_optimizer/session/
-# paths.py``), but the shipped read-only asset dirs it resolves
-# (``scripts/``, ``actions/``, ``kernel_opt/``) still live directly under
-# ``inference_optimizer/`` — hence ``.parent.parent``, not ``.parent``.
+# This module lives under ``inference_optimizer/session/``, but the shipped
+# read-only asset dirs it resolves (``scripts/``, ``actions/``,
+# ``kernel_opt/``) still live directly under ``inference_optimizer/`` —
+# hence ``.parent.parent``, not ``.parent``.
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 # One-shot guard so the "USER_DATA_PATH unset" fallback warning fires at most
@@ -277,7 +276,7 @@ def asset_scripts_dir() -> Path:
     """Return the directory of shipped release-contract shell scripts
     (installers + baseline/profile configs).
 
-    tree-reform.MD P2.4: ``scripts/`` was split three ways (``assets/`` for
+    ``scripts/`` was split three ways (``assets/`` for
     installers/configs, ``tools/`` for operator CLIs, ``experiments/`` for
     A/B scripts); this helper follows the ``assets/`` successor since that is
     the shell-installer counterpart of the former single ``scripts/`` dir.
@@ -300,8 +299,8 @@ def asset_actions_dir() -> Path:
 def asset_system_prompts_dir() -> Path:
     """Return the directory of shipped agent system prompts.
 
-    tree-reform.MD P2.3: the orchestrator (and its prompt templates, now
-    ``orchestrator/prompts/`` after the P2.3 stage-B subpackage split) moved
+    The orchestrator (and its prompt templates, now
+    ``orchestrator/prompts/`` after the stage-B subpackage split) moved
     out of ``src/hyperloom/inference_optimizer/`` into the ``hyperloom.orchestrator``
     package. When an operator has set ``$INFERENCE_OPTIMIZER_ASSET_ROOT``
     (see SKILL.md's per-run asset override, which symlinks ``orchestrator/``
@@ -417,7 +416,7 @@ def kernel_agent_root(session_dir: Path) -> Path:
     ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
     ``<sd>/kernel-agent-workspace/``.
 
-    tree-reform.MD §2.4/P2.4: renamed from ``kernel_agent_runs_root`` (which
+    Renamed from ``kernel_agent_runs_root`` (which
     collided with the unrelated ``session_paths.kernel_agent_runs_root`` —
     that one returns the ``runs/`` subdirectory *one level below* this
     root) to remove the same-name-different-meaning ambiguity.

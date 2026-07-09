@@ -20,7 +20,7 @@ python -m hyperloom.agents.critic.runtime.cli replay-dead-letter [--dir DIR] [--
 
 Every command writes a single JSON object to stdout (or to ``--out``)
 and returns exit code 0 on logical success — including
-``dead_lettered`` outcomes per contract §6. Exit code 2 is reserved for
+``dead_lettered`` outcomes per the critic contract. Exit code 2 is reserved for
 adapter bugs that should propagate back to the SKILL caller.
 """
 
@@ -47,9 +47,8 @@ from .session_memory import SessionMemory
 
 # ---------------------------------------------------------------------------
 # _read_json / _emit_json are re-exported from hyperloom.common.subprocess_bridge
-# (tree-reform.MD §7) above; kept as module-level bindings so any
-# `setattr(cli_module, "_read_json"/"_emit_json", fake)`-style monkeypatch
-# still resolves through this module's own __dict__ for the callers below.
+# above; kept as module-level bindings so monkeypatches on this module still
+# resolve through its own __dict__.
 
 
 def _resolve_kb_client() -> KBClient:
@@ -318,7 +317,7 @@ def _make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hyperloom.agents.critic.runtime.cli", description="Critic runtime CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Phase 0
+    # Session bootstrap commands
     init = sub.add_parser("init-session")
     init.add_argument("--request", required=True)
     init.add_argument("--out", default="-")
@@ -330,7 +329,7 @@ def _make_parser() -> argparse.ArgumentParser:
     close.add_argument("--out", default="-")
     close.set_defaults(func=_cmd_close_session)
 
-    # Phase 1 + 2
+    # Review preparation and commit commands
     prep = sub.add_parser("prepare-review")
     prep.add_argument("--request", required=True)
     prep.add_argument("--out", default="-")

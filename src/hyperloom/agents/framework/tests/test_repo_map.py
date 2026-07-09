@@ -92,10 +92,9 @@ def test_known_frameworks_constant_matches_dict():
 
 
 def test_repo_map_in_sync_with_io_fallback():
-    """G1 — orchestrator's framework client re-exports this module's ``repo_url_for_framework``
-    directly (tree-reform.MD P2.5 removed the old IO-only ``except ImportError`` fallback copy,
-    since framework-agent is now always importable alongside orchestrator). Skipped when
-    inference_optimizer is absent."""
+    """orchestrator's framework client re-exports this module's ``repo_url_for_framework``
+    directly, since framework-agent is now always importable alongside orchestrator.
+    Skipped when inference_optimizer is absent."""
     pytest.importorskip("hyperloom.orchestrator.framework.client")
     from hyperloom.orchestrator.framework import client as fac
 

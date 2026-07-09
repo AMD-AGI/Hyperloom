@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit coverage for non-diff tuned-artifact integration (§3.5 / B6):
+"""Unit coverage for non-diff tuned-artifact integration:
 ``_resolve_artifact_specs`` sandbox validation and the
 ``_apply_artifacts`` / ``_revert_artifacts`` backup-restore round-trip."""
 

@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Idempotent, backward-compatible patcher for InferenceX
-``benchmarks/benchmark_lib.sh`` (Hyperloom issue #194 §2).
+``benchmarks/benchmark_lib.sh`` (Hyperloom issue #194).
 
 Upstream resets ``num_prompts="$max_concurrency"`` under ``PROFILE=1``,
 stomping ``--num-prompts`` so the engine finishes before the steady-state

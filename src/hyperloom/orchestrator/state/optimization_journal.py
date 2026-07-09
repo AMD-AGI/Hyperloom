@@ -47,7 +47,7 @@ _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 # Statuses that mean "a real change was tested / applied and then rolled back
 # or rejected on measured grounds" → REVERT. Everything else for these kinds
 # (apply_failed / no_patch / fetch_failed / applied_no_bench / rejected_by_critic
-# / skipped / failed / the P0 terminal stamps …) never reached a KEEP/REVERT
+# / skipped / failed / terminal progress stamps …) never reached a KEEP/REVERT
 # measurement, so it is ``no_promote`` — neither a win nor a regression signal.
 _JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset(
     {"reverted", "accuracy_unavailable_reject", "regression"}

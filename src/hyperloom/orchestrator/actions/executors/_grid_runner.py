@@ -35,8 +35,8 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 
-# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
-# re-exported here so the module namespace + monkeypatch surface is intact.
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from ._grid_base import (
     variant_fingerprint as variant_fingerprint,
     _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,

@@ -88,7 +88,7 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert "max_position_embeddings=2048" in final_md
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
-    # PR-review-1: fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
+    # Fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
     breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
 
@@ -184,7 +184,7 @@ def test_monitor_offline_vocab_includes_context_window():
 
 
 def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):
-    """follow-up #4: the fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
+    """The fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
     monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
     model = tmp_path / "ctx2048reason"
     _write_config(model, max_position_embeddings=2048)

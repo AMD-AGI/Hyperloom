@@ -517,7 +517,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     keys off patches_written so it creates NO integrate_patch — the authored
     bridge never fires. The empty-outcome bridge MUST stamp a terminal row
     (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump
-    re-dispatches the candidate forever (gap-5 livelock, e.g. aiter #28067).
+    re-dispatches the candidate forever (livelock).
     """
     stub = _Stub(tmp_path, authoring=True)
     cand = "https://github.com/sgl-project/sglang/pull/28067"
@@ -641,7 +641,7 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress == []
 
 
-# Step 3 — audit-routed dispatch ------------------------------------------
+# Audit-routed dispatch ----------------------------------------------------
 def test_pump_audit_skip_records_terminal_row_no_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -816,7 +816,7 @@ def test_audit_candidate_reuses_cached_verdict_no_reaudit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Step 4 resume idempotency: a candidate carrying ``_audit`` is not re-audited."""
+    """Resume idempotency: a candidate carrying ``_audit`` is not re-audited."""
     calls = SimpleNamespace(n=0)
 
     async def _phase_audit(**_: Any) -> dict[str, Any]:
@@ -865,7 +865,7 @@ def test_audit_candidate_same_framework_omits_target_framework(
 ) -> None:
     """Candidate framework == session framework (the common case, incl. blank
     candidate.framework) -> phase_audit called without target_framework, exactly
-    as before the #5-P1 wiring (design doc L0 guard: same-framework is unaffected)."""
+    as before the cross-framework wiring; same-framework is unaffected."""
     captured: dict[str, Any] = {}
 
     async def _phase_audit(**kwargs: Any) -> dict[str, Any]:
@@ -908,7 +908,7 @@ def test_audit_candidate_cross_framework_sets_target_framework(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Design #5-P1 wiring: a candidate discovered from a DIFFERENT framework's
+    """A candidate discovered from a DIFFERENT framework's
     repo must be audited in cross-framework mode against this session's own
     (target) framework, with the target's own live source roots attached."""
     captured: dict[str, Any] = {}
@@ -951,7 +951,7 @@ def test_discover_batch_tags_cross_repo_candidates_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Design #5-P2 mesh-coordinator lane (default ON): a candidate discovered from
+    """A candidate discovered from
     a DIFFERENT framework's repo (already queried via the pr_intel_specialist
     cross-repo set) gets tagged with its origin framework WITHOUT any env opt-in;
     the session's own-repo candidates are left untagged, exactly as before."""
@@ -1041,7 +1041,7 @@ def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
     assert kinds == ["framework_agent"]
 
 
-# --- #5-P2: cross-framework authoring seed / provenance --------------------
+# --- cross-framework authoring seed / provenance --------------------
 
 
 def test_authoring_specialist_cross_framework_seed(tmp_path: Path):

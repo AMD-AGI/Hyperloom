@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""#266 method-1 wiring: lifecycle events are actually emitted at the
+"""Lifecycle events are actually emitted at the
 phase/step boundaries.
 
 Covers the emit points added on top of the lifecycle schema (Task B):

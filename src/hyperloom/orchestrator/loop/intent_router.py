@@ -137,7 +137,7 @@ class IntentRouter:
 
         Drops proposals for pruned families, applies the pending-roofline and
         execution-order denials, then publishes a ``proposal`` message and
-        registers a :class:`PendingProposal` so the Critic gate (§18) can later
+        registers a :class:`PendingProposal` so the Critic gate can later
         return a verdict.
 
         Args:
@@ -912,7 +912,7 @@ class IntentRouter:
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
         """Publish a free-form message onto the bus.
 
-        Soft-degrades an unknown topic to ``observation`` per DESIGN §13.2 and
+        Soft-degrades an unknown topic to ``observation`` and
         routes to the requested recipient (defaulting to broadcast).
 
         Args:
@@ -923,7 +923,7 @@ class IntentRouter:
         topic = intent.payload.get("topic", "observation")
         if topic not in __import__("hyperloom.orchestrator.bus.message_bus",
                                     fromlist=["TOPIC_ALLOWLIST"]).TOPIC_ALLOWLIST:
-            # Soft-degrade unknown topic per DESIGN §13.2.
+            # Soft-degrade unknown topic.
             topic = "observation"
         to_agent = intent.payload.get("to") or "*"
         await self.bus.append_and_seq(Message.new(

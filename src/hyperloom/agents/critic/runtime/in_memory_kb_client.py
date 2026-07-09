@@ -309,7 +309,7 @@ class InMemoryKBClient:
         edges_in = payload.get("edges") or {}
 
         warnings: list[str] = []
-        # Scope value normalisation (G-3): warn when an incoming value differs
+        # Scope value normalisation: warn when an incoming value differs
         # from its normalised form.
         for k, v in payload["scope"].items():
             if str(v).strip().lower() != _normalise_value(v) or _normalise_value(v) != _normalise_value(
@@ -340,7 +340,7 @@ class InMemoryKBClient:
             return {"row": row.to_dict(), "created": True, "warnings": warnings}
 
         row = self._rows[existing_id]
-        # Partial field merge (G-1).
+        # Partial field merge.
         if "summary" in payload:
             row.summary = summary_in
         if metadata_in:
@@ -350,7 +350,7 @@ class InMemoryKBClient:
             for eid in ids:
                 if eid not in existing:
                     existing.append(eid)
-        # Importance protection (G-2).
+        # Importance protection.
         if importance_in < row.importance:
             warnings.append("importance_protected")
         else:

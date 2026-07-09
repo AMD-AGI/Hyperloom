@@ -1,4 +1,4 @@
-"""PR-K2 — aiter cpp_itfs RUNTIME-compiled cache invalidation (GH #458).
+"""aiter cpp_itfs RUNTIME-compiled cache invalidation tests.
 
 Background
 ----------

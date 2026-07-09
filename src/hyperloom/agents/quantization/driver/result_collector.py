@@ -10,7 +10,7 @@ The split exists so the classifier can stay declarative (decision table) while
 disk I/O lives here in one place. It also keeps tests cheap — feed a fixture
 workspace directory, get a frozen snapshot, assert on fields.
 
-Only the **MUST-have** and **MUST-validate** files from §5.4 are interpreted;
+Only the **MUST-have** and **MUST-validate** files are interpreted;
 SHOULD-have and NICE-to-have presence is recorded but not graded — that's
 classifier territory.
 """
@@ -27,7 +27,7 @@ from typing import Iterable
 
 STRICT_VALIDATION_ENV = "HYPERLOOM_QUANT_STRICT_VALIDATION"
 
-# §5.4 MUST-have file globs for the quantized model directory.
+# MUST-have file globs for the quantized model directory.
 # (Multi-shard models also require ``model.safetensors.index.json``, but its
 # absence on single-file models is not a failure — the weights-glob covers
 # both cases.)
@@ -50,10 +50,10 @@ class ValidationSteps:
     run / crashed early, not that the step was skipped on purpose.
     """
 
-    auxiliary: str | None = None  # Step 1
-    md5: str | None = None  # Step 2
-    config: str | None = None  # Step 3
-    fuzzy: str | None = None  # Step 4
+    auxiliary: str | None = None
+    md5: str | None = None
+    config: str | None = None
+    fuzzy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ class CollectedArtifacts:
     manifest_parse_error: str | None
     quantized_model_dir: Path | None
 
-    # SHOULD-have / Plan artifacts
+    # SHOULD-have planning artifacts
     model_analysis_present: bool
     quant_plan_present: bool
     session_context_present: bool
@@ -98,7 +98,7 @@ class CollectedArtifacts:
 # parsing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Matches a line like ``**Step 2 — MD5 spot-check**: ok``.
+# Matches a line like ``**MD5 spot-check**: ok``.
 # The validator emits one of ``ok`` / ``FAIL`` / ``skipped`` exactly.
 _STEP_LINE_RE = re.compile(
     r"^\*\*Step\s+(?P<num>[1-4])\b[^*]*\*\*\s*:\s*(?P<status>ok|FAIL|skipped)\b",
@@ -251,7 +251,7 @@ def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
 
     The classifier uses these to decide if SKILL.md actually diagnosed a fix
     before the retry was attempted (precondition for incrementing the
-    retry counter — see §A.10).
+    retry counter — see the SKILL retry policy).
 
     Args:
         workspace: Workspace directory to scan.

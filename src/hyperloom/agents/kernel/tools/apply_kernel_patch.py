@@ -743,7 +743,7 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     return {"status": "ok", "removed": removed}
 
 
-# PR-K: aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so).
+# aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so).
 _AITER_CSRC_MARKER = "/aiter/csrc/"
 
 
@@ -1389,7 +1389,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
 
-    # PR-K: restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
+    # Restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") == "ok":
         jit_build_restore = _restore_aiter_jit_build(jit_build_backup)
@@ -1397,7 +1397,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
             restored.append(str(jit_build_restore["restored_to"]))
 
-    # PR-K2: restore the aiter cpp_itfs runtime cache moved aside during apply so a non-KEEP decision serves v0 (only present when apply moved cpp_itfs cache dirs).
+    # Restore the aiter cpp_itfs runtime cache moved aside during apply so a non-KEEP decision serves v0 (only present when apply moved cpp_itfs cache dirs).
     cpp_itfs_cache_backup = manifest.get("cpp_itfs_cache_backup") or {}
     if cpp_itfs_cache_backup.get("status") == "ok":
         cpp_itfs_cache_restore = _restore_aiter_cpp_itfs_cache(cpp_itfs_cache_backup)
@@ -1659,7 +1659,7 @@ def apply_kernel_patch(
         "is_cpp_itfs": False,
     }
     if strategy["compiled"] and not skip_rebuild:
-        # PR-K: move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
+        # Move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
         jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
         if jit_build_backup.get("status") == "failed":
             # Refuse to rebuild against an inconsistent jit cache: restore v0 and bail.
@@ -1682,7 +1682,7 @@ def apply_kernel_patch(
                 encoding="utf-8",
             )
 
-        # PR-K2: aiter cpp_itfs kernels (e.g. paged_attention -> pa_ragged)
+        # aiter cpp_itfs kernels (e.g. paged_attention -> pa_ragged)
         # are runtime-compiled into $HOME/.aiter/build/<md_name>_<hash>/ on
         # first call, NOT by setup.py develop, and the dir name hashes
         # params (not source) so pristine + patched collide -> the next

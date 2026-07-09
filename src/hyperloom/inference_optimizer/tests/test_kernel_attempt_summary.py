@@ -419,7 +419,7 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
     assert any(r["kernel_id"] == "k_obsolete" for r in out["by_kernel"])
 
 
-# Issue: summary buried failure root-cause in details file
+# Summary exposes failure root-cause directly.
 def _write_full_kernel_result(
     session_dir: Path,
     session_id: str,

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FRAMEWORK candidate-level artifacts + outcome classification (Step 1).
+"""FRAMEWORK candidate-level artifacts + outcome classification.
 
 Deterministic, LLM-free observability helpers for the FRAMEWORK_AGENT phase:
 

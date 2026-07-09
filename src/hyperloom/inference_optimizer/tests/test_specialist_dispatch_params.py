@@ -325,7 +325,7 @@ def test_gap_backfill_prefers_high_severity_then_least_attempted(orchestration_r
     )
     params = {"domain": "serving_specialist"}
     gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
-    # framework is serving_specialist's kb_anchor, so both match; high wins.
+ # framework is serving_specialist's kb_anchor, so both match; high wins.
     assert params["gap_canonical_id"] == "gap.win"
 
 
@@ -567,13 +567,13 @@ def test_task_tool_granted_and_todowrite_granted():
 
 
 # --------------------------------------------------------------------------- #
-# Problem 2 — domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
+# domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
 # on legitimate keys leaking through params.tags untranslated).
 # --------------------------------------------------------------------------- #
 def test_normalize_dispatch_tags_translates_key_to_anchor():
     from hyperloom.orchestrator.specialists.domains import normalize_dispatch_tags
 
-    # A domain KEY in params.tags is translated to its kb_anchor.
+ # A domain KEY in params.tags is translated to its kb_anchor.
     assert normalize_dispatch_tags({"tags": ["serving_specialist"]}) == ["framework"]
     assert normalize_dispatch_tags({"tags": ["kernel_switch_specialist"]}) == ["kernel_agent"]
 

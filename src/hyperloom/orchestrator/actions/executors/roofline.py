@@ -263,7 +263,7 @@ class RooflineExecutor:
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
 
-        # ---- Step 1: profile (with retry) ------------------------------------
+        # ---- Profile (with retry) --------------------------------------------
         # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
         # failure rate (SIGQUIT / "Profiling is not in progress" / engine init
         # crash). Retry up to _PROFILE_MAX_ATTEMPTS times; each call to
@@ -441,13 +441,13 @@ class RooflineExecutor:
         # Inline-promote only the profile fields trace_analyze needs (not
         # current_best / cumulative_gain). Do NOT clear last_trace_analyze
         # here: record_trace_analyze derives the next snapshot_id from it, so
-        # clearing would reset the monotonic counter (§5/§8.7 invariant). The
+        # clearing would reset the monotonic counter. The
         # clear happens only on the trace_analyze failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
         self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
 
-        # ---- Step 2: trace_analyze ----------------------------------------
+        # ---- trace_analyze -------------------------------------------------
         # Pin the snapshot's arm so the ceiling's precision is anchored to the
         # arm this roofline actually profiled. A PRELUDE roofline measures the
         # baseline arm; without this the recorder would infer "current_best"
