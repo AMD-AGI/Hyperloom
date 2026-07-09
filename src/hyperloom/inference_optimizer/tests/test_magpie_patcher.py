@@ -138,6 +138,9 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     run_benchmark_serving --model "$MODEL" || exit $?
   fi
 fi
+if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+fi
 """
 
 
@@ -248,6 +251,9 @@ def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
     assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
     assert "magpie_run_benchmark_serving_remote_direct trust" in text
     assert "magpie_run_benchmark_serving_remote_direct || exit $?" in text
+    assert "HYPERLOOM_EVAL_CONCURRENCY_FIX" in text
+    assert "EVAL_CONCURRENT_REQUESTS" in text
+    assert "--concurrent-requests" not in text
 
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     assert script.read_text(encoding="utf-8") == text
