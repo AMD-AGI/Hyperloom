@@ -291,13 +291,9 @@ acquire_install_lock() {
   fi
 }
 
-# Preflight credential validation. Mirrors the gate in
-# kernel-agent/scripts/install.sh so users invoking the inference-optimizer
-# installer directly (the canonical entrypoint) get the same fail-fast
-# behaviour as users running kernel-agent on its own. Without this, a
-# missing SAFE_API_KEY / OPENAI_BASE_URL slips past pip install, Magpie
-# clone, InferenceX clone (~10+ minutes of work) and only surfaces when the
-# chained kernel-agent installer reaches GEAK config generation.
+# Preflight credential validation. Mirrors kernel-agent/scripts/install.sh:
+# a usable setup needs at least one LLM base URL and at least one key. This
+# accepts either the AMD single-gateway pair or native split OpenAI/Anthropic.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -314,10 +310,14 @@ preflight_load_dotenv() {
 preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
-  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
-  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
-  if [ "${#missing[@]}" -eq 0 ]; then
-    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+  local has_url=0 has_key=0
+  { [ -n "${OPENAI_BASE_URL:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; } && has_url=1
+  { [ -n "${SAFE_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
+    || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("OPENAI_BASE_URL or ANTHROPIC_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("SAFE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN")
+  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
+    log "credentials preflight: usable LLM base URL + key present"
     return 0
   fi
   local env_file_status
@@ -334,18 +334,24 @@ preflight_validate_credentials() {
     return 0
   fi
   cat >&2 <<EOF
-[inference-optimizer ERROR] Missing required credential(s): ${missing[*]}
+[inference-optimizer ERROR] Missing required credential group(s): ${missing[*]}
 
 Tried loading from:
   - shell environment
   - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
 
 Fix one of:
-  1. Copy .env from a working worktree into this one:
-       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
-  2. Export directly into the shell before re-running:
+  1. Single gateway:
        export SAFE_API_KEY=ak-your-safe-apikey
        export OPENAI_BASE_URL=https://gateway.example.com/v1
+  2. Split OpenAI or Anthropic:
+       export OPENAI_BASE_URL=https://api.openai.com/v1
+       export OPENAI_API_KEY=sk-...
+       # or
+       export ANTHROPIC_BASE_URL=https://api.anthropic.com
+       export ANTHROPIC_API_KEY=sk-ant-...
+  3. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2
 }

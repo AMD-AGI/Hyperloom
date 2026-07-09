@@ -140,15 +140,20 @@ TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
 
-# Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
-# is missing from env, source $REPO_ROOT/.env (resolved above from this
-# script's parent dir) but protect any keys already set in env from being
-# overwritten by .env.
+# Credentials fallback: env always wins. If any supported LLM credential is
+# missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR_API_KEY:-}" ]; then
+if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
+   || [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${ANTHROPIC_BASE_URL:-}" ] \
+   || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] \
+   || [ -z "${CURSOR_API_KEY:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
     _snap_url="${OPENAI_BASE_URL-}"
+    _snap_openai_key="${OPENAI_API_KEY-}"
+    _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
+    _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
+    _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
     _snap_cursor="${CURSOR_API_KEY-}"
     set -a
     # shellcheck disable=SC1091
@@ -156,8 +161,13 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
     set +a
     [ -n "$_snap_safe" ] && export SAFE_API_KEY="$_snap_safe"
     [ -n "$_snap_url" ]  && export OPENAI_BASE_URL="$_snap_url"
+    [ -n "$_snap_openai_key" ] && export OPENAI_API_KEY="$_snap_openai_key"
+    [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
+    [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
+    [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
     [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
-    unset _snap_safe _snap_url _snap_cursor
+    unset _snap_safe _snap_url _snap_openai_key _snap_anthropic_url
+    unset _snap_anthropic_key _snap_anthropic_token _snap_cursor
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -263,15 +273,9 @@ else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
 # When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
-# install. Defaults to 1 so GEAK kernel-opt gets RAG-augmented retrieval
-# out of the box on the canonical GPU-pod path (cuda auto-detect, BGE-
-# large embedding ~1min). Callers that don't want this — e.g. claude-only
-# kernel-opt, CPU-only sandbox where BGE-large takes ~1.5h, or any path
-# where install.sh latency matters more than RAG quality — should set
-# `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` in the launching env (Brain
-# propagates Environment block vars from the prompt into sandbox env, so
-# operators can flip this per-task without editing this script).
+# install. A build failure warns by default; set strict=1 to fail install.
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
+KERNEL_AGENT_RAG_INDEX_STRICT_VAL="${KERNEL_AGENT_RAG_INDEX_STRICT:-0}"
 # Explicit alias for operators who want to skip the final model/index load
 # step during install (e.g. Docker builds without visible GPUs).
 KERNEL_AGENT_SKIP_MODEL_LOAD_VAL="${KERNEL_AGENT_SKIP_MODEL_LOAD:-0}"
@@ -281,7 +285,7 @@ GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
+GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # LiteLLM provider-specific base_url normalisation:
 #   * openai/* models require the OpenAI-compatible base URL, which in our
@@ -341,6 +345,7 @@ Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  KERNEL_AGENT_RAG_INDEX_STRICT=1       Fail install when the RAG index build fails (default warns).
   KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
                                         Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
 EOF
@@ -368,13 +373,8 @@ verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
 }
 
-# Preflight credential validation. The env+.env fallback loader above
-# (lines 89-105) only LOADS missing keys; it does not VALIDATE that they
-# were actually provided. Without this gate, a missing SAFE_API_KEY or
-# OPENAI_BASE_URL would slip past pip install / GEAK clone / aiter JIT
-# (~10-20 minutes of work) and only blow up at the final
-# generate_geak_litellm_config step (line ~670). Fail fast here so the
-# operator can fix .env / export before any expensive work happens.
+# Preflight credential validation. A usable setup needs at least one LLM base
+# URL and at least one key; single-gateway and split OpenAI/Anthropic are valid.
 #
 # Strict mode by design: no bypass env var. The chained installer
 # steps (GEAK config, OOB CLI auth) all need real credentials, so an
@@ -383,10 +383,14 @@ verify_die() {
 # does not actually install.
 preflight_validate_credentials() {
   local missing=()
-  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
-  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
-  if [ "${#missing[@]}" -eq 0 ]; then
-    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+  local has_url=0 has_key=0
+  { [ -n "${OPENAI_BASE_URL:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; } && has_url=1
+  { [ -n "${SAFE_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
+    || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("OPENAI_BASE_URL or ANTHROPIC_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("SAFE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN")
+  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
+    log "credentials preflight: usable LLM base URL + key present"
     return 0
   fi
   local env_file_status
@@ -403,18 +407,24 @@ preflight_validate_credentials() {
     return 0
   fi
   cat >&2 <<EOF
-[kernel-agent ERROR] Missing required credential(s): ${missing[*]}
+[kernel-agent ERROR] Missing required credential group(s): ${missing[*]}
 
 Tried loading from:
   - shell environment
   - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
 
 Fix one of:
-  1. Copy .env from a working worktree into this one:
-       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
-  2. Export directly into the shell before re-running:
+  1. Single gateway:
        export SAFE_API_KEY=ak-your-safe-apikey
        export OPENAI_BASE_URL=https://gateway.example.com/v1
+  2. Split OpenAI or Anthropic:
+       export OPENAI_BASE_URL=https://api.openai.com/v1
+       export OPENAI_API_KEY=sk-...
+       # or
+       export ANTHROPIC_BASE_URL=https://api.anthropic.com
+       export ANTHROPIC_API_KEY=sk-ant-...
+  3. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2
 }
@@ -1089,7 +1099,7 @@ ensure_geak_v3() {
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
       if [ -z "$GEAK_API_KEY_VAL" ] || [ -z "$GEAK_BASE_URL_VAL" ]; then
-        die "Cannot generate GEAK litellm config: SAFE_API_KEY and OPENAI_BASE_URL are required"
+        die "Cannot generate GEAK litellm config: need a usable LLM base URL and key"
       fi
       cat > "$GEAK_CONFIG" <<EOF
 model:
@@ -1317,7 +1327,16 @@ ensure_rag_index() {
     return
   fi
   log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run sh -c "cd '${GEAK_V3_ROOT}' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  if run sh -c "cd '${GEAK_V3_ROOT}' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"; then
+    return 0
+  fi
+  case "$KERNEL_AGENT_RAG_INDEX_STRICT_VAL" in
+    1|true|TRUE|yes|YES|on|ON)
+      die "GEAK RAG index build failed (KERNEL_AGENT_RAG_INDEX_STRICT=$KERNEL_AGENT_RAG_INDEX_STRICT_VAL)"
+      ;;
+  esac
+  warn "GEAK RAG index build failed; continuing install without a prebuilt index"
+  warn "Set KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 to skip or KERNEL_AGENT_RAG_INDEX_STRICT=1 to fail."
 }
 
 ensure_oob() {

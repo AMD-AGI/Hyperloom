@@ -10,7 +10,7 @@ help:
 	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
 clean:
-	rm -rf "$(BUILDDIR)" api/generated
+	rm -rf "$(BUILDDIR)" reference/generated sphinx/_toc.yml
 
 # Catch-all target: route all unknown targets to sphinx-build using the
 # "make mode" option (-M).
