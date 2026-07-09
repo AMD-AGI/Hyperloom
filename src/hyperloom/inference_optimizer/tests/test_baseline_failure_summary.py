@@ -226,3 +226,20 @@ def test_format_md_surfaces_root_cause():
     assert "Root cause" in md
     assert "oom" in md
     assert "modeling_cohere2.py" not in md
+
+
+def test_classify_root_cause_type_kv_cache_oom():
+    assert (
+        _classify_root_cause_type(
+            "kv_cache_oom",
+            "Loaded weights leave no GPU memory for the KV cache",
+        )
+        == "kv_cache_oom"
+    )
+    assert (
+        _classify_root_cause_type(
+            "subprocess_nonzero",
+            "Raise --mem-fraction-static above 0.737",
+        )
+        == "kv_cache_oom"
+    )

@@ -118,6 +118,17 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
     "unknown",
 )
 
+# KV-cache OOM: weights loaded but no room left for the KV cache. Kept
+# distinct from a generic nonzero exit so the loop/report attributes it to an
+# over-aggressive --mem-fraction-static (raise it) rather than a hard crash.
+# This surfaces AFTER weight load (often minutes in), so it must be matched
+# regardless of the fast-exit elapsed threshold.
+_KV_CACHE_OOM_MARKERS = (
+    "no gpu memory for the kv cache",
+    "leave no gpu memory",
+    "raise --mem-fraction-static above",
+)
+
 
 # Strong cuda-graph capture markers: stream-capture incompatibility, reliably
 # recoverable by disabling cuda-graph. Markers live in server.log, not the
@@ -261,9 +272,13 @@ def _classify_subprocess_error(
         ``"fast_exit_arg_error"`` for a fast exit caused by argument
         validation, else ``"subprocess_nonzero"``.
     """
+    tail = stderr_tail.lower()
+    # KV-cache OOM can surface long after weight load, so it is matched before
+    # the fast-exit elapsed gate below.
+    if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
+        return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
         return "subprocess_nonzero"
-    tail = stderr_tail.lower()
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
         return "fast_exit_arg_error"
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):

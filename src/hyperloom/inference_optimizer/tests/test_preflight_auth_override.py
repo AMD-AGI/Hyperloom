@@ -1145,3 +1145,21 @@ def test_cli_parser_exposes_degraded_flags():
     args = parser.parse_args(["optimize", "--model", "/x"])
     assert args.degraded_kb is False
     assert args.degraded_pr is False
+
+
+# Framework guard
+
+def test_expected_framework_guard_rejects_mismatch(monkeypatch, capsys):
+    monkeypatch.setenv("EXPECTED_FRAMEWORK", "vllm")
+    with pytest.raises(SystemExit) as exc:
+        cli._enforce_expected_framework("sglang")
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "EXPECTED_FRAMEWORK" in err
+    assert "vllm" in err
+    assert "sglang" in err
+
+
+def test_expected_framework_guard_accepts_match(monkeypatch):
+    monkeypatch.setenv("EXPECTED_FRAMEWORK", "VLLM")
+    cli._enforce_expected_framework("vllm")

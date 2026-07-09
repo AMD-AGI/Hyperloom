@@ -148,6 +148,12 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
     blob = f"{error_class} {error_text}".lower()
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
+    if (
+        error_class == "kv_cache_oom"
+        or "no gpu memory for the kv cache" in blob
+        or "mem-fraction-static" in blob
+    ):
+        return "kv_cache_oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:
         return "benchmark_timeout"
     if (
@@ -336,6 +342,34 @@ def _build_failure_summary(
         return None
 
 
+_STOP_REASON_EXPLANATIONS: dict[str, str] = {
+    "target_reached": "Target reached: the requested --target-gain / --target-tput was met.",
+    "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
+    "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "robustness_escalated": (
+        "Robustness escalated: the run stopped early (not a target hit). Common triggers are an "
+        "approaching deadline, a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
+        "The best validated result was locked in before exit."
+    ),
+    "crash_threshold_exceeded": "Too many recoverable crashes accumulated; the run stopped to preserve the validated result.",
+    "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
+    "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
+    "sweep_done": "SWEEP finished the configured concurrency/shape grid.",
+    "conc_sweep_done": "Post-sweep concurrency sweep finished.",
+    "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
+    "user_stop_requested": "Stopped on an explicit operator request.",
+}
+
+
+def _explain_stop_reason(stop_reason):
+    """Return a human-readable explanation for a terminal ``stop_reason``.
+
+    Returns ``""`` for unknown/empty reasons so callers can omit the line.
+    """
+    return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
+
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -366,6 +400,7 @@ def _build_summary_dict(
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
         "stop_reason": state.stop_reason,
+        "stop_reason_explanation": _explain_stop_reason(state.stop_reason),
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         # Remaining-gaps assessment verdict + history.
@@ -432,6 +467,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- **Model**: {summary['model_name']}  (`{summary['model_path']}`)")
     lines.append(f"- **Stop reason**: `{summary['stop_reason']}`")
+    stop_expl = str(summary.get("stop_reason_explanation") or "").strip()
+    if stop_expl:
+        lines.append(f"- **Why it stopped**: {stop_expl}")
     stop_detail = str(summary.get("stop_detail") or "").strip()
     if stop_detail:
         lines.append(f"- **Stop detail**: {stop_detail}")

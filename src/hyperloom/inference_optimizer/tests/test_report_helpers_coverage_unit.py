@@ -212,3 +212,46 @@ def test_highlight_topics():
     # fallback branch
     other = rp._highlight({"a": 1, "b": "two", "c": [1, 2]}, "weird_topic", "ag")
     assert "a" in other["summary"]
+
+
+# ---- _explain_stop_reason ----
+def test_explain_stop_reason_robustness_escalated():
+    msg = rp._explain_stop_reason("robustness_escalated")
+    assert msg
+    assert "robustness" in msg.lower()
+
+
+def test_explain_stop_reason_target_reached():
+    assert "target" in rp._explain_stop_reason("target_reached").lower()
+
+
+def test_explain_stop_reason_unknown_is_empty():
+    assert rp._explain_stop_reason("some_unmapped_reason") == ""
+    assert rp._explain_stop_reason("") == ""
+
+
+def test_format_md_renders_stop_explanation():
+    md = rp._format_md(
+        {
+            "session_id": "s",
+            "model_name": "m",
+            "model_path": "/m",
+            "stop_reason": "robustness_escalated",
+            "stop_reason_explanation": "Robustness escalated: stopped early to protect validated gains.",
+            "max_minutes": 60,
+            "report_generated_at": "t0",
+            "framework": "sglang",
+            "current_best": {},
+            "baseline_tput": 100.0,
+            "cumulative_gain": 0.0,
+            "cumulative_gain_validated": 0.0,
+            "cumulative_gain_validated_stack_len": 0,
+            "optimization_stack_len": 0,
+            "crash_count": 0,
+            "pruned_families": [],
+            "event_counts_by_topic": {},
+            "highlights": [],
+        }
+    )
+    assert "Why it stopped" in md
+    assert "Robustness escalated" in md

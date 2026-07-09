@@ -1206,3 +1206,22 @@ def test_classify_value_error_with_argv_dump_not_arg_error():
         )
         == "subprocess_nonzero"
     )
+
+
+def test_classify_kv_cache_oom_after_weight_load():
+    # KV-cache OOM can surface well after the 30s fast-exit window (weights
+    # take minutes to load), so it must be detected regardless of elapsed time.
+    tail = (
+        "ValueError: Loaded weights leave no GPU memory for the KV cache "
+        "under --mem-fraction-static=0.7. Raise --mem-fraction-static above 0.737"
+    )
+    assert _classify_subprocess_error(600.0, tail) == "kv_cache_oom"
+
+
+def test_classify_kv_cache_oom_fast_exit():
+    tail = "no GPU memory for the KV cache"
+    assert _classify_subprocess_error(3.0, tail) == "kv_cache_oom"
+
+
+def test_classify_non_kv_oom_still_nonzero():
+    assert _classify_subprocess_error(600.0, "some other runtime failure") == "subprocess_nonzero"
