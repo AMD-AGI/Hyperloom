@@ -25,10 +25,10 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator moves monotonically through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK -> EXPLORE -> KERNEL -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
-`phase_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
+`hyperloom.orchestrator.phases.machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
 analysis refreshes and close sequencing may be enqueued internally even
 when the LLM is not allowed to propose them.
@@ -131,8 +131,9 @@ CLOSE drains the final artifacts:
 
 1. `report` renders the operator-facing final report.
 2. `session_breakdown` writes the downstream JSON contract.
-3. The CLI finally-block writes a safety-net breakdown if the close
-   sequencer did not already finish cleanly.
+3. The `hyperloom.inference_optimizer.cli` finally-block writes a
+   safety-net breakdown if the close sequencer did not already finish
+   cleanly.
 
 The close path must be idempotent because sessions can end through a
 normal phase transition, a wall-clock deadline, an operator interrupt, or

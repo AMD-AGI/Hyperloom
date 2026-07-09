@@ -110,7 +110,7 @@ Self-hosted Hyperloom is MIT licensed (see
 
 ## Detailed Skill Documentation
 
-The repo ships a single skill — `src/hyperloom/inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs:
+The primary entry-point skill is `src/hyperloom/inference_optimizer/` — with the full optimization protocol, examples, and a knowledge base of lessons learned from prior runs. Sub-agents under `src/hyperloom/agents/` (critic, robustness, framework, quantization, kernel) ship their own SKILL specs and run as subprocesses driven by the orchestrator:
 
 | Domain | Skill | Description |
 |--------|-------|-------------|
@@ -124,14 +124,17 @@ The skill file is the agent's instructions. It encodes the full optimization met
 
 ```
 Hyperloom/
-├── src/hyperloom/                        # Single src-layout namespace (tree-reform.MD)
+├── src/hyperloom/                        # Single src-layout namespace
 │   ├── common/                           # Zero-dependency shared library (io/env/jsonio/...)
 │   ├── inference_optimizer/              # Inference optimization skill (sole entry point)
 │   │   ├── SKILL.md                      # Skill spec (Cursor/Claw entry point)
 │   │   ├── cli/                          # CLI entry: inference_optimizer optimize
 │   │   ├── session/                      # Session paths, manifest writer, single-optimizer lock
-│   │   ├── actions/_meta/                # Action metadata and scheduling policy
+│   │   ├── actions/_meta/                # Action metadata YAML (loaded by ActionRegistry)
 │   │   ├── baseline_comparison/          # InferenceX baseline comparison and target analysis
+│   │   ├── breakdown/                    # session_breakdown.json builder + collectors/
+│   │   ├── multi_node/                   # Multi-node install/launch helpers
+│   │   ├── references/                   # Skill reference docs (kernel/framework/…)
 │   │   ├── tools/                        # Operator CLIs (dump_session_breakdown/event_counts/…)
 │   │   ├── experiments/                  # A/B and roofline-audit scripts
 │   │   ├── assets/                       # Install scripts, baseline/profile configs
@@ -139,8 +142,8 @@ Hyperloom/
 │   ├── orchestrator/                     # Coordinator + agent roles + action executors
 │   │   ├── loop/                         # Coordinator facade + collaborators
 │   │   ├── phases/                       # Phase state machine + per-phase handlers
-│   │   ├── policy/                       # PolicyGate + action surfaces
-│   │   ├── actions/                      # Action registry + executors/
+│   │   ├── policy/                       # PolicyGate + per-phase action scheduling policy
+│   │   ├── actions/                      # Action registry implementation + executors/
 │   │   ├── roles/                        # Claude/Codex/Critic/Robustness backend adapters
 │   │   ├── state/                        # SharedState + journal/memory/task-registry/objective
 │   │   ├── bus/                          # Message bus, cursor store, GPU pool, resource locks
@@ -149,6 +152,7 @@ Hyperloom/
 │   │   ├── kernel/                       # Kernel-request handling + roofline
 │   │   ├── framework/                    # FRAMEWORK_AGENT client/paths
 │   │   ├── scoring/                      # Proposal scorer
+│   │   ├── trace/                        # Conversation/LLM trace + Langfuse emitter
 │   │   └── prompts/                      # Orchestration prompt construction
 │   └── agents/                           # Sibling skills, promoted into the hyperloom namespace
 │       ├── critic/                       # Critic subprocess runtime (proposal review)

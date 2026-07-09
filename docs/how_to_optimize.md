@@ -124,5 +124,5 @@ the case studies:
 
 ## Troubleshooting
 
-If a run fails on first launch (auth-proxy 401, Ray `--num-gpus`, VRAM issues),
+If a run fails on first launch (gateway 401, Ray `--num-gpus`, VRAM issues),
 see [Troubleshooting](TROUBLESHOOTING.md).

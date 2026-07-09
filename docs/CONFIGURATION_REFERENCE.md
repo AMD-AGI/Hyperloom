@@ -26,8 +26,8 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | `GEAK_API_KEY`         | no       | inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
 | `GEAK_BASE_URL`        | no       | inherits `OPENAI_BASE_URL` | Only set explicitly to override the default inheritance.                                                                                                                          |
 | `GEAK_MODEL_NAME`      | no       | `claude-opus-4-7` | GEAK preprocessor / solver model id.                                                                                                                                                           |
-| `ANTHROPIC_API_KEY`    | no       | inherits `SAFE_API_KEY` (via auth-proxy) | Only set explicitly to override.                                                                                                                                |
-| `OPENAI_API_KEY`       | no       | inherits `SAFE_API_KEY` (via auth-proxy) | Only set explicitly to override.                                                                                                                                |
+| `ANTHROPIC_API_KEY`    | no       | inherits `SAFE_API_KEY` (via preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
+| `OPENAI_API_KEY`       | no       | inherits `SAFE_API_KEY` (via preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `LANGFUSE_HOST`        | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Base URL of your Langfuse deployment (e.g. `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE_PUBLIC_KEY`  | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE_SECRET_KEY`  | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
@@ -46,19 +46,23 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | `HYPERLOOM_ROOT`                          | no                   | `$HYPERLOOM_RUNTIME_DIR/source-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the pod-local open-source root (`HYPERLOOM_OPEN_SOURCE_ROOT`, default `/opt/hyperloom/open-source-repos`), not this path. |
 | `HYPERLOOM_OPEN_SOURCE_ROOT`              | no                   | `/opt/hyperloom/open-source-repos`                                 | Pod-local, non-ephemeral (NOT /tmp) root for auto-cloned open-source dependencies such as Magpie, TraceLens, GEAK, and OOB. Decoupled from `USER_DATA_PATH` so shared session storage does not collocate concurrent pods' checkouts. The installer creates it with `mkdir -p`, so the pod must be able to write `/opt`; if the container runs as non-root with a read-only `/opt`, set this to a writable dir (e.g. `$USER_DATA_PATH/open-source-repos`). Local Mode note: `src/hyperloom/inference_optimizer/assets/local_setup.sh` accepts the alias `HYPERLOOM_DEPS_ROOT` (and `--deps-root`) for the same root; it exports the resolved value as `HYPERLOOM_OPEN_SOURCE_ROOT` both into the current shell and into `local-setup.env.sh`, so `install.sh` / `paths.open_source_root()` / the trace-analyze handler and tool resolve the SAME default TraceLens path. Always `source local-setup.env.sh` before running install/optimize in a fresh shell. |
 | `MAGPIE_PATH`                             | no                   | `$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`                               | Magpie source root for benchmark wrappers.                                                                                                                                            |
-| `SESSION_DIR`                             | no (robustness-agent)| scan known paths                                                   | Path containing `storage/conductor.db`; the robustness FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`.                                       |
+| `SESSION_DIR`                             | no (robustness-agent)| scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`.                                       |
 | `ROBUSTNESS_SERVER_URL`                   | no (robustness-agent)| scan known DNS                                                     | M1 primary data source; empty disables the primary path and forces local-only probes.                                                                                                |
-| `WORKSPACE_PATH` *(deprecated)*           | no                   | unset                                                              | **Retired** during the all-artefacts-under-`USER_DATA_PATH` migration. Logged with a warning when set; do not rely on it. See [UPGRADING.md](UPGRADING.md).                            |
+| `WORKSPACE_PATH` *(legacy)*               | no                   | unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [UPGRADING.md](UPGRADING.md).                            |
 | `INFERENCE_OPTIMIZER_SESSION_DIR` *(deprecated)* | no            | unset                                                              | **Retired** — replaced by `USER_DATA_PATH`. **No longer read.**                                                                                                                       |
 
 ---
 
-## 3. Auth-proxy
+## 3. LLM gateway credentials
+
+> The local auth-proxy has been removed. LLM calls now go directly to the
+> upstream gateway; any leftover `127.0.0.1:4002` URL is stale and is
+> force-rewritten to the gateway at preflight. `AUTH_PROXY_PORT` is no
+> longer read.
 
 | Variable           | Required | Default | Description                                                                                                  |
 |--------------------|----------|---------|--------------------------------------------------------------------------------------------------------------|
-| `AUTH_PROXY_PORT`  | no       | `4002`  | Bind port for the OOB auth-proxy on `127.0.0.1`. Change only if 4002 is occupied.                            |
-| `OOB_API_KEY`      | no       | inherits `SAFE_API_KEY` | Internal — only used inside the auth-proxy subprocess.                                              |
+| `OOB_API_KEY`      | no       | inherits `SAFE_API_KEY` | API key forwarded to OOB / Ray runtime (preflight, kernel-agent tools). Not tied to the removed auth-proxy. |
 
 ---
 
@@ -118,9 +122,7 @@ comparing gains with normal sessions.
 
 | Variable                                          | Default                                                                | Description                                                                                                                                            |
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`      | union with `/sgl-workspace/{aiter,sglang,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/agents/kernel/scripts/install.sh`'s probe step.   |
-| `INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS`          | derived from sglang source                                             | Path override for the file used to enumerate sglang server flags.                                                                                       |
-| `INFERENCE_OPTIMIZER_VLLM_ARG_UTILS`              | derived from vllm source                                               | Path override for the file used to enumerate vllm CLI flags.                                                                                            |
+| `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`      | union with `/sgl-workspace/{aiter,sglang,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (via `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
 | `INFERENCE_OPTIMIZER_RESCUE_PATHS`                | unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
 | `INFERENCE_OPTIMIZER_AITER_JIT_DIR`               | aiter default                                                          | Override the aiter JIT cache root for cold-cap sizing.                                                                                                  |
 | `INFERENCE_OPTIMIZER_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
@@ -144,14 +146,13 @@ comparing gains with normal sessions.
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | unset                  | Set to `1` to forcibly disable the LLM RCA engine even when credentials are present.                                                 |
 | `ROBUSTNESS_AGENT_ENABLE_HARD_ACTIONS`| unset                  | M4 milestone gate for scheduling-police hard actions (`prune_branch`, `kill_task`, ...). Default keeps them disabled.                |
 | `LLM_MODEL`                           | `claude-opus-4-7`      | RCA model name for robustness-agent.                                                                                                 |
-| `ROBUST_ANALYZER_URL`                 | scan known DNS         | Optional hybrid-provider endpoint used by robustness-agent local/server data-source discovery.                                      |
 
 ---
 
 ## 8. Session / observability hand-off
 
-These are read by `manifest.py` and `breakdown/collectors.py` to
-populate `session_breakdown.json` for downstream consumers
+These are read by `session/manifest.py` and the `breakdown/collectors/`
+package to populate `session_breakdown.json` for downstream consumers
 (`claw-stats-service`).
 
 | Variable          | Description                                                                                |
@@ -254,11 +255,10 @@ window (`MODEL_CONTEXT_WINDOWS`; 200k default), scaled by the fractions below.
 These are read by `os.environ` somewhere in the codebase but are
 internal-only — do not set them by hand:
 
-* `_KERNEL_AGENT_ROOT_ENV` — internal CLI-only handoff to the kernel
-  subprocess.
-* `WORKSPACE_PATH` — kept for legacy launcher warnings only; never
-  read for behaviour.
-* `ANTHROPIC_BASE_URL` — set by the auth-proxy at process launch.
+* `HYPERLOOM_KERNEL_AGENT_ROOT` — internal CLI-only handoff to the
+  kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
+* `ANTHROPIC_BASE_URL` — set by preflight / split-gateway wiring at
+  process launch.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol — internal toggles for
   the test suite.
 
@@ -269,8 +269,8 @@ detail rather than something you should tune.
 
 ## See also
 
-* [ENV_AND_AUTH.md](ENV_AND_AUTH.md) — credential precedence and the
-  auth-proxy in detail.
+* [ENV_AND_AUTH.md](ENV_AND_AUTH.md) — credential precedence and direct
+  upstream gateway wiring.
 * [KB_GUIDE.md](KB_GUIDE.md) — local recipe KB and optional Cortex KB setup.
 * [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — symptom → variable
   reverse-lookup for common failures.

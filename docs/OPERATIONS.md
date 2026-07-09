@@ -7,7 +7,7 @@
 > AMD owns operations; this document does **not** apply.
 
 This page covers Kubernetes sizing, `USER_DATA_PATH` backup and
-retention, the auth-proxy supervisor, log/metrics surface, and a
+retention, LLM gateway credentials, log/metrics surface, and a
 disaster-recovery runbook.
 
 For application-level configuration see
@@ -101,15 +101,15 @@ Notes:
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network
   storage (NFS, WekaFS) works but adds latency to the per-tick
   state.json reads.
-* The auth-proxy binds on `127.0.0.1:4002` inside the pod — no Service
-  / NetworkPolicy required.
+* LLM calls go directly to the upstream gateway (no local auth-proxy) —
+  no in-pod Service / NetworkPolicy required for LLM traffic.
 
 ### Lifecycle
 
 | Phase           | Trigger                                            | Action                                                  |
 |-----------------|----------------------------------------------------|---------------------------------------------------------|
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
-| Heartbeat       | Every 60 s                                         | Coordinator writes `state.json.tmp` → atomic rename inside `$SESSION_DIR`. |
+| State checkpoint | Each tick / state change (`--tick-interval-sec`, default `0.0`) | Coordinator atomically writes `state.json` (temp `.state-*.json` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
 | Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume` / `--resume-from`; reads `manifest.json` + `state.json`. |
 
@@ -124,7 +124,7 @@ Notes:
 | Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
 | `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | **Permanent.** This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
 | Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | **Permanent.** Backup before cleanup of `USER_DATA_PATH`.                                                |
-| Robustness findings                     | `$USER_DATA_PATH/agents/robustness/findings/*.jsonl`              | 30 days minimum; longer if your incident process needs it.                                               |
+| Robustness findings                     | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`      | 30 days minimum; longer if your incident process needs it.                                               |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |
 | Per-attempt artefacts (full)            | `$SESSION_DIR/kernel-agent/runs/<session_id>/{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                                  |
 
@@ -142,26 +142,23 @@ find "$USER_DATA_PATH" -mindepth 2 -maxdepth 2 -type d -name '20??????T??????Z' 
 
 ---
 
-## 4. Auth-proxy supervision
+## 4. LLM gateway credentials
 
-The OOB auth-proxy (`127.0.0.1:4002`) is a single Python child of the
-kernel-agent. If it dies (OOM, port conflict, stale tcp state),
-**every** subsequent `claude` / `codex` CLI call returns HTTP 401.
+Hyperloom no longer runs a local auth-proxy. The `claude` / `codex`
+CLIs and sub-agents call the upstream gateway directly, authenticated
+by the resolved API keys (`SAFE_API_KEY` / `CURSOR_API_KEY` / provider
+keys). If those keys are missing or expired, LLM calls return HTTP 401.
 
-`src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh` is idempotent and safe to
-run from a sidecar / liveness probe:
+Recovery when calls start returning 401:
 
-```bash
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"
-```
-
-It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is
-open but the probe times out (stuck proxy), it kills the existing
-`auth_proxy.py` process and relaunches. If `:4002` is healthy, it
-noops.
-
-Recommended liveness probe: every 60 s, exit non-zero if
-`curl --max-time 2 http://127.0.0.1:4002/healthz` fails.
+1. Confirm the gateway credentials in `Secret: hyperloom-creds` are
+   valid and mounted into the pod.
+2. Re-run preflight (any `inference_optimizer` CLI command) or
+   `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`
+   to refresh the resolved gateway aliases.
+3. Clear any stale legacy proxy URL (`127.0.0.1:4002`) left in
+   `~/.claude/config.json`; preflight force-rewrites it to the upstream
+   gateway, but a read-only config can pin the dead endpoint.
 
 ---
 
@@ -174,8 +171,8 @@ is JSONL-on-disk + (optional) downstream collectors.
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
 | Per-tick Coordinator state     | `$SESSION_DIR/state.json`                                                        | JSON, snapshot  |
 | Session breakdown (final)      | `$SESSION_DIR/session_breakdown.json`                                            | JSON, snapshot  |
-| Robustness findings            | `$USER_DATA_PATH/agents/robustness/findings/<session>.jsonl`                     | JSONL, append   |
-| Critic verdicts                | `$USER_DATA_PATH/critic-session-memory/<session>/emit-*.json`                    | JSON per call   |
+| Robustness findings            | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`                     | JSONL, append   |
+| Critic decisions               | `$SESSION_DIR/critic-session-memory/<session_id>/decisions.jsonl`                | JSONL, append   |
 | Kernel-opt attempts            | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl`        | JSONL, append   |
 | Inference server logs          | `$SESSION_DIR/runs/<action>/<task>/server.log`                                  | text            |
 
@@ -199,8 +196,8 @@ ingest it whole on session end.
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
    (if any) is re-played from scratch.
-4. Robustness writes a fresh `findings/<session>.jsonl` segment; old
-   segments remain.
+4. Robustness writes a fresh `agents/robustness/findings/<session_id>.jsonl`
+   segment; old segments remain.
 
 ### Scenario B: PV lost or corrupted
 
@@ -209,10 +206,14 @@ ingest it whole on session end.
 2. KB is unaffected if `HYPERLOOM_LOCAL_KB_ROOT` lives on a different
    volume (recommended). The next run gets the same local recipe store.
 
-### Scenario C: auth-proxy stuck
+### Scenario C: LLM calls return 401
 
-1. Liveness probe should already have caught this.
-2. Manual: `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"`.
+1. Verify the gateway credentials (`SAFE_API_KEY` / `CURSOR_API_KEY`)
+   are present and valid in the pod.
+2. Re-run preflight or
+   `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`
+   to refresh resolved gateway aliases; clear any stale
+   `127.0.0.1:4002` URL in `~/.claude/config.json`.
 3. If 401s persist, rotate `SAFE_API_KEY` (rare — the key is
    long-lived) and re-run.
 
@@ -259,7 +260,7 @@ Before going to production with self-hosted Hyperloom:
   storage with daily backup.
 - [ ] `SAFE_API_KEY` rotation runbook (key is long-lived; rotation
   requires only re-export + `install.sh` re-run).
-- [ ] Liveness probe for auth-proxy on `127.0.0.1:4002`.
+- [ ] Gateway credential validity monitoring (401 alerting on LLM calls).
 - [ ] Daily ship of `session_breakdown.json` to long-term storage.
 - [ ] Weekly prune of `USER_DATA_PATH` for completed sessions
   > 14 days old.

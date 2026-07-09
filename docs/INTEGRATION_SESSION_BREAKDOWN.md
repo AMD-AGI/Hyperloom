@@ -5,7 +5,7 @@ the `inference_optimizer` runtime (producer) and any downstream
 consumer (`claw-stats-service`, results service, notebooks, custom
 dashboards). One file per session, written to
 `$SESSION_DIR/session_breakdown.json` at session end (and on
-operator demand via [`scripts/dump_session_breakdown.py`](OPERATOR_SCRIPTS.md)).
+operator demand via [`hyperloom.inference_optimizer.tools.dump_session_breakdown`](OPERATOR_SCRIPTS.md)).
 
 The authoritative source of truth for the wire shape is
 [`src/hyperloom/inference_optimizer/breakdown/schema.py`](../src/hyperloom/inference_optimizer/breakdown/schema.py).
@@ -395,7 +395,7 @@ investigation than the breakdown summarises.
     "sweep_reports": ["runs/sweep/grid.json"],
     "kernel_attempts": ["kernel-agent/runs/sess-20260517-1130/optimization_attempts.jsonl"],
     "critic_workdir": "critic-workdir",
-    "robustness_workdir": "agents/robustness"
+    "robustness_workdir": "robustness-workdir"
   }
 }
 ```
@@ -408,7 +408,8 @@ TypedDict shapes.)
 ## 19. Producing the file
 
 * **Live, in-session:** the Coordinator emits the `session_breakdown`
-  action and the `cli.py` finally-block as a safety net.
+  action and the `hyperloom.inference_optimizer.cli` finally-block as a
+  safety net.
 * **Offline / historical:** see
   [`OPERATOR_SCRIPTS.md`](OPERATOR_SCRIPTS.md):
   ```bash

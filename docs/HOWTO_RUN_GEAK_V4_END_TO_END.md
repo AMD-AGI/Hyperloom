@@ -99,8 +99,8 @@ rocm-smi --showuse | grep -i 'GPU use'
 rocm-smi --showmeminfo vram | grep -i 'Used'
 pgrep -af 'hipcc|ninja|/opt/venv/bin/geak'   # expect empty
 ```
-> `run_gvf.sh` does this automatically at the top of every run (skip with
-> `SKIP_PRERUN_CLEANUP=1`).
+> Run this cleanup manually at the top of every run (see §2 for the full
+> command).
 >
 > **⚠ Single-tenant only.** This blind `pkill -f` sweep is safe ONLY on an
 > experiment box you own end-to-end. It is **not** the fix for the orphaned-probe
@@ -142,9 +142,9 @@ captured shapes, source paths, dedup'd task groups) and writes
 an apples-to-apples optimizer on identical info.
 
 ```bash
-cd /wekafs/sapmajum/PROJECTS/OUTS/mixtral_autonomous
+cd <clone>/HL_fresh
 
-python3 geak_vs_forge_driver.py \
+python3 src/hyperloom/agents/kernel/tools/geak_vs_forge_driver.py \
   --analysis  <.../tracelens/analysis.md> \
   --csv-dir   <.../tracelens/perf_report_csvs> \
   --framework sglang \
@@ -353,8 +353,7 @@ analysis (the normal case here, and required for a fair v3-vs-v4 comparison).
   `hipcc -c /dev/null` / `ccache hipcc` / `ninja` / `clang++` children reparented to
   PID 1 that hold the aiter JIT build lock; the next run's attention sits at the
   preprocess soft cap "doing nothing" for ~1h. It is NOT a slow compile — kill the
-  probe children (see §2) and harness-init resumes immediately. `run_gvf.sh` now
-  does this automatically.
+  probe children (see §2) and harness-init resumes immediately.
 - **Editing budgets** → don't. Use GEAK's default wall-clock budget unless you
   have a specific reason; document it if you ever change it.
 - **Leaking an op_test into the prompt** → GEAK is PROMPT-ONLY; never pass a

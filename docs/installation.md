@@ -27,7 +27,7 @@ The fastest path, with no local GPU setup:
 ## Option 2 — Local Mode (Cursor)
 
 Local Mode runs Hyperloom in a remote AMD GPU environment, then connects Cursor
-to it. Complete the three steps in order:
+to it. Complete the four steps in order:
 
 1. **Prepare the GPU environment** — an MI300X/MI308X/MI325X/MI355X machine running an
    SGLang or vLLM ROCm image (see [Compatibility Matrix](compatibility.md)).
@@ -63,8 +63,8 @@ and the [Auth & Environment Guide](ENV_AND_AUTH.md).
 ## Optional — quantization (AMD Quark)
 
 The optional `--quantize` prelude requires an [AMD Quark](https://quark.docs.amd.com/)
-checkout at runtime. Set `QUARK_ROOT` to point at it. See the README's
-quantization section for details.
+checkout at runtime. Set `QUARK_ROOT` to point at it. See
+[Quantization (AMD Quark)](QUANTIZATION_QUARK.md) for details.
 
 ## Related guides
 

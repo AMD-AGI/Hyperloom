@@ -89,6 +89,8 @@ AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform 
 
 After setup, open the Hyperloom workspace printed by `local_setup.sh` in Cursor, then paste the generated prompt template into Cursor Chat. Fill in the model path and adjust the other workload parameters before sending.
 
+> **Note.** `local_setup.sh` only checks out dependency code and writes `local-setup.env.sh`; it does not install the runtime. Before the first launch, also run `bash src/hyperloom/inference_optimizer/assets/install.sh` and source `kernel-agent.env.sh` in the same shell (see [installation.md](installation.md) Step 4 / SKILL.md Step 1).
+
 `local_setup.sh` prints something like this when it finishes:
 
 ````text

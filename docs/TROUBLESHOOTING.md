@@ -10,7 +10,7 @@ upstream SKILL file for the component you're touching:
 
 ---
 
-## Auth-proxy 401
+## Gateway 401
 
 **Symptom.** A tool exits with one of:
 
@@ -19,30 +19,25 @@ upstream SKILL file for the component you're touching:
 * `Claude SDK exit code 1`
 * `OpenAI SDK: AuthenticationError`
 
-**Cause.** The OOB auth-proxy on `127.0.0.1:4002` is down or stuck.
-The proxy is what rewrites the upstream `x-api-key` header to
-`Authorization: Bearer <SAFE_API_KEY>` for the AMD primus-safe
-gateway. Without it, every `claude` / `codex` CLI request 401s.
+**Cause.** The `claude` / `codex` CLIs and sub-agents call the upstream
+gateway directly (the local auth-proxy was removed). A 401 means the
+resolved gateway credentials are missing/expired, or a stale legacy
+proxy URL (`127.0.0.1:4002`) is still pinned in the CLI config.
 
-**Fix.** Re-run the supervisor (idempotent — noop if healthy):
+**Fix.**
 
-```bash
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"
-```
+1. Verify `SAFE_API_KEY` is set: `echo "$SAFE_API_KEY"`.
+2. Re-run preflight or the installer to refresh resolved gateway
+   aliases:
+   ```bash
+   bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+   ```
+3. Clear any stale `127.0.0.1:4002` endpoint from `~/.claude/config.json`
+   (preflight force-rewrites it to the gateway, but a read-only config
+   can pin the dead URL).
 
-It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is
-open but the probe times out (stuck proxy), it kills the existing
-`auth_proxy.py` process and relaunches.
-
-**Still failing?**
-
-* Verify `SAFE_API_KEY` is set: `echo "$SAFE_API_KEY"`.
-* Verify nothing else is on port 4002:
-  `ss -ltnp | grep :4002`.
-* Override the port if 4002 is occupied:
-  `AUTH_PROXY_PORT=4012 bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"`.
-
-See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §5 for proxy internals.
+See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §5 for direct gateway wiring
+and 401 recovery.
 
 ---
 
@@ -255,7 +250,7 @@ fast once `/tmp` is reaped.
 
 ---
 
-## Cursor backend gets HTTP 401 (separate from auth-proxy)
+## Cursor backend gets HTTP 401 (separate from the AMD gateway creds)
 
 **Symptom.** The OOB `cursor` backend specifically returns 401 even
 though `claude` / `codex` work fine.
@@ -293,10 +288,12 @@ original session, or the session never reached the point of writing
 
 **Fix.**
 
-1. Verify env:
+1. Verify env and locate the real session dir (the default
+   `per_model_ts` layout nests it at
+   `$USER_DATA_PATH/<model>/<UTC_ts>/`, not the workspace root):
    ```bash
    echo "$USER_DATA_PATH"
-   ls "$USER_DATA_PATH"/{manifest,state}.json
+   find "$USER_DATA_PATH" -name manifest.json
    ```
 2. If you used a custom path the first time, re-export it before
    resuming:
@@ -385,14 +382,18 @@ The harvest step scans these on each tick and copies any orphaned
 Three commands give you a fast situation report:
 
 ```bash
+# Resolve the active session dir first (from launch-info or a running shell).
+# Defaults to INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR when set.
+SD="${INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR:-$SESSION_DIR}"
+
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.tools.event_counts
+python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
 
 # 2. What was the last action's outcome?
-jq '.optimization_stack | last' "$SESSION_DIR/state.json"
+jq '.optimization_stack | last' "$SD/state.json"
 
 # 3. Any Robustness findings since the last tick?
-tail -n 5 "$USER_DATA_PATH"/agents/robustness/findings/*.jsonl 2>/dev/null
+tail -n 5 "$SD"/agents/robustness/findings/*.jsonl 2>/dev/null
 ```
 
 See [`OPERATOR_SCRIPTS.md`](OPERATOR_SCRIPTS.md) for the full set of

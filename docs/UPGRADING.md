@@ -122,12 +122,13 @@ handler as `trace_report_path` and forwarded to the lifecycle as
 `$SESSION_DIR/kernel-agent/runs/<session_id>/tracelens/analysis.md`).
 The `--compat-report-path` argument was removed.
 
-### Optional: enable PMC roofline
+### Optional: roofline analysis
 
-New in 0.6: `HYPERLOOM_ENABLE_PMC_ROOFLINE=1` layers Magpie PMC
-roofline analysis on top of TraceLens. Useful for compute-bound
-workloads; adds ~3 minutes per profile call. See
-[`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md) §7.
+Roofline analysis (roofline → trace_analyze → TraceLens) is controlled
+by the `--enable-roofline` CLI flag (on by default). Useful for
+compute-bound workloads; adds time per profile call. Diffusion runs
+emit a `diffusion_roofline.json` sidecar under the session's
+`kernel-agent/runs/...` tree.
 
 ### Optional: opt into the Cursor backend
 
@@ -167,7 +168,7 @@ For any minor / patch upgrade:
 1. Pull the new Hyperloom revision into `$REPO_ROOT`.
 2. Re-run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
-   refreshes the auth-proxy, and regenerates `kernel-agent.env.sh`.
+   regenerates gateway aliases, and rewrites `kernel-agent.env.sh`.
 3. Re-source the env file:
    ```bash
    . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"

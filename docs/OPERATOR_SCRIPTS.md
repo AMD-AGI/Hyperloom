@@ -15,7 +15,7 @@ All scripts respect the `$USER_DATA_PATH` env (default
 
 Produce a `session_breakdown.json` from a session directory. Same
 builder as the live Coordinator `session_breakdown` action and the
-`cli.py` finally-block safety net.
+`hyperloom.inference_optimizer.cli` finally-block safety net.
 
 **Use this when:**
 
@@ -82,7 +82,7 @@ python -m hyperloom.inference_optimizer.tools.dump_session_report \
 
 # With LLM-polished prose (OpenAI-compatible endpoint):
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
-OPENAI_BASE_URL=http://127.0.0.1:4002/v1 \
+OPENAI_BASE_URL="$OPENAI_BASE_URL" \
 OPENAI_API_KEY=... \
 python -m hyperloom.inference_optimizer.tools.dump_session_report \
     --input  /wekafs/.../session_breakdown.json \
@@ -154,10 +154,10 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 
 ## 4. A/B helper scripts (advanced)
 
-The same scripts directory also contains:
+The `src/hyperloom/inference_optimizer/experiments/` directory also contains:
 
-* `ab_torch_compile_kernels.py`
-* `ab_torch_compile_magpie.py`
+* `ab_torch_compile_kernels.py` (`python -m hyperloom.inference_optimizer.experiments.ab_torch_compile_kernels`)
+* `ab_torch_compile_magpie.py` (`python -m hyperloom.inference_optimizer.experiments.ab_torch_compile_magpie`)
 
 These are internal A/B harnesses used during torch.compile
 investigation work; they are not part of the customer-facing workflow
