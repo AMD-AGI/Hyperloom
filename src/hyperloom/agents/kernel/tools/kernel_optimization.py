@@ -467,7 +467,7 @@ def parse_backends(backends: str) -> list[str]:
 
     Args:
         backends (str): Comma-separated backend names (case-insensitive),
-            e.g. ``"geak,claude"``.
+            e.g. ``"geak_v3,claude"``.
 
     Returns:
         list[str]: The normalized (lowercased, trimmed) backend names in the
@@ -475,23 +475,23 @@ def parse_backends(backends: str) -> list[str]:
 
     Raises:
         ValueError: When any backend is outside the allowed set
-            (``geak``, ``claude``, ``codex``, ``cursor``).
+            (``geak_v3``, ``claude``, ``codex``, ``cursor``).
     """
     raw = str(backends or "").strip()
     # Defense-in-depth (Hyperloom#601): an upstream dispatch slip can hand us
-    # the repr() of a Python list (e.g. "['geak']" or "['geak', 'claude']")
+    # the repr() of a Python list (e.g. "['geak_v3']" or "['geak_v3', 'claude']")
     # instead of a bare comma-joined string. Recover the inner tokens so a
     # serialization mistake at the call site does not reject an otherwise-valid
-    # backend with the self-contradictory "unsupported backend(s): ['geak']".
+    # backend with the self-contradictory "unsupported backend(s): ['geak_v3']".
     # Genuinely-invalid names inside the list are still rejected below.
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1].replace("'", "").replace('"', "")
     parsed = [b.strip().lower() for b in raw.split(",") if b.strip()]
     # `forge` is the Kernel-Forge autonomous-loop backend; it is first in the
-    # default ladder (choose_backends) and falls through to geak/claude/codex
+    # default ladder (choose_backends) and falls through to geak_v3/claude/codex
     # when it skips a non-triton candidate or misses a KEEP. See
     # claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md.
-    allowed = {"geak", "claude", "codex", "cursor", "forge"}
+    allowed = {"geak_v3", "claude", "codex", "cursor", "forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
         raise ValueError(
@@ -540,13 +540,13 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if not user_backends:
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
-            # 'perfskills' is a phase-level delegate owned by the coordinator,
-            # not a per-kernel backend; drop it so a perfskills-only order does
-            # not crash parse_backends here (this subprocess only runs on the
-            # native per-kernel path, which the coordinator skips for
-            # PerfSkills). An empty remainder falls back to the default ladder.
+            # 'geak' is the whole-pipeline e2e phase-level delegate owned by the
+            # coordinator, not a per-kernel backend; drop it so a geak-only order
+            # does not crash parse_backends here (this subprocess only runs on the
+            # native per-kernel path, which the coordinator skips for the GEAK
+            # e2e optimizer). An empty remainder falls back to the default ladder.
             env_tokens = ",".join(
-                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "perfskills"
+                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak"
             )
             if env_tokens:
                 user_backends = parse_backends(env_tokens)
@@ -566,7 +566,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         # hidden fallbacks: KERNEL_OPT_BACKEND_ORDER=forge means strict
         # forge-only. Operators that want GEAK fallback must include it in the
         # env/order explicitly (e.g. forge,geak).
-        if "geak" in user_backends and not benchmark_available:
+        if "geak_v3" in user_backends and not benchmark_available:
             notes["geak_without_benchmark"] = True
         return user_backends, notes
 
@@ -579,7 +579,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     # CURSOR_API_KEY is unset (explicit --backends / env still wins). Without a
     # benchmark GEAK still attempts but flags geak_without_benchmark=True so KEEP
     # gates know confidence is reduced.
-    selected = ["forge", "geak", "claude", "codex"]
+    selected = ["forge", "geak_v3", "claude", "codex"]
     if cursor_key_present:
         selected.append("cursor")
     if not benchmark_available:
@@ -1712,7 +1712,7 @@ def build_prompt(
             "the one matching the symbol above; preserve all other kernels verbatim.\n"
         )
     # Quote the per-backend wall-clock so GEAK's task-mode parser infers the right mode (>=120min→full).
-    if backend == "geak":
+    if backend == "geak_v3":
         # Default tracks $GEAK_RUN_MODE (quick->70, full->180); 180 matches GEAK's own
         # full-mode budget so the quoted wall-clock triggers full mode. The prior 130
         # killed GEAK before its deadline (see parallel_e2e_runner / _default_geak_budget_minutes).
@@ -1734,7 +1734,7 @@ def build_prompt(
     # harness, so do NOT surface it in the GEAK prompt: prompt = analysis + shapes +
     # workload config, GEAK figures out the rest. (Other backends still get it.)
     bench_block = ""
-    if bench_files and backend != "geak":
+    if bench_files and backend != "geak_v3":
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
         for b in bench_files[:8]:
             bench_block += f"- {b}\n"
@@ -2047,9 +2047,9 @@ def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
         prompt_file (Path): Prompt file whose stem names the run subdir.
 
     Returns:
-        Path: The created ``.../geak/<session_id>/<prompt_stem>`` directory.
+        Path: The created ``.../geak_v3/<session_id>/<prompt_stem>`` directory.
     """
-    out = _kernel_agent_root() / "geak" / session_id / prompt_file.stem
+    out = _kernel_agent_root() / "geak_v3" / session_id / prompt_file.stem
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -2834,7 +2834,7 @@ def invoke_backend(
     # GEAK needs more wall-clock than claude/codex; full mode -> 180min (3h) matches
     # GEAK's own budget so the subprocess timeout doesn't kill it mid-round before it
     # finalizes a deployable artifact (which would also skip the combined-E2E A/B).
-    if backend == "geak":
+    if backend == "geak_v3":
         _geak_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180.0
         budget_min = float(getattr(args, "geak_budget_min", 0) or _geak_default)
     else:
@@ -2884,7 +2884,7 @@ def invoke_backend(
     # (each backend will further scope its own out_dir below).
     _shared_out_dir = (
         _geak_output_dir(args.session_id, prompt_file)
-        if backend == "geak"
+        if backend == "geak_v3"
         else _forge_output_dir(args.session_id, prompt_file)
         if backend == "forge"
         else _oob_output_dir(args.session_id, prompt_file)
@@ -2896,7 +2896,7 @@ def invoke_backend(
     # --test-command -- doing so bypasses GEAK's preprocess and was the source of
     # the GEMM-flattened paged-attention harness. For GEAK, pass the raw
     # test_command (the op_test) and let GEAK figure it out: one path.
-    if common_test_command and backend != "geak":
+    if common_test_command and backend != "geak_v3":
         _harness_cmd = _try_generate_harness(
             common_test_command,
             candidate,
@@ -2919,7 +2919,7 @@ def invoke_backend(
         )
 
     try:
-        if backend == "geak":
+        if backend == "geak_v3":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
             # GEAK owns harness construction from the prompt; HL never passes
@@ -4307,7 +4307,7 @@ def build_verification(
     if (
         correctness_signal is None
         and best is not None
-        and best.get("backend") == "geak"
+        and best.get("backend") == "geak_v3"
         and measured
         and best_speedup >= 1.0
         and _trust_geak_correctness()

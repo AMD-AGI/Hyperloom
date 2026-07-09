@@ -251,7 +251,7 @@ class KernelAgentToolTests(unittest.TestCase):
         # Prefix match on `_PIP_FLAGS` allows future flag additions.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
         self.assertIn(
-            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"',
+            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_V3_ROOT}"',
             install_text,
         )
         # GEAK v3.2.1 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
@@ -273,7 +273,7 @@ class KernelAgentToolTests(unittest.TestCase):
             "python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\",
             install_text,
         )
-        self.assertIn('"${GEAK_ROOT}/mcp_tools/${_geak_mcp}"', install_text)
+        self.assertIn('"${GEAK_V3_ROOT}/mcp_tools/${_geak_mcp}"', install_text)
         # Auto-detect block: cuda stays the preferred default, env var still overrides.
         self.assertIn('if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)
@@ -320,10 +320,10 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
         self.assertIn('git -C "$_tl_tmp" checkout -q FETCH_HEAD', install_text)
         self.assertIn('mv "$_tl_tmp" "$TRACELENS_ROOT"', install_text)
-        # PerfSkills (GEAK_v4) existing-checkout path must realign to PERFSKILLS_REF,
-        # mirroring ensure_geak — not just log "already present".
-        self.assertIn('git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"', install_text)
-        self.assertIn('git -C "${PERFSKILLS_ROOT}" checkout -q --force FETCH_HEAD', install_text)
+        # Per-kernel GEAK (geak_v3) existing-checkout path must realign to
+        # GEAK_V3_REF (ensure_geak_v3) — not just log "already present".
+        self.assertIn('git -C "${GEAK_V3_ROOT}" fetch --depth 1 origin "$GEAK_V3_REF"', install_text)
+        self.assertIn('git -C "${GEAK_V3_ROOT}" checkout -q --force FETCH_HEAD', install_text)
         self.assertNotIn(
             'TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text
         )
@@ -464,10 +464,10 @@ class KernelAgentToolTests(unittest.TestCase):
 
             # Default ladder is Forge-GEAK-OOB: forge leads, then GEAK, then
             # the OOB backends (claude, codex; cursor is key-gated).
-            self.assertIn("geak", result["selected_backends"])
+            self.assertIn("geak_v3", result["selected_backends"])
             self.assertEqual(result["selected_backends"][0], "forge")
             self.assertEqual(
-                result["selected_backends"][:4], ["forge", "geak", "claude", "codex"]
+                result["selected_backends"][:4], ["forge", "geak_v3", "claude", "codex"]
             )
             # No bench → flagged for downstream verification gates.
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
@@ -510,7 +510,7 @@ class KernelAgentToolTests(unittest.TestCase):
                     "--session-id",
                     "s4",
                     "--backends",
-                    "geak",
+                    "geak_v3",
                     "--disable-rag",
                     "--disable-xs-memory",
                     "--dry-run",
@@ -518,7 +518,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            self.assertEqual(result["selected_backends"], ["geak"])
+            self.assertEqual(result["selected_backends"], ["geak_v3"])
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
             self.assertFalse(result["backend_selection"]["rag_enabled"])
             self.assertFalse(result["backend_selection"]["xs_memory_enabled"])
@@ -571,7 +571,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            self.assertIn("geak", result["selected_backends"])
+            self.assertIn("geak_v3", result["selected_backends"])
             self.assertEqual(result["proposal"]["decision"], "KEEP")
             self.assertIn("rag_hits", result)
             self.assertIn("xs_memory_hits", result)

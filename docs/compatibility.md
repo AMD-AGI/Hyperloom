@@ -22,12 +22,13 @@ These AMD Instinct GPUs are validated with Hyperloom:
 | GPU | Architecture | Status |
 |-----|--------------|--------|
 | AMD Instinct™ MI300X GPU | gfx942 | Supported |
+| AMD Instinct™ MI308X GPU | gfx942 | Supported |
 | AMD Instinct™ MI325X GPU | gfx942 | Supported |
 | AMD Instinct™ MI355X GPU | gfx950 | Supported |
 
 ```{note}
-MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom
-keeps the resolved GPU type distinct (`mi325x`), but Magpie benchmark
+MI308X and MI325X share the gfx942/CDNA3 runner family with MI300X. Hyperloom
+keeps the resolved GPU type distinct (`mi308x` / `mi325x`), but Magpie benchmark
 rendering reuses the MI300X runner scripts and image family unless a dedicated
 image is supplied.
 ```
@@ -40,6 +41,8 @@ These inference frameworks are supported:
 |-----------|--------------|--------|-------|
 | SGLang (ROCm) | 7.2.0 | Supported | Default framework |
 | vLLM (ROCm) | 7.2.0 | Supported | Do not mix frameworks within one session |
+| Atom (ROCm) | 7.2.0 | Supported | Single-node only (multi-node rejected by the IR-8 guard) |
+| xDiT (diffusion) | 7.2.0 | Supported | Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency `e2el_mean_ms` (ms). |
 
 ## Container images
 
@@ -50,9 +53,9 @@ inside Primus-SaFE.
 
 | Image | GPU |
 |-------|-----|
-| `primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix` | MI300X |
+| `primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix` | MI300X / MI308X / MI325X |
 | `primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix` | MI355X |
-| `vllm/vllm-openai-rocm:v0.19.0` | MI300X and MI355X |
+| `primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix` | MI300X / MI308X / MI325X / MI355X |
 
 Browse all available SGLang tags at
 [hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags).
@@ -66,6 +69,7 @@ These are the Hyperloom components:
 | TraceLens | <https://github.com/AMD-AGI/TraceLens> |
 | Magpie | <https://github.com/AMD-AGI/Magpie> |
 | IntelliKit | <https://github.com/AMDResearch/intellikit> |
+| KernelForge | <https://github.com/AMD-AGI/KernelForge> |
 | GEAK | <https://github.com/AMD-AGI/GEAK> |
-| AgentKernelArena |<https://github.com/AMD-AGI/AgentKernelArena> |
+| AgentKernelArena (optional; not in the default install / optimization loop) |<https://github.com/AMD-AGI/AgentKernelArena> |
 | AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |
