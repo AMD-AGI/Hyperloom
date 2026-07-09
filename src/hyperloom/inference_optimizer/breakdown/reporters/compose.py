@@ -67,6 +67,27 @@ __all__ = [
     "LLMClient",
     "ComposeResult",
     "render_session_report",
+    # Renderer submodules imported above only for their @register_renderer
+    # side effect; listed as deliberate re-exports so static analysis does
+    # not flag them as unused imports.
+    "_r_session",
+    "_r_workload",
+    "_r_baseline",
+    "_r_final",
+    "_r_capability_summary",
+    "_r_phase_timeline",
+    "_r_kernel_lifecycle",
+    "_r_kernel_profiling",
+    "_r_kernel_decision_path",
+    "_r_roofline",
+    "_r_invocations",
+    "_r_param_search",
+    "_r_decision_journal",
+    "_r_sweep",
+    "_r_critic_robustness",
+    "_r_attribution",
+    "_r_source_files",
+    "_r_data_provenance",
 ]
 
 

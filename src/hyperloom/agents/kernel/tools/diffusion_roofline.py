@@ -330,6 +330,7 @@ def assemble_report(
                 if recon:
                     report["reconciliation"] = recon
         except (KeyError, TypeError, ValueError):
+            # Optional reconciliation data missing/malformed; skip it.
             pass
     return report
 

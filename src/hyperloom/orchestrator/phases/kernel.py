@@ -35,8 +35,6 @@ from ..loop.coordinator_helpers import (  # noqa: F401 - re-exported for callers
     _resolve_serving_fidelity,
     _split_env_and_flags,
     effective_closing_grace_sec,
-    format_exc_brief,
-    serialize_verdict_advisory,
 )
 from .base import PhaseHandler
 
@@ -681,6 +679,7 @@ class KernelPhase(PhaseHandler):
                 try:
                     os.killpg(os.getpgid(p.pid), sig)
                 except (ProcessLookupError, PermissionError):
+                    # Process already exited; nothing to signal.
                     pass
 
             try:

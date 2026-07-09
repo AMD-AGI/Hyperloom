@@ -78,8 +78,7 @@ def test_roofline_pending_gate_hooks_removed():
             f"would silently re-introduce the "
             f"wait_for_auto_roofline gate."
         )
-    import hyperloom.orchestrator.loop.coordinator as coord_mod
-
+    from hyperloom.orchestrator.loop import coordinator as coord_mod
     assert not hasattr(coord_mod, "_ROOFLINE_GATED_ACTIONS")
 
 

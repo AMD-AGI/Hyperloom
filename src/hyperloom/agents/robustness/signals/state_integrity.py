@@ -23,7 +23,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..role.envelope import ROBUSTNESS_STATE_FIELDS  # noqa: F401  (audit ref)
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity

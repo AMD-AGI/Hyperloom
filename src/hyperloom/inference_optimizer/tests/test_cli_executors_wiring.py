@@ -18,9 +18,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
-import hyperloom.inference_optimizer.cli.executors as cli_executors
+from hyperloom.inference_optimizer.cli import executors as cli_executors
 from hyperloom.inference_optimizer.cli.executors import (
     _build_specialist_executor,
     _noop_prep,

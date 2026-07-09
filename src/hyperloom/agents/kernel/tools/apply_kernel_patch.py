@@ -1611,6 +1611,7 @@ def apply_kernel_patch(
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
+                # Best-effort backup restore; a filesystem error here is non-fatal.
                 pass
             return {
                 "status": "failed",
@@ -1666,6 +1667,7 @@ def apply_kernel_patch(
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
+                # Best-effort backup restore; a filesystem error here is non-fatal.
                 pass
             return {
                 "status": "failed",
@@ -1697,6 +1699,7 @@ def apply_kernel_patch(
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
+                # Best-effort backup restore; a filesystem error here is non-fatal.
                 pass
             if jit_build_backup.get("status") == "ok":
                 _restore_aiter_jit_build(jit_build_backup)

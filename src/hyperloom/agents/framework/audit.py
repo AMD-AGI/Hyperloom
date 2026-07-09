@@ -26,7 +26,6 @@ Per the plan's evidence rule, an ``already_*`` verdict is downgraded to
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +61,6 @@ _APPLICABILITIES = (
     "not_applicable",
     "needs_human_review",
 )
-
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
 
 def _signal_lines(lines: list[str]) -> list[str]:
     """Keep semantically meaningful lines (drop blanks / pure punctuation).

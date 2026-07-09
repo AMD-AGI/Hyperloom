@@ -76,25 +76,11 @@ ALLOWED_FILES: dict[str, str] = {
     # KB best_config arg handling moved with them.
     "src/hyperloom/orchestrator/loop/resume.py": "resume/replay collaborator carries the coordinator envelope-read surface",
     "src/hyperloom/orchestrator/loop/writeback.py": "writeback collaborator carries the KB best_config / recipe-attrs arg surface",
-    "src/hyperloom/orchestrator/loop/gating.py": "gating collaborator carries the sequence-denial envelope-read surface",
-    "src/hyperloom/orchestrator/loop/dispatcher.py": "dispatcher collaborator carries the delegate/dispatch envelope-read surface",
-    "src/hyperloom/orchestrator/loop/proposals.py": "proposals collaborator carries the KB recipe best_config arg surface",
-    "src/hyperloom/orchestrator/loop/advisory.py": "advisory collaborator carries the proposed-variant arg surface",
-    "src/hyperloom/orchestrator/loop/inline_actions.py": "inline-actions collaborator carries the inline delegate envelope-read surface",
-    "src/hyperloom/orchestrator/loop/conversation.py": "conversation collaborator carries the inbox/context envelope-read surface",
-    "src/hyperloom/orchestrator/loop/maintenance.py": "maintenance collaborator carries the checkpoint/observation arg surface",
-    # Coordinator phase-handler clusters live in collaborator objects; the
-    # read_extra_server_args envelope-read
+    # tree-reform.MD P2.2 3b-2: Coordinator phase-handler clusters live in
+    # collaborator objects; the read_extra_server_args envelope-read
     # comments / warm-recipe KB best_config arg handling moved with them.
-    "src/hyperloom/orchestrator/phases/machine.py": "phase-machine handler carries the cumulative-merge helper import",
     "src/hyperloom/orchestrator/phases/prelude.py": "prelude handler carries the warm-recipe KB best_config/extra_sglang_args read+merge surface",
-    "src/hyperloom/orchestrator/phases/sweep.py": "sweep handler carries the cumulative-merge helper import",
-    "src/hyperloom/orchestrator/phases/close.py": "close handler carries the cumulative-merge helper import",
-    "src/hyperloom/orchestrator/phases/internal.py": "internal-tasks handler carries the cumulative-merge helper import",
-    "src/hyperloom/orchestrator/phases/kernel_stack.py": "kernel-stack handler carries the cumulative-merge helper import",
-    "src/hyperloom/orchestrator/phases/kernel.py": "kernel handler carries the cumulative-merge helper import",
-    "src/hyperloom/orchestrator/phases/explore.py": "explore handler carries the cumulative-merge helper import",
-    "src/hyperloom/orchestrator/phases/framework.py": "framework handler carries the cumulative-merge helper import",
+    "src/hyperloom/orchestrator/phases/kernel.py": "kernel phase re-exports coordinator helper names for callers/tests",
     "src/hyperloom/orchestrator/loop/result_recorder.py":
         "result-recording / fact-synthesis methods extracted verbatim from "
         "coordinator.py (phase 1B); same read_extra_server_args envelope-read "

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 import types
@@ -12,7 +13,7 @@ if str(_CI_DIR) not in sys.path:
 
 if "requests" not in sys.modules:
     try:
-        import requests as _requests  # noqa: E402,F401
+        importlib.import_module("requests")
     except ModuleNotFoundError:
         requests_stub = types.ModuleType("requests")
         requests_stub.HTTPError = Exception

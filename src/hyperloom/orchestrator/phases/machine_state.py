@@ -1447,6 +1447,7 @@ def kernel_work_pending(state: Any) -> bool:
         if bool(getattr(state, "has_keep_pending_integrate", False)):
             return True
     except Exception:
+        # Optional capability probe; treat a failure as 'not available'.
         pass
 
     try:
@@ -1454,6 +1455,7 @@ def kernel_work_pending(state: Any) -> bool:
         if callable(untried_hot) and bool(untried_hot()):
             return True
     except Exception:
+        # Optional capability probe; treat a failure as 'not available'.
         pass
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}

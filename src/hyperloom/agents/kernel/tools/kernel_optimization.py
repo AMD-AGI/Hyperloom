@@ -2214,6 +2214,7 @@ def _extract_py_path(test_command: str) -> str | None:
             if part.endswith(".py"):
                 return part
     except ValueError:
+        # No matching path part; return None below.
         pass
     return None
 
@@ -2924,7 +2925,6 @@ def invoke_backend(
             out_dir = _geak_output_dir(args.session_id, prompt_file)
             # GEAK owns harness construction from the prompt; HL never passes
             # common_test_command to avoid stale op->test mappings.
-            is_multigpu = is_multigpu_common
             previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(

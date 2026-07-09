@@ -1604,6 +1604,7 @@ class BaselineExecutor:
                 if p.exists():
                     p.unlink()
             except OSError:
+                # Best-effort cleanup; a filesystem error here is non-fatal.
                 pass
         # Narrow trigger: only deep-clean when the port is occupied by a
         # zombie (healthy endpoint, no metadata). Avoids killing unrelated
@@ -1803,6 +1804,7 @@ class BaselineExecutor:
         try:
             stale_server_log.unlink()
         except FileNotFoundError:
+            # Stale log already absent; nothing to remove.
             pass
         except OSError as exc:
             log.warning(

@@ -266,11 +266,13 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
             try:
                 out["max_running_requests"] = int(tokens[i + 1])
             except ValueError:
+                # Non-integer CLI value; leave the field unset.
                 pass
         elif tok in ("--max-num-seqs",) and i + 1 < len(tokens):
             try:
                 out["max_num_seqs"] = int(tokens[i + 1])
             except ValueError:
+                # Non-integer CLI value; leave the field unset.
                 pass
         elif tok == "--enable-chunked-prefill":
             out["chunked_prefill_enabled"] = True

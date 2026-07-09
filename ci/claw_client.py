@@ -373,6 +373,7 @@ class ClawClient:
                     try:
                         on_event(event_data)
                     except Exception:
+                        # User callback errors must not break the SSE event stream.
                         pass
 
                 if event_type == "toolUsed":

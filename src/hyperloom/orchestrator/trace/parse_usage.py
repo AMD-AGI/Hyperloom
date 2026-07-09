@@ -360,6 +360,7 @@ def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
         if found is not None:
             return normalize_usage(found)
     except (json.JSONDecodeError, ValueError):
+        # Not valid JSON; fall through to line-by-line parsing.
         pass
     # Attempt 2: line-by-line (JSONL / mixed log output).
     last_usage: dict[str, Any] | None = None

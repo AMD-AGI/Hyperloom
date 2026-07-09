@@ -427,7 +427,7 @@ def test_vllm_concurrent_patchers_converge(fake_vllm_world):
     def worker() -> None:
         try:
             results.append(ensure_vllm_patched_for_tracelens())
-        except BaseException as exc:  # noqa: BLE001 - test-only
+        except Exception as exc:  # noqa: BLE001 - test-only
             errors.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(6)]

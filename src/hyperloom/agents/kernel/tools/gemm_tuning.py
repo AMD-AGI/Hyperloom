@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except SystemExit as exc:
         exit_code = exc.code if exc.code is not None else 0
-    except BaseException as exc:  # noqa: BLE001 - return structured failure
+    except Exception as exc:  # noqa: BLE001 - return structured failure
         _json_line(
             {
                 "status": "failed",

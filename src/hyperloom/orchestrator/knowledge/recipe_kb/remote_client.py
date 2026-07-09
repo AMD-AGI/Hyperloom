@@ -12,11 +12,7 @@ dispatcher can degrade to the local store with a single ``except``.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Mapping
-
-
-log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -33,13 +33,13 @@ def _make_response(body: dict[str, Any] | list[Any], *, status: int = 200):
     """Return a context-manager that mimics ``urllib.request.urlopen``."""
 
     class _Resp:
-        def __enter__(self_inner):
-            return self_inner
+        def __enter__(self):
+            return self
 
-        def __exit__(self_inner, *exc_info):
+        def __exit__(self, *exc_info):
             return False
 
-        def read(self_inner, *args, **kwargs):
+        def read(self, *args, **kwargs):
             return json.dumps(body).encode("utf-8")
 
     return _Resp()
@@ -232,7 +232,6 @@ def test_plane_pr_feed_warm_dispatches_to_repos(monkeypatch):
     )
 
     def _stub(req, **_kwargs):  # noqa: ARG001
-        url = req.full_url if hasattr(req, "full_url") else str(req)
         return _make_response(
             {
                 "items": [

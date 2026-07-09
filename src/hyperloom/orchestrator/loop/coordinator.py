@@ -2165,4 +2165,7 @@ __all__ = [
     "_parse_iso_unix",
     "_resolve_roofline_watermark_ratio",
     "effective_closing_grace_sec",
+    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in
+    # tests. Declared so the re-export is intentional, not a flagged import.
+    "SPECIALIST_FROM_AGENT_PREFIX",
 ]

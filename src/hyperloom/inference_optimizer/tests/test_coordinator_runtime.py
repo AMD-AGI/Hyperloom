@@ -806,7 +806,7 @@ async def test_promote_sweep_records_discarded_attempt(session_dir):
             "pareto_front": [{"name": "a"}, {"name": "b"}],
         }
         await c._promote_to_shared_state("sweep", result, task=task)
-        last = c.shared_state.last_sweep_attempt = c.shared_state.last_sweep
+        c.shared_state.last_sweep_attempt = c.shared_state.last_sweep
         assert c.shared_state.sweep_attempts[-1]["status"] == "succeeded"
         assert c.shared_state.sweep_attempts[-1]["decision"] == "discarded"
         assert c.shared_state.sweep_attempts[-1]["extras"]["grid_size"] == 4

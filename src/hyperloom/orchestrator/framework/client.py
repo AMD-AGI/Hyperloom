@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import os
 import shutil
 import subprocess
@@ -26,9 +25,6 @@ from typing import Any
 # ``hyperloom`` distribution, so the former IO-only ``except ImportError``
 # fallback copy of ``_FRAMEWORK_TO_REPO_URL`` is no longer needed.
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
-
-
-log = logging.getLogger(__name__)
 
 
 def _resolve_fa_binary() -> str | None:

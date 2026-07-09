@@ -28,7 +28,6 @@ concatenation under the session dir.
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,8 +36,6 @@ from .inferencex_client import DEFAULT_BASE_URL
 from .name_mapping import to_inferencex_name
 from .types import BaselinePoint, BaselineQuery, BaselineSummary
 
-
-log = logging.getLogger(__name__)
 
 LLM_AUTHORED_SOURCE = "llm_authored"
 

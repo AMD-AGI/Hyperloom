@@ -1194,10 +1194,12 @@ class CriticAgentBackend:
         try:
             acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Malformed usage value; skip this token count.
             pass
         try:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Malformed usage value; skip this token count.
             pass
 
     def set_trace_context(
