@@ -40,7 +40,7 @@ FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/QUICKSTART_LOCAL_MODE.md (SGLang v0.5.12,
+# Framework versions track docs/compatibility.md (SGLang v0.5.12,
 # ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
 # v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
 # is the nearest published ROCm 7.2 wheel. AITER_REF pins ROCm/aiter to a
