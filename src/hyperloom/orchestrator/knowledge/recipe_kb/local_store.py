@@ -176,6 +176,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         try:
             tmp.unlink()
         except OSError:
+            # Temp file already gone; re-raise the original write error below.
             pass
         raise
 
@@ -318,6 +319,7 @@ class _CidLock:
                 try:
                     os.close(self._fd)
                 except OSError:
+                    # FD already closed; nothing to release.
                     pass
                 self._fd = None
         self._mutex.release()

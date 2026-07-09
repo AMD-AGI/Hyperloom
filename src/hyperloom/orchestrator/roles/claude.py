@@ -213,7 +213,6 @@ class ClaudeBackend:
             except BackendError:
                 if self.sdk_query_factory is None or self.sdk_options_cls is None:
                     raise
-                mod = None
             else:
                 if self.sdk_query_factory is None:
                     self.sdk_query_factory = query
