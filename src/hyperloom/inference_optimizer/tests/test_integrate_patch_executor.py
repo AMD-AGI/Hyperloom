@@ -117,8 +117,8 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# 1. Patch path resolution
-# G2 — force RUN_EVAL for framework-authored source patches (only with a baseline)
+# Patch path resolution.
+# Force RUN_EVAL for framework-authored source patches (only with a baseline).
 def test_framework_run_eval_envs_forces_for_authored_with_baseline():
     assert IntegratePatchExecutor._framework_run_eval_envs(
         {"framework_agent_authoring": True, "accuracy_baseline": 0.8}
@@ -130,7 +130,7 @@ def test_framework_run_eval_envs_forces_for_authored_with_baseline():
 
 def test_framework_run_eval_envs_no_force_without_baseline():
     # baseline eval never produced a score -> nothing to gate against -> don't
-    # force eval on the candidate (matches the framework path / G1 degrade).
+    # force eval on the candidate (matches the framework degradation path).
     assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
     assert (
         IntegratePatchExecutor._framework_run_eval_envs(
@@ -764,7 +764,7 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# 4c. Enablement environment-setup replay (Q3): allowlist + resolve + runner.
+# Enablement environment-setup replay: allowlist + resolve + runner.
 @pytest.mark.parametrize(
     "cmd",
     [

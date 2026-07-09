@@ -19,9 +19,8 @@ import shlex
 # anymore after the .preflight split) because tests patch the stdlib module
 # singletons via ``cli.shutil.which`` / ``cli.subprocess.run`` /
 # ``"hyperloom.inference_optimizer.cli.subprocess.run"``; that attribute path
-# must keep resolving through this package (tree-reform-lessons.MD §2.3:
-# stdlib module patches are global and survive relocation, but only if the
-# ``cli.<module>`` attribute itself still exists).
+# must keep resolving through this package because stdlib module patches are
+# global and only work here if the ``cli.<module>`` attribute itself exists.
 import shutil  # noqa: F401 - re-exported for callers/tests
 import subprocess  # noqa: F401 - re-exported for callers/tests
 import sys
@@ -130,8 +129,8 @@ from hyperloom.orchestrator.actions.executors._aiter_jit import (
     clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
 )
 
-# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
-# re-exported here so the module namespace + monkeypatch surface is intact.
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from .credentials import (
     _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
     _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
@@ -236,9 +235,9 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-# tree-reform.MD P2.4 follow-up: _RetiredFlag / _build_parser (+ its 6 purely
-# computational, never-monkeypatched helpers) live in .parser; re-exported
-# here so the module namespace is unchanged for callers/tests.
+# _RetiredFlag / _build_parser (+ its purely computational helpers) live in
+# .parser; re-exported here so the module namespace is unchanged for
+# callers/tests.
 from .parser import (  # noqa: F401 - re-exported for callers/tests
     _RetiredFlag as _RetiredFlag,
     _build_parser as _build_parser,
@@ -249,9 +248,9 @@ from .parser import (  # noqa: F401 - re-exported for callers/tests
     _parse_conc_values as _parse_conc_values,
     _positive_int_arg as _positive_int_arg,
 )
-# tree-reform.MD P2.4 follow-up: the _preflight cluster (env-hygiene / SDK
-# install / TraceLens-CLI gate / diagnostics) lives in .preflight; re-exported
-# here so the module namespace + monkeypatch surface is intact. See
+# The _preflight cluster (env-hygiene / SDK install / TraceLens-CLI gate /
+# diagnostics) lives in .preflight; re-exported here so the module namespace +
+# monkeypatch surface is intact. See
 # preflight.py's module docstring for why _load_dotenv_fallback /
 # _load_kernel_agent_env_fallback / _clone_inferencex use lazy
 # package-qualified lookups internally instead of bare-name calls.
@@ -1547,7 +1546,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
         prior_crash = state.crash_count
 
-        # Issue-G: target_reached is an intentional terminal state (SKILL Run-time signals);
+        # target_reached is an intentional terminal state;
         # require --force-resume to push past it. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
         force_resume = bool(getattr(args, "force_resume", False))
         gated_terminal = {"target_reached"}
@@ -2118,11 +2117,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
-        # Drop the single-optimizer session lock (issue #592) once the
+        # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
         session_lock.release()
-        # Issue #464: crash-safe reports/final.json. Runs unconditionally and
+        # Crash-safe reports/final.json. Runs unconditionally and
         # FIRST so a consumable machine-readable summary always exists even
         # when the CLOSE sequencer never ran (time_exhausted / external
         # SIGTERM) or its report task failed. Idempotent: a no-op when the
@@ -2172,7 +2171,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 print(f"Session breakdown : {breakdown_path}")
             except Exception:  # noqa: BLE001
                 log.exception("session_breakdown finalize failed (non-fatal)")
-            # Issue-I: safety-net reports/final.md (no-op when the sequencer's final.md already exists).
+            # Safety-net reports/final.md write (no-op when the sequencer's final.md already exists).
             try:
                 from ..breakdown import write_minimal_final_report
 

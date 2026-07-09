@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Read-only deprecation aliases for renamed payload fields (tree-reform.MD §7).
+"""Read-only deprecation aliases for renamed payload fields.
 
 Canonical home for the ``extra_sglang_args`` → ``extra_server_args`` compat
 shim that was independently copied into the kernel-agent and robustness-agent
@@ -9,7 +9,7 @@ framework-neutral canonical key.
 
 Contract (identical to the historical ``hyperloom.inference_optimizer.compat.payload_aliases``,
 now re-exported from ``hyperloom.inference_optimizer.compat`` after the
-tree-reform.MD P2.4 ``compat/`` -> ``compat.py`` flattening):
+``compat/`` -> ``compat.py`` flattening):
 
 * **Read-only on legacy**. Writers always emit the canonical name; the alias
   only flows in the read direction.
