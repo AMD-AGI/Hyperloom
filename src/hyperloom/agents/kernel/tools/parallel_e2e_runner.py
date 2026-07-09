@@ -605,6 +605,7 @@ def main() -> int:
         try:
             _stop_ray_via_helper(bool(summary.get("ray_started_by_runner")), run_dir / "logs" / "ray.log")
         except Exception:
+            # Best-effort Ray teardown; ignore failures during cleanup.
             pass
         summary["status"] = "failed"
         summary["error"] = f"{type(exc).__name__}: {exc}"
