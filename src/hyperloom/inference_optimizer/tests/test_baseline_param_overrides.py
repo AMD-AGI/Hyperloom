@@ -154,7 +154,7 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
 
 
 def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
-    """Without an override, gpu_type force-pins the generic ``{framework}_{gpu_type}.sh`` so Magpie never falls through to the InferenceX native script. See ``design/magpie-generic-script-and-user-data-path.md`` §3."""
+    """Without an override, gpu_type force-pins the generic ``{framework}_{gpu_type}.sh`` so Magpie never falls through to the InferenceX native script."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, benchmark_script="dsr1_fp8_mi300x.sh")
     out = tmp_path / "out"
@@ -281,7 +281,7 @@ def _write_yaml_with_server_args(
 
 
 def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
-    """#520 end-to-end: a YAML EXTRA_VLLM_ARGS base + a variant's
+    """A YAML EXTRA_VLLM_ARGS base + a variant's
     extra_server_args must not yield a duplicate --attention-backend in the
     materialized config (vLLM v0.21.0 crashes EngineCoreProc on a duplicate)."""
     base = tmp_path / "base.yaml"
@@ -310,7 +310,7 @@ def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
 
 
 def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
-    """#520 no-op for sglang: it tolerates a repeated flag (last-wins at the
+    """SGLang tolerates a repeated flag (last-wins at the
     server), so materialize must NOT dedup it."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_server_args(
@@ -643,12 +643,12 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
-    """#210 fix: the baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout.
+    """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout.
 
- #536 added a layer on top: by default the executor mirrors a network-mount
+    By default the executor mirrors a network-mount
     InferenceX checkout to local disk and pins MAGPIE_INFERENCEX_PATH at that
     mirror. That mirror behaviour has its own coverage
-    (test_baseline_warmup_double_run.py). Here we isolate the #210 env-inheritance
+    (test_baseline_warmup_double_run.py). Here we isolate the env-inheritance
     contract by disabling the mirror, so the asserted path is exactly the
     configured ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
     """

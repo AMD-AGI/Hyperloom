@@ -5,7 +5,7 @@
 Covers the operator-facing phase/step boundary log:
 
 * ``phase_state.lifecycle_label`` resolves the human-friendly names used
- in issue #266 (TraceLens / GEAK / Integrate / Report), falls back to the
+ for TraceLens / GEAK / Integrate / Report, falls back to the
   phase-label table, then to the verbatim name.
 * ``phase_state.make_lifecycle_event`` produces a canonical row (seq / ts /
   phase upper-cased / step / label default / status upper-cased / artifact

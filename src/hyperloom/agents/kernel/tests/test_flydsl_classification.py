@@ -397,7 +397,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
 
 
 class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
-    """PR #668 pseudo_op names must be classified as FlyDSL (matched by name prefix; no on-disk source)."""
+    """pseudo_op names must be classified as FlyDSL by name prefix without on-disk source."""
 
     def test_pseudo_op_moe_flydsl_stage1_recognised(self) -> None:
         self.assertEqual(

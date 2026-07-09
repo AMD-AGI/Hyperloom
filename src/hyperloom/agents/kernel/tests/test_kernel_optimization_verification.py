@@ -385,7 +385,7 @@ def _geak_partial_attempt(
 
 
 def test_geak_partial_with_verified_round_correctness_keeps(tmp_path):
-    """#735-followup: a SIGTERM'd GEAK run (status=incremental_after_round_1) whose
+    """A SIGTERM'd GEAK run (status=incremental_after_round_1) whose
     round_evaluation shows correctness.success=True + a verified speedup must be
     trusted and routed to KEEP — not discarded as NEEDS_REVIEW (which never reaches
     integrate/E2E). This is the exact DeepSeek-R1 2.6x case."""
@@ -520,7 +520,7 @@ def test_cli_correctness_override(tmp_path):
 
 
 def test_speedup_just_above_gate_keeps(tmp_path):
-    """A 1.07x speedup clears the 1.05x KEEP gate (issue #442: was rejected by the old higher gate)."""
+    """A 1.07x speedup clears the 1.05x KEEP gate and is not rejected by the old higher gate."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
         _args(correctness_passed=True, micro_speedup=1.07, e2e_gain_pct=0.5, accuracy_passed=True),

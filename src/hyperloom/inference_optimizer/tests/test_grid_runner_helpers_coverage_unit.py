@@ -290,7 +290,7 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
 
 
 def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
-    """#520: when base YAML + base_extra_args + variant all set the same flag,
+    """When base YAML + base_extra_args + variant all set the same flag,
     the materialized YAML must contain each flag only once (last wins)."""
     base = tmp_path / "base.yaml"
     base.write_text(
@@ -334,7 +334,7 @@ def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
 
 
 def test_shell_safe_dedupe_normalizes_equals_form() -> None:
-    """#520: --flag=value and --flag value must dedupe to one (last wins)."""
+    """--flag=value and --flag value must dedupe to one (last wins)."""
     out = gr._shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out.count("--attention-backend") == 1, out
     assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"

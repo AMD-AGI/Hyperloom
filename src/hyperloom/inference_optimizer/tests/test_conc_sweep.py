@@ -950,7 +950,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 
 def test_exit_normal_sweep_returns_conc_sweep_done():
-    """Bug #12: SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
+    """SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
     from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
 
     class _State:
@@ -979,7 +979,7 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
-    """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
+    """KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
     from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
@@ -1020,7 +1020,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
 
 
 def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
-    """Bug #11: ``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
+    """``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
     from hyperloom.orchestrator.policy.gate import PolicyGate, PolicyDenied
 
     class _State:

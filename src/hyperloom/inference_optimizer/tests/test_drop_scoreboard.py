@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.9 — drop scoreboard tests."""
+"""Drop scoreboard tests."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 # 1. SharedState dataclass surface
 def test_shared_state_has_no_action_scores_field():
-    """KB_design §3.9 §4.1: ``action_scores`` dropped from the dataclass."""
+    """``action_scores`` is dropped from the dataclass."""
     s = SharedState()
     assert not hasattr(s, "action_scores"), (
         "v0.8 §3.9 retired action_scores; field must be removed from SharedState (KB_design §3.9 Inv-9.1)."
@@ -36,7 +36,7 @@ def test_shared_state_has_no_scoring_helpers():
 
 
 def test_shared_state_keeps_params_no_promote_streak_as_fact():
-    """v0.8 §3.9 keeps the streak field — it's a *fact*, not a priority."""
+    """The streak field stays because it is a *fact*, not a priority."""
     s = SharedState()
     assert s.params_no_promote_streak == 0
     assert "params_no_promote_streak" in s.to_prompt_summary()
@@ -52,14 +52,14 @@ def test_shared_state_keeps_tick_and_target_gap_pct():
 
 
 def test_shared_state_all_top_actions_policy_locked_removed():
-    """KB_gaps/Dead-B — the "everything's locked" stub is deleted from SharedState."""
+    """The "everything's locked" stub is deleted from SharedState."""
     s = SharedState()
     assert not hasattr(s, "all_top_actions_policy_locked")
 
 
 # 2. Legacy migration — drop / warn modes
 def _legacy_state_payload() -> dict:
-    """A v0.6-shaped state.json snapshot with action_scores + legacy fields."""
+    """A legacy state.json snapshot with action_scores + legacy fields."""
     return {
         "session_id": "legacy-sid",
         "baseline_tput": 1234.0,
@@ -108,7 +108,7 @@ def test_from_dict_warn_mode_emits_warning(monkeypatch, caplog):
 
 
 def test_from_dict_no_legacy_fields_means_no_log(monkeypatch, caplog):
-    """A clean v0.8 state.json doesn't produce any §3.9 log line."""
+    """A clean state.json doesn't produce any migration log line."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "warn")
     raw = {"session_id": "fresh", "baseline_tput": 999.0}
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.state.shared_state"):
@@ -118,7 +118,7 @@ def test_from_dict_no_legacy_fields_means_no_log(monkeypatch, caplog):
 
 
 def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
-    """Write a v0.6 state.json with action_scores, load + save, confirm field gone."""
+    """Write a legacy state.json with action_scores, load + save, confirm field gone."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", raising=False)
     sd = tmp_path / "session"
     sd.mkdir()
@@ -132,10 +132,10 @@ def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
 
 # 3. the v0.6 action-scoreboard module is gone
 def test_scoring_module_was_retired():
-    """The retired v0.6 ``orchestrator/scoring.py`` scoreboard module never
+    """The retired ``orchestrator/scoring.py`` scoreboard module never
     comes back. (Not to be confused with ``hyperloom.orchestrator.scoring``,
-    a distinct, unrelated ``scoring/`` subpackage introduced by tree-reform.MD
-    P2.3 that holds the pre-existing, always-advisory ``proposal_scorer.py``.)
+    a distinct, unrelated ``scoring/`` subpackage that holds the pre-existing,
+    always-advisory ``proposal_scorer.py``.)
     """
     scoring_pkg = importlib.import_module("hyperloom.orchestrator.scoring")
     assert not hasattr(scoring_pkg, "get_action_score")
@@ -145,7 +145,7 @@ def test_scoring_module_was_retired():
 
 # Coordinator scoring surface fully removed
 def test_coordinator_has_no_scoring_methods():
-    """KB_gaps/Dead-B — every v0.6 scoreboard hook on Coordinator is removed."""
+    """Every scoreboard hook on Coordinator is removed."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     for name in (
@@ -175,7 +175,7 @@ def test_coordinator_source_has_no_scoreboard_callers():
 
 
 def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
-    """KB_gaps/Dead-B §B.4 — the pruned-family advisory string must not mention "Action scores"."""
+    """The pruned-family advisory string must not mention "Action scores"."""
     from hyperloom.orchestrator.loop import intent_router as _c
 
     src = Path(_c.__file__).read_text(encoding="utf-8")
@@ -188,7 +188,7 @@ def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
 
 # 5. Orchestration prompt has no Action scores top-12 block
 def test_orchestration_prompt_has_no_scoreboard_block():
-    """KB_design §3.9 §8 — DECISION FRAMEWORK must not steer toward live scoring vocab."""
+    """DECISION FRAMEWORK must not steer toward live scoring vocab."""
     from hyperloom.orchestrator.prompts.prompt_builder import (
         FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,
@@ -223,7 +223,7 @@ def test_orchestration_prompt_has_no_scoreboard_block():
 
 
 def test_kernel_opt_body_has_no_scoreboard_vocab():
-    """KB_gaps/Dead-D — the kernel-pipeline body must NOT carry v0.6 scoreboard vocab."""
+    """The kernel-pipeline body must NOT carry scoreboard vocab."""
     from hyperloom.orchestrator.prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )
@@ -247,7 +247,7 @@ def test_kernel_opt_body_has_no_scoreboard_vocab():
 
 
 def test_kernel_opt_body_references_v08_decision_signals():
-    """KB_gaps/Dead-D §5.1 — the body must surface the v0.8 decision facts."""
+    """The body must surface the decision facts."""
     from hyperloom.orchestrator.prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )

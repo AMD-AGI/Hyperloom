@@ -2,10 +2,10 @@
 
 """GEAK-dispatch correctness regressions.
 
-* #601 — a ``backends`` payload supplied as a JSON list (``["geak"]``) must be
+* A ``backends`` payload supplied as a JSON list (``["geak"]``) must be
   serialized into a bare ``--backends geak`` token, never ``str(["geak"])`` →
   ``"['geak']"`` (which the kernel-agent validator rightly rejects).
-* #602 — a non-GEAK attempt (e.g. a Claude subprocess that times out) must not
+* A non-GEAK attempt (e.g. a Claude subprocess that times out) must not
   be silently bucketed under the GEAK invocation lane; the backend that ran is
   stamped on the result and an unattributable failure never defaults to GEAK.
 """

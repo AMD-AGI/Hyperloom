@@ -1,13 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase 0 (long-run infrastructure) acceptance tests.
+"""Long-run infrastructure acceptance tests.
 
 Covers the "live long safely" reworks that must hold before the cyclic phase
-machine (Phase 1) is introduced:
+machine is introduced:
 
-* R4 — bounded SharedState ledgers + events/tasks DB retention (resume-safe).
-* R5 — active GPU-lease reaper + coordinator maintenance tick.
-* R6a — bounded transient-failure retry/backoff for LLM backend calls.
+* bounded SharedState ledgers + events/tasks DB retention (resume-safe).
+* active GPU-lease reaper + coordinator maintenance tick.
+* bounded transient-failure retry/backoff for LLM backend calls.
 
 All deterministic + offline (no GPU, no network, fake clock).
 """

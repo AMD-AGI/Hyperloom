@@ -248,7 +248,7 @@ def _materialize_envs(
 def test_materialize_injects_for_sglang_fp8_dynamic_on_gfx942(
     tmp_path, fp8_dynamic_model
 ):
-    """The bug repro: the fast-path env must be materialized for this workload.
+    """The fast-path env must be materialized for this workload.
 
     Before the fix the materialized envs do NOT carry the env (slow unfused
     fallback); after the fix they do.

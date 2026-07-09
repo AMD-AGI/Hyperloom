@@ -80,7 +80,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
 
 
 def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
-    """#575/#735: capture scan finds everything under capture_traces/ but no real trace."""
+    """Capture scan finds everything under capture_traces/ but no real trace."""
     from hyperloom.orchestrator.actions.executors.profile import (
         _capture_sidecar_traces_for_dir,
     )
@@ -107,7 +107,7 @@ def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
 
 
 def test_trace_files_for_dir_excludes_capture_traces(tmp_path):
-    """#735: vLLM graph_capture_*.trace.json.gz under capture_traces/ is NOT a primary trace."""
+    """vLLM graph_capture_*.trace.json.gz under capture_traces/ is NOT a primary trace."""
     from hyperloom.orchestrator.actions.executors.profile import (
         _trace_files_for_dir,
     )
@@ -127,7 +127,7 @@ def test_trace_files_for_dir_excludes_capture_traces(tmp_path):
 
 @pytest.mark.asyncio
 async def test_profile_executor_falls_back_to_capture_sidecars(tmp_path, monkeypatch):
-    """#575: SGLang capture-only (bs_*_rank0.json.gz, no *.trace.json.gz) succeeds via fallback."""
+    """SGLang capture-only (bs_*_rank0.json.gz, no *.trace.json.gz) succeeds via fallback."""
     user_data = tmp_path / "user_data"
     user_data.mkdir()
     monkeypatch.setenv("USER_DATA_PATH", str(user_data))

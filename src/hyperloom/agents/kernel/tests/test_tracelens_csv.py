@@ -251,7 +251,7 @@ def test_deterministic_main_fails_before_high_idle_gate(
 
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
-    """The exact event that ranked #1 in the buggy resume3/4 trace."""
+    """The exact event that ranked first in the buggy resume trace."""
     sync_event = {
         "name": "torch/cuda/streams.py(222): synchronize",
         "cat": "python_function",
@@ -500,7 +500,7 @@ def test_125_derive_category_normalizations():
 
 
 def test_125_finalize_outputs_source_path_field():
-    """_finalize_candidates exposes source_path mirror of source_file (#125)."""
+    """_finalize_candidates exposes the source_path mirror of source_file."""
     candidates = [
         {
             "name": "rmsnorm_kernel",
@@ -654,7 +654,7 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
 
 
 def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
-    """#599: other_bucket fallback candidates use exact op-name CSV shapes."""
+    """other_bucket fallback candidates use exact op-name CSV shapes."""
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "ops_unique_args.csv").write_text(
@@ -1005,7 +1005,7 @@ def _make_write_reports_args(trace_path):
 
 
 def test_write_reports_raises_when_analysis_md_missing(tmp_path):
-    """#203: write_reports refuses to fabricate a Markdown when analysis.md is missing."""
+    """write_reports refuses to fabricate a Markdown when analysis.md is missing."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -1023,7 +1023,7 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
-    """#203: a passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
+    """A passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -1042,7 +1042,7 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
 
 
 def test_write_reports_does_not_create_filename_aliases(tmp_path):
-    """#203: ``analysis.md`` is the single exit; legacy aliases must not be written."""
+    """``analysis.md`` is the single exit; legacy aliases must not be written."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -1070,7 +1070,7 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
 
 
 def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
-    """#203: Hyperloom must not rewrite the upstream report's contents (byte-identity check)."""
+    """Hyperloom must not rewrite the upstream report's contents (byte-identity check)."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -1157,7 +1157,7 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
 
 
 def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
-    """#126/#124 regression: a CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
+    """A CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
     import gzip
     import json as _json
     from unittest.mock import patch
@@ -1350,7 +1350,7 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
 
 
 def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
-    """#266: the SDK runner must persist a full stream-JSON transcript
+    """The SDK runner must persist a full stream-JSON transcript
     (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
     operator can inspect the agent's lifecycle and the artifacts it
     produced *during* execution. The transcript path is surfaced via
@@ -1442,7 +1442,7 @@ def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
 
 
 def test_266_transcript_failure_never_aborts_run(tmp_path):
-    """#266: transcript capture is best-effort — a serialization or IO
+    """Transcript capture is best-effort — a serialization or IO
     error on the logging side must never abort an otherwise-successful
     TraceLens run. ``analysis.md`` is still the contracted exit point."""
     import asyncio
@@ -1491,7 +1491,7 @@ def test_266_transcript_failure_never_aborts_run(tmp_path):
 
 
 def test_266_transcript_caps_oversized_fields():
-    """#266: a megabyte tool_result / text block must be truncated so the
+    """A megabyte tool_result / text block must be truncated so the
     diagnostic transcript cannot grow unbounded. The cap applies to direct
     string fields and to strings nested inside tool inputs/results."""
     cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
@@ -3216,7 +3216,7 @@ def test_is_native_source_detects_device_extensions():
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """#420 core: a native .cu kernel invoked from two call sites reports
+    """A native .cu kernel invoked from two call sites reports
     two different ``#L`` lines (no Python AST def-line exists, so the
     reported line is the call site). The OLD key ``(op, path, line, fn)``
     split one kernel into two task_groups — two redundant GEAK dispatches.
@@ -3253,7 +3253,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """#420 real-world case (Qwen3-32B rmsnorm_quant from the issue):
+    """Real-world Qwen3-32B rmsnorm_quant case:
     k005/k006/k007 are three instantiations of ONE ``__global__`` template
     (``add_rmsnorm_quant_kernel``) living in ONE .cu. TraceLens names them
     with DIFFERENT Itanium-mangled operation symbols — a mangled symbol,
@@ -3340,7 +3340,7 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
 
 
 def test_aggregate_canonicalizes_native_source_path():
-    """#420: the same .cu file reached via a non-normalized path
+    """The same .cu file reached via a non-normalized path
     (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one
     group rather than splitting on the literal path string."""
     cands = [

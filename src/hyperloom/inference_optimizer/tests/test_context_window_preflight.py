@@ -184,7 +184,7 @@ def test_monitor_offline_vocab_includes_context_window():
 
 
 def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):
-    """follow-up #4: the fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
+    """The fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
     monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
     model = tmp_path / "ctx2048reason"
     _write_config(model, max_position_embeddings=2048)

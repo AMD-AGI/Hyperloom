@@ -1,12 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase 1 (cyclic phase machine) acceptance tests — R1 / R2 / R7.
+"""Cyclic phase machine acceptance tests.
 
 Covers:
 * ``compute_next_phase`` SWEEP back-edge branches (reloop / converged / no
   budget / cyclic-off).
-* per-cycle budget window (R2).
-* Coordinator loopback application (macro_cycle bump, marker reset, R7 streak).
+* per-cycle budget window.
+* Coordinator loopback application (macro_cycle bump, marker reset, streak).
 * PolicyGate re-entry after a loopback is not falsely denied.
 * 12h single-cycle regression: cyclic-off behaviour byte-for-byte unchanged.
 

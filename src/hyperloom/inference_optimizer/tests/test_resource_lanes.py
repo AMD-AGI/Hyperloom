@@ -274,7 +274,7 @@ async def test_specialist_gpu_pool_rejects_oversized_request(conn):
 
 @pytest.mark.asyncio
 async def test_capacity_zero_means_lane_disabled(conn, locks):
-    """``--research-lane-capacity 0`` semantics (KB_design §3.7 §4.4)."""
+    """``--research-lane-capacity 0`` disables the research lane."""
     set_lane_capacity(conn.raw, "research_lane", 0)
     with pytest.raises(LaneFull):
         await locks.acquire_many(

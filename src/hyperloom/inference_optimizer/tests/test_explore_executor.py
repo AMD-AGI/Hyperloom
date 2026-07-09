@@ -131,7 +131,7 @@ def test_canonical_fingerprint_distinguishes_envs():
 
 
 def test_canonical_fingerprint_matches_variant_fingerprint():
-    """Identity with v0.6 ``variant_fingerprint`` (lossless migration)."""
+    """Identity with legacy ``variant_fingerprint`` is preserved during migration."""
     args = "--attention-backend aiter"
     envs = {"VLLM_ROCM_USE_AITER": "1"}
     assert canonical_fingerprint(args, envs) == variant_fingerprint(args, envs)

@@ -300,7 +300,7 @@ def test_server_log_shows_death_detects_marker(tmp_path):
 
 
 def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
-    """#524: the vLLM v1 engine-core bootstrap tail must read as dead. The
+    """The vLLM v1 engine-core bootstrap tail must read as dead. The
     ``RuntimeError: Engine core initialization failed`` line and the
     ``Failed core proc(s)`` anchor both trip the watchdog."""
     log_path = tmp_path / "server.log"
@@ -351,7 +351,7 @@ def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
-    """#524: the excerpt helper returns the engine/worker-init root-cause line
+    """The excerpt helper returns the engine/worker-init root-cause line
     (with a little context) so the failure classifier can put the real server
     fault in the operator-facing ``error`` field; a healthy / missing log
     returns ``None``."""

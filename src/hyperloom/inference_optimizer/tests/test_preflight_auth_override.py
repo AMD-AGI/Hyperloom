@@ -231,7 +231,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     clean_url_env,
     stub_install_steps,
 ):
-    """#521: an operator-pinned GEAK/OOB tunnel URL survives preflight.
+    """An operator-pinned GEAK/OOB tunnel URL survives preflight.
 
     GEAK runs in a separate network namespace that cannot reach the gateway
     directly; the operator points GEAK_BASE_URL at the host-local reverse
@@ -533,7 +533,7 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
 
 
 def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
-    """#340: opt-out lets a non-AMD orchestration model pass when in catalog."""
+    """Opt-out lets a non-AMD orchestration model pass when in catalog."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setattr(
         cli,
@@ -550,7 +550,7 @@ def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsy
 
 
 def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys):
-    """#340: under opt-out a catalog miss errors (no silent opus-4-6 fallback)."""
+    """Under opt-out a catalog miss errors with no silent opus-4-6 fallback."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
     monkeypatch.setattr(
         cli,
@@ -568,7 +568,7 @@ def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys
 
 
 def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
-    """#340: opt-out with an empty model id aborts before the probe."""
+    """Opt-out with an empty model id aborts before the probe."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
 
     def _no_probe(**kwargs):
