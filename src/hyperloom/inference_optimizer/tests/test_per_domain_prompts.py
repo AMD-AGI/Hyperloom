@@ -287,7 +287,7 @@ def test_static_recon_existing_markers_unaffected_by_shared_expert_change():
 # 3. SpecialistRunner no longer marks any domain as "generic template"
 @pytest.mark.asyncio
 async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
-    """When the M5 active set covers a domain, the runner must NOT add a generic-template note."""
+    """When the active set covers a domain, the runner must NOT add a generic-template note."""
     from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
         MockTurn,

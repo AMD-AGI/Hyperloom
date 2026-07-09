@@ -210,7 +210,7 @@ def test_populate_skips_microbench_when_internal_extension_enabled(
     tmp_path: Path,
 ) -> None:
     """Internal extension backfills MAF, so no microbenchmark runs even when
-    the bundled arch spec is missing (#390 gate)."""
+    the bundled arch spec is missing."""
     calls: list[list[str]] = []
 
     def _run_command(cmd, *, cwd, timeout_s, env=None):
@@ -298,7 +298,7 @@ def test_get_check_gpu_idle_resolves_after_install(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A None cache (TraceLens not importable at process start) is re-resolved
-    once TraceLens is installed by tracelens_analysis.main() (#390)."""
+    once TraceLens is installed by tracelens_analysis.main()."""
     monkeypatch.setattr(tab, "check_gpu_idle", None)
     sentinel = lambda *_a, **_k: (True, "idle")  # noqa: E731
     _install_fake_tracelens(
@@ -314,7 +314,7 @@ def test_get_check_gpu_idle_resolves_after_install(
 def test_get_collect_arch_jsons_resolves_after_install(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same lazy re-resolution for the arch-JSON collector (#390)."""
+    """Same lazy re-resolution for the arch-JSON collector."""
     monkeypatch.setattr(tab, "_collect_arch_jsons", None)
     sentinel = lambda: {"MI355X": "/tmp/MI355X.json"}  # noqa: E731
     _install_fake_tracelens(
@@ -345,7 +345,7 @@ def test_get_collect_arch_jsons_resolves_after_install(
 )
 def test_resolve_arch_benchmark_timeout_s(tla, monkeypatch: pytest.MonkeyPatch, raw, expected) -> None:
     """Malformed TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC falls back to the 600s
-    floor instead of raising ValueError before the microbenchmark (#390)."""
+    floor instead of raising ValueError before the microbenchmark."""
     if raw is None:
         monkeypatch.delenv(tla.ARCH_BENCHMARK_TIMEOUT_ENV, raising=False)
     else:

@@ -4,7 +4,7 @@
 
 The broader ``src/hyperloom/agents/kernel/tests/test_tracelens_csv.py`` file
 exercises many TraceLens integration paths that require repo-local TraceLens
-assets. These tests isolate the small SDK-runner contract added by #266 so CI
+assets. These tests isolate the small SDK-runner transcript contract so CI
 covers the transcript feature without pulling in those environment-dependent
 cases.
 """

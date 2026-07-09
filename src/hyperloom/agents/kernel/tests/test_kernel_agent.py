@@ -422,7 +422,7 @@ class KernelAgentToolTests(unittest.TestCase):
             self.assertGreaterEqual(len(result["hot_kernels"]), 2)
 
     def test_default_backends_include_geak_without_benchmark(self) -> None:
-        """Policy change (#144): auto-pick includes GEAK even with no benchmark; decision stays NEEDS_REVIEW."""
+        """Auto-pick includes GEAK even with no benchmark; decision stays NEEDS_REVIEW."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"

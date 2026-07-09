@@ -37,7 +37,7 @@ def test_save_writes_schema_version_to_state_json(tmp_path):
 
 
 def test_v06_state_without_schema_version_is_migrated(tmp_path):
-    """A v0.6 state.json with no ``schema_version`` is bumped to the current default."""
+    """A legacy state.json with no ``schema_version`` is bumped to the current default."""
     sd = tmp_path / "session"
     sd.mkdir()
     legacy = {
@@ -79,7 +79,7 @@ _FACT_LAYER_PAYLOAD: dict = {
 
 
 def test_fact_layer_fields_survive_v06_resume(tmp_path):
-    """Fact-layer fields are bit-equal across the v0.6 → current migration."""
+    """Fact-layer fields are bit-equal across the legacy-to-current migration."""
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -94,7 +94,7 @@ def test_fact_layer_fields_survive_v06_resume(tmp_path):
 
 
 def test_fact_layer_md5_matches_post_save(tmp_path):
-    """Inv-10.1 stronger form — a migration + save round-trip keeps the fact-layer projection byte-identical."""
+    """A migration + save round-trip keeps the fact-layer projection byte-identical."""
     import hashlib
 
     sd = tmp_path / "session"
@@ -117,7 +117,7 @@ def test_fact_layer_md5_matches_post_save(tmp_path):
 
 # 3. Inv-10.3 — migration idempotence
 def test_migration_is_idempotent(tmp_path):
-    """Inv-10.3 — re-loading an already-migrated state.json produces the identical SharedState."""
+    """Re-loading an already-migrated state.json produces the identical SharedState."""
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -150,7 +150,7 @@ def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
 
 # 4. Migration log content
 def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
-    """A v0.6 payload with action_scores logs the scoreboard drop + migrated schema_version."""
+    """A legacy payload with action_scores logs the scoreboard drop + migrated schema_version."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
         "session_id": "legacy",
