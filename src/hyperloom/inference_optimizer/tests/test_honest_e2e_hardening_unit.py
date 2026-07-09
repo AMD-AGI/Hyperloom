@@ -121,7 +121,7 @@ def _geak_nr_result() -> dict:
         "status": "ok",
         "proposal": {"decision": "NEEDS_REVIEW"},
         "verification": {
-            "best_backend": "geak",
+            "best_backend": "geak_v3",
             "correctness_passed": True,
             "micro_speedup": 1.5,
         },

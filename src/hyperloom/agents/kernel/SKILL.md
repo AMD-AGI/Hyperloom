@@ -78,7 +78,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI from `GEAK_REF` (default `v3.2.1`) +
+- GEAK CLI (per-kernel backend) from `GEAK_V3_REF` (default `GEAK_v3.2`) +
   `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
@@ -88,7 +88,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   preset. Other yaml budget knobs are not env-overridable on purpose —
   edit `$GEAK_CONFIG` directly if you need to tune them per pod.
 - GEAK MCP tools — installed as four pip packages from
-  `${GEAK_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
+  `${GEAK_V3_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
   these at preprocess + run time; missing any of them fails the GEAK
   attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
   installed → 4-minute aborts with zero-byte baselines).
@@ -358,7 +358,7 @@ repeat the manual install above.
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
 `ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
 the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
-`${GEAK_ROOT}` / `${OOB_ROOT}`) via `cp -r`, runs `pip install -e` against
+`${GEAK_V3_ROOT}` / `${OOB_ROOT}`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.

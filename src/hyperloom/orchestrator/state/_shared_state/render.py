@@ -122,6 +122,12 @@ class _RenderMixin:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
+        geak_pending_tag = (
+            " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
+            if isinstance(getattr(self, "geak_pending", None), dict)
+            and self.geak_pending.get("status") == "awaiting_rebench"
+            else ""
+        )
         from hyperloom.inference_optimizer import framework_registry
 
         lines = [
@@ -131,7 +137,7 @@ class _RenderMixin:
             f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}",
+            f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt (visible without a checklist).
         untried_hot = self.untried_hot_reusable_kernels()
