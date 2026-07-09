@@ -140,7 +140,7 @@ Claude SDK auth (`ANTHROPIC_API_KEY` or equivalent) is handled by
 ## Tests
 
 ```bash
-pytest quantization_agent/tests/
+pytest src/hyperloom/agents/quantization/tests/
 ```
 
 All tests run offline — no network, no GPU, no Claude SDK calls (a fake-SDK

@@ -9,9 +9,8 @@ description: |
 globs:
   - "**/inference*optim*"
   - "**/inference_optimizer*"
-  # tree-reform.MD P2.3: the Coordinator/orchestrator moved to
-  # src/hyperloom/orchestrator/ (out of src/hyperloom/inference_optimizer/); keep this
-  # skill triggering on it since it still owns the launcher's runtime story.
+  # The Coordinator/orchestrator lives under src/hyperloom/orchestrator/;
+  # keep this skill triggering on it since it still owns the launcher's runtime story.
   - "**/hyperloom/orchestrator/**"
 ---
 
@@ -30,8 +29,8 @@ The CLI starts a Python Coordinator that coordinates:
 - Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
-- Robustness: default `--robustness-agent` — drives the `robustness-agent/`
-  subprocess runtime for health monitoring, RCA, and scheduling-police
+- Robustness: default `--robustness-agent` — drives the
+  `hyperloom.agents.robustness` subprocess runtime for health monitoring, RCA, and scheduling-police
   intents. `--robustness-mock` for offline / smoke tests.
   - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
     `LocalProbeSource` targets sandbox-local resources only (ray status,
@@ -40,7 +39,7 @@ The CLI starts a Python Coordinator that coordinates:
     probe surfaces as a HIGH false positive that floods the bus. The CLI
     auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
     WARNING; pass `--robustness-mock` explicitly to suppress it. See
-    `multi_node/SKILL.md` (Robustness limitation in multi-node mode).
+    `src/hyperloom/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
 State lives under a **session directory** (per optimization run).
 The **workspace root** is ``$USER_DATA_PATH`` (default
@@ -558,7 +557,7 @@ fallback}, probed against `<OPENAI_BASE_URL>/models`; see
 critic-agent runtime probe (`## Critic Backend Selection`).
 
 Don't manually pip-install SDKs, edit `~/.claude/config.json`, start Ray,
-or `curl /v1/models` — `_preflight()` owns these. See `kernel-agent/SKILL.md`
+or `curl /v1/models` — `_preflight()` owns these. See `src/hyperloom/agents/kernel/SKILL.md`
 for the chained installer truth.
 
 ### Recovery
@@ -795,7 +794,7 @@ shell — set it when you resume a non-default session.
 atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
 are in PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo
-URL `https://github.com/ROCm/ATOM.git` is in `framework_agent.repo_map`.
+URL `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`.
 Unlike sglang/vllm, atom is the only framework with a programmatic
 cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
 `atom_prefix_cache`, `atom_kv_fp8` on FP8, model-class-gated `atom_ep` /
@@ -1067,7 +1066,7 @@ Override the probe dir via `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
 ## Pre-GEAK Unittest Harness (unittest skill)
 
 Before `backend=geak` attempts, the main agent generates a GEAK-compatible
-test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+test harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill
 searches for existing tests, collects shapes/dtypes from TraceLens and
 profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
 / `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
@@ -1077,7 +1076,7 @@ The resulting `test_command` is passed via `--test-command` to
 produce a valid harness (after up to 3 retries), `--test-command` is omitted
 and GEAK falls back to its own test discovery cascade.
 
-Validation uses `kernel-agent/skills/unittest/validate_harness.py` for both
+Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for both
 static checks (argparse + 4 flags + GEAK output markers) and runtime
 verification (run correctness + benchmark with reduced iterations).
 

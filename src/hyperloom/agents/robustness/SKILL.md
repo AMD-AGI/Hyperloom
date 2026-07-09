@@ -104,7 +104,7 @@ The host-side wrapper that drives this subprocess lives in
 `src/hyperloom/orchestrator/roles/robustness_agent.py:RobustnessAgentBackend`,
 mirroring the layout of `CriticAgentBackend`. End-to-end tests in
 `src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
-`robustness-agent/tests/test_runtime_cli.py` together cover the full
+`src/hyperloom/agents/robustness/tests/test_runtime_cli.py` together cover the full
 host -> subprocess -> envelope -> upstream PolicyGate path.
 
 ## Environment variables

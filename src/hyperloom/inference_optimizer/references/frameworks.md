@@ -40,7 +40,7 @@ Single-node only (`--nodes>=2` fails fast). Shipped configs `baseline_atom.yaml`
 `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`) are in
 PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo URL
-`https://github.com/ROCm/ATOM.git` is in `framework_agent.repo_map`. Unlike
+`https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`. Unlike
 sglang/vllm, atom is the only framework with a programmatic cold-start seed grid
 (`_atom_default_grid`: `atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8` on
 FP8, model-class-gated `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`,

@@ -78,7 +78,7 @@ src/hyperloom/inference_optimizer/
 
 The Coordinator + agent roles + action executors live in the sibling
 `hyperloom.orchestrator` package (`src/hyperloom/orchestrator/`), not under
-`inference_optimizer/` (tree-reform.MD P2.3).
+`inference_optimizer/`.
 
 ## Package metadata
 

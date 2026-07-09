@@ -1,7 +1,7 @@
 # framework-agent KB - 4-file schema
 
 > Reference for the knowledge base shape consumed by
-> `framework_agent.kb`. Derived from
+> `hyperloom.agents.framework.kb`. Derived from
 > `claw-dev/docs-zh/tbo-arbor-framework-kb-design.md`; this file is the
 > distilled contract used at runtime.
 
@@ -24,11 +24,11 @@ ${FRAMEWORK_AGENT_KB_DIR}/
 ```
 
 `${FRAMEWORK_AGENT_KB_DIR}` is resolved by
-`framework_agent.kb._resolve_kb_root()` in this order:
+`hyperloom.agents.framework.kb._resolve_kb_root()` in this order:
 
 1. `FRAMEWORK_AGENT_KB_DIR` env (set by `scripts/install.sh`);
 2. `${FRAMEWORK_AGENT_ROOT}/kb` env fallback;
-3. `<repo>/framework-agent/kb` (development default).
+3. `<repo>/src/hyperloom/agents/framework/kb` (development default).
 
 ## Per-file roles
 
@@ -47,7 +47,7 @@ ${FRAMEWORK_AGENT_KB_DIR}/
 
 ## Loading priority
 
-`framework_agent.kb._PRIORITY_FILES = ["empirical_kb.md", "shared_pitfalls.md"]`
+`hyperloom.agents.framework.kb._PRIORITY_FILES = ["empirical_kb.md", "shared_pitfalls.md"]`
 controls the order `select_kb()` returns files within a matched domain:
 
 ```

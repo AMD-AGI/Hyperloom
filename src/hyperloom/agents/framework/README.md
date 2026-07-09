@@ -24,21 +24,21 @@ When a `(model, backend)` combo will not start, the enablement building
 blocks turn the failure into an authored bridging patch, gated on *does it
 run* rather than *is it faster*:
 
-1. **Classify** — `framework_agent.enablement.classify_failure(log)` parses a
+1. **Classify** — `hyperloom.agents.framework.enablement.classify_failure(log)` parses a
    launch/import/build log into a `FailureSignature`
    (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
    `import_error` / `shape_mismatch` / `not_implemented` /
    `capability_disabled`) with the offending file/symbol and a `bridge_layer`.
-2. **Discover** — `framework_agent.enablement_discovery.build_search_plan(...)`
+2. **Discover** — `hyperloom.agents.framework.enablement_discovery.build_search_plan(...)`
    picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via
    `repo_map.bridge_repo_urls` for the failure's bridge layer) and ranks
    candidate PR titles for *enablement* intent (`enable` / `support` / `add` /
    `fix` / `port`).
-3. **Author** — `framework_agent.enablement_authoring.build_mandate(...)`
+3. **Author** — `hyperloom.agents.framework.enablement_authoring.build_mandate(...)`
    produces the `EnablementMandate` (allowed source roots + task description +
    patch invariants) handed to Hyperloom's `enablement_specialist` /
    `SpecialistRunner`, which writes the patch into an isolated worktree.
-4. **Verify** — `framework_agent.enablement.runnable_decision(...)` is the
+4. **Verify** — `hyperloom.agents.framework.enablement.runnable_decision(...)` is the
    KEEP/REVERT gate: the launch probe must exit 0 (no timeout) and any minimal
    correctness check must pass; the same failure re-appearing is a reject.
 
@@ -96,7 +96,7 @@ inference_optimizer optimize \
 ```
 
 See `src/hyperloom/inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
-and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
+and `src/hyperloom/orchestrator/actions/executors/hyperloom.agents.framework.py`.
 
 ## Design references
 

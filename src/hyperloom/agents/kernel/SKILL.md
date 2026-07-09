@@ -189,7 +189,7 @@ Inputs:
 Run:
 
 ```bash
-python "$REPO_ROOT/kernel-agent/tools/tracelens_analysis.py" \
+python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/tracelens_analysis.py" \
   --trace-input "$TRACE_INPUT" \
   --session-id "$SESSION_ID" \
   --model-name "$MODEL_NAME" \
@@ -222,7 +222,7 @@ Inputs:
 Run:
 
 ```bash
-python "$REPO_ROOT/kernel-agent/tools/kernel_optimization.py" \
+python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/kernel_optimization.py" \
   --session-id "$SESSION_ID" \
   --kernel-id "$KERNEL_ID" \
   ${BACKENDS:+--backends "$BACKENDS"} \
@@ -244,7 +244,7 @@ and report it instead of crashing the resident session.
 #### Pre-GEAK Unittest Harness (unittest skill)
 
 Before `backend=geak` attempts, the main agent generates a GEAK-compatible
-test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+test harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill
 searches for existing tests, collects shapes/dtypes from TraceLens, and
 generates a 4-mode harness (`--correctness`/`--profile`/`--benchmark`/`--full-benchmark`).
 
@@ -254,7 +254,7 @@ The resulting `test_command` is passed via `--test-command` to
 If the skill fails to produce a valid harness, omit `--test-command` and
 GEAK falls back to its own test discovery.
 
-Validation uses `kernel-agent/skills/unittest/validate_harness.py` for
+Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for
 static checks (argparse + 4 flags + output markers) and runtime verification
 (run correctness + benchmark modes, check exit codes and markers).
 
@@ -521,7 +521,7 @@ writes:
 
 ### Per-attempt stdout file naming
 
-`run_attempt` (in `kernel-agent/tools/kernel_optimization.py`) materialises
+`run_attempt` (in `src/hyperloom/agents/kernel/tools/kernel_optimization.py`) materialises
 one file per attempt under `runs/<session_id>/optimized/`:
 
 | Mode             | Filename                                                  | Contents                                                                 |
