@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_inferencex_patcher.ensure_benchmark_lib_patched`` (Hyperloom issue #194 §2).
+"""Tests for ``_inferencex_patcher.ensure_benchmark_lib_patched``.
 
 Pins the patcher contract: a backward-compatible, idempotent, concurrency-safe,
 fail-soft patch to ``benchmark_lib.sh`` that honours ``$NUM_PROMPTS``. Fixtures
@@ -203,13 +203,13 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
     assert _LEGACY_LINE not in text
 
 
-# PR-D §2: benchmark_serving.py PROFILE_EXTRA_BODY consumer patch
+# benchmark_serving.py PROFILE_EXTRA_BODY consumer patch.
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import (  # noqa: E402
     ensure_benchmark_serving_patched,
 )
 
 
-# Verbatim copy of the PR-D §2 line (41-space indent the patcher matches on).
+# Verbatim copy of the legacy line (41-space indent the patcher matches on).
 _BS_LEGACY_LINE = (
     '                                         extra_body={"num_steps": 1, '
     '"merge_profiles": True, "profile_by_stage": True},'

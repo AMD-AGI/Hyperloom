@@ -1148,7 +1148,7 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
 
 
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
-    # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
+    # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift.
     text = IO_INSTALL.read_text(encoding="utf-8")
     assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"' in text
     assert 'MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"' in text

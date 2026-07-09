@@ -8,9 +8,9 @@ action); the markdown body at ``actions/<name>.md`` is loaded lazily.
 Operational fields gate execution/dispatch (``allowed_tools``,
 ``requires_lanes``, ``lease_ttl_sec``, ``preferred_backend`` /
 ``preferred_model``, ``max_turns``, ``side_effects``); all other fields are
-prompt-advisory only (KB_design §3.9 Inv-9.1 enforced by construction here).
+prompt-advisory only (Inv-9.1 enforced by construction here).
 
-Schema (DESIGN §16.2)::
+Schema::
 
     name:                str  (required, must equal the filename stem)
     family:              one of {prep, analysis, shallow, deep_kernel,
@@ -152,7 +152,7 @@ def _require_vocab(action_name: str, field: str, value: Any, allowed: frozenset[
 
 @dataclass(frozen=True)
 class ActionMetadata:
-    """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2).
+    """Mirrors ``actions/_meta/<name>.yaml``.
 
     Operational fields gate execution; every other field is prompt-advisory
     only. See module docstring.

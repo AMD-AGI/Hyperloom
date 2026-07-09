@@ -123,7 +123,7 @@ def normalize_upstream_category(raw: str) -> str:
 
 @dataclass
 class TraceLensSkillRunResult:
-    """Artifacts produced by one TraceLens skill run (per §2: ``analysis.md`` is the single source of truth)."""
+    """Artifacts produced by one TraceLens skill run (``analysis.md`` is the single source of truth)."""
 
     output_dir: Path
     report_path: Path
@@ -243,7 +243,7 @@ def build_orchestrator_prompt(
 ) -> str:
     """Prompt a Claude SDK agent to execute the TraceLens standalone skill.
 
-    Assembles the full natural-language instruction that pins every Step 0
+    Assembles the full natural-language instruction that pins every required
     input (paths, platform, framework, analysis/execution mode, capture folder)
     so the agent can run the analysis-orchestrator workflow without prompting.
 
@@ -668,8 +668,8 @@ async def run_tracelens_skill(
                 if log:
                     log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
 
-    # Final report is ``analysis.md`` (contract since #148; the v0.2 standalone_analysis.md
-    # fallback was dropped in #203 for masking orchestrator failures with stale data).
+    # Final report is ``analysis.md`` (the v0.2 standalone_analysis.md
+    # fallback was dropped for masking orchestrator failures with stale data).
     report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if sdk_error:
@@ -711,7 +711,7 @@ async def run_tracelens_skill(
 _safe_float = safe_float
 
 
-# analysis.md parser (TraceLens final-report contract; PR #155): reads p_item markers + compute-tier reasoning blocks with a 9-column **Data:** table. Sole reader of candidate data.
+# analysis.md parser (TraceLens final-report contract): reads p_item markers + compute-tier reasoning blocks with a 9-column **Data:** table. Sole reader of candidate data.
 _DATA_TABLE_HEADER_TOKENS = (
     "operation",
     "args",
@@ -1024,7 +1024,7 @@ def _row_to_candidate(
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
         "source_file": resolved_source_file,
-        # PR-B §1: keep raw Kernel Path verbatim so aggregation's AST resolution survives _finalize_candidates' source_file overwrite.
+        # Keep raw Kernel Path verbatim so aggregation's AST resolution survives _finalize_candidates' source_file overwrite.
         "tracelens_launcher_path": kernel_path,
         # Device kernel symbol for dispatch resolution (op -> source); "" when absent.
         "device_kernel_name": device_kernel_name,
@@ -1073,7 +1073,7 @@ _IDLE_PCT_TABLE_RE = re.compile(
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
     """Extract ``Idle %`` from an ``analysis.md`` Executive Summary table.
 
-    Used by the §1/§2 idle gate.
+    Used by the idle gate.
 
     Args:
         md_path: Path to the ``analysis.md`` report.
@@ -1099,7 +1099,7 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
-    """Compute the per-row sort key for the ``Lower Efficiency`` filter (§2).
+    """Compute the per-row sort key for the ``Lower Efficiency`` filter.
 
     Args:
         candidate: A candidate row carrying ``efficiency_percent``.
@@ -1120,7 +1120,7 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     """Parse a TraceLens ``analysis.md`` report into hot-kernel rows.
 
-    Rows are returned in §2 priority order (P-item, then lower efficiency
+    Rows are returned in priority order (P-item, then lower efficiency
     within each item).
 
     Args:
@@ -1218,7 +1218,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     return candidates
 
 
-# PR-B §1: source-function aggregation — group candidates sharing an AST-resolved (source_path, line, fn) triple to avoid wasting per-kernel GEAK budget; unparseable kernel_path falls back to per-kernel dispatch.
+# Source-function aggregation: group candidates sharing an AST-resolved (source_path, line, fn) triple to avoid wasting per-kernel GEAK budget; unparseable kernel_path falls back to per-kernel dispatch.
 
 # Launcher path shapes: ``<path>(<line>): <func>`` (Python) or bare / ``<path>#L<line>`` (HIP); missing pieces None.
 _LAUNCHER_PATH_RE = re.compile(
@@ -1609,7 +1609,7 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    # Grouping key: native (.cu/.hip/.cpp) on (source_path, function) only — collapse #420 over-split mangled-symbol instantiations of one __global__ into one composite job; Python on (operation, path, line, function) — TraceLens Kernel Path is the calling frame so distinct kernels share a caller, operation MUST stay in the key (Q1) normalized across dtypes. source_path is normpath-canonicalized.
+    # Grouping key: native (.cu/.hip/.cpp) on (source_path, function) only; Python on (operation, path, line, function). TraceLens Kernel Path is the calling frame so distinct kernels share a caller, operation MUST stay in the key normalized across dtypes. source_path is normpath-canonicalized.
     groups: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
@@ -1626,7 +1626,7 @@ def aggregate_by_source_function(
             key: tuple = ("native", src_norm, function_name)
         else:
             # Keep the (normalized) operation so distinct kernels sharing
-            # one Python caller frame stay separate (Q1 invariant).
+            # one Python caller frame stay separate.
             norm_op = _normalize_operation_key(operation)
             key = (
                 "py",
@@ -1651,7 +1651,7 @@ def aggregate_by_source_function(
                 "aggregate_duration_us": 0.0,
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
-                # Q2: distinct per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item when one function spans multiple.
+                # Distinct per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item when one function spans multiple.
                 "all_pitem_prose": [],
                 "_pitem_prose_seen": set(),  # popped before return
             }
