@@ -197,3 +197,24 @@ def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
     )
     opts = clib._build_robustness_options(args)
     assert opts["workload_uid"] == "ray-42"
+
+
+# ---- _resolve_kernel_agent_max_turns ----
+def test_kernel_agent_max_turns_default(monkeypatch):
+    from hyperloom.inference_optimizer.cli import backends as cb
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", raising=False)
+    assert cb._resolve_kernel_agent_max_turns() == 5
+
+
+def test_kernel_agent_max_turns_env_override(monkeypatch):
+    from hyperloom.inference_optimizer.cli import backends as cb
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "9")
+    assert cb._resolve_kernel_agent_max_turns() == 9
+
+
+def test_kernel_agent_max_turns_invalid_falls_back(monkeypatch):
+    from hyperloom.inference_optimizer.cli import backends as cb
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "not-an-int")
+    assert cb._resolve_kernel_agent_max_turns() == 5
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "0")
+    assert cb._resolve_kernel_agent_max_turns() == 5

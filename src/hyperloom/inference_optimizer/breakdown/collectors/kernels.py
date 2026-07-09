@@ -10,6 +10,7 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -984,6 +985,188 @@ def collect_kernel_optimization_summary(
 # Conc Sweep Summary (Breakdown panel integration spec §A2; PR #399)
 _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 
+_CONC_SWEEP_VARIANT_RE = re.compile(r"^(baseline|optimized)_conc(\d+)$")
+
+
+def _safe_mtime(p: Path) -> float:
+    """mtime for sort keys; 0.0 when the entry vanished mid-scan.
+
+    Breakdown collectors must never raise, so a concurrent workspace cleanup
+    that removes a path between enumeration and ``stat`` must not surface as
+    an exception out of ``collect_conc_sweep_summary``.
+    """
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _conc_sweep_successful_pairs(summary: dict[str, Any]) -> int:
+    try:
+        return int((summary.get("summary") or {}).get("successful_pairs") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[str, Any]:
+    """Best-effort point extraction from a conc_sweep variant workspace."""
+    result_paths = sorted(
+        variant_dir.rglob("inferencex_result.json"),
+        key=_safe_mtime,
+        reverse=True,
+    )
+    for result_path in result_paths:
+        data = _load_json_safe(result_path, [])
+        if not isinstance(data, dict):
+            continue
+        tput = data.get("output_throughput")
+        if tput is None:
+            tput = data.get("total_output_throughput")
+        try:
+            tput_f = float(tput)
+        except (TypeError, ValueError):
+            continue
+        return {
+            "arm": arm,
+            "conc": conc,
+            "status": "succeeded",
+            "output_throughput": tput_f,
+            "request_throughput": data.get("request_throughput"),
+            "total_token_throughput": data.get("total_token_throughput"),
+            "raw_result_path": _rel(
+                result_path,
+                variant_dir.parents[2] if len(variant_dir.parents) >= 3 else variant_dir,
+            ),
+        }
+    return {
+        "arm": arm,
+        "conc": conc,
+        "status": "failed",
+        "output_throughput": None,
+    }
+
+
+def _conc_sweep_pair_comparison(
+    baseline_points: list[dict[str, Any]],
+    optimized_points: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Pure baseline-vs-optimized outer join over CONC (no heavy deps).
+
+    Mirrors ``orchestrator.conc_sweep._build_comparison`` but stays import-light
+    so the breakdown collector never drags in Magpie/torch at report time.
+    """
+    by_b = {p["conc"]: p for p in baseline_points}
+    by_o = {p["conc"]: p for p in optimized_points}
+    concs = sorted(set(by_b) | set(by_o))
+    rows: list[dict[str, Any]] = []
+    speedups: list[float] = []
+    successful = 0
+    failed = 0
+    for c in concs:
+        b = by_b.get(c) or {}
+        o = by_o.get(c) or {}
+        bt = b.get("output_throughput")
+        ot = o.get("output_throughput")
+        speedup = None
+        delta = None
+        if isinstance(bt, (int, float)) and bt > 0 and isinstance(ot, (int, float)) and ot > 0:
+            speedup = float(ot) / float(bt)
+            delta = (speedup - 1.0) * 100.0
+            speedups.append(speedup)
+            successful += 1
+        else:
+            failed += 1
+        rows.append(
+            {
+                "conc": c,
+                "baseline_tput": bt,
+                "optimized_tput": ot,
+                "speedup": speedup,
+                "delta_pct": delta,
+                "baseline_status": b.get("status"),
+                "optimized_status": o.get("status"),
+            }
+        )
+    summary: dict[str, Any] = {
+        "successful_pairs": successful,
+        "failed_pairs": failed,
+        "best_conc": None,
+        "best_speedup": None,
+        "median_speedup": None,
+        "mean_speedup": None,
+    }
+    if speedups:
+        best_idx, best_val = max(
+            ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
+            key=lambda x: x[1],
+        )
+        srt = sorted(speedups)
+        n = len(srt)
+        median = srt[n // 2] if n % 2 == 1 else 0.5 * (srt[n // 2 - 1] + srt[n // 2])
+        summary.update(
+            {
+                "best_conc": rows[best_idx]["conc"],
+                "best_speedup": round(best_val, 4),
+                "median_speedup": round(median, 4),
+                "mean_speedup": round(sum(speedups) / len(speedups), 4),
+            }
+        )
+    return rows, summary
+
+
+def _recover_conc_sweep_summary_from_runs(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Recover a conc_sweep summary from raw run workspaces when the report is stale."""
+    runs_dir = session_dir / "runs" / "conc_sweep"
+    if not runs_dir.exists():
+        return {}
+    tasks = sorted(
+        (p for p in runs_dir.iterdir() if p.is_dir()),
+        key=_safe_mtime,
+        reverse=True,
+    )
+    best_payload: dict[str, Any] = {}
+    best_pairs = 0
+    for task_dir in tasks:
+        baseline_points: list[dict[str, Any]] = []
+        optimized_points: list[dict[str, Any]] = []
+        try:
+            for variant_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+                match = _CONC_SWEEP_VARIANT_RE.match(variant_dir.name)
+                if not match:
+                    continue
+                arm, conc_text = match.groups()
+                point = _load_conc_variant_point(variant_dir, arm=arm, conc=int(conc_text))
+                if arm == "baseline":
+                    baseline_points.append(point)
+                else:
+                    optimized_points.append(point)
+        except OSError:
+            continue
+        if not baseline_points and not optimized_points:
+            continue
+        baseline_points.sort(key=lambda p: p["conc"])
+        optimized_points.sort(key=lambda p: p["conc"])
+        comparison, summary = _conc_sweep_pair_comparison(baseline_points, optimized_points)
+        pairs = int(summary.get("successful_pairs") or 0)
+        payload = {
+            "schema_version": "recovered-v1",
+            "status": "succeeded" if pairs else "failed",
+            "source": "recovered_from_runs",
+            "workspace": task_dir.as_posix(),
+            "baseline": {"points": baseline_points},
+            "optimized": {"points": optimized_points},
+            "comparison": comparison,
+            "summary": summary,
+            "report_path": _rel(task_dir, session_dir) or task_dir.as_posix(),
+        }
+        if pairs > best_pairs:
+            best_payload = payload
+            best_pairs = pairs
+    return best_payload
+
 
 def collect_conc_sweep_summary(
     session_dir: Path,
@@ -1008,6 +1191,13 @@ def collect_conc_sweep_summary(
     """
     path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
     if not path.exists():
+        recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
+        if _conc_sweep_successful_pairs(recovered) > 0:
+            warnings.append(
+                "conc_sweep_summary: reports/conc_sweep_summary.json absent; "
+                "recovered from runs/conc_sweep"
+            )
+            return recovered
         return {}
     blob = _load_json_safe(path, warnings)
     if not isinstance(blob, dict):
@@ -1022,6 +1212,17 @@ def collect_conc_sweep_summary(
         out["comparison"] = []
 
     out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
+
+    # Only fall back to run-workspace recovery when the authoritative report
+    # has no successful pairs. A healthy report is authoritative and must not
+    # be overridden by the weaker throughput-only recompute (also skips the
+    # full runs/ scan on the healthy path).
+    if _conc_sweep_successful_pairs(out) == 0:
+        recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
+        if _conc_sweep_successful_pairs(recovered) > 0:
+            recovered["original_report_path"] = out["report_path"]
+            warnings.append("conc_sweep_summary: recovered successful conc_sweep data from runs/conc_sweep")
+            return recovered
     return out
 
 
