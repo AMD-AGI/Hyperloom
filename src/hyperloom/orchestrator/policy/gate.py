@@ -1945,7 +1945,22 @@ class PolicyGate:
         if not needs_gpu:
             return
         serving_tp = _serving_tp_for_policy(self.shared_state)
-        default_gpu_count = serving_tp or 1
+        from ..specialists.profile import (
+            resolve_specialist_profile,
+            uses_whole_machine_gpu_lane,
+        )
+
+        # Whole-machine bench specialists lease from ``framework_gpu_pool``
+        # (the full node), so their default gpu_count must match the dispatcher:
+        # serving_tp when known, otherwise the whole-machine pool capacity.
+        # When serving_tp > 0 the existing bench-floor below already aligns them;
+        # the special case is serving_tp == 0 (no serving yet) where the old
+        # ``serving_tp or 1`` default was 1 while the dispatcher fell back to
+        # ``gpu_pool.capacity`` — corrected here to match.
+        if uses_whole_machine_gpu_lane(params) and serving_tp == 0:
+            default_gpu_count = _whole_machine_pool_size() or 1
+        else:
+            default_gpu_count = serving_tp or 1
         gpu_count_raw = params.get("gpu_count", default_gpu_count)
         if gpu_count_raw is None or (isinstance(gpu_count_raw, str) and not gpu_count_raw.strip()):
             gpu_count_raw = default_gpu_count
@@ -1972,10 +1987,6 @@ class PolicyGate:
                     "before dispatching GPU specialists."
                 ),
             )
-        from ..specialists.profile import (
-            resolve_specialist_profile,
-            uses_whole_machine_gpu_lane,
-        )
 
         if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
             gpu_count = serving_tp

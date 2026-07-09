@@ -684,3 +684,36 @@ def test_specialist_emit_hint_lists_all_eight_llm_domains():
         "static_recon_specialist",
     ):
         assert key in hint, key
+
+
+# --------------------------------------------------------------------------- #
+# Medium #1 — gate gpu_count default aligned with dispatcher at serving_tp=0
+# --------------------------------------------------------------------------- #
+def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_role, monkeypatch):
+    """When serving_tp=0 (no serving yet), a bench specialist with no explicit
+    gpu_count must default to the whole-machine pool size in the gate, matching
+    the dispatcher's fallback to ``gpu_pool.capacity`` (Medium #1 fix).
+
+    Previously the gate defaulted to 1 (``serving_tp or 1``) while the
+    dispatcher fell back to the pool capacity, causing a default mismatch."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    # tp=0: no serving, gpu_specialist_capacity=4 (4-card node).
+    gate = _gate_with_gpu_capacity(4, tp=0)
+    # Must not raise: gate's default gpu_count must now be 4 (whole-machine)
+    # not 1 (the old ``serving_tp or 1`` when serving_tp=0), so the validation
+    # agrees with the dispatcher that actually leases all 4 cards.
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "bench patch before any serving baseline exists",
+                "mode": "patch",
+                "bench": True,
+                "needs_gpu": True,
+                # gpu_count omitted → gate must default to whole-machine size.
+            }
+        ),
+    )
