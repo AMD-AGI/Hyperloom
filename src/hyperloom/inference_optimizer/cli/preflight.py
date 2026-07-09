@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import (  # noqa: F401 - re-exported for callers/tests
-    _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
     _sync_geak_config_base_url,
@@ -751,8 +750,7 @@ def _preflight(
 
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     # Explicit operator values on each side are preserved; a missing side falls
-    # back to the other (legacy single-gateway stays one URL). We still rewrite
-    # known-stale 127.0.0.1:4002 leftovers so they can't reach the CLIs.
+    # back to the other (legacy single-gateway stays one URL).
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if anthropic_url or openai_url:
@@ -764,9 +762,8 @@ def _preflight(
                 continue
             prev = os.environ.get(var, "")
             if prev != want:
-                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "resolved endpoint"
                 os.environ[var] = want
-                print(f"Preflight: {var} {prev or '<unset>'} -> {want} ({why})")
+                print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
         # Claude CLI primary key: prefer the explicit Anthropic-side key so a
         # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY
         # (single-gateway) is the fallback.
@@ -781,20 +778,18 @@ def _preflight(
         # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
         # gateway URL, but an INTENTIONAL operator override is preserved (#521:
         # GEAK runs in a separate network namespace reached via a host-local
-        # reverse tunnel). We still force-rewrite the known-stale legacy
-        # auth-proxy URL (127.0.0.1:4002) so leftovers can't reach the CLIs.
+        # reverse tunnel).
         gateway_url = openai_url or anthropic_url
         if gateway_url:
             for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
-                if current and current != gateway_url and not _is_stale_proxy_url(current):
+                if current and current != gateway_url:
                     print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
                     continue
                 if os.environ.get(alias) != gateway_url:
                     prev = os.environ.get(alias, "")
                     os.environ[alias] = gateway_url
-                    why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
-                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} ({why})")
+                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
         # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
         # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the

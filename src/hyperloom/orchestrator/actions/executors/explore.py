@@ -184,6 +184,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # pull provenance/evidence; safe on the plain dataclass.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
+        # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag
+        # variants. Consumed by _grid_runner._build_variant_yaml. Stashed as a
+        # plain attr like the other metadata above.
+        gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]

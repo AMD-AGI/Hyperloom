@@ -22,12 +22,14 @@ from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
+    _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,
     _merge_cumulative_extra_sglang_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
+    _geak_revalidation_decision,
     _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
     format_exc_brief,
@@ -1191,42 +1193,107 @@ class WritebackCollaborator:
             if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
-                if measured_ok and self.shared_state.baseline_tput > 0:
-                    self.shared_state.cumulative_gain_validated = (
-                        (float(measured) - self.shared_state.baseline_tput)
-                        / self.shared_state.baseline_tput
-                        * 100.0
+                # A GEAK revalidation (2b) must not blindly stamp validated
+                # from the measured tput: assert the ran config's identity + that
+                # the optimization actually engaged, else replay via the GEAK
+                # harness (2a). Generic (native) revalidations keep the original
+                # unconditional watermark reconciliation below.
+                if bool((task.params or {}).get("geak_fallback")):
+                    got_hash = ""
+                    if isinstance(best_winner, dict):
+                        got_hash = str(best_winner.get("fingerprint") or "")
+                    if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
+                        got_hash = str(winners[0].get("fingerprint") or "")
+                    decision = _geak_revalidation_decision(
+                        measured=measured,
+                        baseline=self.shared_state.baseline_tput,
+                        got_hash=got_hash,
+                        expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
+                        min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
-                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                    recorded = cb_rec.get("tput")
-                    try:
-                        floor = float(
-                            os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
-                            or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                    if decision == "validated":
+                        if self._geak_legacy_promote():
+                            # Legacy: current_best/stack were written up front by
+                            # the provisional promote; here we only stamp the
+                            # same-harness validated watermark.
+                            self.shared_state.cumulative_gain_validated = (
+                                (float(measured) - self.shared_state.baseline_tput)
+                                / self.shared_state.baseline_tput
+                                * 100.0
+                            )
+                            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                            self.shared_state.cumulative_gain_provenance = "geak_orch_harness_validated"
+                            self.shared_state.resume_pending_revalidation = False
+                        else:
+                            # Rebench-first: THIS is where the headline is first
+                            # written - from the measured orchestrator-harness
+                            # rebench. Lifts current_best + optimization_stack +
+                            # the validated gain and clears geak_pending.
+                            ps = (
+                                self.shared_state.geak_result
+                                if isinstance(
+                                    getattr(self.shared_state, "geak_result", None), dict
+                                )
+                                else {}
+                            )
+                            self._promote_geak_from_candidate(
+                                ps,
+                                measured_tput=float(measured),
+                                provenance="geak_orch_harness_validated",
+                            )
+                    else:
+                        # 2b inconclusive (config-identity or engagement) -> GEAK
+                        # harness replay (2a). Leaves pending flag set; 2a clears
+                        # it on success. Best-effort so a fallback failure never
+                        # crashes the reactor (provisional gain + warning remain).
+                        log.warning(
+                            "geak 2b revalidation inconclusive "
+                            "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
+                            measured, got_hash, (task.params or {}).get("expected_cfg_hash"),
                         )
-                    except (TypeError, ValueError):
-                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                    if (
-                        isinstance(recorded, (int, float))
-                        and recorded > 0
-                        and float(measured) < float(recorded) * floor / 100.0
-                    ):
-                        await self._record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "current_best_drift",
-                                "severity": "high",
-                                "measured_tput": float(measured),
-                                "recorded_tput": float(recorded),
-                                "floor_pct": floor,
-                            },
+                        try:
+                            await self._validate_geak_via_geak_harness(reason="2b_inconclusive")
+                        except Exception:  # noqa: BLE001 - defensive
+                            log.exception("geak 2a GEAK-harness fallback failed")
+                    changed = True
+                else:
+                    if measured_ok and self.shared_state.baseline_tput > 0:
+                        self.shared_state.cumulative_gain_validated = (
+                            (float(measured) - self.shared_state.baseline_tput)
+                            / self.shared_state.baseline_tput
+                            * 100.0
                         )
-                if measured_ok:
-                    self.shared_state.resume_pending_revalidation = False
-                changed = True
+                        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                        cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                        recorded = cb_rec.get("tput")
+                        try:
+                            floor = float(
+                                os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
+                                or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                            )
+                        except (TypeError, ValueError):
+                            floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        if (
+                            isinstance(recorded, (int, float))
+                            and recorded > 0
+                            and float(measured) < float(recorded) * floor / 100.0
+                        ):
+                            await self._record_observation(
+                                "coordinator",
+                                "observation",
+                                {
+                                    "kind": "current_best_drift",
+                                    "severity": "high",
+                                    "measured_tput": float(measured),
+                                    "recorded_tput": float(recorded),
+                                    "floor_pct": floor,
+                                },
+                            )
+                    if measured_ok:
+                        self.shared_state.resume_pending_revalidation = False
+                    changed = True
             if isinstance(winners, list) and winners:
                 for winner in winners:
                     if not isinstance(winner, dict):
@@ -1306,6 +1373,12 @@ class WritebackCollaborator:
                     "workspace": result.get("workspace"),
                     "provenance": "integrate_patch",
                     "scope": "source_patch",
+                    # Durable source-layer handles so current_best stays
+                    # relaunchable (and reproducible in the GEAK baseline)
+                    # regardless of later git hygiene on the shared live tree.
+                    "source_snapshot": result.get("source_snapshot") or "",
+                    "framework_root": result.get("framework_root") or "",
+                    "base_sha": result.get("base_sha") or "",
                 }
                 self._lift_to_current_best("integrate_patch", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:

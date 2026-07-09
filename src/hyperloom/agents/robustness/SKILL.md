@@ -16,7 +16,7 @@ on-disk findings.
 ## Quick start
 
 ```bash
-cd robustness-agent
+cd src/hyperloom/agents/robustness
 python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 
 # Reactor mode. Auto-discovers session_dir and probes
@@ -27,10 +27,10 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 ## M1 module layout
 
 ```
-robustness_agent/
+src/hyperloom/agents/robustness/
 ├── runtime/
 │   ├── __init__.py         # subprocess transport package
-│   └── cli.py              # `python -m robustness_agent.runtime.cli tick` entry point
+│   └── cli.py              # `python -m hyperloom.agents.robustness.runtime.cli tick` entry point
 ├── role/
 │   ├── envelope.py         # IntentType / Intent / build_* helpers (mirror upstream)
 │   ├── prompt_inputs.py    # Coordinator prompt -> ReactorContext
@@ -65,7 +65,7 @@ so its dependency tree (httpx, openai SDK, sqlite3) stays isolated
 from the host.
 
 ```bash
-python -m robustness_agent.runtime.cli tick \
+python -m hyperloom.agents.robustness.runtime.cli tick \
     --request request.json \
     --out emit.json
 ```
@@ -104,7 +104,7 @@ The host-side wrapper that drives this subprocess lives in
 `src/hyperloom/orchestrator/roles/robustness_agent.py:RobustnessAgentBackend`,
 mirroring the layout of `CriticAgentBackend`. End-to-end tests in
 `src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
-`robustness-agent/tests/test_runtime_cli.py` together cover the full
+`src/hyperloom/agents/robustness/tests/test_runtime_cli.py` together cover the full
 host -> subprocess -> envelope -> upstream PolicyGate path.
 
 ## Environment variables
@@ -159,8 +159,7 @@ Cooldown: identical `(symptom_name, subject)` keys are silenced for
 LocalProbe stays small-scope by design: it only collects what the
 agent itself can see. GPU time-series, workload inference health, and
 node-level fault detection stay with primus-robust + robustness-server
-(see `docs/robustness-agent-implementation-plan.md` §6.1 for the
-ownership matrix).
+ownership.
 
 `DegradeRouter` switches to the fallback after
 `source_fail_threshold` (default 3) consecutive primary failures and
@@ -206,7 +205,7 @@ local-only.
 ## Session-end postmortem (L1 + L2)
 
 When the Coordinator sets `state.json::stop_reason` (run wind-down)
-the reactor fires :class:`robustness_agent.finalize.PostmortemFinalizer`
+the reactor fires :class:`hyperloom.agents.robustness.finalize.postmortem.PostmortemFinalizer`
 exactly once. It aggregates the in-session findings + per-task
 `runs/<action>/<task_id>/result.json` into:
 
@@ -218,7 +217,7 @@ exactly once. It aggregates the in-session findings + per-task
 
 Disable via `Config.finalize_enabled=False`. Operators can re-run the
 finalizer post-hoc via
-`robustness_agent.finalize.postmortem.finalize_session(session_dir, session_id=...)`
+`hyperloom.agents.robustness.finalize.postmortem.finalize_session(session_dir, session_id=...)`
 (noop when the marker exists).
 
 ## Critic feedback loop (L4)

@@ -20,7 +20,7 @@
 # Phase 5  combined env    — write runtime/hyperloom.env.sh
 # Phase 6  verify + print launch prompt
 #
-# Scope: core (native optimizer). PerfSkills/GEAK-e2e, live Langfuse, Quark,
+# Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
 
 set -euo pipefail
@@ -40,7 +40,7 @@ FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/QUICKSTART_LOCAL_MODE.md (SGLang v0.5.12,
+# Framework versions track docs/compatibility.md (SGLang v0.5.12,
 # ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
 # v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
 # is the nearest published ROCm 7.2 wheel. AITER_REF pins ROCm/aiter to a
@@ -832,8 +832,10 @@ main() {
     die "expected ${local_env} after local_setup.sh but it is missing"
   fi
 
-  # Phase 4: runtime install (core scope — no --with-perfskills; Langfuse stays
-  # off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env).
+  # Phase 4: runtime install. The GEAK e2e optimizer is always installed
+  # (whether it runs is chosen per-session via KERNEL_OPT_BACKEND_ORDER);
+  # Langfuse stays off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the
+  # environment/.env.
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)

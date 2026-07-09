@@ -3316,7 +3316,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
         await krh._run_optimization_batch(
             payload={
                 "candidates_path": "/dummy",
-                "backend_order": "geak,claude,codex",
+                "backend_order": "geak_v3,claude,codex",
                 "max_parallel": 3,
                 "parallel_backends": False,
             },
@@ -3345,7 +3345,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3353,7 +3353,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
                 "verification": {
                     "micro_speedup": 1.30,
                     "correctness_passed": False,
-                    "best_artifact_path": "/tmp/geak.py",
+                    "best_artifact_path": "/tmp/geak_v3.py",
                 },
             }
         if backend == "claude":
@@ -3387,13 +3387,13 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     }
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             candidate,
             session_dir=session_dir,
         )
 
     # Ladder walks past GEAK NEEDS_REVIEW + Claude REVERT, then breaks on Codex KEEP.
-    assert calls == ["geak", "claude", "codex"], calls
+    assert calls == ["geak_v3", "claude", "codex"], calls
     assert (best.get("proposal") or {}).get("decision") == "KEEP", best
     assert (best.get("verification") or {}).get("micro_speedup") == 1.17
     assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/codex.py"
@@ -3407,7 +3407,7 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3415,19 +3415,19 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
                 "verification": {
                     "micro_speedup": 1.50,
                     "correctness_passed": True,
-                    "best_artifact_path": "/tmp/geak.py",
+                    "best_artifact_path": "/tmp/geak_v3.py",
                 },
             }
         raise AssertionError(f"ladder must NOT run {backend!r} after GEAK KEEP")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
 
-    assert calls == ["geak"]
+    assert calls == ["geak_v3"]
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.50
 
@@ -3440,12 +3440,12 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak_v3.py"},
             }
         if backend == "claude":
             return {
@@ -3465,7 +3465,7 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
@@ -3486,7 +3486,7 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3494,7 +3494,7 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
                 "verification": {
                     "micro_speedup": 1.20,
                     "correctness_passed": True,
-                    "best_artifact_path": "/tmp/geak.py",
+                    "best_artifact_path": "/tmp/geak_v3.py",
                 },
             }
         if backend == "claude":
@@ -3512,21 +3512,21 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
 
     # GEAK KEEP no longer short-circuits: claude (OOB) must have run too.
-    assert "geak" in calls and "claude" in calls, calls
-    # Higher micro wins (claude 1.50 > geak 1.20).
+    assert "geak_v3" in calls and "claude" in calls, calls
+    # Higher micro wins (claude 1.50 > geak_v3 1.20).
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.50
     assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/claude.py"
     # Attempt ledger records both ladders.
     logged = {a["backend"] for a in best["backend_fallback_attempts"]}
-    assert "geak" in logged and "claude" in logged, logged
+    assert "geak_v3" in logged and "claude" in logged, logged
 
 
 @pytest.mark.asyncio
@@ -3536,12 +3536,12 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.60, "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.60, "best_artifact_path": "/tmp/geak_v3.py"},
             }
         if backend == "claude":
             return {
@@ -3561,14 +3561,14 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
 
     assert (best.get("verification") or {}).get("micro_speedup") == 1.60
-    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak.py"
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak_v3.py"
 
 
 @pytest.mark.asyncio
@@ -3581,12 +3581,12 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak_v3.py"},
             }
         if backend == "claude":
             return {
@@ -3606,16 +3606,16 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
 
-    # OOB group walked claude -> codex; geak raced alongside exactly once.
-    assert calls.count("geak") == 1
+    # OOB group walked claude -> codex; geak_v3 raced alongside exactly once.
+    assert calls.count("geak_v3") == 1
     assert "claude" in calls and "codex" in calls, calls
-    # codex KEEP (1.45) beats geak NEEDS_REVIEW (1.30).
+    # codex KEEP (1.45) beats geak_v3 NEEDS_REVIEW (1.30).
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.45
     assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/codex.py"
@@ -3675,7 +3675,7 @@ async def test_backend_sequence_forge_keep_short_circuits(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge,geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "forge,geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
@@ -3716,7 +3716,7 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
     monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
 
     out = await krh._run_optimization_batch(
-        {"candidates_path": "/dummy", "backend_order": "forge,geak,claude,codex", "max_parallel": 8},
+        {"candidates_path": "/dummy", "backend_order": "forge,geak_v3,claude,codex", "max_parallel": 8},
         [
             {"kernel_id": "k001", "source_file": "/p/a.py"},
             {"kernel_id": "k002", "source_file": "/p/b.py"},
@@ -4097,7 +4097,7 @@ def test_batch_candidates_skips_in_flight_kernels(
                 "state": "running",
                 "current_step": "run_backends",
                 "pid": 123456,
-                "last_lines": ["kernel_id=k004", "selected_backends=geak"],
+                "last_lines": ["kernel_id=k004", "selected_backends=geak_v3"],
             }
         )
     )

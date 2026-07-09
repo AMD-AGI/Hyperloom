@@ -1,8 +1,8 @@
-"""Workload sweep that relaunches the PerfSkills-optimized server.
+"""Workload sweep that relaunches the GEAK-optimized server.
 
-When the KERNEL_AGENT phase is delegated to PerfSkills
-(``KERNEL_OPT_BACKEND_ORDER=perfskills``), the optimized server is reproduced
-from PerfSkills' own ``bench_e2e.sh`` plus the built overlay/flags/env recorded
+When the KERNEL_AGENT phase is delegated to GEAK
+(``KERNEL_OPT_BACKEND_ORDER=geak``), the optimized server is reproduced
+from GEAK' own ``bench_e2e.sh`` plus the built overlay/flags/env recorded
 in ``result.json``. Each grid point relaunches the optimized server through
 ``bench_e2e.sh`` (same per-variant-server semantics as the native sweep),
 benches at ``(CONC, ISL, OSL)``, and parses ``bench_summary.json``.
@@ -48,7 +48,7 @@ def _write_benchmark_report(
     Field names match what ``breakdown.collectors._benchmark_report_metrics``
     parses (flat ``output_throughput_tok_s`` / ``mean_ttft_ms`` /
     ``mean_tpot_ms`` / ``mean_e2el_ms``) and ``success`` drives the per-variant
-    status, so the perfskills sweep points are auditable through the exact same
+    status, so the geak sweep points are auditable through the exact same
     collector path as the native sweep. Best-effort: never raises.
     """
     report = {
@@ -60,7 +60,7 @@ def _write_benchmark_report(
         "mean_ttft_ms": mean_ttft_ms,
         "mean_tpot_ms": mean_tpot_ms,
         "mean_e2el_ms": mean_e2el_ms,
-        "source": "perfskills",
+        "source": "geak",
     }
     if error:
         report["error"] = error
@@ -71,7 +71,7 @@ def _write_benchmark_report(
     except OSError as exc:
         # Best-effort reporting: a failed benchmark_report.json write must never
         # break the sweep, so log and continue instead of propagating.
-        log.warning("perfskills_sweep: could not write %s: %s",
+        log.warning("geak_sweep: could not write %s: %s",
                     out_dir / "benchmark_report.json", exc)
 
 
@@ -109,7 +109,7 @@ def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return front
 
 
-async def sweep_via_perfskills(
+async def sweep_via_geak(
     *,
     result: dict[str, Any],
     conc_values: list[int],
@@ -117,9 +117,20 @@ async def sweep_via_perfskills(
     output_root: Path,
     variant_timeout_sec: int,
     repeats: int = 3,
+    pin_num_prompts: bool = False,
 ) -> dict[str, Any]:
-    """Run a CONC × (ISL, OSL) sweep on the PerfSkills-optimized server."""
-    bench_script = result.get("bench_script") or result.get("perfskills_bench_script")
+    """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server.
+
+    Args:
+        pin_num_prompts: When True, also forward ``num_prompts`` from the
+            protocol onto every point (NUM_PROMPTS). Off by default because a
+            multi-conc sweep's prompt count is tied to each concurrency (a fixed
+            count would mis-size other concs); a SINGLE-point validated replay
+            (修改点7 2a) sets it True so the replay matches the headline result's
+            exact protocol (e.g. num_prompts=320) instead of bench_e2e.sh's
+            per-conc default (CONC*10).
+    """
+    bench_script = result.get("bench_script") or result.get("geak_bench_script")
     overlay = result.get("final_overlay") or ""
     cfg = result.get("accepted_config") or {}
     flags = str(cfg.get("flags") or "")
@@ -127,7 +138,7 @@ async def sweep_via_perfskills(
 
     if not bench_script or not Path(bench_script).is_file():
         return {"status": "failed", "error_class": "missing_bench_script",
-                "error": f"PerfSkills bench script not found: {bench_script}"}
+                "error": f"GEAK bench script not found: {bench_script}"}
 
     model = os.environ.get("MODEL_PATH", "").strip()
     backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
@@ -151,11 +162,16 @@ async def sweep_via_perfskills(
         _regimes = result.get("validated_regimes") or []
         _protocol = _regimes[0] if _regimes and isinstance(_regimes[0], dict) else {}
     protocol_env: dict[str, str] = {}
-    for _src, _dst in (
+    _protocol_map = [
         ("random_range_ratio", "RANDOM_RANGE_RATIO"),
         ("num_warmups", "NUM_WARMUPS"),
         ("seed", "SEED"),
-    ):
+    ]
+    # Single-point validated replay: also pin num_prompts so the replay matches
+    # the headline result's exact protocol (see pin_num_prompts docstring).
+    if pin_num_prompts:
+        _protocol_map.append(("num_prompts", "NUM_PROMPTS"))
+    for _src, _dst in _protocol_map:
         _val = _protocol.get(_src)
         if _val is not None:
             protocol_env[_dst] = str(_val)
@@ -274,5 +290,5 @@ async def sweep_via_perfskills(
         "pareto_front": front,
         "best_for_each_conc": best_for_each_conc,
         "workspace": output_root.as_posix(),
-        "source": "perfskills",
+        "source": "geak",
     }

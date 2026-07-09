@@ -24,13 +24,13 @@ from ._common import (
 
 
 
-def _perfskills_accepted_kernels_from_journey(
+def _geak_accepted_kernels_from_journey(
     result: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
     """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``.
 
-    GEAK-e2e's ``result.json`` carries the aggregate win but can ship an empty
+    GEAK e2e's ``result.json`` carries the aggregate win but can ship an empty
     ``accepted_kernels`` (e.g. a recovered/intermediate flush after a budget
     SIGTERM). The sibling ``kernel_journey.json`` still records the per-kernel
     end-to-end outcome, so this reads it and projects each kernel whose ``e2e``
@@ -59,7 +59,7 @@ def _perfskills_accepted_kernels_from_journey(
             return []
         journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        warnings.append(f"perfskills: kernel_journey read failed for backfill: {exc}")
+        warnings.append(f"geak: kernel_journey read failed for backfill: {exc}")
         return []
     if not isinstance(journey, dict):
         return []
@@ -86,12 +86,10 @@ def _perfskills_accepted_kernels_from_journey(
             or (dispatch.get("backends") or [None])[0]
             or ""
         )
-        # The GEAK-e2e pipeline's GEAK is the distinct ``geak_v4`` variant; the
-        # raw kernel_journey.json labels it plainly ``geak``. Relabel so the
-        # backfilled attribution matches the assembled kernel_journey / versions
-        # map (which the coordinator records under ``geak_v4``).
-        if backend.lower() == "geak":
-            backend = "geak_v4"
+        # The e2e optimizer's own kernel backend is the canonical ``geak`` (this
+        # whole-pipeline optimizer, formerly labelled ``geak_v4`` / perfskills).
+        # kernel_journey.json already labels it ``geak``, so it is kept verbatim;
+        # the legacy per-kernel backend is now the distinct ``geak_v3`` token.
         accepted.append(
             {
                 "kernel_id": kid,
@@ -112,18 +110,18 @@ def _perfskills_accepted_kernels_from_journey(
     return accepted
 
 
-def _perfskills_reconstruct_from_disk(
+def _geak_reconstruct_from_disk(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any] | None:
-    """Best-effort reconstruction of a PerfSkills run from on-disk survivors.
+    """Best-effort reconstruction of a GEAK run from on-disk survivors.
 
-    When ``state.perfskills_result`` is empty/missing — typically because the
+    When ``state.geak_result`` is empty/missing — typically because the
     coordinator was killed (external SIGKILL / OOM / budget) AFTER the e2e
     runner produced artifacts but BEFORE the tick-boundary ``state.save`` — the
     normalized result never lands in state and, on resume past KERNEL, the
     section would otherwise be a bare ``status=missing`` black hole. The
-    runner's working tree under ``<session>/perfskills/`` survives on the shared
+    runner's working tree under ``<session>/geak/`` survives on the shared
     FS, so this scans it to recover WHAT actually ran: the handoff (proves HL
     handed off), the e2e ``exp_root`` and the stages it reached (baseline /
     kernels / opbench / strategy), any flushed-but-unpromoted ``result.json``
@@ -139,7 +137,7 @@ def _perfskills_reconstruct_from_disk(
     Returns:
         dict[str, Any] | None: The recovered evidence, or ``None``.
     """
-    pf = session_dir / "perfskills"
+    pf = session_dir / "geak"
     try:
         if not pf.is_dir():
             return None
@@ -153,7 +151,7 @@ def _perfskills_reconstruct_from_disk(
                 return obj if isinstance(obj, dict) else {}
         except (OSError, ValueError) as exc:
             warnings.append(
-                f"perfskills: reconstruct read failed for {p.name}: {exc}"
+                f"geak: reconstruct read failed for {p.name}: {exc}"
             )
         return {}
 
@@ -192,7 +190,7 @@ def _perfskills_reconstruct_from_disk(
         if e2e_dirs:
             exp_root = e2e_dirs[-1]
     except OSError as exc:
-        warnings.append(f"perfskills: reconstruct iterdir failed: {exc}")
+        warnings.append(f"geak: reconstruct iterdir failed: {exc}")
 
     kernels_attempted: list[dict[str, Any]] = []
     if exp_root is not None:
@@ -219,7 +217,7 @@ def _perfskills_reconstruct_from_disk(
                 if (kdir / "_exp").is_dir():
                     stages.append("opbench")
         except OSError as exc:
-            warnings.append(f"perfskills: reconstruct kernels scan failed: {exc}")
+            warnings.append(f"geak: reconstruct kernels scan failed: {exc}")
     recon["kernels_attempted"] = kernels_attempted
 
     # 4) per-kernel accepted kernels from the journey (reuse the projection so
@@ -229,12 +227,12 @@ def _perfskills_reconstruct_from_disk(
         try:
             if kj.is_file():
                 recon["accepted_kernels"] = (
-                    _perfskills_accepted_kernels_from_journey(
+                    _geak_accepted_kernels_from_journey(
                         {"kernel_journey_path": str(kj)}, warnings
                     )
                 )
         except OSError as exc:
-            warnings.append(f"perfskills: accepted kernels journey unreadable: {exc}")
+            warnings.append(f"geak: accepted kernels journey unreadable: {exc}")
 
     # 5) newest-artifact timestamp (how far the run got in wall-clock). Bounded
     #    to a handful of key paths — the exp_root tree can hold thousands of
@@ -283,13 +281,13 @@ def _perfskills_reconstruct_from_disk(
                         "winner_kind": ob.get("winner_kind"),
                     })
         except OSError as exc:
-            warnings.append(f"perfskills: reconstruct opbench scan failed: {exc}")
+            warnings.append(f"geak: reconstruct opbench scan failed: {exc}")
     if opbench_results:
         recon["opbench_results"] = opbench_results
 
     # 7) runner log tails — the run_e2e stdout/stderr survivors under
     #    ``exp_root/logs/``. The normalized returncode/stdout_tail/stderr_tail the
-    #    coordinator would have folded into ``perfskills_result`` died with the
+    #    coordinator would have folded into ``geak_result`` died with the
     #    killed process; these on-disk logs are the closest recoverable proxy for
     #    "how far / why". Bounded to the newest handful, tail-only.
     log_tails: dict[str, str] = {}
@@ -309,7 +307,7 @@ def _perfskills_reconstruct_from_disk(
                     except OSError:
                         continue
         except OSError as exc:
-            warnings.append(f"perfskills: reconstruct log-tail read failed: {exc}")
+            warnings.append(f"geak: reconstruct log-tail read failed: {exc}")
     if log_tails:
         recon["runner_log_tails"] = log_tails
 
@@ -339,29 +337,29 @@ def _perfskills_reconstruct_from_disk(
     recon["likely_cause"] = likely_cause
 
     recon["stages_reached"] = stages
-    # Nothing meaningful recovered (e.g. an empty ``perfskills/`` dir) → let the
+    # Nothing meaningful recovered (e.g. an empty ``geak/`` dir) → let the
     # caller emit the legacy ``missing`` section.
     if not (handoff or flushed or exp_root):
         return None
     return recon
 
 
-def collect_perfskills(
+def collect_geak(
     session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the PerfSkills/GEAK-e2e KERNEL-phase section.
+    """Collect the GEAK/GEAK e2e KERNEL-phase section.
 
-    When the KERNEL_AGENT phase is delegated to the PerfSkills e2e optimizer
-    (``KERNEL_OPT_BACKEND_ORDER=perfskills``), the native kernel lifecycle is bypassed
-    and the only structured record is ``state.perfskills_result`` (the normalized
+    When the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer
+    (``KERNEL_OPT_BACKEND_ORDER=geak``), the native kernel lifecycle is bypassed
+    and the only structured record is ``state.geak_result`` (the normalized
     ``result.json`` plus runner metadata). This collector maps that into the
     session-breakdown's data contract so the run is auditable: what the optimizer
     did (per-kernel / per-head), the accepted config, the validated regimes, the
     gain attribution, and — on a miss — the normalized failure reason.
 
-    Returns an empty ``{}`` when PerfSkills was never engaged, so native sessions
+    Returns an empty ``{}`` when GEAK was never engaged, so native sessions
     are byte-for-byte unaffected (the dashboard hides the section).
 
     Args:
@@ -370,32 +368,32 @@ def collect_perfskills(
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
-        dict[str, Any]: The PerfSkills section, or ``{}`` when not engaged.
+        dict[str, Any]: The GEAK section, or ``{}`` when not engaged.
     """
     optimizer = str(state.get("kernel_optimizer") or "").strip().lower()
-    result = state.get("perfskills_result")
-    # ``perfskills_result`` defaults to ``{}`` in SharedState, so an empty dict
+    result = state.get("geak_result")
+    # ``geak_result`` defaults to ``{}`` in SharedState, so an empty dict
     # must NOT count as engaged — otherwise every native session would emit a
-    # spurious perfskills section. Engage only when the optimizer flag selected
-    # perfskills, or a non-empty result was actually recorded.
+    # spurious geak section. Engage only when the optimizer flag selected
+    # geak, or a non-empty result was actually recorded.
     has_result = isinstance(result, dict) and bool(result)
-    engaged = optimizer == "perfskills" or has_result
+    engaged = optimizer == "geak" or has_result
     if not engaged:
         return {}
     if not has_result:
         # Engaged via the optimizer flag but no result recorded yet/at all.
         # Before surfacing a bare ``missing`` black hole, try to reconstruct the
-        # run from the on-disk ``perfskills/`` working tree — it survives an
+        # run from the on-disk ``geak/`` working tree — it survives an
         # external kill that lost the in-memory result before the tick-boundary
-        # ``state.save`` (the exact gap behind the empty ``perfskills_result``).
-        recon = _perfskills_reconstruct_from_disk(session_dir, warnings)
+        # ``state.save`` (the exact gap behind the empty ``geak_result``).
+        recon = _geak_reconstruct_from_disk(session_dir, warnings)
         if recon is None:
             return {
                 "engaged": True,
                 "status": "missing",
                 "error_class": "no_result",
                 "error": (
-                    "kernel_optimizer=perfskills but no perfskills_result "
+                    "kernel_optimizer=geak but no geak_result "
                     "recorded"
                 ),
                 "accepted_kernels": [],
@@ -407,9 +405,9 @@ def collect_perfskills(
             "status": "no_result_recovered_from_disk",
             "error_class": "no_result",
             "error": (
-                "kernel_optimizer=perfskills but no perfskills_result was "
+                "kernel_optimizer=geak but no geak_result was "
                 "committed to state; reconstructed the run from on-disk "
-                "perfskills/ artifacts. The runner handed off and produced "
+                "geak/ artifacts. The runner handed off and produced "
                 "intermediate output, but the normalized result.json was never "
                 "folded into state — typically an external kill (SIGKILL / OOM "
                 "/ budget) before the tick-boundary state.save, then a resume "
@@ -444,7 +442,7 @@ def collect_perfskills(
         except (ValueError, OSError) as exc:
             # Relativizing is cosmetic: keep the absolute path on failure and
             # record the reason per the collector's warnings contract.
-            warnings.append(f"perfskills: failed to relativize path {p!r}: {exc}")
+            warnings.append(f"geak: failed to relativize path {p!r}: {exc}")
         return p
 
     status = str(result.get("status") or "unknown")
@@ -461,20 +459,20 @@ def collect_perfskills(
     accepted_heads = result.get("accepted_heads") or []
     if not isinstance(accepted_kernels, list):
         accepted_kernels = []
-        warnings.append("perfskills: accepted_kernels was not a list")
+        warnings.append("geak: accepted_kernels was not a list")
     if not isinstance(accepted_heads, list):
         accepted_heads = []
 
     # Back-fill per-kernel attribution when ``result.json`` shipped the aggregate
     # win but an empty ``accepted_kernels`` (e.g. a recovered/intermediate flush
     # after a budget SIGTERM). The sibling ``kernel_journey.json`` still records
-    # the integrated/KEEP kernels, so derive them here to keep the perfskills
+    # the integrated/KEEP kernels, so derive them here to keep the geak
     # section's ``accepted_kernels`` / ``kernels_optimized`` consistent with the
     # assembled ``kernel_journey``. Only fires on a successful run with an empty
     # list; a producer-populated list is always preserved verbatim.
     accepted_kernels_source = "result" if accepted_kernels else None
     if not accepted_kernels and status == "ok":
-        backfilled = _perfskills_accepted_kernels_from_journey(result, warnings)
+        backfilled = _geak_accepted_kernels_from_journey(result, warnings)
         if backfilled:
             accepted_kernels = backfilled
             accepted_kernels_source = "kernel_journey_backfill"

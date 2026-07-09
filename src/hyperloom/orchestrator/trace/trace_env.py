@@ -5,7 +5,7 @@
 Centralizes the (otherwise scattered) bool parsing for the trace package so
 the Langfuse toggle reads identically everywhere. Hyperloom has no global
 ``env.py``; the convention is documented in
-``docs/CONFIGURATION_REFERENCE.md`` and prefixed ``HYPERLOOM_*`` for
+``docs/reference/environment-variables.md`` and prefixed ``HYPERLOOM_*`` for
 cross-component escape hatches. This module owns only the trace-related
 names.
 """

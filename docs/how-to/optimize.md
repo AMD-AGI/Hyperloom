@@ -10,8 +10,10 @@ This topic assumes you have already completed installation. If you haven't:
 
 - **Hosted UI** — see [Quickstart — hosted UI](../install/quickstart.md). No
   local setup needed; launch directly from the browser.
-- **Local Mode or bare-metal** — see [Install Hyperloom](../install/hyperloom-installation.md)
-  first, then return here to launch your first run.
+- **Local Mode** — see [Local Mode quickstart](../install/local-mode.md), then
+  return here to launch your first run.
+- **Bare-metal** — see [Bare-metal quickstart](../install/bare-metal.md), then
+  return here to launch your first run.
 
 ## Launch from Cursor (Local Mode)
 
@@ -27,7 +29,7 @@ idempotent, the second run is fast and safe.
 ```
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model
@@ -42,7 +44,7 @@ Optimize inference for this workload:
 
 Before launch, run exactly:
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
-bash inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/assets/install.sh
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
 
@@ -54,18 +56,19 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — benchmark concurrency level | Start with `64`; Hyperloom sweeps other values during SWEEP phase |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `8`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `1,2,4,8,16,32,64,128`) |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
-See the [README](https://github.com/AMD-AGI/Hyperloom/blob/main/README.md) for
-the full prompt field reference (every field maps to a CLI flag).
+See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
+for the full prompt field reference (every field maps to a CLI flag defined in
+`cli/parser.py`).
 
 ## Monitor the run
 
 The agent reports a session ID, log path, and PID, then polls until the run
 completes. Under the hood it walks the phase chain
-`PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE`; see
+`PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for what
 happens in each phase.
 
@@ -74,7 +77,7 @@ happens in each phase.
 Paste this prompt into Cursor Chat to resume an existing session:
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 
@@ -94,9 +97,13 @@ fields to read first are:
 
 | Field | What it tells you |
 |-------|-------------------|
-| `final.throughput_tok_s_per_gpu` | Validated end-of-session throughput — the headline number |
+| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM / Atom |
 | `final.cumulative_gain_pct_validated` | Validated gain over baseline |
 | `final.action_path` | Ordered list of changes that make up the final optimized stack |
+
+For scriptable diffusion workloads (`--framework xdit`), the headline metric is
+`final.e2el_mean_ms` (lower is better) and reports use `img/s` as the throughput
+unit.
 
 For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see

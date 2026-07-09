@@ -4,7 +4,7 @@
 
 Builds a bar chart comparing MI355X baseline, NVIDIA B200, and Hyperloom
 MI355X tokens/sec per GPU, then saves it as
-``docs/figs/glm5_optimization_breakdown.png`` for use in the slide deck. Uses
+``docs/images/glm5_optimization_breakdown.png`` for use in the slide deck. Uses
 the non-interactive ``Agg`` backend so it can run headless.
 """
 import matplotlib
@@ -59,6 +59,6 @@ ax.text(0.5, 1.01, 'CONC=64  ·  ISL/OSL=1024',
 
 fig.tight_layout()
 import os
-out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'figs', 'glm5_optimization_breakdown.png')
+out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'images', 'glm5_optimization_breakdown.png')
 fig.savefig(out, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
 print(f'Saved to {out}')

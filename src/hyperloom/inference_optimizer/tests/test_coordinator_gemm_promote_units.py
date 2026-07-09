@@ -271,7 +271,7 @@ class TestBf16DenseFallback:
 
         coord.bus.append_and_seq = _append_and_seq
         coord.phase_machine._kernel_enabled = lambda: True
-        coord.phase_kernel._perfskills_enabled = lambda: False
+        coord.phase_kernel._geak_enabled = lambda: False
         coord._gemm_tuning_required_before_kernel_opt = lambda: True
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
         coord.phase_kernel._should_continue_kernel_after_gemm = lambda: False
@@ -355,7 +355,7 @@ class TestBf16DenseFallback:
 
         coord.bus.append_and_seq = _append_and_seq
         coord.phase_machine._kernel_enabled = lambda: True
-        coord.phase_kernel._perfskills_enabled = lambda: False
+        coord.phase_kernel._geak_enabled = lambda: False
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
         coord.phase_kernel._should_continue_kernel_after_gemm = lambda: False
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop

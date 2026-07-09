@@ -186,12 +186,12 @@ class SweepPhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        # PerfSkills-owned KERNEL: hand the e2e result to the sweep so it reuses
-        # PerfSkills' bench_e2e.sh + overlay instead of relaunching via Magpie.
-        ps_result = getattr(state, "perfskills_result", None) or {}
+        # GEAK-owned KERNEL: hand the e2e result to the sweep so it reuses
+        # GEAK's bench_e2e.sh + overlay instead of relaunching via Magpie.
+        ps_result = getattr(state, "geak_result", None) or {}
         if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
                 and ps_result.get("bench_script"):
-            params["perfskills_result"] = ps_result
+            params["geak_result"] = ps_result
         cb = state.current_best or {}
         if isinstance(cb, dict):
             cb_args = str(cb.get("extra_server_args") or "")

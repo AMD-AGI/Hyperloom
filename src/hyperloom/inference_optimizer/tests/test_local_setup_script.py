@@ -30,6 +30,9 @@ _HOST_LEAK_VARS = (
     "HYPERLOOM_DEPS_ROOT",
     "LOCAL_SETUP_ENV",
     "KERNEL_FORGE_REPO",
+    "FORGE_PATH",
+    "KERNEL_FORGE_ROOT",
+    "KERNEL_FORGE_PATH",
     "INFERENCEX_REPO",
     "INFERENCEX_REF",
     "TRACELENS_REPO",
@@ -112,6 +115,8 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert env_file.exists()
     env_text = env_file.read_text(encoding="utf-8")
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
+    assert f"export FORGE_PATH='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
+    assert f"export KERNEL_FORGE_ROOT='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'KernelForge' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
     assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text

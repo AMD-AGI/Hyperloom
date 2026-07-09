@@ -74,7 +74,7 @@ async def test_quark_root_missing_fast_path(tmp_path, monkeypatch):
     # With QUARK_ROOT unset the resolver falls back to DEFAULT_QUARK_ROOT;
     # point that at a nonexistent path so the bootstrap still fails with
     # quark_root_missing (hermetic — doesn't depend on the host's real
-    # /wekafs/hyperloom/Quark checkout).
+    # /primus/hyperloom/Quark checkout).
     monkeypatch.delenv("QUARK_ROOT", raising=False)
     monkeypatch.setattr(
         "hyperloom.agents.quantization.driver.retry.DEFAULT_QUARK_ROOT",

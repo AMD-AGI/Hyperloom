@@ -37,7 +37,7 @@ Summary:
 ## Procedure
 
 1. For each non-explicit candidate, call
-   `framework_agent.explorer._passes_filter(candidate, pr_filter)`.
+   `hyperloom.agents.framework.explorer._passes_filter(candidate, pr_filter)`.
 2. If the helper returns `(True, "")`, keep the candidate.
 3. Otherwise emit a `skipped` record: `{ref, source, reason}` -
    the reason string is human-readable and references the failing

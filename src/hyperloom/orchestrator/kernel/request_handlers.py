@@ -171,7 +171,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
 # autonomous loop) prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
 # its claude-agent-sdk ResultMessages. The other backends (claude/codex/cursor)
 # already account their spend via their own paths.
-_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak", "oob", "forge"})
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak_v3", "oob", "forge"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -253,7 +253,7 @@ _APPLY_TOOL_MODULE: Any | None = None
 # when CURSOR_API_KEY is unset (see _backend_order). An explicit
 # KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order)
 # still overrides this default as-is.
-_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak", "claude", "codex", "cursor")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3", "claude", "codex", "cursor")
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
@@ -2896,7 +2896,7 @@ def _optimization_budget_minutes(payload: dict) -> float:
     oob_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
     geak_budget = _geak_budget_minutes(payload)
     backend = str(payload.get("backends") or "").strip().lower()
-    if backend == "geak":
+    if backend == "geak_v3":
         return geak_budget
     if backend in {"claude", "codex", "cursor"}:
         return oob_budget
@@ -2925,7 +2925,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
 
     This is the single source of truth for kernel-backend selection and is
     shared by both the per-kernel ladder (:func:`_backend_order`) and the
-    phase-level PerfSkills check (:func:`perfskills_selected`).  Unknown tokens
+    phase-level GEAK e2e check (:func:`geak_selected`).  Unknown tokens
     are kept here on purpose; callers filter to the set they understand.
 
     Precedence (highest to lowest): ``payload['backend_order']`` ->
@@ -2948,22 +2948,23 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
     return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
 
 
-def perfskills_selected(payload: dict | None = None) -> bool:
-    """Whether ``perfskills`` is requested in the kernel backend order.
+def geak_selected(payload: dict | None = None) -> bool:
+    """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order.
 
-    ``perfskills`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL_AGENT phase to the PerfSkills e2e optimizer".
+    ``geak`` is not a per-kernel backend: when it appears in the order it
+    means "delegate the whole KERNEL_AGENT phase to the GEAK e2e optimizer".
     It therefore *owns* the phase whenever present (any other backends in the
-    order are ignored for the kernel phase), so an order of just ``perfskills``
-    runs only PerfSkills.
+    order are ignored for the kernel phase), so an order of just ``geak``
+    runs only the GEAK e2e optimizer. The legacy per-kernel backend is the
+    distinct ``geak_v3`` token.
 
     Args:
         payload: Optional request payload that may carry ``backend_order``.
 
     Returns:
-        bool: ``True`` when ``perfskills`` is in the resolved order.
+        bool: ``True`` when ``geak`` is in the resolved order.
     """
-    return "perfskills" in _raw_kernel_backend_order(payload)
+    return "geak" in _raw_kernel_backend_order(payload)
 
 
 def _kernel_ladder_budget_sec(payload: dict) -> int:
@@ -3007,7 +3008,7 @@ def _backend_order(payload: dict) -> list[str]:
     2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
     3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
        ``KERNEL_OPT_BACKEND_ORDER``.
-    4. The built-in GEAK-first default ladder.
+    4. The built-in forge-first default ladder.
 
     All backend names are normalized to lowercase before filtering, so
     values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
@@ -3020,21 +3021,22 @@ def _backend_order(payload: dict) -> list[str]:
 
     Returns:
         list[str]: The filtered, ordered backend names (subset of
-            ``{"claude", "codex", "cursor", "geak"}``).
+            ``{"claude", "codex", "cursor", "geak_v3"}``).
     """
     order = _raw_kernel_backend_order(payload)
     if order:
         explicit = True
     else:
-        # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
+        # Ignore legacy payload["backends"]; the default ladder (forge first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
     # `forge` (Kernel-Forge autonomous-loop backend) is first in
     # _DEFAULT_KERNEL_BACKEND_ORDER; keep it in `allowed` so it survives the
-    # filter for both the default and any explicit backend_order.  `perfskills`
-    # is intentionally absent: it is a phase-level delegate (see
-    # ``perfskills_selected``), not a per-kernel backend, so it is dropped here.
-    allowed = {"claude", "codex", "cursor", "geak", "forge"}
+    # filter for both the default and any explicit backend_order.  `geak`
+    # (the whole-pipeline e2e delegate) is intentionally absent: it is a
+    # phase-level delegate (see ``geak_selected``), not a per-kernel backend,
+    # so it is dropped here. The per-kernel backend is ``geak_v3``.
+    allowed = {"claude", "codex", "cursor", "geak_v3", "forge"}
     selected = [backend for backend in order if backend in allowed]
     # Drop cursor from the auto-derived ladder when CURSOR_API_KEY is unset (explicit order still wins).
     if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
@@ -3539,7 +3541,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
     # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
     # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
-    # Claude/Codex/forge KEEP. Scoped to backend=="geak" so OOB backends are byte-identical;
+    # Claude/Codex/forge KEEP. Scoped to backend=="geak_v3" so OOB backends are byte-identical;
     # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
     _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
     try:
@@ -3552,7 +3554,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
         if (
             _promote
             and keep == 0
-            and _backend == "geak"
+            and _backend == "geak_v3"
             and verification.get("correctness_passed") is True
             and micro >= _thr
         )
@@ -3710,8 +3712,8 @@ async def _run_kernel_backend_sequence(
             best = forge_best
             attempts = forge_attempts
 
-    geak_group = [b for b in remaining if b == "geak"]
-    oob_group = [b for b in remaining if b != "geak"]
+    geak_group = [b for b in remaining if b == "geak_v3"]
+    oob_group = [b for b in remaining if b != "geak_v3"]
 
     if best is not None:
         pass
@@ -3897,8 +3899,8 @@ def _run_combined_e2e_sync(
     if not payload.get("combined_e2e"):
         return None
     order = _backend_order(payload)
-    if "geak" not in [b.lower() for b in (order or [])]:
-        log.info("combined_e2e: skipped (backend is not geak: %s)", order)
+    if "geak_v3" not in [b.lower() for b in (order or [])]:
+        log.info("combined_e2e: skipped (backend is not geak_v3: %s)", order)
         return None
     model = _resolve_local_model_path(str(payload.get("model_path") or "").strip())
     if not model:
@@ -4111,12 +4113,12 @@ def _backends_cli_arg(value: Any) -> str:
     """Normalize a payload ``backends`` field into a bare ``--backends`` value.
 
     The orchestration payload may carry ``backends`` as a bare string
-    (``"geak"``), a comma-joined string (``"geak,claude"``), or a JSON list
-    (``["geak"]``) when an upstream request serializes it as an array. A list
+    (``"geak_v3"``), a comma-joined string (``"geak_v3,claude"``), or a JSON list
+    (``["geak_v3"]``) when an upstream request serializes it as an array. A list
     MUST be comma-joined into bare names, never ``str()``-ed into the repr of a
-    list (``"['geak']"``) — the kernel-agent's ``parse_backends`` validator
+    list (``"['geak_v3']"``) — the kernel-agent's ``parse_backends`` validator
     correctly rejects that opaque token and the dispatch fails with the
-    self-contradictory "unsupported backend(s): ['geak']".
+    self-contradictory "unsupported backend(s): ['geak_v3']".
 
     Args:
         value: The raw ``payload["backends"]`` value (str / list / tuple / None).
@@ -4225,7 +4227,7 @@ async def _run_optimization_single(
         cmd += ["--dry-run"]
     geak_budget_min = _geak_budget_minutes(payload)
     backend = backends_arg.lower()
-    if backend == "geak" or not backend:
+    if backend == "geak_v3" or not backend:
         cmd += ["--geak-budget-min", str(geak_budget_min)]
     if payload.get("budget_minutes") is not None:
         cmd += ["--budget-minutes", str(payload["budget_minutes"])]
@@ -4331,7 +4333,7 @@ def _trace_kernel_attempt_usage(
         except (OSError, ValueError):
             continue
         try:
-            if backend == "geak":
+            if backend == "geak_v3":
                 usage = parse_geak_usage(stdout_text)
             elif backend == "forge":
                 usage = parse_forge_usage(stdout_text)

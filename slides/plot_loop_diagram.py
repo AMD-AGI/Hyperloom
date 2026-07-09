@@ -5,7 +5,7 @@
 Draws the phased pipeline (classify, baseline, profile, build) feeding into the
 DFS-style optimization loop (pop highest-scored action, execute, benchmark,
 re-score) and the sweep/report exit, then saves it as
-``docs/figs/optimization_loop.png`` for use in the slide deck. Uses the
+``docs/images/optimization_loop.png`` for use in the slide deck. Uses the
 non-interactive ``Agg`` backend so it can run headless.
 """
 import matplotlib
@@ -86,6 +86,6 @@ ax.text(3.55, 4.25, 'DFS LOOP', fontsize=10, fontweight='bold', color='#ff6e40',
 
 fig.tight_layout()
 import os
-out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'figs', 'optimization_loop.png')
+out = os.path.join(os.path.dirname(__file__), '..', 'docs', 'images', 'optimization_loop.png')
 fig.savefig(out, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
 print(f'Saved to {out}')

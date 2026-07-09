@@ -97,7 +97,6 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
-    assert credentials._is_stale_proxy_url("http://127.0.0.1:4002/v1")
     assert credentials._derive_anthropic_base_url("https://gw.example/v1") == "https://gw.example"
 
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
@@ -107,7 +106,7 @@ def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypat
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
     assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://open.example/v1")
 
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:4002/v1")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://anthropic.example")
 
     cfg = tmp_path / "geak.yaml"

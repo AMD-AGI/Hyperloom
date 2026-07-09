@@ -1,7 +1,7 @@
 # GitHub Search protocol used by framework-agent
 
 > Technical reference for the anonymous GitHub Search backend in
-> `framework_agent.sources.github`. Distilled from the original Hyperloom
+> `hyperloom.agents.framework.sources.github`. Distilled from the original Hyperloom
 > (Arbor, arXiv:2606.12563) `github_search.py` plus the live framework-agent
 > implementation.
 
@@ -35,7 +35,7 @@ header). The 60 req/h IP rate limit therefore applies.
 `(term1 OR term2 OR ...)` is the OR-fold of either:
 
 1. `extract_keywords(gap_description)` from
-   `framework_agent.keywords` - whitelist hits (60+ ROCm / LLM
+   `hyperloom.agents.framework.keywords` - whitelist hits (60+ ROCm / LLM
    terms) plus PascalCase identifiers (`RadixCache`, `KvCache`, ...)
    plus a fallback to the first five 3+ letter words.
 2. If keyword extraction returns empty, the curated `PERF_TERMS`
@@ -91,7 +91,7 @@ the item to be skipped silently. The result list is trimmed to
 
 ## Dispatcher integration
 
-`framework_agent.sources.enumerate_candidates` calls the github
+`hyperloom.agents.framework.sources.enumerate_candidates` calls the github
 backend exactly once per repo per run, **after** the primus_cortex
 backend. Results are unioned and de-duplicated by `ref`; primus wins
 ties because it appears first in the iteration order.

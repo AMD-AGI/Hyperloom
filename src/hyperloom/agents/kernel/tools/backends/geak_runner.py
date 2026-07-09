@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""e2e optimizer submission (formerly PerfSkills; now GEAK@GEAK_v4).
+"""GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main).
 
-This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like GEAK's
-single-kernel loop). Its code lives in GEAK on the GEAK_v4 branch
+This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like the legacy
+per-kernel GEAK single-kernel loop, now ``geak_v3``). Its code lives in GEAK
 (``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
 KERNEL_AGENT phase via the stable ``interface/run_e2e.py`` contract: we write a
 ``handoff.json`` (Hyperloom best config + workload), call the runner, and read
@@ -13,8 +13,8 @@ per-kernel report).
 
 All Claude-SDK / Workflow / ``--effort`` detail lives INSIDE the optimizer's
 ``interface/run_e2e.py``; this module only marshals the two JSON files and the
-subprocess. See <GEAK_v4>/interface/run_e2e.md for the contract. The
-PERFSKILLS_* env-var / function names are kept as the stable handle.
+subprocess. See GEAK ``interface/run_e2e.md`` for the contract. The
+GEAK_* env-var / function names are the stable handle.
 """
 
 from __future__ import annotations
@@ -29,24 +29,24 @@ from pathlib import Path
 
 
 def _resolve_runner() -> str:
-    """Resolve run_e2e.py from $PERFSKILLS_E2E_RUNNER / $PERFSKILLS_ROOT (GEAK@GEAK_v4)."""
-    runner = os.environ.get("PERFSKILLS_E2E_RUNNER", "").strip()
+    """Resolve run_e2e.py from $GEAK_E2E_RUNNER / $GEAK_ROOT (GEAK@GEAK)."""
+    runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
     if runner and Path(runner).is_file():
         return runner
-    root = os.environ.get("PERFSKILLS_ROOT", "").strip()
+    root = os.environ.get("GEAK_ROOT", "").strip()
     if root:
         cand = Path(root) / "interface" / "run_e2e.py"
         if cand.is_file():
             return str(cand)
     raise FileNotFoundError(
-        "e2e runner not found. Set PERFSKILLS_E2E_RUNNER to "
-        "<GEAK_v4 checkout>/interface/run_e2e.py (the installer exports it)."
+        "e2e runner not found. Set GEAK_E2E_RUNNER to "
+        "<GEAK checkout>/interface/run_e2e.py (the installer exports it)."
     )
 
 
-def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
-                    python_bin: str = "") -> dict:
-    """Run PerfSkills e2e once and return the parsed result.json (+ run metadata).
+def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
+              python_bin: str = "") -> dict:
+    """Run GEAK e2e once and return the parsed result.json (+ run metadata).
 
     Args:
         handoff: handoff.json payload (Hyperloom best config + workload).
@@ -71,19 +71,19 @@ def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
 
     env = dict(os.environ)
     # The resolved ``timeout_s`` is AUTHORITATIVE for the delegated director run:
-    # run_e2e.py reads PERFSKILLS_E2E_TIMEOUT_S to self-stop (anyio.fail_after)
+    # run_e2e.py reads GEAK_E2E_TIMEOUT_S to self-stop (anyio.fail_after)
     # before our outer subprocess kill. Assign (not setdefault) so a value
     # inherited from the parent env (e.g. a stale export / ray passthrough) can
-    # never override the caller's budget — when Hyperloom drives, PerfSkills'
+    # never override the caller's budget — when Hyperloom drives, GEAK's
     # time MUST come from Hyperloom (the --timeout-s it passes). Standalone runs
     # resolve timeout_s to the 12h default (or an explicit env, see _main).
     # Split the inner SOFT deadline from the outer HARD kill so run_e2e can
     # self-stop (anyio.fail_after) and FLUSH result.json (recover-from-disk)
     # before we SIGKILL. Previously both were timeout_s, so the flush was killed
     # mid-write -> "no_result_json" and the measured win was lost.
-    flush_grace = int(os.environ.get("PERFSKILLS_FLUSH_GRACE_S", "180"))
+    flush_grace = int(os.environ.get("GEAK_FLUSH_GRACE_S", "180"))
     inner_timeout = max(60, timeout_s - flush_grace)
-    env["PERFSKILLS_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
+    env["GEAK_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
 
     started = time.time()
     # start_new_session=True -> run_e2e + its vllm/node children share a process
@@ -139,25 +139,25 @@ def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
 
 
 def _main(argv: list[str]) -> int:
-    """CLI: perfskills_runner.py <handoff.json> <output_dir> [--timeout-s N]."""
+    """CLI: geak_runner.py <handoff.json> <output_dir> [--timeout-s N]."""
     import argparse
 
-    ap = argparse.ArgumentParser(description="Run PerfSkills e2e once.")
+    ap = argparse.ArgumentParser(description="Run GEAK e2e once.")
     ap.add_argument("handoff_json")
     ap.add_argument("output_dir")
     # Sentinel default: an explicit --timeout-s (Hyperloom always passes one) is
     # authoritative. Without it (standalone runner invocation) fall back to an
-    # explicitly-exported PERFSKILLS_E2E_TIMEOUT_S, else the 12h default.
+    # explicitly-exported GEAK_E2E_TIMEOUT_S, else the 12h default.
     ap.add_argument("--timeout-s", type=int, default=None)
     args = ap.parse_args(argv)
 
     if args.timeout_s is not None:
         timeout_s = args.timeout_s
     else:
-        timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))  # 12h
+        timeout_s = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))  # 12h
 
     handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
-    out = call_perfskills(handoff, Path(args.output_dir), timeout_s=timeout_s)
+    out = call_geak(handoff, Path(args.output_dir), timeout_s=timeout_s)
     print(json.dumps({"status": out.get("status"),
                       "speedup": out.get("throughput_speedup"),
                       "result_path": out.get("result_path")}))

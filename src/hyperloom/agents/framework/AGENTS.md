@@ -44,7 +44,7 @@ implemented in current scope.
 | Variable | Purpose | Default |
 |---|---|---|
 | `WORKSPACE_PATH` | Root for the skill files | `/workspace` |
-| `FRAMEWORK_AGENT_ROOT` | Root of this skill | `${WORKSPACE_PATH}/src/hyperloom/agents/framework` (tree-reform.MD P2.5 promoted this from a sibling `framework-agent/` checkout) |
+| `FRAMEWORK_AGENT_ROOT` | Root of this skill | `${WORKSPACE_PATH}/src/hyperloom/agents/framework` |
 | `FRAMEWORK_AGENT_KB_DIR` | KB write target | `${FRAMEWORK_AGENT_ROOT}/kb` |
 | `PRIMUS_CORTEX_PR_API` | Primus Cortex base URL fallback | unset (CLI flag wins) |
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitHub auth | unset (anonymous fallback) |

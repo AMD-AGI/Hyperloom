@@ -427,13 +427,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "native" (GEAK/per-kernel loop, default) or
-    # "perfskills" (one-shot whole-pipeline e2e optimizer cloned from upstream;
-    # see src/hyperloom/agents/kernel/tools/backends/perfskills_runner.py).
+    # KERNEL-phase optimizer: "native" (geak_v3 per-kernel loop, default) or
+    # "geak" (one-shot whole-pipeline e2e optimizer cloned from upstream;
+    # see src/hyperloom/agents/kernel/tools/backends/geak_runner.py).
     kernel_optimizer: str = "native"
-    # Snapshot of the last PerfSkills e2e run (result.json + final_launch.sh /
+    # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
-    perfskills_result: dict[str, Any] = field(default_factory=dict)
+    geak_result: dict[str, Any] = field(default_factory=dict)
     # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
     explore_enabled: bool = True
     # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
@@ -542,6 +542,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Validated cumulative gain: re-baselined fresh server with every KEEP (per-round gains don't compose linearly); standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
+    # Provenance/basis of the currently-recorded gain so reports can tell a
+    # provisional cross-harness number (e.g. a geak e2e win divided by the
+    # orchestrator baseline) from a same-harness-validated one. Display/audit
+    # only; never gates scheduling. Empty on legacy/native sessions.
+    cumulative_gain_provenance: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a
@@ -552,6 +557,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # entries need a fresh post-resume stack rebench.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     resume_pending_revalidation: bool = False
+    # A GEAK(GEAK) e2e candidate that has landed a self-reported win but is
+    # NOT yet confirmed by a main-flow (orchestrator / GEAK-harness) rebench. It
+    # carries the accepted config + the optimizer's OWN (audit-only) numbers, but
+    # is deliberately KEPT OUT of current_best / optimization_stack / the headline
+    # gain until the rebench validates it (mirrors forge's "no integrate → not in
+    # optimization_stack"). Cleared once promoted from a measured rebench.
+    geak_pending: dict[str, Any] = field(default_factory=dict)
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""

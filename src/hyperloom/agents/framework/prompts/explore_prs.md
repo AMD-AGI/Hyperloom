@@ -24,8 +24,8 @@ consider for isolated build + benchmark.
 ## Tool surface
 
 ```python
-from framework_agent.runtime.tools_api import find_relevant_prs_smart
-from framework_agent.keywords import extract_keywords
+from hyperloom.agents.framework.runtime.tools_api import find_relevant_prs_smart
+from hyperloom.agents.framework.keywords import extract_keywords
 ```
 
 `extract_keywords(gap_description)` is automatically invoked by the

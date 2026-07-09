@@ -284,7 +284,7 @@ def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 
     return {
         "status": "completed",
         "attempt_id": "geak-aaa",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(artifact),
         "backend_paths": {
             "geak_final_report": str(final),
@@ -373,7 +373,7 @@ def _geak_partial_attempt(
     return {
         "status": "partial",
         "attempt_id": "geak-partial",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(artifact),
         "backend_paths": {
             "geak_final_report": str(final),
@@ -635,7 +635,7 @@ def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak0",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(patch),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch),
@@ -679,7 +679,7 @@ def test_build_verification_recovers_py_from_worktree(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak0",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(patch),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch),
@@ -736,7 +736,7 @@ def test_build_verification_records_multi_file_artifact_bundle(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak0",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(patch),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch),
@@ -904,7 +904,7 @@ def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-deadbeef",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(log_path),
         "backend_paths": {},
     }
@@ -973,7 +973,7 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-cafebabe",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(log_path),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch_path),
@@ -1028,7 +1028,7 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-asm",
-        "backend": "geak",
+        "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(patch_path)},
     }
 
@@ -1064,7 +1064,7 @@ def test_patch_with_absolute_path_header_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil", "backend": "geak",
+        "status": "completed", "attempt_id": "geak-evil", "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
@@ -1088,7 +1088,7 @@ def test_patch_with_parent_traversal_header_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak",
+        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
@@ -1108,7 +1108,7 @@ def test_patch_targeting_other_basename_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-other", "backend": "geak",
+        "status": "completed", "attempt_id": "geak-other", "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(other)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
