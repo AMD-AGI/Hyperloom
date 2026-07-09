@@ -3,7 +3,7 @@
 > **Audience.** Site reliability and platform engineers self-hosting
 > Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare
 > metal, or a managed PaaS). For the hosted PrimusClaw experience
-> ([core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/))
+> ([crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/))
 > AMD owns operations; this document does **not** apply.
 
 This page covers Kubernetes sizing, `USER_DATA_PATH` backup and
@@ -148,11 +148,11 @@ The OOB auth-proxy (`127.0.0.1:4002`) is a single Python child of the
 kernel-agent. If it dies (OOM, port conflict, stale tcp state),
 **every** subsequent `claude` / `codex` CLI call returns HTTP 401.
 
-`kernel-agent/scripts/ensure_auth_proxy.sh` is idempotent and safe to
+`src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh` is idempotent and safe to
 run from a sidecar / liveness probe:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"
 ```
 
 It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is
@@ -212,7 +212,7 @@ ingest it whole on session end.
 ### Scenario C: auth-proxy stuck
 
 1. Liveness probe should already have caught this.
-2. Manual: `bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"`.
+2. Manual: `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"`.
 3. If 401s persist, rotate `SAFE_API_KEY` (rare — the key is
    long-lived) and re-run.
 

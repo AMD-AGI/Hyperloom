@@ -12,7 +12,7 @@ page summarizes the entry points and links to the detailed guides.
 ## Prerequisites
 
 Bind your [LLM Gateway](https://llm.amd.com/) key to
-[Hyperloom](https://core42.primus-safe.amd.com/hyperloom/) to obtain your API
+[Hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/) to obtain your API
 key. This key provides access to TraceLens, GEAK, and OOB services for both the
 UI and the local workflow.
 
@@ -20,7 +20,7 @@ UI and the local workflow.
 
 The fastest path, with no local GPU setup:
 
-1. Go to [core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/).
+1. Go to [crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/).
 2. Select **Claw Agent** or **Get Started** to enter PrimusClaw.
 3. Choose the **Hyperloom**, **TraceLens-only**, or **GEAK-only** tab for your task.
 
@@ -39,7 +39,7 @@ to it. Complete the three steps in order:
    cd Hyperloom
    cp .env.template .env   # then edit credentials
    export USER_DATA_PATH=/path/to/hyperloom-run
-   bash inference_optimizer/scripts/local_setup.sh
+   bash src/hyperloom/inference_optimizer/assets/local_setup.sh
    ```
 
 4. **Before launching an optimization**, source the generated local setup,
@@ -48,7 +48,7 @@ to it. Complete the three steps in order:
 
    ```bash
    source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-   bash inference_optimizer/scripts/install.sh
+   bash src/hyperloom/inference_optimizer/assets/install.sh
    source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
    ```
 

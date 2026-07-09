@@ -542,7 +542,10 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 # The rotation pool is ordered not-run-first, so batch 0 hits the not-yet-run
 # head. Merge the candidate-pool change before this fire so the very next cron
 # starts at batch 0; bump this if the merge slips to a later fire.
-_CRON_ANCHOR_UTC = datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc)
+# 2026-06-26: reset to restart the rotation at batch 0 on the new
+# hf_sub100_part1_20260626.json pool. The next scheduled fire (12:07 UTC) is the
+# first at/after this anchor -> batch 0.
+_CRON_ANCHOR_UTC = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
 
 # Fallback optimizer budget (hours) used as the rotation step size when
 # INPUT_MAX_HOURS is unset/invalid. Keep in sync with the optimize-submit
@@ -859,6 +862,7 @@ def _matrix_entry(entry: dict | str) -> dict:
             "rayjob_image",
             "is_top",
             "params_b",
+            "downloads",
         ):
             if entry.get(key) is not None:
                 out[key] = entry[key]

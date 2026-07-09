@@ -8,7 +8,7 @@ dashboards). One file per session, written to
 operator demand via [`scripts/dump_session_breakdown.py`](OPERATOR_SCRIPTS.md)).
 
 The authoritative source of truth for the wire shape is
-[`inference_optimizer/breakdown/schema.py`](../inference_optimizer/breakdown/schema.py).
+[`src/hyperloom/inference_optimizer/breakdown/schema.py`](../src/hyperloom/inference_optimizer/breakdown/schema.py).
 This page describes the contract from a consumer's perspective.
 
 ---
@@ -179,7 +179,7 @@ downstream consumers:
 
 Chronologically ordered events, one per Coordinator action completion.
 Each entry has `action`, `task_id`, `status`, `decision`,
-`key_metric`, optional `kernel_id` (for kernel-owned actions),
+`key_metric`, optional `kernel_id` (for kernel_agent-owned actions),
 optional `workspace`, and an `extras` dict for action-specific payload.
 
 Useful for rendering session-progress timelines and "what changed at
@@ -412,13 +412,13 @@ TypedDict shapes.)
 * **Offline / historical:** see
   [`OPERATOR_SCRIPTS.md`](OPERATOR_SCRIPTS.md):
   ```bash
-  python -m inference_optimizer.scripts.dump_session_breakdown \
+  python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
       --session-dir /path/to/session \
       [--output /tmp/breakdown.json]
   ```
 
 All three paths share the same builder
-(`inference_optimizer.breakdown.build`), so the output is identical
+(`hyperloom.inference_optimizer.breakdown.build`), so the output is identical
 regardless of producer.
 
 ---
@@ -445,5 +445,5 @@ alerting.
 * [`OPERATOR_SCRIPTS.md`](OPERATOR_SCRIPTS.md) — how to produce a
   breakdown from a finished session directory.
 * [`OPERATIONS.md`](OPERATIONS.md) §3 — retention recommendations.
-* [`../inference_optimizer/breakdown/schema.py`](../inference_optimizer/breakdown/schema.py)
+* [`../src/hyperloom/inference_optimizer/breakdown/schema.py`](../src/hyperloom/inference_optimizer/breakdown/schema.py)
   — TypedDict source of truth.

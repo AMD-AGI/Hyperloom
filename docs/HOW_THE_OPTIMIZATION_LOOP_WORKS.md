@@ -25,7 +25,7 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator moves monotonically through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_PR -> EXPLORE -> KERNEL -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK -> EXPLORE -> KERNEL -> SWEEP -> CLOSE
 ```
 
 `phase_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
@@ -49,9 +49,9 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_PR
+## FRAMEWORK
 
-When enabled, FRAMEWORK_PR is managed by the Coordinator. The only
+When enabled, FRAMEWORK is managed by the Coordinator. The only
 protected framework-agent integration is discovery via `fa
 phase-discover`.
 
@@ -59,7 +59,7 @@ For each candidate:
 
 1. framework-agent returns candidate metadata and diff information,
 2. Critic reviews the candidate before apply,
-3. the framework PR executor applies, benchmarks, and either keeps or
+3. the framework executor applies, benchmarks, and either keeps or
    reverts the candidate,
 4. progress is recorded in `SharedState` and later surfaced in
    `session_breakdown.json`.
@@ -94,7 +94,7 @@ the reported cumulative gain is not just a sum of per-round deltas.
 
 ## KERNEL
 
-KERNEL phase is the bridge to kernel-agent work. Orchestration may send
+KERNEL_AGENT phase is the bridge to kernel-agent work. Orchestration may send
 kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
@@ -175,7 +175,7 @@ stateless per tick.
 The loop adapts through facts, not through retired score tables:
 
 - `SharedState` carries current best, stack entries, phase history,
-  action attempts, kernel attempts, framework PR progress, and warnings.
+  action attempts, kernel attempts, framework progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
 - Robustness watches stalls, crashes, config-only loops, specialist
@@ -210,6 +210,6 @@ For a finished or interrupted session, start with:
 - `session_breakdown.json`.
 
 For reports and dashboards, `session_breakdown.json` is the external
-contract. Its producer code lives under `inference_optimizer/breakdown/`,
+contract. Its producer code lives under `src/hyperloom/inference_optimizer/breakdown/`,
 and its consumer-facing shape is documented in
 `docs/INTEGRATION_SESSION_BREAKDOWN.md`.

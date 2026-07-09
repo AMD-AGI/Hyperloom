@@ -9,7 +9,7 @@ below.
 
 ## Option A — Hosted UI (PrimusClaw)
 
-1. Open [core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/).
+1. Open [crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/).
 2. Select **Claw Agent** or **Get Started** to enter PrimusClaw.
 3. Pick the tab that matches your task:
    - **Hyperloom** — end-to-end model performance optimization.
@@ -29,7 +29,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
 cp .env.template .env          # then edit credentials (SAFE_API_KEY, OPENAI_BASE_URL)
 export USER_DATA_PATH=/path/to/hyperloom-run
-bash inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
 
 When `local_setup.sh` finishes it prints the workspace path to open in Cursor,
@@ -42,7 +42,7 @@ start `inference_optimizer optimize`:
 
 ```bash
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-bash inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/assets/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
@@ -56,7 +56,7 @@ Open the printed workspace in Cursor, then paste the generated prompt into
 Cursor Chat, filling in your workload:
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model
@@ -71,7 +71,7 @@ Optimize inference for this workload:
 
 Before launch, run exactly:
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
-bash inference_optimizer/scripts/install.sh
+bash src/hyperloom/inference_optimizer/assets/install.sh
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
 
@@ -87,14 +87,14 @@ the full prompt field reference (every field maps to a CLI flag).
 
 The agent reports a session ID, log path, and PID, then polls until the run
 completes. Under the hood it walks the phase chain
-`PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE`; see
+`PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE`; see
 [How the optimization loop works](HOW_THE_OPTIMIZATION_LOOP_WORKS.md) for what
 happens in each phase.
 
 ### 5. Resume an interrupted session
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 
