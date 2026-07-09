@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .base import BackendError, BackendTurnResult, build_chat_messages
+from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
+# OpenAI HTTP client timeout defaults for critic review calls.
+CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
+CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 120.0
 
 # Cap on per-turn workdirs kept on disk; older ones are pruned each turn.
 CRITIC_AGENT_WORKDIR_KEEP_COUNT = 50
@@ -423,6 +426,42 @@ class CriticAgentBackend:
             kwargs: dict[str, Any] = {"api_key": api_key}
             if base_url:
                 kwargs["base_url"] = base_url
+            try:
+                import httpx
+            except ImportError:
+                # Keep best-effort fallback to SDK defaults if httpx isn't
+                # importable in this environment.
+                log.warning(
+                    "critic_agent_backend: httpx unavailable; "
+                    "falling back to AsyncOpenAI default timeouts"
+                )
+            else:
+                connect_timeout_s = parse_call_timeout_env(
+                    "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
+                    default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+                )
+                rw_timeout_s = parse_call_timeout_env(
+                    "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
+                    default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
+                )
+                try:
+                    kwargs["timeout"] = httpx.Timeout(
+                        connect=connect_timeout_s,
+                        read=rw_timeout_s,
+                        write=rw_timeout_s,
+                        pool=rw_timeout_s,
+                    )
+                except (TypeError, ValueError) as exc:
+                    # Keep best-effort fallback to SDK defaults when timeout
+                    # values are rejected by the local httpx version.
+                    log.warning(
+                        "critic_agent_backend: failed to build httpx.Timeout "
+                        "(connect=%s rw=%s): %r; falling back to AsyncOpenAI "
+                        "default timeouts",
+                        connect_timeout_s,
+                        rw_timeout_s,
+                        exc,
+                    )
             self._client = AsyncOpenAI(**kwargs)
 
         # Resolve static per-session context once; absent model/framework keys
