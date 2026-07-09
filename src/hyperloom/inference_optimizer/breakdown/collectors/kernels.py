@@ -988,6 +988,19 @@ _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 _CONC_SWEEP_VARIANT_RE = re.compile(r"^(baseline|optimized)_conc(\d+)$")
 
 
+def _safe_mtime(p: Path) -> float:
+    """mtime for sort keys; 0.0 when the entry vanished mid-scan.
+
+    Breakdown collectors must never raise, so a concurrent workspace cleanup
+    that removes a path between enumeration and ``stat`` must not surface as
+    an exception out of ``collect_conc_sweep_summary``.
+    """
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _conc_sweep_successful_pairs(summary: dict[str, Any]) -> int:
     try:
         return int((summary.get("summary") or {}).get("successful_pairs") or 0)
@@ -999,14 +1012,16 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
     """Best-effort point extraction from a conc_sweep variant workspace."""
     result_paths = sorted(
         variant_dir.rglob("inferencex_result.json"),
-        key=lambda p: p.stat().st_mtime,
+        key=_safe_mtime,
         reverse=True,
     )
     for result_path in result_paths:
         data = _load_json_safe(result_path, [])
         if not isinstance(data, dict):
             continue
-        tput = data.get("output_throughput") or data.get("total_output_throughput")
+        tput = data.get("output_throughput")
+        if tput is None:
+            tput = data.get("total_output_throughput")
         try:
             tput_f = float(tput)
         except (TypeError, ValueError):
@@ -1109,7 +1124,7 @@ def _recover_conc_sweep_summary_from_runs(
         return {}
     tasks = sorted(
         (p for p in runs_dir.iterdir() if p.is_dir()),
-        key=lambda p: p.stat().st_mtime,
+        key=_safe_mtime,
         reverse=True,
     )
     best_payload: dict[str, Any] = {}
@@ -1117,16 +1132,19 @@ def _recover_conc_sweep_summary_from_runs(
     for task_dir in tasks:
         baseline_points: list[dict[str, Any]] = []
         optimized_points: list[dict[str, Any]] = []
-        for variant_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
-            match = _CONC_SWEEP_VARIANT_RE.match(variant_dir.name)
-            if not match:
-                continue
-            arm, conc_text = match.groups()
-            point = _load_conc_variant_point(variant_dir, arm=arm, conc=int(conc_text))
-            if arm == "baseline":
-                baseline_points.append(point)
-            else:
-                optimized_points.append(point)
+        try:
+            for variant_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+                match = _CONC_SWEEP_VARIANT_RE.match(variant_dir.name)
+                if not match:
+                    continue
+                arm, conc_text = match.groups()
+                point = _load_conc_variant_point(variant_dir, arm=arm, conc=int(conc_text))
+                if arm == "baseline":
+                    baseline_points.append(point)
+                else:
+                    optimized_points.append(point)
+        except OSError:
+            continue
         if not baseline_points and not optimized_points:
             continue
         baseline_points.sort(key=lambda p: p["conc"])
@@ -1195,11 +1213,16 @@ def collect_conc_sweep_summary(
 
     out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
 
-    recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
-    if _conc_sweep_successful_pairs(recovered) > _conc_sweep_successful_pairs(out):
-        recovered["original_report_path"] = out["report_path"]
-        warnings.append("conc_sweep_summary: recovered newer successful conc_sweep data from runs/conc_sweep")
-        return recovered
+    # Only fall back to run-workspace recovery when the authoritative report
+    # has no successful pairs. A healthy report is authoritative and must not
+    # be overridden by the weaker throughput-only recompute (also skips the
+    # full runs/ scan on the healthy path).
+    if _conc_sweep_successful_pairs(out) == 0:
+        recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
+        if _conc_sweep_successful_pairs(recovered) > 0:
+            recovered["original_report_path"] = out["report_path"]
+            warnings.append("conc_sweep_summary: recovered successful conc_sweep data from runs/conc_sweep")
+            return recovered
     return out
 
 

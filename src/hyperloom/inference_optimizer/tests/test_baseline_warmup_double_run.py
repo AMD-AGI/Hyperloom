@@ -1208,6 +1208,13 @@ def test_classify_value_error_with_argv_dump_not_arg_error():
     )
 
 
+def test_classify_subprocess_error_none_tail_does_not_crash():
+    # A slow (>=FAST_EXIT) failure with no captured stderr must not raise:
+    # stderr_tail.lower() is hoisted above the elapsed gate, so a None tail
+    # would AttributeError without the guard.
+    assert _classify_subprocess_error(600.0, None) == "subprocess_nonzero"
+
+
 def test_classify_kv_cache_oom_after_weight_load():
     # KV-cache OOM can surface well after the 30s fast-exit window (weights
     # take minutes to load), so it must be detected regardless of elapsed time.

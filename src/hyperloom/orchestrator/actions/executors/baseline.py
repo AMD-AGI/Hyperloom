@@ -272,7 +272,7 @@ def _classify_subprocess_error(
         ``"fast_exit_arg_error"`` for a fast exit caused by argument
         validation, else ``"subprocess_nonzero"``.
     """
-    tail = stderr_tail.lower()
+    tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load, so it is matched before
     # the fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
