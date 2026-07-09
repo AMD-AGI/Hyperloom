@@ -15,9 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   stale subprocesses (process-group SIGTERM/SIGKILL) so the run never
   leaks zombie agents.
 - Add repository governance docs (LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md).
-- Add documentation guides under `docs/`: `ENV_AND_AUTH.md`, `KB_GUIDE.md`, `CONFIGURATION_REFERENCE.md`, `INTEGRATION_SESSION_BREAKDOWN.md`, `OPERATIONS.md`, `OPERATOR_SCRIPTS.md`, `TROUBLESHOOTING.md`, `UPGRADING.md`.
-- Refresh `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` and add `src/hyperloom/inference_optimizer/README.md` as a package-level entry point.
-- README now links to the new guides via a "Learn More" doc index and lists `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the repo-tree.
+- Add structured Sphinx documentation under `docs/`: install guides, how-to
+  guides, reference material, component pages, release notes, and compatibility
+  docs.
+- Refresh the optimization-loop documentation under
+  `docs/conceptual/optimization-loop.md` and add
+  `src/hyperloom/inference_optimizer/README.md` as a package-level entry point.
+- README now links to the structured docs via a "Learn More" index and lists
+  `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the
+  repo tree.
 - **fix(orchestrator)**: drop pre-M4 `select_kernels` request alias and the
   legacy `SharedState.last_select_kernels` / `record_select_kernels` mirror.
   Only the canonical `trace_analyze` kind / `last_trace_analyze` cache

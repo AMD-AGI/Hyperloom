@@ -71,7 +71,7 @@ Bare-Metal mode installs Hyperloom directly on a host that already provides the 
 
 ### Inference Optimization — InferenceX Challenge
 
-Hyperloom optimized 4 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or beating NVIDIA B200 on 3 out of 4 models.
+Hyperloom optimized 5 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or beating NVIDIA B200 on all reported workloads.
 
 | Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
 |-------|---------------:|:------------------:|:--------------:|
@@ -173,7 +173,7 @@ Hyperloom/
 │           ├── scripts/                  # Runtime setup scripts: install.sh, etc.
 │           └── tests/                    # Kernel-agent tool tests
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
-├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
+├── docs/                                 # Sphinx documentation site (install/how-to/reference/components)
 ├── scripts/                              # Repo-level helper scripts
 ├── slides/                               # Presentation assets used by the README
 ├── pyproject.toml                        # Package metadata and console scripts
