@@ -18,7 +18,7 @@ for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
 
 import ray_runtime  # noqa: E402
 
-# Minimum soft RLIMIT_NOFILE the raylet needs to stay up (issue #433).
+# Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
 
 
@@ -137,8 +137,8 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
 def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeypatch):
     """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no
     ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1)
-    and emit NO warning. Regressing this re-introduces the issue #433
-    boundary bug where -1 was mistaken for a tiny cap."""
+    and emit NO warning. Regressing this re-introduces the boundary bug where
+    -1 was mistaken for a tiny cap."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=_FakeResource.RLIM_INFINITY, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)

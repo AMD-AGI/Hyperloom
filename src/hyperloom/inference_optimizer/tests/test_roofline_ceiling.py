@@ -1594,7 +1594,7 @@ class TestDeepSeekV3ConfigAliases:
 
 
 # ---------------------------------------------------------------------------
-# PerfModel bottom-up breakdown (Phase 2 / 3).
+# PerfModel bottom-up breakdown.
 # ---------------------------------------------------------------------------
 
 

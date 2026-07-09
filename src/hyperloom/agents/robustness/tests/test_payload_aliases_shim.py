@@ -3,7 +3,7 @@
 """Smoke tests pinning the payload-aliases helper's behaviour as used by
 ``hyperloom.agents.robustness.signals.repeated_payload``.
 
-tree-reform.MD P2.7: this package's own ``_payload_aliases.py`` re-export shim
+this package's own ``_payload_aliases.py`` re-export shim
 (a P2.1-era duplicate) has been removed; ``repeated_payload.py`` now imports
 the canonical helper directly from ``hyperloom.common.payload_aliases``,
 which is what this test exercises.

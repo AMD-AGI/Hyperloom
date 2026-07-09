@@ -419,7 +419,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
 def test_best_config_reads_stack_args_from_canonical_server_key(
     tmp_path: Path,
 ) -> None:
-    """Review #2 repro (fix for #332): best_config reads the canonical ``extra_server_args`` stack key, not the legacy ``*_sglang_args``."""
+    """best_config reads the canonical ``extra_server_args`` stack key, not the legacy ``*_sglang_args``."""
     coord = _make_coordinator(tmp_path)
     ss = coord.shared_state
     ss.current_best = {

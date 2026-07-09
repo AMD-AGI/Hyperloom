@@ -96,7 +96,7 @@ def test_specialist_focus_renders_non_empty_for_all_frameworks(
     assert "**Pitfalls" in text
 
 
-# 4. #5-P2 Option A: dedicated cross-framework rewrite domain + porting focus.
+# 4. Option A: dedicated cross-framework rewrite domain + porting focus.
 def test_cross_framework_rewrite_domain_registered():
     domain = get_domain("cross_framework_rewrite_specialist")
     assert domain is not None
