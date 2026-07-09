@@ -16,7 +16,8 @@ for its agent loop and environment tooling.
 Within Hyperloom, GEAK is one of the kernel-rewrite backends: when a hot kernel
 is identified, it is optimized asynchronously through GEAK (alongside the out-of-box (OOB)
 kernel-optimization path that uses Claude Code or OpenAI Codex). The kernel agent
-dispatches GEAK runs through Ray so multiple candidates can be explored in
+dispatches GEAK runs with placement precedence SSH (Dynamo multi-node) > Ray
+(when available) > direct CLI, so multiple candidates can be explored in
 parallel on the cluster's GPUs.
 
 - **Source**: <https://github.com/AMD-AGI/GEAK>
@@ -130,19 +131,28 @@ For the full CLI reference and examples, see the
 
 GEAK is wired in as a kernel-rewrite backend of the kernel agent:
 
-- `src/hyperloom/agents/kernel/tools/kernel_optimization.py` selects the backend ladder
-  (defaulting to `forge,geak,claude,codex,cursor`; `cursor` is key-gated) and builds the GEAK task
-  prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
-  vocabulary and rendering the `--test-command` and budget.
-- `src/hyperloom/agents/kernel/tools/backends/geak_submit.py` is the GEAK submission backend.
-  It locates the `geak` CLI on `PATH`, resolves `$GEAK_CONFIG`, assembles the
-  argument vector (`geak -t <prompt> --yolo --output <dir> --gpu-ids <ids>
-  --config <cfg> ...`), and dispatches it inside a `num_gpus`-pinned Ray
-  remote task (`run_via_ray`), remapping visible GPUs to logical IDs and
-  isolating per-attempt compile caches so a co-running OOB ladder can't clobber
-  artifacts.
-- `src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py` adapts the task prompt that GEAK
-  receives.
+- The orchestrator's `src/hyperloom/orchestrator/kernel/request_handlers.py`
+  (`_backend_order()`) selects the backend ladder, defaulting to
+  `forge,geak,claude,codex,cursor` (`cursor` is key-gated), and dispatches one
+  backend per child. `kernel_optimization.choose_backends()` mirrors the same
+  default when a subprocess runs without an explicit `--backends`.
+- `src/hyperloom/agents/kernel/tools/kernel_optimization.py` builds the GEAK
+  task prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
+  vocabulary and rendering the budget/shape metadata into the prompt. It does
+  **not** pass `--test-command` to GEAK — GEAK owns harness construction from
+  the prompt, so Hyperloom deliberately omits `common_test_command`.
+- `src/hyperloom/agents/kernel/tools/backends/geak_submit.py` is the GEAK
+  submission backend. It locates the `geak` CLI on `PATH`, resolves
+  `$GEAK_CONFIG`, assembles the argument vector (`geak -t <prompt> --yolo
+  --output <dir> --gpu-ids <ids> --config <cfg> ...`), and dispatches it with
+  placement precedence `ssh (Dynamo multi-node) > ray (`run_via_ray`, when
+  `ray_available()`) > direct CLI`. The Ray path pins `num_gpus`, remaps
+  visible GPUs to logical IDs, and isolates per-attempt compile caches so a
+  co-running OOB ladder can't clobber artifacts.
+- `src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py` runs at install
+  time to patch GEAK's bundled `mini_kernel_strategy_list.yaml`; it does not
+  alter the runtime task prompt (that is built by
+  `kernel_optimization.build_prompt()`).
 
 This lets Hyperloom optimize hot kernels asynchronously and in parallel on the
 cluster. See [Hyperloom optimization loop](../conceptual/optimization-loop.md).

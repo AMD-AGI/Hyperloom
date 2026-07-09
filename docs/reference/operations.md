@@ -118,7 +118,7 @@ The following table describes the key lifecycle events for a Hyperloom session.
 | Phase           | Trigger                                            | Action                                                  |
 |-----------------|----------------------------------------------------|---------------------------------------------------------|
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
-| Heartbeat       | Every 60 s                                         | Coordinator writes `state.json.tmp` → atomic rename inside `$SESSION_DIR`. |
+| Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state-*.json` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
 | Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume` / `--resume-from`; reads `manifest.json` + `state.json`. |
 
@@ -137,7 +137,7 @@ Back up the following artifacts from each session.
 | Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
 | `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
 | Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                |
-| Robustness findings                     | `$USER_DATA_PATH/agents/robustness/findings/*.jsonl`              | 30 days minimum; longer if your incident process needs it.                                               |
+| Robustness findings                     | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`      | 30 days minimum; longer if your incident process needs it.                                               |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |
 | Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/runs/<session_id>/{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                                  |
 
@@ -187,8 +187,8 @@ is JSONL-on-disk + (optional) downstream collectors.
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
 | Per-tick Coordinator state     | `$SESSION_DIR/state.json`                                                        | JSON, snapshot  |
 | Session breakdown (final)      | `$SESSION_DIR/session_breakdown.json`                                            | JSON, snapshot  |
-| Robustness findings            | `$USER_DATA_PATH/agents/robustness/findings/<session>.jsonl`                     | JSONL, append   |
-| Critic verdicts                | `$USER_DATA_PATH/critic-session-memory/<session>/emit-*.json`                    | JSON per call   |
+| Robustness findings            | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`                     | JSONL, append   |
+| Critic verdicts                | `$SESSION_DIR/critic-workdir/<turn>/emit.json` (memory in `$SESSION_DIR/critic-session-memory/`) | JSON per call   |
 | Kernel-opt attempts            | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl`        | JSONL, append   |
 | Inference server logs          | `$SESSION_DIR/runs/<action>/<task>/server.log`                                  | text            |
 

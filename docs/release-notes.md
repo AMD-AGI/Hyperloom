@@ -7,13 +7,17 @@ myst:
 
 # Hyperloom release notes
 
-## Hyperloom 0.1.0
+The current packaged version is **0.8.0** (`pyproject.toml`). For the
+per-change history since the initial snapshot, see
+[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md);
+this page summarizes the headline capabilities.
 
-Initial release of Hyperloom.
+## Hyperloom (initial capabilities)
+
+The first public snapshot introduced the following features, which remain the
+core of the current runtime:
 
 ### Added
-
-This release introduces the following features:
 
 - **Agentic optimization loop** — Hyperloom treats LLM inference optimization as
   a search problem. Given a workload, the agent autonomously explores candidates

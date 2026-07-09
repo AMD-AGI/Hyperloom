@@ -13,7 +13,7 @@ There are two ways to get a GPU environment:
 
 **Prerequisites:**
 
-- An AMD GPU machine supporting **MI300X** or **MI355X**.
+- An AMD GPU machine supporting **MI300X / MI308X / MI325X / MI355X** (MI308X and MI325X run with the MI300X runner scripts).
 - Access to an OpenAI-compatible (LiteLLM-style) LLM gateway: set **both** `SAFE_API_KEY` (your gateway API key) and `OPENAI_BASE_URL` (your gateway’s `/v1` endpoint). The Primus-SaFE LiteLLM gateway is one option (get your key via the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)), but any compatible gateway works.
 
 ### 1. Start the container
@@ -54,22 +54,68 @@ Select the container you started (`hyperloom-local`):
 
 Cursor opens a new window attached to the running container. Open a workspace folder inside the container to continue.
 
-### 3. Clone Hyperloom and bootstrap Local Mode
+### 3. Clone Hyperloom and configure credentials
 
-In the container, make sure GitHub authentication and AMD-AGI repository access are available — `local_setup.sh` reuses that access to clone dependency repositories. Then clone and bootstrap in one go:
+In the container, make sure GitHub authentication and AMD-AGI repository access
+are available — `local_setup.sh` reuses that access to clone dependency
+repositories. Then clone Hyperloom:
 
 ```bash
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
-export SAFE_API_KEY=ak-your-safe-apikey            # <-- paste your gateway key
-export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1  # <-- set to your gateway base URL (Primus-SaFE example)
+cp .env.template .env
+```
+
+Configure one of the supported LLM gateway layouts:
+
+**Single gateway (default).** One OpenAI-compatible endpoint serves both Claude
+and GPT-style models. This is the usual AMD Primus-SaFE setup:
+
+```bash
+export SAFE_API_KEY=ak-your-safe-apikey
+export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
+```
+
+**Split Anthropic + OpenAI entrypoints.** Use this when Claude and GPT models
+live on different upstream providers or gateways:
+
+```bash
+export ANTHROPIC_BASE_URL=https://api.anthropic.com
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=sk-...
+```
+
+**Model IDs.** The AMD defaults work on the Primus-SaFE gateway. For split
+entrypoints or a self-hosted gateway, pin model IDs that your gateway serves:
+
+```bash
+export CLAUDE_MODEL=your-orchestration-model
+export CODEX_MODEL=your-kernel-model
+```
+
+For non-AMD/self-hosted gateways, also opt out of the AMD-only model gate so
+preflight validates against your gateway's `/models` catalog:
+
+```bash
+export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+```
+
+Shell exports are enough for one session. To persist them, put the same values
+in `.env`; shell exports still win over `.env`. For non-AMD gateways, model
+overrides, Cursor keys, and endpoint overrides, see
+[Authentication and credentials](../reference/authentication.md).
+
+### 4. Bootstrap dependency checkouts
+
+Run `local_setup.sh` after credentials are available:
+
+```bash
 export USER_DATA_PATH=/workspace/hyperloom && mkdir -p "$USER_DATA_PATH"
 bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 ```
-> **Tip:** Instead of exporting these variables each session, you can persist credentials in a `.env` file. See the appendix below for the basic recipe, or [Authentication and credentials](../reference/authentication.md) for the full reference.
 
 - `SAFE_API_KEY` — your key from the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
 - `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). It **must be an absolute path** and can point at any location with enough space.
-- Not using the Primus-SaFE gateway? See [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd--self-hosted-gateway) for self-hosted gateways and model overrides.
 
 When it finishes, `local_setup.sh` prints the workspace path to open in Cursor, a prompt template to paste into Cursor Chat (with a `Model:` field to fill in), and the env file to source before launch.
 
@@ -81,7 +127,7 @@ AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform 
 
 1. Create an Authoring Pod on Primus-SaFE Authoring and select an SGLang or vLLM image. On this platform, use the Harbor mirror prefix `harbor.<datacenter_name>.primus-safe.amd.com/proxy/primussafe/sglang:<tag>` (the internal mirror of the Docker Hub images above).
 2. When the Pod is ready, connect to it with Cursor Remote SSH (follow the connection instructions shown in the Primus-SaFE Authoring UI).
-3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-bootstrap-local-mode) above to clone Hyperloom and run the bootstrap.
+3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-configure-credentials) and [Step 4](#4-bootstrap-dependency-checkouts) above to clone Hyperloom and run the bootstrap.
 
 ---
 

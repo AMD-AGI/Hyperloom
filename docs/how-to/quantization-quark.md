@@ -42,13 +42,16 @@ release does not ship the `.claude/skills/quark-torch-*` skill entry points that
 Hyperloom drives. Until those skills are public, use an internal AMD Quark
 repository checkout.
 
-Hyperloom resolves the Quark root in this order:
+When you run `inference_optimizer optimize`, the quantization prelude resolves
+the Quark root in this order:
 
-1. `--quark-root`
-2. `QUARK_ROOT`
-3. The Core42-only default `/wekafs/hyperloom/Quark`
+1. `QUARK_ROOT`
+2. The canonical default `/wekafs/hyperloom/Quark`
 
-Outside Core42, set `QUARK_ROOT` explicitly. The path must contain
+`inference_optimizer optimize` has no `--quark-root` flag; that argument only
+exists on the standalone `quantization-agent` CLI. For the `optimize` path,
+set `QUARK_ROOT` explicitly wherever the canonical default is not mounted. The
+path must contain
 `.claude/skills/quark-torch-ptq/SKILL.md` plus the validator and eval skills. If
 the resolved checkout is missing after quantization is enabled, the run fails
 fast instead of silently optimizing the unquantized source model.

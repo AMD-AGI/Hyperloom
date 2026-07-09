@@ -8,7 +8,7 @@ The installer runs: base preflight â†’ optional SGLang/vLLM framework install â†
 
 ## Prerequisites
 
-- An AMD GPU host with **ROCm** runtime and a **ROCm-built torch** already installed (**MI300X** or **MI355X**).
+- An AMD GPU host with **ROCm** runtime and a **ROCm-built torch** already installed (**MI300X / MI308X / MI325X / MI355X**; bare-metal preflight maps gfx942 uniformly to MI300X).
 - GitHub authentication and AMD-AGI repository access (the bundled `local_setup.sh` reuses it to clone dependency repos).
 
 ---

@@ -67,7 +67,7 @@ the full prompt field reference (every field maps to a CLI flag).
 
 The agent reports a session ID, log path, and PID, then polls until the run
 completes. Under the hood it walks the phase chain
-`PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE`; see
+`PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for what
 happens in each phase.
 

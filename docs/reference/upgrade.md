@@ -130,12 +130,14 @@ handler as `trace_report_path` and forwarded to the lifecycle as
 `$SESSION_DIR/kernel-agent/runs/<session_id>/tracelens/analysis.md`).
 The `--compat-report-path` argument was removed.
 
-### Optional: enable PMC roofline
+### Roofline is now on by default (no PMC env toggle)
 
-New in 0.6: `HYPERLOOM_ENABLE_PMC_ROOFLINE=1` layers Magpie performance monitoring counter (PMC)
-roofline analysis on top of TraceLens. Useful for compute-bound
-workloads; adds ~3 minutes per profile call. See
-[Environment variables](environment-variables.md) §7.
+There is no `HYPERLOOM_ENABLE_PMC_ROOFLINE` environment variable. Roofline
+analysis (the composite `profile` + `trace_analyze` + `analysis.md` path) is
+controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
+`--no-enable-roofline` for a profile-only run, or set
+`INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0` for the same effect. See
+[Environment variables](environment-variables.md).
 
 ### Optional: opt into the Cursor backend
 

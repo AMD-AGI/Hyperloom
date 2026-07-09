@@ -83,7 +83,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
-  "exporter_version": "0.6.0",
+  "exporter_version": "session-breakdown-1.0.0",
 
   "session":            { /* §3  SessionMeta */ },
   "workload":           { /* §4  Workload */ },
@@ -244,12 +244,13 @@ The same `kernel_id` appears in multiple lists as it progresses.
 
 ## `param_search`
 
-The canonical ledger is `explore`, with `ParamSearchEntry` records for
-every tested variant: `status` ∈ `accepted` / `rejected` / `tested`,
-the `extra_server_args` / `extra_envs` it injected, the
+The canonical field is `explore_search` (the native merged ledger), with
+`ParamSearchEntry` records for every tested variant: `status` ∈ `accepted` /
+`rejected` / `tested`, the `extra_server_args` / `extra_envs` it injected, the
 `output_throughput` it measured, and the resulting `gain_pct`. The
-`params` and `backends` ledgers are compatibility aliases emitted for
-archived sessions and old readers. The section also includes
+`param_search` ledger is a v1-reader compatibility alias for the same data;
+`params` and `backends` are older compatibility aliases emitted for archived
+sessions and old readers. The section also includes
 `synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
 
 ---
@@ -315,7 +316,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
-  "exporter_version": "0.6.0",
+  "exporter_version": "session-breakdown-1.0.0",
 
   "session": {
     "session_id": "sess-20260517-1130",
@@ -329,13 +330,13 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "host": "claw-sandbox-7",
     "code_revision": "a1b2c3d",
     "pid": 12345,
-    "session_dir": "/workspace/hyperloom",
+    "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
     "tick_count": 89,
     "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x-profilerfix"
   },
 
   "workload": {
-    "framework": "sglang",
+    "framework_name": "sglang",
     "framework_version": "0.5.11",
     "model_name": "GLM-5-FP8",
     "model_path": "/wekafs/models/GLM-5-FP8",
