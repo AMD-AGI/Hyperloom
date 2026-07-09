@@ -193,8 +193,8 @@ export OOB_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 ```
 
 Preflight preserves intentional operator overrides. If `GEAK_BASE_URL` or
-`OOB_BASE_URL` is set, Hyperloom treats it as deliberate and does not rewrite it;
-remove stale `127.0.0.1:4002` overrides by hand.
+`OOB_BASE_URL` is set, Hyperloom treats it as deliberate and does not rewrite it.
+Only set these variables when the target is reachable from the worker runtime.
 
 ---
 
@@ -255,20 +255,18 @@ legacy-only and still used in narrow fallbacks; prefer `USER_DATA_PATH`. See
 
 ---
 
-## Direct upstream wiring (no local auth-proxy)
+## Direct upstream wiring
 
-Older Hyperloom builds ran a local auth-proxy on `127.0.0.1:4002` to
-rewrite `x-api-key` into `Authorization: Bearer`. **That component has
-been removed.** Claude, Codex, and GEAK now talk to the upstream gateway
-directly. The AMD primus-safe gateway accepts both header styles natively.
+Claude, Codex, and GEAK talk to the configured upstream gateway directly.
+The AMD primus-safe gateway accepts both header styles natively.
 
 At preflight, the inference optimizer CLI:
 
 - Resolves Anthropic and OpenAI base URLs.
 - Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
 - Fills unset alias env vars (`GEAK_*`, `OOB_*`, and so on).
-- Preserves explicit `GEAK_BASE_URL` / `OOB_BASE_URL` overrides, including stale
-  ones; clear any old `127.0.0.1:4002` env values before launch.
+- Preserves explicit `GEAK_BASE_URL` / `OOB_BASE_URL` overrides for separate
+  routable endpoints.
 
 **401 recovery:**
 
@@ -277,7 +275,7 @@ At preflight, the inference optimizer CLI:
 2. Re-run preflight (any `inference_optimizer` CLI command) or
    `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
-   upstream gateway, not `127.0.0.1:4002`.
+   configured upstream gateway.
 
 The `cursor` backend always bypasses your LLM gateway (Cursor's own
 issuer). GEAK uses `GEAK_API_KEY` / `GEAK_BASE_URL` (or the generated
@@ -332,15 +330,6 @@ separate routable endpoint.
 
 Re-export the key(s) and re-run `install.sh` (idempotent). Preflight
 and all aliases pick up the new value on the next CLI launch.
-
-**Q: I still see `127.0.0.1:4002` in my env or Claude config.**
-
-That is a stale legacy proxy URL. Delete stale `GEAK_BASE_URL` /
-`OOB_BASE_URL` / `OPENAI_BASE_URL` values from the shell or `.env`, then re-run
-install/preflight. If only `~/.claude/config.json` is stale, install/preflight
-rewrites `customApiUrl` to the resolved upstream gateway.
-
----
 
 ## More info
 

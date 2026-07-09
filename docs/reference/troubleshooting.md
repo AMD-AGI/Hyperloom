@@ -27,13 +27,13 @@ upstream SKILL file for the component you're touching:
 
 **Cause**: The LLM gateway credentials are missing, expired, or not
 propagated to `~/.claude/config.json`. Hyperloom talks directly to the
-upstream gateway — there is no local auth-proxy.
+configured upstream gateway.
 
 **Fix**:
 
-1. Confirm `SAFE_API_KEY` is set and current:
+1. Confirm `SAFE_API_KEY` is set without printing the secret:
    ```bash
-   echo "$SAFE_API_KEY"
+   test -n "${SAFE_API_KEY:-}"
    ```
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
@@ -43,9 +43,9 @@ upstream gateway — there is no local auth-proxy.
    bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
-   upstream gateway (for example, `https://your-openai-compatible-gateway.example.com/v1`),
-   not `127.0.0.1:4002`. Also clear any stale `GEAK_BASE_URL` / `OOB_BASE_URL`
-   / `OPENAI_BASE_URL` env overrides that still point at the removed proxy.
+   upstream gateway (for example, `https://your-openai-compatible-gateway.example.com/v1`).
+   If `GEAK_BASE_URL` or `OOB_BASE_URL` is set, confirm it points at a
+   routable endpoint for the worker runtime.
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
 
