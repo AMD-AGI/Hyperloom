@@ -2,8 +2,8 @@
 
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
-Pins the post-auth-proxy contract: legacy ``127.0.0.1:4002`` URLs and stale key
-aliases are rewritten to be consistent with ``OPENAI_BASE_URL`` / ``SAFE_API_KEY``.
+Pins the direct-gateway contract: base URLs are resolved for split/single
+entrypoints and key aliases are fanned out from ``SAFE_API_KEY``.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def test_derive_anthropic_base_url_strips_openai_v1_suffix():
     )
 
 
-def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
+def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     monkeypatch,
     tmp_path,
     clean_url_env,
@@ -100,12 +100,8 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "OPENAI_BASE_URL",
         "https://gateway.example/api/v1/llm-proxy/v1",
     )
-    # A stale 127.0.0.1:4002 ANTHROPIC_BASE_URL is treated as unset and
-    # re-derived from OPENAI_BASE_URL (the only stale-URL force-rewrite path).
-    monkeypatch.setenv(
-        "ANTHROPIC_BASE_URL",
-        "http://127.0.0.1:4002/api/v1/llm-proxy",
-    )
+    # ANTHROPIC_BASE_URL unset -> re-derived from OPENAI_BASE_URL.
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     # Key aliases start unset so SAFE_API_KEY fills them (gap-fill semantics).
     for name in (
         "OPENAI_API_KEY",
@@ -117,13 +113,14 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "AMD_LLM_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Base-url aliases start unset -> default to the resolved gateway.
     for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
-        monkeypatch.setenv(name, "http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+        monkeypatch.delenv(name, raising=False)
 
     config_dir = tmp_path / ".claude"
     config_dir.mkdir()
     (config_dir / "config.json").write_text(
-        '{"primaryApiKey":"old-key","customApiUrl":"http://127.0.0.1:4002/v1"}',
+        '{"primaryApiKey":"old-key","customApiUrl":"https://old.example/v1"}',
         encoding="utf-8",
     )
 
@@ -149,7 +146,6 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         assert cli.os.environ[name] == resolved[1]
 
     config_text = (config_dir / "config.json").read_text(encoding="utf-8")
-    assert "127.0.0.1:4002" not in config_text
     assert '"primaryApiKey": "new-safe-key"' in config_text
     assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
 
@@ -257,38 +253,6 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     assert cli.os.environ["OOB_BASE_URL"] == tunnel
     # Unset alias still defaults to the gateway.
     assert cli.os.environ["LLM_API_BASE"] == gateway
-
-
-def test_preflight_rewrites_stale_proxy_even_when_operator_set(
-    monkeypatch,
-    tmp_path,
-    clean_url_env,
-    stub_install_steps,
-):
-    """A leftover 127.0.0.1:4002 value is force-rewritten, not preserved."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
-    monkeypatch.setenv(
-        "OPENAI_BASE_URL",
-        "https://gateway.example/api/v1/llm-proxy/v1",
-    )
-    monkeypatch.setenv(
-        "GEAK_BASE_URL",
-        "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
-    )
-
-    resolved = cli._preflight()
-
-    assert cli.os.environ["GEAK_BASE_URL"] == resolved[1]
-    assert "127.0.0.1:4002" not in cli.os.environ["GEAK_BASE_URL"]
-
-
-def test_is_stale_proxy_url_matches_legacy_only():
-    assert cli._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
-    assert not cli._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
-    assert not cli._is_stale_proxy_url("https://gateway.example/v1")
-    assert not cli._is_stale_proxy_url("")
-    assert not cli._is_stale_proxy_url(None)
 
 
 # _sync_geak_config_base_url (#521): GEAK reads $GEAK_CONFIG yaml, not env.

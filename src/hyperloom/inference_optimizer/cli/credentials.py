@@ -156,22 +156,6 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
-# Legacy local auth-proxy endpoint. The component was removed; any leftover
-# URL pinned at this host:port is stale and must be force-rewritten to the
-# upstream gateway even when an operator value is otherwise preserved (#521).
-_STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
-
-def _is_stale_proxy_url(url: str | None) -> bool:
-    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``).
-
-    Args:
-        url (str | None): The URL to test.
-
-    Returns:
-        bool: ``True`` when the URL pins the stale legacy proxy host:port.
-    """
-    return _STALE_PROXY_HOSTPORT in str(url or "")
-
 # Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
 # written by kernel-agent/scripts/install.sh, but tolerant of any indent).
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
@@ -249,16 +233,10 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
 
     Each side keeps an explicit operator value; a missing side falls back to
     the other so the legacy single-gateway setup (only ``OPENAI_BASE_URL``)
-    keeps working and both Claude and Codex still reach an endpoint. Known
-    stale auth-proxy leftovers (127.0.0.1:4002) are treated as unset so they
-    are re-derived rather than preserved.
+    keeps working and both Claude and Codex still reach an endpoint.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-    if _is_stale_proxy_url(openai_url):
-        openai_url = ""
-    if _is_stale_proxy_url(anthropic_url):
-        anthropic_url = ""
 
     if anthropic_url and openai_url:
         # Both explicitly configured: respect each as-is (true dual entry).
@@ -272,7 +250,7 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
     return "", ""
 
 def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway.
 
     Args:
         primary_api_key (str): The Claude CLI primary API key to write; blank
