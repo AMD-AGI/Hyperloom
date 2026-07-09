@@ -1,0 +1,87 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+name: Docs
+
+# Builds the Sphinx documentation (docs/) with the same config used locally and
+# by Read the Docs (autodoc + autosummary + napoleon + MyST, Furo theme) and
+# publishes the rendered HTML to GitHub Pages.
+#
+# - Pull requests: build only, as a check that the docs still compile. Nothing
+#   is published from a PR.
+# - Push to main: build and deploy the site to GitHub Pages.
+#
+# One-time repo setup (Settings -> Pages -> "Build and deployment"): set the
+# Source to "GitHub Actions". No branch or gh-pages branch is needed; this
+# workflow uploads the artifact and deploys it directly.
+on:
+  push:
+    branches: [main]
+    # Rebuild when docs, the source packages they document, or the build deps
+    # change. autodoc pulls docstrings out of the code (src/ layout), so source
+    # edits can change the rendered site even when docs/ is untouched.
+    paths:
+      - "docs/**"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  # Allow manual runs (e.g. to republish after changing Pages settings).
+  workflow_dispatch:
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (sphinx html)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install documentation dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r docs/requirements.txt
+
+      - name: Build HTML
+        # conf.py mocks the heavy runtime imports (torch, triton, ray, ...), so
+        # the build does not need an editable install of the packages.
+        run: |
+          sphinx-build -b html docs docs/_build/html
+
+      - name: Upload Pages artifact
+        # Only the push-to-main run needs to hand off to the deploy job; the PR
+        # build is a compile check and stops here.
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    name: deploy (github pages)
+    # Publish only from main; PRs never deploy.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

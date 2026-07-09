@@ -1543,12 +1543,15 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         "top_k": 5,
         "dry_run": True,
         "budget_minutes": 1,
+        # Exercise the structured-result plumbing via the explicit bypass route
+        # (the default is now the TraceLens agent route, which needs a real root).
+        "analysis_route": "bypass",
     }
     res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-    # No trace files → failed, but the response must still be structured.
+    # Structured result surfaced verbatim by the bypass backend.
     assert res["status"] in ("ok", "succeeded", "failed")
-    assert "tool" in res or "run_id" in res or "error" in res
-    assert res.get("session_id") == session_dir.name or "run_id" in res
+    assert res.get("route") == "bypass"
+    assert res.get("candidates_path") and "artifact_paths" in res
 
 
 @pytest.mark.asyncio
@@ -1570,6 +1573,234 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
         res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
         # Must return a structured result, never raise AttributeError.
         assert res["status"] in ("ok", "succeeded", "failed")
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the
+    TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "xdit",
+            "model_name": "FLUX.1-dev",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+    assert "--tracelens-root" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkeypatch):
+    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even
+    for a text-gen framework (explicit env route wins over the default)."""
+    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bypass")
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "orchestrator_mode": "bypass", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--tracelens-root" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
+    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route
+    (the shipped default). Bypass is reached only via an explicit route."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_invalid_route_falls_back_to_agent(session_dir, monkeypatch):
+    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route;
+    it falls back to the default TraceLens ``agent`` route and surfaces a warning."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "analysis_route": "foobar",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+    codes = {w.get("code") for w in res.get("trace_health_warnings", [])}
+    assert "invalid_analysis_route" in codes
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
+    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only
+    (must NOT reach bypass, which would crash argparse -> degraded), while
+    --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    base = {
+        "trace_input": str(fake_trace),
+        "session_id": session_dir.name,
+        "framework": "xdit",
+        "num_denoise_steps": 20,
+        "top_k": 5,
+    }
+    # Explicit bypass route: no --skip-split, but --num-denoise-steps forwarded.
+    await krh.trace_analyze_handler({**base, "analysis_route": "bypass"}, session_dir=session_dir)
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--skip-split" not in cmd
+    assert "--num-denoise-steps" in cmd and "20" in cmd
+    # TraceLens (deterministic) route: both flags present.
+    await krh.trace_analyze_handler({**base, "analysis_route": "deterministic"}, session_dir=session_dir)
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--skip-split" in cmd
+    assert "--num-denoise-steps" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_text_gen_deterministic_escapes_to_tracelens(session_dir, monkeypatch):
+    """TraceLens stays reachable as an explicit escape hatch: text-gen with
+    analysis_route=deterministic runs the TraceLens tool, not bypass."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "analysis_route": "deterministic",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--tracelens-root" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_xdit_explicit_route_overrides_bypass(session_dir, monkeypatch):
+    """An explicit route wins over the xDiT bypass default (e.g. forcing the
+    TraceLens deterministic route)."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "orchestrator_mode": "deterministic", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "xdit",
+            "analysis_route": "deterministic",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "deterministic" in cmd
 
 
 @pytest.mark.asyncio

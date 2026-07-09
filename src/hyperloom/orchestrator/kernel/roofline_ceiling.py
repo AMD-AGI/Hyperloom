@@ -945,6 +945,12 @@ def compute_compute_bound_ceiling_tok_per_sec(
 
     Divisor uses ``active_weight_bytes`` at B=1 (NOT batch-saturated). Returns 0.0 on missing input (degrade to T_mem).
 
+    ``F_peak`` is the **max-achievable (sustained) TFLOPS** — the SAME convention
+    as the bottom-up PerfModel path (:func:`compute_roofline_from_perfmodel`), so
+    within%/gap don't jump ~1.85x when this top-down fallback is used on an
+    incomplete config. The vendor dense peak is used only as a coverage-gap
+    fallback when the achievable table lacks the (gpu, precision).
+
     Args:
         gpu_type: GPU type key for the peak TFLOPS lookup.
         num_gpus: Number of GPUs (tensor-parallel degree).
@@ -957,7 +963,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
         The compute-bound decode throughput ceiling, or ``0.0`` on missing
         input.
     """
-    peak_tflops = _resolve_peak_tflops(gpu_type, precision_tag)
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes only when active is missing/0 (never a batch-saturated weight here).
@@ -1057,6 +1063,312 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
     return max(float(meta.weight_dtype_bytes or 2.0), 2.0)
 
 
+def _read_diffusion_num_steps(state: Any) -> int:
+    """Read the denoising step count (``XDIT_NUM_STEPS``) from the baseline yaml.
+
+    Args:
+        state: Shared run state carrying the materialized baseline yaml.
+
+    Returns:
+        The positive step count, or ``0`` when unavailable.
+    """
+    envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
+    return _env_int(envs, "XDIT_NUM_STEPS")
+
+
+def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
+    """Read the image resolution (``XDIT_HEIGHT``/``XDIT_WIDTH``) from the baseline yaml.
+
+    Needed for models (e.g. FLUX, SD3) whose transformer config carries no
+    ``sample_size`` -- the DiT sequence length is set by the runtime resolution.
+
+    Args:
+        state: Shared run state carrying the materialized baseline yaml.
+
+    Returns:
+        ``(height, width)`` in pixels; ``(0, 0)`` when unavailable.
+    """
+    try:
+        envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
+        return _env_int(envs, "XDIT_HEIGHT"), _env_int(envs, "XDIT_WIDTH")
+    except (AttributeError, TypeError, ValueError):
+        return 0, 0
+
+
+def _read_vae_geometry(model_path: str) -> tuple[int, int]:
+    """Read ``(vae_scale_factor, latent_channels)`` from ``<model>/vae/config.json``.
+
+    The VAE spatial downscale is ``2 ** (len(block_out_channels) - 1)`` (one
+    stride-2 stage per extra block); ``latent_channels`` is the VAE latent depth.
+    Both feed the DiT sequence-length derivation for sample_size-less configs.
+
+    Args:
+        model_path: Local diffusers model directory.
+
+    Returns:
+        ``(vae_scale_factor, latent_channels)``; ``vae_scale_factor`` defaults to
+        8 (the standard SD/FLUX VAE) and ``latent_channels`` to 0 when unreadable.
+    """
+    try:
+        cfg = json.loads((Path(model_path) / "vae" / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return 8, 0
+    if not isinstance(cfg, dict):
+        return 8, 0
+    boc = cfg.get("block_out_channels")
+    vae_scale = 2 ** (len(boc) - 1) if isinstance(boc, list) and boc else 8
+    latent_channels = int(cfg.get("latent_channels") or 0)
+    return vae_scale, latent_channels
+
+
+def compute_diffusion_mem_img_per_sec(
+    *, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int
+) -> float:
+    """Memory-roofline ceiling for diffusion image throughput (images/sec).
+
+    Each denoising step must read the full model weights at least once, so the
+    per-step time is lower-bounded by ``weight_bytes / (HBM_BW * num_gpus)`` and
+    one image takes ``num_steps`` such steps. This is a strict upper bound on
+    images/sec in the memory-bound regime. The compute-bound ceiling (which
+    typically dominates for diffusion) needs per-op FLOPs modeling and is added
+    separately once it can be validated against a real xDiT trace.
+
+    Args:
+        gpu_type: GPU type key for the HBM bandwidth lookup.
+        num_gpus: Tensor/sequence-parallel degree (floored at 1).
+        weight_bytes: Total model weight bytes (read once per step).
+        num_steps: Number of denoising steps per image.
+
+    Returns:
+        The memory-bound images/sec ceiling, or ``0.0`` on unknown GPU type or
+        degenerate input.
+    """
+    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+    if spec is None:
+        return 0.0
+    bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    if weight_bytes <= 0 or num_steps <= 0 or bw <= 0:
+        return 0.0
+    per_step_s = weight_bytes / bw
+    total_s = num_steps * per_step_s
+    return 1.0 / total_s if total_s > 0 else 0.0
+
+
+def _read_diffusion_dit_meta(
+    model_path: str, *, height: int = 0, width: int = 0
+) -> tuple[int, int, int, int] | None:
+    """DiT transformer shape from ``<model>/transformer/config.json`` for the
+    compute-bound diffusion ceiling.
+
+    Estimates DiT-ONLY params, NOT the total ``weight_bytes`` (which also holds
+    the text encoder + VAE that do NOT run per denoising step). Per standard
+    transformer block the count is ``12 * H**2`` (4H^2 attention + 8H^2 MLP);
+    FLUX-style dual-stream blocks (``num_layers``) run separate image+text
+    projections and are counted ``2x``, single-stream blocks (``num_single_layers``)
+    ``1x`` -- so ``params = 12 * H**2 * (2 * num_layers + num_single_layers)``.
+
+    Latent token count (the DiT sequence length):
+      - ``sample_size`` present (Sana/PixArt/DiT): ``(sample_size / patch_size)**2``.
+      - else (FLUX/SD3): from the runtime resolution -- one token per
+        ``vae_scale_factor * transformer_pack`` pixels a side, where the pack is
+        inferred from ``in_channels / vae_latent_channels`` (FLUX folds a 2x2
+        patch into channels), all read from the VAE + transformer configs.
+
+    Args:
+        model_path: Local diffusers model directory.
+        height: Image height in pixels (used only when ``sample_size`` is absent).
+        width: Image width in pixels (used only when ``sample_size`` is absent).
+
+    Returns:
+        ``(dit_params, latent_tokens, num_layers, hidden_size)`` where
+        ``num_layers`` is the TOTAL block count (dual + single stream, for the
+        attention term), or ``None`` when the config is unreadable / missing
+        fields / no way to size the latent grid (caller degrades to memory-only).
+    """
+    try:
+        cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
+    num_single_layers = int(cfg.get("num_single_layers") or 0)
+    hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
+    if hidden <= 0:
+        heads = int(cfg.get("num_attention_heads") or 0)
+        head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
+        hidden = heads * head_dim
+    patch = int(cfg.get("patch_size") or 1) or 1
+    sample = int(cfg.get("sample_size") or 0)
+    if num_layers <= 0 or hidden <= 0:
+        return None
+
+    if sample > 0:
+        latent_tokens = (sample // patch) ** 2
+    else:
+        latent_tokens = _diffusion_latent_tokens_from_resolution(model_path, cfg, height, width)
+    if latent_tokens <= 0:
+        return None
+
+    total_layers = num_layers + num_single_layers
+    param_layer_units = 2 * num_layers + num_single_layers if num_single_layers > 0 else num_layers
+    dit_params = 12 * param_layer_units * hidden * hidden
+    if dit_params <= 0:
+        return None
+    return dit_params, latent_tokens, total_layers, hidden
+
+
+def _diffusion_latent_tokens_from_resolution(
+    model_path: str, transformer_cfg: dict[str, Any], height: int, width: int
+) -> int:
+    """Latent-grid token count for a sample_size-less DiT from the runtime resolution.
+
+    ``tokens = (H / downscale) * (W / downscale)`` where ``downscale =
+    vae_scale_factor * transformer_pack``. The transformer pack is inferred from
+    ``in_channels / vae_latent_channels`` (FLUX packs a 2x2 patch into channels),
+    defaulting to 2 (the FLUX/SD3 convention) when it cannot be derived.
+
+    Args:
+        model_path: Local diffusers model directory (for the VAE geometry).
+        transformer_cfg: Parsed transformer ``config.json``.
+        height: Image height in pixels.
+        width: Image width in pixels.
+
+    Returns:
+        The latent token count, or ``0`` when the resolution is unavailable.
+    """
+    if height <= 0 or width <= 0:
+        return 0
+    vae_scale, latent_channels = _read_vae_geometry(model_path)
+    in_ch = int(transformer_cfg.get("in_channels") or 0)
+    pack = 2
+    if in_ch > 0 and latent_channels > 0 and in_ch % latent_channels == 0:
+        ratio = in_ch // latent_channels
+        root = int(round(ratio ** 0.5))
+        if root >= 1 and root * root == ratio:
+            pack = root
+    downscale = max(vae_scale, 1) * max(pack, 1)
+    if downscale <= 0:
+        return 0
+    return (height // downscale) * (width // downscale)
+
+
+def compute_diffusion_compute_img_per_sec(
+    *,
+    gpu_type: str,
+    num_gpus: int,
+    precision_tag: str,
+    dit_params: int,
+    latent_tokens: int,
+    num_layers: int,
+    hidden_size: int,
+    num_steps: int,
+) -> float:
+    """Compute-roofline ceiling for diffusion image throughput (images/sec).
+
+    Per denoising step the DiT does ``2 * dit_params * T`` linear FLOPs (the
+    2N-per-token rule over ``T`` latent tokens) plus ``4 * L * T**2 * H``
+    attention-score FLOPs (QK^T + A·V, weightless); one image is ``num_steps``
+    such steps. ``F_peak`` is the max-achievable (sustained) TFLOPS — the SAME
+    convention as the memory ceiling and the LLM ceiling (vendor peak only as a
+    coverage-gap fallback). VAE decode (one-time) is intentionally excluded: a
+    small, documented under-count that keeps this a valid upper bound.
+
+    Args:
+        gpu_type: GPU type key for the peak TFLOPS lookup.
+        num_gpus: Tensor/sequence-parallel degree (floored at 1).
+        precision_tag: Precision key for the peak TFLOPS lookup.
+        dit_params: DiT-only parameter count (see :func:`_read_diffusion_dit_meta`).
+        latent_tokens: Latent tokens processed per denoising step.
+        num_layers: DiT transformer layers (for the attention-score term).
+        hidden_size: DiT model dim (for the attention-score term).
+        num_steps: Denoising steps per image.
+
+    Returns:
+        The compute-bound images/sec ceiling, or ``0.0`` on degenerate input.
+    """
+    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
+        return 0.0
+    linear = 2.0 * dit_params * latent_tokens
+    attn = 4.0 * max(num_layers, 0) * (latent_tokens ** 2) * max(hidden_size, 0)
+    flops_per_image = num_steps * (linear + attn)
+    if flops_per_image <= 0:
+        return 0.0
+    peak_flops = peak_tflops * 1e12 * max(num_gpus, 1)
+    return peak_flops / flops_per_image
+
+
+def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload) -> RooflineBreakdown:
+    """Diffusion (xDiT) roofline breakdown in images/sec.
+
+    Ceiling = ``min(memory, compute)`` (the binding side), like the LLM path.
+    Memory: per-step full-weight read. Compute: a config-analytical DiT FLOP
+    model (see :func:`compute_diffusion_compute_img_per_sec`) — route-independent,
+    so it tightens the (previously memory-only, too-loose) ceiling for every xDiT
+    run. Degrades to memory-only when the DiT transformer config is unreadable.
+    Values ride the ``*_tok_per_sec`` fields; the img/s unit is tagged at the
+    snapshot layer (``throughput_unit``).
+
+    Args:
+        state: Shared run state (for the denoising step count).
+        runtime: Resolved runtime workload (model_path / gpu_type / tp).
+
+    Returns:
+        The diffusion ``RooflineBreakdown``, or ``_EMPTY_BREAKDOWN`` when the
+        model weights or step count are unavailable.
+    """
+    num_steps = _read_diffusion_num_steps(state)
+    if num_steps <= 0:
+        return _EMPTY_BREAKDOWN
+    # DiT geometry drives BOTH sides: the compute FLOP model AND the per-step
+    # memory IO. Read the runtime resolution so sample_size-less configs (FLUX)
+    # can still size their latent grid.
+    height, width = _read_diffusion_resolution(state)
+    dit = _read_diffusion_dit_meta(runtime.model_path, height=height, width=width)
+
+    # We need at least one weight source: the DiT geometry (resolution/sample_size)
+    # OR the full-checkpoint size. FLUX's single-file checkpoint layout can defeat
+    # load_model_meta (returns None), but the DiT meta alone still drives the
+    # compute + DiT-only memory ceiling, so only bail when BOTH are missing.
+    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+    meta_bytes = int(meta.weight_bytes) if (meta is not None and meta.weight_bytes > 0) else 0
+    if dit is None and meta_bytes <= 0:
+        return _EMPTY_BREAKDOWN
+
+    # Per denoising step only the DiT runs; the text encoder + VAE are one-time,
+    # so per-step memory IO is the DiT-ONLY weight bytes (dit_params x dtype),
+    # consistent with the DiT-only compute FLOPs. Fall back to the full checkpoint
+    # only when the DiT geometry is unavailable (also the memory-only degrade).
+    cmp_img_s = 0.0
+    mem_bytes = meta_bytes
+    if dit is not None:
+        dit_params, latent_tokens, num_layers, hidden = dit
+        dit_weight_bytes = int(dit_params * _resolve_dtype_bytes(runtime.precision or "bf16"))
+        if dit_weight_bytes > 0:
+            mem_bytes = dit_weight_bytes
+        cmp_img_s = compute_diffusion_compute_img_per_sec(
+            gpu_type=runtime.gpu_type,
+            num_gpus=runtime.tp,
+            precision_tag=runtime.precision or "bf16",
+            dit_params=dit_params,
+            latent_tokens=latent_tokens,
+            num_layers=num_layers,
+            hidden_size=hidden,
+            num_steps=num_steps,
+        )
+    mem_img_s = compute_diffusion_mem_img_per_sec(
+        gpu_type=runtime.gpu_type,
+        num_gpus=runtime.tp,
+        weight_bytes=mem_bytes,
+        num_steps=num_steps,
+    )
+    if mem_img_s <= 0 and cmp_img_s <= 0:
+        return _EMPTY_BREAKDOWN
+    peak, bound = select_peak_and_bound(mem_img_s, cmp_img_s)
+    return RooflineBreakdown(mem_img_s, cmp_img_s, peak, bound)
+
+
 def compute_roofline_breakdown_from_state(
     state: Any,
     *,
@@ -1073,6 +1385,11 @@ def compute_roofline_breakdown_from_state(
         fields).
     """
     runtime = resolve_runtime_workload(state, arm=arm)
+    # Diffusion (xDiT) uses an images/sec ceiling with a distinct formula (no KV
+    # cache, per-step full-weight read); the LLM decode path below does not
+    # apply. Branch before loading the LLM-oriented meta/perfmodel.
+    if (runtime.framework or "").strip().lower() == "xdit":
+        return _compute_diffusion_breakdown_from_state(state, runtime)
     meta = load_model_meta(
         runtime.model_path,
         precision_hint=runtime.precision,
@@ -1242,6 +1559,38 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
     """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
     return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
+
+
+def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
+    """Provenance for the compute-peak TFLOPS used by every compute ceiling.
+
+    The unified convention is **max-achievable (sustained)** TFLOPS (LLM + xDiT +
+    bypass all share it); the vendor dense peak is only a coverage-gap fallback.
+    Surfacing the convention + value + source keeps within%/gap interpretable and
+    makes any peak-convention divergence explicit.
+
+    Args:
+        gpu_type: GPU type key for the peak lookup.
+        precision_tag: Precision key for the peak lookup.
+
+    Returns:
+        ``{compute_peak_convention, compute_peak_tflops, compute_peak_source}``.
+    """
+    ach = _resolve_achievable_tflops(gpu_type, precision_tag)
+    if ach > 0:
+        return {
+            "compute_peak_convention": "achievable",
+            "compute_peak_tflops": ach,
+            "compute_peak_source": "TraceLens arch JSON (max-achievable sustained)",
+        }
+    vendor = _resolve_peak_tflops(gpu_type, precision_tag)
+    return {
+        "compute_peak_convention": "vendor" if vendor > 0 else "unknown",
+        "compute_peak_tflops": vendor,
+        "compute_peak_source": (
+            "vendor dense peak (achievable-table miss fallback)" if vendor > 0 else "unavailable"
+        ),
+    }
 
 
 import dataclasses as _dc

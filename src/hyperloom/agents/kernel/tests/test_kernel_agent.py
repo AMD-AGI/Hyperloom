@@ -268,11 +268,12 @@ class KernelAgentToolTests(unittest.TestCase):
             "                    cross-session-memory-mcp automated-test-discovery; do",
             install_text,
         )
+        # Keep this resilient to shell-formatting indentation changes.
         self.assertIn(
-            "python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\\n"
-            '        "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"',
+            "python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\",
             install_text,
         )
+        self.assertIn('"${GEAK_ROOT}/mcp_tools/${_geak_mcp}"', install_text)
         # Auto-detect block: cuda stays the preferred default, env var still overrides.
         self.assertIn('if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)

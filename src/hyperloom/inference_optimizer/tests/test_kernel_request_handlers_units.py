@@ -1566,6 +1566,45 @@ class TestAllKernelCandidates:
     def test_missing_path_returns_empty(self):
         assert krh._all_kernel_candidates({}) == []
 
+    def test_dedups_skipped_subset_of_hot(self, tmp_path):
+        # P0 contract: ``hot_kernels`` is the FULL ranked set and
+        # ``skipped_kernels`` is its non-routable subset, so the two lists
+        # OVERLAP on-disk. ``_all_kernel_candidates`` must count each kernel
+        # once (else ``kernels_considered`` double-counts every non-routable
+        # hotspot). Regression for the routable-only -> full contract change.
+        cp = tmp_path / "kc.json"
+        hot = [
+            {"kernel_id": "k001", "name": "moe", "reusable_native_kernel": True},
+            {"kernel_id": "k002", "name": "aten::mm", "reusable_native_kernel": False},
+            {"kernel_id": "k003", "name": "aiter::rmsnorm", "reusable_native_kernel": False},
+        ]
+        skipped = [dict(c) for c in hot if not c["reusable_native_kernel"]]  # subset of hot
+        cp.write_text(json.dumps({"hot_kernels": hot, "skipped_kernels": skipped}), encoding="utf-8")
+        out = krh._all_kernel_candidates({"candidates_path": str(cp)})
+        # Each kernel exactly once, hot order preserved (not 3 hot + 2 skipped = 5).
+        assert [c["kernel_id"] for c in out] == ["k001", "k002", "k003"]
+        assert len(out) == 3
+
+    def test_dedups_by_name_when_kernel_id_missing(self, tmp_path):
+        # Fall back to ``name`` when ``kernel_id`` is absent so the overlap is
+        # still collapsed; a row with neither id nor name is never dropped.
+        cp = tmp_path / "kc.json"
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [{"name": "moe"}, {"name": "aten::mm"}, {"gpu_pct": 1.0}],
+                    "skipped_kernels": [{"name": "aten::mm"}, {"gpu_pct": 2.0}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = krh._all_kernel_candidates({"candidates_path": str(cp)})
+        names = [c.get("name") for c in out]
+        # "aten::mm" appears once; the two identity-less rows are both kept.
+        assert names.count("aten::mm") == 1
+        assert names.count("moe") == 1
+        assert sum(1 for c in out if not (c.get("kernel_id") or c.get("name"))) == 2
+
 
 class TestBatchKernelCandidatesRetryBudget:
     def _write_candidates(self, tmp_path: Path) -> Path:
@@ -1715,7 +1754,7 @@ class TestTracelensRootResolution:
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
         )
         assert called["n"] == 1  # self-heal was attempted
         assert out["status"] == "failed"
@@ -1742,7 +1781,7 @@ class TestTracelensRootResolution:
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
         assert out["status"] == "failed"
@@ -1764,7 +1803,7 @@ class TestTracelensRootResolution:
             lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
         )
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
         )
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
