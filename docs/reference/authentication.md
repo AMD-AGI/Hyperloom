@@ -8,8 +8,10 @@ myst:
 
 This is the single authoritative reference for credentials and
 environment configuration in Hyperloom. If any other document
-(`README.md`, `inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
-`robustness-agent/SKILL.md`) appears to contradict this page, this page wins. Open an issue against the contradicting file.
+(`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`,
+`src/hyperloom/agents/kernel/SKILL.md`,
+`src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
+page, this page wins. Open an issue against the contradicting file.
 
 Hyperloom needs at most three classes of configuration:
 
@@ -20,7 +22,7 @@ Hyperloom needs at most three classes of configuration:
 - The **Cursor SDK** key (`CURSOR_API_KEY`) — optional, only needed if
    you want the OOB `cursor` kernel-opt backend.
 - **Path / workspace layout** — for local mode, run
-   `inference_optimizer/scripts/local_setup.sh` once (credentials and the
+   `src/hyperloom/inference_optimizer/assets/local_setup.sh` once (credentials and the
    Hyperloom checkout are enough). It clones missing dependency repos under
    `HYPERLOOM_OPEN_SOURCE_ROOT`, writes
    `$USER_DATA_PATH/runtime/local-setup.env.sh`, and exports `OOB_SRC`,
@@ -31,8 +33,8 @@ Hyperloom needs at most three classes of configuration:
 
 In the **single-gateway** setup, GEAK keys, OOB Claude/Codex keys, and
 Anthropic / OpenAI aliases are **derived** from `SAFE_API_KEY` and
-`OPENAI_BASE_URL` by `kernel-agent/scripts/install.sh` and
-`inference_optimizer/cli.py` at preflight. You normally do not set those
+`OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
+the inference optimizer CLI preflight. You normally do not set those
 aliases by hand. Split-gateway and GEAK/OOB endpoint overrides are the
 exceptions (see below).
 
@@ -48,8 +50,8 @@ Hyperloom reads credentials from two places, in order:
 | `$REPO_ROOT/.env`                           | Only for keys missing from the process environment.       |
 
 Shell environment variables always win over `.env`.
-Both `inference_optimizer/cli.py` (`_load_dotenv_fallback`) and
-`kernel-agent/scripts/install.sh` honor this rule. Do *not*
+Both the inference optimizer CLI dotenv loader and
+`src/hyperloom/agents/kernel/scripts/install.sh` honor this rule. Do *not*
 manually `source .env` from chat — it inverts the precedence and can
 overwrite an exported key with a stale value from disk.
 
@@ -164,7 +166,7 @@ gateway. It therefore requires a separate issuer key with prefix `crsr_...`:
 | Variable                | Default           | Description                                                                                                                                                                          |
 |-------------------------|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `CURSOR_API_KEY`        | unset             | Cursor SDK key. Never inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset. |
-| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7` | Override the default Cursor model id.                                                                                                                                                |
+| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7-thinking-xhigh` | Override the default Cursor model id.                                                                                                                                                |
 
 The selection notes carry `cursor_key_present: bool` for observability.
 If you pass `--backends cursor` explicitly without a key set, the
@@ -190,8 +192,9 @@ export GEAK_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 export OOB_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 ```
 
-Preflight preserves intentional operator overrides. It only force-rewrites
-URLs still pointing at the removed legacy local proxy (`127.0.0.1:4002`).
+Preflight preserves intentional operator overrides. If `GEAK_BASE_URL` or
+`OOB_BASE_URL` is set, Hyperloom treats it as deliberate and does not rewrite it;
+remove stale `127.0.0.1:4002` overrides by hand.
 
 ---
 
@@ -204,11 +207,11 @@ clones them when missing and records the resolved paths in
 
 ```bash
 export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-bash inference_optimizer/scripts/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 ```
 
-`kernel-agent/scripts/install.sh` (invoked by preflight or manually) then
+`src/hyperloom/agents/kernel/scripts/install.sh` (invoked by preflight or manually) then
 installs runtime dependencies (Ray, GEAK, OOB CLIs, Magpie, and so on) and
 writes `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Source that too when
 driving kernel-agent tools directly.
@@ -237,6 +240,7 @@ explicit path pointing at a missing directory fails preflight.
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, GEAK, and OOB. Writable `/opt` required unless overridden. |
+| `FORGE_PATH`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge`                | KernelForge checkout root for the `forge` backend. `local_setup.sh` also exports `KERNEL_FORGE_ROOT` with the same value. |
 | `OOB_SRC`                    | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge/OOB`           | OOB kernel-opt backends (claude / codex / cursor). Derived from the KernelForge checkout.                           |
 | `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis.        |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; pinned to a fixed SHA on auto-clone. |
@@ -244,9 +248,9 @@ explicit path pointing at a missing directory fails preflight.
 | `MAGPIE_PATH`                | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/Magpie`                    | Magpie benchmark wrappers; installed by `install.sh` when missing.                                                  |
 
 ```{note}
-`WORKSPACE_PATH` and `INFERENCE_OPTIMIZER_SESSION_DIR` are no longer read.
-Rename launchers that still export them to `USER_DATA_PATH`. See
-[Upgrade Hyperloom version](../reference/upgrade.md).
+`INFERENCE_OPTIMIZER_SESSION_DIR` is no longer read. `WORKSPACE_PATH` is
+legacy-only and still used in narrow fallbacks; prefer `USER_DATA_PATH`. See
+[Upgrade Hyperloom version](upgrade.md).
 ```
 
 ---
@@ -258,20 +262,20 @@ rewrite `x-api-key` into `Authorization: Bearer`. **That component has
 been removed.** Claude, Codex, and GEAK now talk to the upstream gateway
 directly. The AMD primus-safe gateway accepts both header styles natively.
 
-At preflight, `inference_optimizer/cli.py`:
+At preflight, the inference optimizer CLI:
 
 - Resolves Anthropic and OpenAI base URLs.
 - Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
 - Fills unset alias env vars (`GEAK_*`, `OOB_*`, and so on).
-- Force-rewrites any leftover URL still pinned at `127.0.0.1:4002` to
-  the real upstream gateway (stale installs only).
+- Preserves explicit `GEAK_BASE_URL` / `OOB_BASE_URL` overrides, including stale
+  ones; clear any old `127.0.0.1:4002` env values before launch.
 
 **401 recovery:**
 
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
 2. Re-run preflight (any `inference_optimizer` CLI command) or
-   `bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only`.
+   `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway, not `127.0.0.1:4002`.
 
@@ -331,9 +335,10 @@ and all aliases pick up the new value on the next CLI launch.
 
 **Q: I still see `127.0.0.1:4002` in my env or Claude config.**
 
-That is a stale legacy proxy URL. Run any `inference_optimizer` CLI
-command (preflight rewrites it automatically), or delete the stale
-`customApiUrl` from `~/.claude/config.json` and re-run install.
+That is a stale legacy proxy URL. Delete stale `GEAK_BASE_URL` /
+`OOB_BASE_URL` / `OPENAI_BASE_URL` values from the shell or `.env`, then re-run
+install/preflight. If only `~/.claude/config.json` is stale, install/preflight
+rewrites `customApiUrl` to the resolved upstream gateway.
 
 ---
 
