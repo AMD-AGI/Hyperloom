@@ -3104,22 +3104,10 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     session_dir,
 ):
-    """PR-F bug repro: the GEAK→Claude→Codex ladder used to pick the
-    backend with the highest ``micro_speedup``, ignoring whether that
-    attempt was a real KEEP or just a NEEDS_REVIEW with a paper claim.
+    """The backend ladder must prefer a real KEEP over a higher-speed NEEDS_REVIEW.
 
-    Qwen3-30B-A3B-Base session 20260523T035235Z k004 trace:
-      * GEAK         micro=1.30  decision=NEEDS_REVIEW (correctness missing)
-      * Claude       micro=??    decision=??
-      * Codex        micro=1.17  decision=KEEP (correctness PASS)
-
-    Before PR-F: best=GEAK (1.30 > 1.17), KEEP signal silently
-    discarded, integrate gate never fires, k004 patch ends up in
-    rejected with attempts=1 and the actual production-quality 1.17x
-    KEEP is wasted.
-
-    Fix: ladder must prefer KEEP over non-KEEP regardless of micro.
-    Mirror the batch handler's tuple key.
+    A non-KEEP attempt with the highest micro_speedup must not mask a lower-speed
+    KEEP that can safely integrate. Mirror the batch handler's tuple key.
     """
     calls: list[str] = []
 

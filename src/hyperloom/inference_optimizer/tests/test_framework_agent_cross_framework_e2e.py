@@ -123,7 +123,7 @@ def test_cross_framework_candidate_flows_end_to_end(
 ):
     """sglang session discovers a vllm-repo PR -> tagged -> audited cross-fw -> specialist params carry the port.
 
-    Uses the #5-P2 DEFAULT (no env opt-in) so the whole pipeline is exercised as
+    Uses the default cross-framework path (no env opt-in) so the whole pipeline is exercised as
     it runs in production.
     """
     monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
