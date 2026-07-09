@@ -1687,9 +1687,9 @@ def test_build_prompt_strips_base64_images_from_tracelens_context(tmp_path):
     assert "P2: rmsnorm tuning" in prompt
 
 
-# PR-A §4: TraceLens hypothesis block in build_prompt
+# TraceLens hypothesis block in build_prompt.
 def test_build_hypothesis_block_returns_empty_when_no_prose_fields():
-    """Candidates lacking prose fields → no-op block (prompt byte-identical to pre-PR)."""
+    """Candidates lacking prose fields → no-op block."""
     block = ko._build_hypothesis_block(
         {"name": "kernel_no_prose", "source_type": "triton"},
     )
@@ -1775,7 +1775,7 @@ def test_build_hypothesis_block_renders_when_only_identification_present():
 
 
 def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pitems():
-    """Q2: multi-entry ``task_group.all_pitem_prose`` renders every P-item with a ``### P{rank}`` header, rank-sorted."""
+    """Multi-entry ``task_group.all_pitem_prose`` renders every P-item with a ``### P{rank}`` header, rank-sorted."""
     candidate = {
         "name": "aiter::rms_norm",
         # Primary's flat prose intentionally divergent so the test confirms the renderer reads from all_pitem_prose.
@@ -1879,9 +1879,9 @@ def test_build_prompt_includes_hypothesis_block_when_prose_present():
     assert "20.00 ms" in prompt
 
 
-# PR-B §2: benchmark-cases block in build_prompt
+# Benchmark-cases block in build_prompt.
 def test_build_benchmark_cases_block_returns_empty_without_task_group():
-    """Legacy dispatch (no task_group) → byte-identical output to PR-A."""
+    """Legacy dispatch (no task_group) emits no benchmark-cases block."""
     block = ko._build_benchmark_cases_block(
         {"name": "rms_norm", "source_type": "triton"},
     )
@@ -1994,7 +1994,7 @@ def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
     assert "## Benchmark cases" not in prompt
 
 
-# PR-B §3: bound-keyed optimization priority block in build_prompt
+# Bound-keyed optimization priority block in build_prompt.
 def test_build_priority_block_empty_when_no_bound_info():
     block = ko._build_priority_block({"name": "kernel_agent", "source_type": "triton"})
     assert block == ""

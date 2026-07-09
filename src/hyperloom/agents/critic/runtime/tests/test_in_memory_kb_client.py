@@ -45,10 +45,10 @@ def test_upsert_creates_then_returns_existing():
         }
     )
     assert out2["created"] is False
-    # Importance protected (G-2): incoming < existing keeps existing.
+    # Importance protection keeps the existing value when the incoming one is lower.
     assert out2["row"]["importance"] == 0.5
     assert "importance_protected" in out2["warnings"]
-    # Summary partial-merged (G-1).
+    # Summary is partial-merged.
     assert out2["row"]["summary"] == "second"
     # Metadata deep-merged.
     assert out2["row"]["metadata"]["topic"] == "t2"

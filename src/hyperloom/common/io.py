@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Atomic filesystem writes (tree-reform.MD §7 — canonical ``atomic_write*``).
+"""Atomic filesystem writes (canonical ``atomic_write*``).
 
 Single home for the "write to a sibling temp file in the same directory, then
 ``os.replace`` into place" idiom that was independently re-implemented across
@@ -8,7 +8,7 @@ the codebase. A reader never observes a half-written file: it sees either the
 old contents or the complete new contents, never a truncated one.
 
 Zero first-party imports (stdlib only) so any package may depend on it without
-creating an import cycle (see ``tree-reform.MD`` §7 "防环规则").
+creating an import cycle (anti-cycle rule: no first-party imports).
 
 Behaviour-preserving flags let each legacy call site delegate here without any
 observable change:
