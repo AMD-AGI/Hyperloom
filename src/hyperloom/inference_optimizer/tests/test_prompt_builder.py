@@ -37,7 +37,7 @@ def rules_path() -> Path:
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
     assert set(KERNEL_AGENT_OWNED_ACTIONS) <= set(full)
-    # Gap-10: validate_stack is deprecated; the merged ``explore`` action replaces it.
+    # validate_stack is deprecated; the merged ``explore`` action replaces it.
     assert "explore" in full
     assert "report" in full
     assert "baseline" in full
@@ -47,7 +47,7 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
     assert set(KERNEL_AGENT_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
-    # Gap-10: ``explore`` replaces the v0.6 backends/params/validate_stack triple.
+    # ``explore`` replaces the v0.6 backends/params/validate_stack triple.
     assert "explore" in bare
     assert "baseline" in bare
 
@@ -86,7 +86,7 @@ def _section_headers(prompt: str) -> list[str]:
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
-    """v0.8 §3.3 — eight sections now (PHASE CONTRACT §3a added); legacy 1-7 headers preserved verbatim."""
+    """Eight sections now (PHASE CONTRACT added); legacy 1-7 headers preserved verbatim."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -203,7 +203,7 @@ def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # propose_action hint for non-kernel; Gap-10 made ``explore`` the canonical grid-runner.
+    # propose_action hint for non-kernel; ``explore`` is the canonical grid-runner.
     assert "propose_action{action_name='baseline'" in text
     assert "propose_action{action_name='explore'" in text
     assert "REQUEST{target_agent='kernel_agent'" in text
@@ -275,7 +275,7 @@ def test_mission_section_emphasises_cumulative_gain_and_stack_rebench(
     registry,
     rules_path,
 ):
-    """Gap-10: the mission emphasises cumulative gain + ``stack rebench`` (validate_stack keyword gone)."""
+    """The mission emphasises cumulative gain + ``stack rebench`` (validate_stack keyword gone)."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,

@@ -27,7 +27,7 @@ from hyperloom.orchestrator.framework.artifacts import candidate_key
 
 
 # ---------------------------------------------------------------------------
-# P0-1 — candidate_key pure function + unified selector dedup.
+# candidate_key pure function + unified selector dedup.
 # ---------------------------------------------------------------------------
 def test_candidate_key_precedence_and_fallbacks():
     assert candidate_key({"candidate_id": "cid", "pr_url": "u", "ref": "r"}) == "cid"
@@ -53,7 +53,7 @@ class _StateStub:
 
 
 class _MiniCoord:
-    """Minimal binding of the P0 helpers under test."""
+    """Minimal binding of the framework progress helpers under test."""
 
     _MAX_REPEATED_REVIEW_SUBMISSIONS = Coordinator._MAX_REPEATED_REVIEW_SUBMISSIONS
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
@@ -69,7 +69,7 @@ class _MiniCoord:
 
 
 def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
-    """Regression (P0-1): a candidate with only ``pr_url`` must dedup once its
+    """A candidate with only ``pr_url`` must dedup once its
     terminal row (keyed on the same pr_url) is written — the historical
     asymmetry re-selected it forever."""
     coord = _MiniCoord(tmp_path)
@@ -91,7 +91,7 @@ def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# P0-2 — _stamp_framework_progress: fields + idempotency.
+# _stamp_framework_progress: fields + idempotency.
 # ---------------------------------------------------------------------------
 def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     coord = _MiniCoord(tmp_path)
@@ -130,7 +130,7 @@ def test_stamp_empty_key_is_noop(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# P0-3 — silent apply/bench failure stamps no_result_failed.
+# Silent apply/bench failure stamps no_result_failed.
 # ---------------------------------------------------------------------------
 def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
     """A framework_agent task settling ``status="failed"`` routes to
@@ -152,7 +152,7 @@ def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# P0-4 — repeated review backstop.
+# Repeated review backstop.
 # ---------------------------------------------------------------------------
 class _BusStub:
     def __init__(self) -> None:

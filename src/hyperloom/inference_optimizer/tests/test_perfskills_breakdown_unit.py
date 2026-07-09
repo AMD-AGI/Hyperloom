@@ -457,8 +457,8 @@ def test_collect_perfskills_relativize_failure_warns(tmp_path: Path, monkeypatch
     def _boom(_path, _session_dir):
         raise OSError("relativize boom")
 
-    # tree-reform.MD P2.2: collect_perfskills moved to the ``perfskills``
-    # submodule, which binds ``_rel`` from ``collectors._common``; patch it there.
+    # collect_perfskills lives in the ``perfskills`` submodule, which binds
+    # ``_rel`` from ``collectors._common``; patch it there.
     monkeypatch.setattr(collectors.perfskills, "_rel", _boom)
 
     eval_dir = tmp_path / "runs" / "eval"
