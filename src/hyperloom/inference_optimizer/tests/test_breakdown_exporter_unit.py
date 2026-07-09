@@ -160,7 +160,7 @@ def test_write_minimal_final_report_with_attempts(tmp_path):
     assert "last_baseline" in text
 
 
-# ---- write_minimal_final_json (issue #464) ----
+# ---- write_minimal_final_json ----
 
 
 def test_write_minimal_final_json_creates(tmp_path):

@@ -7,13 +7,17 @@ myst:
 # Hyperloom operator scripts
 
 A short reference for the operator-facing scripts under
-`inference_optimizer/scripts/`. These are not part of the agent loop —
+`src/hyperloom/inference_optimizer/tools/`. These are not part of the agent loop —
 they are utilities you run by hand against a finished or in-progress
 session directory.
 
-All scripts respect the `$USER_DATA_PATH` env (default
-`/workspace/hyperloom`) when no explicit `--session-dir` is given. See
-[Hyperloom authentication and credentials](authentication.md).
+When no explicit `--session-dir` is given, scripts resolve the active session in
+two steps: `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` when set, otherwise the
+workspace root (`USER_DATA_PATH`, falling back to `/workspace/hyperloom`). This
+does **not** auto-discover the latest `$USER_DATA_PATH/<model>/<ts>/` per-session
+subdir — under the per-model timestamp layout, pass `--session-dir` explicitly
+(or rely on `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`, which the CLI sets during
+a run). See [Hyperloom authentication and credentials](authentication.md).
 
 ---
 
@@ -37,20 +41,20 @@ Use these commands to produce a session breakdown.
 
 ```bash
 # Live session in the current sandbox (USER_DATA_PATH or /workspace/hyperloom)
-python -m inference_optimizer.scripts.dump_session_breakdown
+python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
 # Historical session on WekaFS
-python -m inference_optimizer.scripts.dump_session_breakdown \
+python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
     --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
 
 # Override output path (don't touch session_dir)
-python -m inference_optimizer.scripts.dump_session_breakdown \
+python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
     --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
 # Bulk historical
 for d in /wekafs/users/*/inference_optimizer-sessions/*; do
     [ -d "$d" ] || continue
-    python -m inference_optimizer.scripts.dump_session_breakdown \
+    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
         --session-dir "$d" > /dev/null
 done
 ```
@@ -86,15 +90,15 @@ Use the following commands to render a session report.
 
 ```bash
 # Deterministic only (no LLM):
-python -m inference_optimizer.scripts.dump_session_report \
+python -m hyperloom.inference_optimizer.tools.dump_session_report \
     --input  /wekafs/.../session_breakdown.json \
     --output /wekafs/.../session_report.md
 
 # With LLM-polished prose (OpenAI-compatible endpoint):
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
-OPENAI_BASE_URL=http://127.0.0.1:4002/v1 \
+OPENAI_BASE_URL=https://your-openai-compatible-gateway.example.com/v1 \
 OPENAI_API_KEY=... \
-python -m inference_optimizer.scripts.dump_session_report \
+python -m hyperloom.inference_optimizer.tools.dump_session_report \
     --input  /wekafs/.../session_breakdown.json \
     --output /wekafs/.../session_report.md
 ```
@@ -136,8 +140,8 @@ Use this when:
 Use the following commands to print event counts for a session.
 
 ```bash
-python -m inference_optimizer.scripts.event_counts            # default session_dir
-python -m inference_optimizer.scripts.event_counts /path/to/session
+python -m hyperloom.inference_optimizer.tools.event_counts            # default session_dir
+python -m hyperloom.inference_optimizer.tools.event_counts /path/to/session
 ```
 
 Reads at most the last 500 events from
@@ -168,17 +172,21 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 
 ---
 
-## A/B (comparative) testing helper scripts (advanced)
+## Additional operator tools
 
-The same scripts directory also contains:
+The same tools package also contains smaller utilities that are useful during
+incident response or launch validation:
 
-* `ab_torch_compile_kernels.py`
-* `ab_torch_compile_magpie.py`
-
-These are internal A/B harnesses used during torch.compile
-investigation work; they are not part of the customer-facing workflow
-and are documented in their respective module docstrings. Treat them
-as reference implementations rather than supported operator tools.
+* `backfill_langfuse.py` — replay one finished session's `reports/trace/` into
+  Langfuse after the fact:
+  `python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD> [--dry-run]`.
+* `preflight_optimizer.py` — launcher-side local preflight for stale processes,
+  ROCm visibility, disk, and model path checks:
+  `python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH`.
+* `read_optimizer_state.py` — concise `state.json` / lifecycle summary:
+  `python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR`.
+* `robustness_monitor.sh.example` — shell example for polling robustness
+  findings around a session; copy/adapt it for local operator workflows.
 
 ---
 

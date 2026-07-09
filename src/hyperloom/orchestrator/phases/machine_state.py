@@ -1200,7 +1200,7 @@ def compute_plateau_explore(
 ) -> tuple[bool, dict[str, Any]]:
     """Real plateau_explore → ``(triggered, evidence)``.
 
-    Trigger (AND, KB_design §3.8 §5.1): recent_keep_gain < threshold AND
+    Trigger (AND): recent_keep_gain < threshold AND
     recent_empty_streak >= empty_streak_threshold.
 
     Args:
@@ -1301,7 +1301,7 @@ def compute_plateau_kernel(
 ) -> tuple[bool, dict[str, Any]]:
     """Real plateau_kernel → ``(triggered, evidence)``.
 
-    Trigger (OR, KB_design §3.8 §5.2 — weaker than explore's AND): revert_streak
+    Trigger (OR, weaker than explore's AND): revert_streak
     >= threshold OR recent_keep_gain < keep_gain_threshold_pct.
 
     Args:
@@ -2069,7 +2069,7 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2 + §3.8 §7.1): global terminal first, then abort > exit_terminal > exit_normal.
+    Priority (Inv-8.2): global terminal first, then abort > exit_terminal > exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.

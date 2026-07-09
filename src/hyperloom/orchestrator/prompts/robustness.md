@@ -129,7 +129,7 @@ sees liveness.
 ## Cross-tick state (M1 transport)
 
 The reactor is rebuilt fresh every tick (`fork python -m
-robustness_agent.runtime.cli tick`). Anything that depends on multiple
+hyperloom.agents.robustness.runtime.cli tick`). Anything that depends on multiple
 consecutive ticks (GPU leak ≥2 ticks, ray pending ≥3 ticks, plateau
 6-tick window, ladder cooldown, RCA throttle 60s) is backed by
 `<session_dir>/agents/robustness/detector_state.json` via the

@@ -1131,8 +1131,8 @@ async def test_promote_baseline_no_warmup_parses_materialized(
     monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"  # skip cascade
-    # tree-reform.MD P2.2 3b-1: _promote_to_shared_state moved to the _writeback
-    # collaborator, which binds _parse_baseline_workload_extra in its own module.
+    # _promote_to_shared_state lives in the writeback collaborator, which binds
+    # _parse_baseline_workload_extra in its own module.
     import hyperloom.orchestrator.loop.writeback as mod
 
     monkeypatch.setattr(mod, "_parse_baseline_workload_extra", lambda path: {"isl": 256})
@@ -1485,7 +1485,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
     coord: Coordinator,
     caplog,
 ) -> None:
-    """Regression (#486): successful specialist recording must not emit the
+    """Successful specialist recording must not emit the
     research-evidence failure log."""
     import logging
 
@@ -2112,10 +2112,10 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
 # -- _session_integrated_kernel_patch (post-opt roofline gate) ---------------
 @pytest.mark.parametrize(
     "action",
-    ["integrate", "integrate_patch", "gemm_tuning", "perfskills_e2e"],
+    ["integrate", "integrate_patch", "gemm_tuning", "geak_e2e"],
 )
 def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator, action: str) -> None:
-    """Any kernel-level optimization (source patch, GEMM tuning, perfskills) gates the post-opt roofline on."""
+    """Any kernel-level optimization (source patch, GEMM tuning, geak) gates the post-opt roofline on."""
     coord.shared_state.optimization_stack = [{"action": action}]
     assert coord._session_integrated_kernel_patch() is True
 

@@ -192,14 +192,14 @@ class FrameworkPhase(PhaseHandler):
                 state.framework_agent_phase_done = True
                 state.save(self.session_dir)
                 return
-        # Step 3: semantic audit BEFORE the Critic/apply. A confident verdict
+        # Run semantic audit before the Critic/apply. A confident verdict
         # routes the candidate (skip already-present, raw-diff for direct_apply,
         # authoring-with-evidence for needs_rewrite); an unknown / unavailable
         # audit preserves the legacy both-tracks behaviour (zero regression).
         audit = await self._audit_framework_agent_candidate(next_candidate)
         audit_step = str((audit or {}).get("recommended_next_step") or "")
         _cand_id_log = self._framework_candidate_key(next_candidate)
-        # G5: only honour a skip when the audit is confident AND evidence-backed;
+        # Only honour a skip when the audit is confident AND evidence-backed;
         # otherwise fall through to authoring (never silently skip a GPU test on
         # a low-confidence already-present claim).
         if audit_step == "skip" and not self._framework_agent_audit_skip_confident(audit):
@@ -213,7 +213,7 @@ class FrameworkPhase(PhaseHandler):
             await self._record_framework_agent_audit_skip(next_candidate, audit)
             state.save(self.session_dir)
             return
-        # G3: direct_apply needs a clean git checkout to apply / commit / reset.
+        # direct_apply needs a clean git checkout to apply / commit / reset.
         # On a wheel install (no git tree among the framework source roots)
         # degrade to authoring so the candidate still progresses instead of
         # failing at ``git apply`` in the executor.
@@ -224,7 +224,7 @@ class FrameworkPhase(PhaseHandler):
                 _cand_id_log,
             )
             audit_step = "author_via_specialist"
-        # G4: a candidate that belongs to a different concrete framework cannot
+        # A candidate that belongs to a different concrete framework cannot
         # be direct-applied into this session's source tree. Downgrade to
         # authoring so the idea can still be ported. ``aiter`` is shared across
         # frameworks and is never treated as a mismatch.
@@ -403,13 +403,13 @@ class FrameworkPhase(PhaseHandler):
             roots = list(resolve_source_file_allowlist())
             session_framework = str(getattr(state, "framework", "") or "").strip().lower()
             cand_framework = str(candidate.get("framework") or "").strip().lower()
-            # #5-P1 wiring: a candidate discovered from a DIFFERENT framework's
+            # A candidate discovered from a DIFFERENT framework's
             # repo (LLM selector may pick one — see cross-framework acceptance
             # note in the candidate-selection prompt) must be judged for
             # portability into this session's own framework, not audited as
             # if it were a same-framework patch. `framework` stays the
             # candidate's own source framework so cross_framework_audit's
-            # src_framework/dst_framework split (design #5) is correct; when
+            # src_framework/dst_framework split is correct; when
             # cand_framework is blank (the common same-framework case — most
             # candidates discovered from this session's own repo never carry
             # an explicit stamp) this resolves to session_framework exactly
@@ -441,7 +441,7 @@ class FrameworkPhase(PhaseHandler):
             candidate["_audit"] = audit
         except Exception:  # noqa: BLE001 — caching is best-effort
             pass
-        # G9: persist the verdict next to the candidate's decision.json.
+        # Persist the verdict next to the candidate's decision.json.
         try:
             from ..framework.artifacts import write_semantic_audit
 
@@ -636,7 +636,7 @@ class FrameworkPhase(PhaseHandler):
             f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
         ]
         notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
-        # #5-P2: cross-framework port. When the audit ran in cross_framework
+        # Cross-framework port. When the audit ran in cross_framework
         # mode the upstream diff targets a different framework's layout/API and
         # can never be git-applied; the specialist must REWRITE the equivalent
         # logic against this session's (target) framework source.
@@ -718,7 +718,7 @@ class FrameworkPhase(PhaseHandler):
             notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
-            # #5-P2 Option A: cross-framework ports route to a dedicated
+            # Cross-framework ports route to a dedicated
             # rewrite domain (isolated system prompt / PolicyGate / provenance
             # observability). Guarded by is_cross_framework so same-framework
             # authoring is byte-for-byte unchanged. KB writeback is unaffected
@@ -740,7 +740,7 @@ class FrameworkPhase(PhaseHandler):
             **self._framework_gpu_params(),
         }
         if is_cross_framework:
-            # #5-P2: thread cross-framework provenance so the specialist->
+            # Thread cross-framework provenance so the specialist->
             # integrate_patch->ledger path records source/target framework.
             params["cross_framework"] = True
             params["source_framework"] = cf_src_framework
@@ -959,7 +959,7 @@ class FrameworkPhase(PhaseHandler):
         model = (getattr(state, "model_name", "") or "").strip()
         repo_url = repo_url_for_framework(framework)
 
-        # Taxonomy-independent dispatch (Q1 hardening): we dispatch a specialist
+        # Taxonomy-independent dispatch: we dispatch a specialist
         # for ANY non-blank launch log, even one that classifies as ``UNKNOWN``.
         # The enumerated ``kind`` is advisory only (it routes bridge-repo hints
         # and labels the mandate); it is NOT a gate. A brand-new failure the
@@ -1050,7 +1050,7 @@ class FrameworkPhase(PhaseHandler):
             # this round's patch (see integrate_patch enablement_base_patches).
             "enablement_base_patches": base_patches,
             # Allowlisted install/setup commands from prior rounds, replayed by
-            # integrate_patch before boot (durable env setup — Q3). Forwarded to
+            # integrate_patch before boot (durable env setup). Forwarded to
             # the synthetic integrate_patch task by _autosubmit_specialist_patch.
             "enablement_setup_commands": base_setup,
             "launch_probe": req.launch_probe,
@@ -2276,7 +2276,7 @@ class FrameworkPhase(PhaseHandler):
             from ..framework import client as _fa_client
             from ..framework.artifacts import summarize_candidate_outcomes
 
-            # Step 1: classify this phase's candidate outcomes so the report /
+            # Classify this phase's candidate outcomes so the report /
             # robustness can tell "discovered nothing" (empty_discovery) apart
             # from "tested candidates but none kept" (tested_no_keep).
             summary = summarize_candidate_outcomes(
@@ -2446,7 +2446,7 @@ class FrameworkPhase(PhaseHandler):
                 batch_id = str((repo_payload or {}).get("batch_id") or "")
             repo_cands = (repo_payload or {}).get("candidates") or []
             if isinstance(repo_cands, list):
-                # #5-P2 mesh-coordinator discovery lane (default ON; kill switch:
+                # Cross-framework discovery lane (default ON; kill switch:
                 # FRAMEWORK_AGENT_CROSS_DISCOVER_TAG=0). This repo_url loop already
                 # discovers from OTHER serving frameworks' repos (pr_intel_specialist
                 # cross-repo set — e.g. a sglang session already queries ROCm/vllm),
@@ -2571,7 +2571,7 @@ class FrameworkPhase(PhaseHandler):
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
-            # Step 4 / Q5: source patches require the accuracy gate for KEEP.
+            # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
         }
@@ -2693,7 +2693,7 @@ class FrameworkPhase(PhaseHandler):
                     return
             except Exception:  # noqa: BLE001 — defensive
                 continue
-        # P0-4 repeated-review backstop: count how many times this candidate has
+        # Repeated-review backstop: count how many times this candidate has
         # been sent for review. Under healthy operation a candidate is submitted
         # once (a terminal row makes it "processed"); repeated submissions mean a
         # terminal-row leak let it be re-selected. Past the abort threshold,
@@ -2836,7 +2836,7 @@ class FrameworkPhase(PhaseHandler):
                 )
                 # Author-only route (no raw track to own a terminal row): stamp
                 # materialize_failed so an approved-but-undispatchable candidate
-                # is not re-selected every tick (P0 terminal-row invariant).
+                # is not re-selected every tick.
                 if not want_raw:
                     self._stamp_framework_progress(
                         candidate_id=cand_id,
@@ -3012,7 +3012,7 @@ class FrameworkPhase(PhaseHandler):
         # Resolve the candidate identity FIRST so the two dead-end returns below
         # (no required_evidence / reauthor cap) can stamp a terminal progress row
         # — a needs_review verdict that neither re-authors nor materializes would
-        # otherwise leave the candidate row-less and re-selected forever (P0).
+        # otherwise leave the candidate row-less and re-selected forever.
         action_name = str(getattr(pending, "action_name", "") or "")
         payload = getattr(pending, "payload", {}) or {}
         candidate: dict[str, Any] = {}

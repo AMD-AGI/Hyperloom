@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""``baseline_failed`` root-cause surfacing tests (issue #465).
+"""``baseline_failed`` root-cause surfacing tests.
 
 On ``baseline_failed`` the top-level ``final.json`` / report must headline the
 real terminal engine/worker fault from the last failed baseline attempt, not a
@@ -226,3 +226,45 @@ def test_format_md_surfaces_root_cause():
     assert "Root cause" in md
     assert "oom" in md
     assert "modeling_cohere2.py" not in md
+
+
+def test_classify_root_cause_type_kv_cache_oom():
+    assert (
+        _classify_root_cause_type(
+            "kv_cache_oom",
+            "Loaded weights leave no GPU memory for the KV cache",
+        )
+        == "kv_cache_oom"
+    )
+    assert (
+        _classify_root_cause_type(
+            "subprocess_nonzero",
+            "Raise --mem-fraction-static above 0.737",
+        )
+        == "kv_cache_oom"
+    )
+
+
+def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
+    # --mem-fraction-static appears verbatim in normal server argv dumps; a
+    # generic failure whose text merely echoes the launch command must NOT be
+    # mislabeled kv_cache_oom (only the specific KV-cache OOM markers should).
+    result = _classify_root_cause_type(
+        "subprocess_nonzero",
+        "server cmd: python -m sglang.launch_server "
+        "--mem-fraction-static 0.9 --tp 8; exited 1 with a segfault",
+    )
+    assert result != "kv_cache_oom"
+
+
+def test_classify_root_cause_kv_cache_oom_specific_phrase_still_matches():
+    # The actionable "Raise --mem-fraction-static above" remediation line is a
+    # genuine KV-cache OOM signal and must still classify as kv_cache_oom even
+    # when error_class is generic.
+    assert (
+        _classify_root_cause_type(
+            "subprocess_nonzero",
+            "ValueError: ... Raise --mem-fraction-static above 0.737",
+        )
+        == "kv_cache_oom"
+    )

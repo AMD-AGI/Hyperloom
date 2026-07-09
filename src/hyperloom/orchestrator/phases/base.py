@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Base class for per-phase handler collaborators (tree-reform.MD P2.2 3b-2).
+"""Base class for per-phase handler collaborators.
 
 Each phase's coordinator methods are extracted into a ``PhaseHandler`` subclass
 that holds a back-reference to its owning ``Coordinator`` and delegates every

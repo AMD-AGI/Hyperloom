@@ -1,12 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase 1 (cyclic phase machine) acceptance tests — R1 / R2 / R7.
+"""Cyclic phase machine acceptance tests.
 
 Covers:
 * ``compute_next_phase`` SWEEP back-edge branches (reloop / converged / no
   budget / cyclic-off).
-* per-cycle budget window (R2).
-* Coordinator loopback application (macro_cycle bump, marker reset, R7 streak).
+* per-cycle budget window.
+* Coordinator loopback application (macro_cycle bump, marker reset, streak).
 * PolicyGate re-entry after a loopback is not falsely denied.
 * 12h single-cycle regression: cyclic-off behaviour byte-for-byte unchanged.
 
@@ -148,7 +148,7 @@ def test_should_reloop_respects_max_cycles(monkeypatch):
 
 
 # ==========================================================================
-# R2 — per-cycle budget window
+# per-cycle budget window
 # ==========================================================================
 def test_per_cycle_budget_shrinks_phase_window():
     now = 1_000_000.0
@@ -196,7 +196,7 @@ def test_budget_minutes_ignores_cycle_window_for_short_run():
 
 
 # ==========================================================================
-# R1 — Coordinator loopback application
+# Coordinator loopback application
 # ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
@@ -281,7 +281,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
 
 
 # ==========================================================================
-# R1 — PolicyGate re-entry after loopback is not falsely denied
+# PolicyGate re-entry after loopback is not falsely denied
 # ==========================================================================
 def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
