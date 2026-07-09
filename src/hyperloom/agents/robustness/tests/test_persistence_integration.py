@@ -190,7 +190,7 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
-    # Flat 3-tick window across 3 fresh classifiers. Seed stack_size=1 to bypass the PR #239 "stack_size==0 -> defer to no_levers" early-return and hit the plateau path.
+    # Flat 3-tick window across 3 fresh classifiers. Seed stack_size=1 to bypass the stack_size==0 defer-to-no_levers early-return and hit the plateau path.
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
         ctx = _ctx_with_tick(

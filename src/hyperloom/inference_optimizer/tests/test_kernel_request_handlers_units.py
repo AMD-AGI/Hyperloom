@@ -1139,7 +1139,7 @@ class TestRunGemmTuningHandler:
 
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
-# of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
+# of the kernel-agent default; the legacy 90 forced quick-mode timing.
 class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
@@ -1703,7 +1703,7 @@ class TestTracelensRootResolution:
         self, tmp_path, monkeypatch
     ):
         # Default (non-override) root missing: handler must ATTEMPT self-heal
-        # (#722) before the fail-fast. We stub the heal to a no-op so the root
+        #  before the fail-fast. We stub the heal to a no-op so the root
         # stays missing and the handler still returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
@@ -1722,7 +1722,7 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
-        # #722/PR#789: a default checkout that EXISTS but is incomplete (dir
+ # a default checkout that EXISTS but is incomplete (dir
         # present, no .git) must still trigger self-heal — gating on is_dir()
         # alone would skip it.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -1749,7 +1749,7 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
-        # #722/PR#789: a NON-default operator override that exists but is
+ # a NON-default operator override that exists but is
         # incomplete (dir present, no .git) must fail fast — never adopted as
         # usable, never auto-cloned.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -1797,7 +1797,7 @@ class TestTracelensRootResolution:
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
-        # #722: the default path is persisted as TRACELENS_ROOT in
+ # the default path is persisted as TRACELENS_ROOT in
         # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
         # A missing default path must still attempt self-heal.
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))

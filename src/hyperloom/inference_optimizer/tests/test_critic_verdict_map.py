@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 KB_design §3.5 §5 / M5 §5 step 5 / KB_gaps/Gap-11 — Critic per-variant ``verdict_map`` tests."""
+"""Critic per-variant ``verdict_map`` tests."""
 
 from __future__ import annotations
 
@@ -932,7 +932,7 @@ class TestCriticRobustnessRenderer:
         assert "Showing first" in out.markdown_block
 
 
-# N38 — per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
+# per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
 class TestN38ActionVerdictClass:
     """N38 (May 2026): per-action ``verdict_class`` metadata so new actions don't reintroduce N33/N35/N37 deadlocks."""
 

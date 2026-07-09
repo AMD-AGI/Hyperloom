@@ -2,7 +2,7 @@
 
 These cover both the TraceLens-internal (extension-enabled) and external
 (open-source-only) paths so the MAF backfill gate is validated for both
-deployments (#364), plus the microbenchmark mechanics themselves (#390).
+deployments , plus the microbenchmark mechanics themselves .
 """
 
 from __future__ import annotations
