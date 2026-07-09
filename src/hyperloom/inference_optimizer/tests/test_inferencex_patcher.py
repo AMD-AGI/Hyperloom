@@ -187,7 +187,7 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
     def worker() -> None:
         try:
             results.append(ensure_benchmark_lib_patched(fake_inferencex))
-        except BaseException as exc:  # noqa: BLE001 - test-only
+        except Exception as exc:  # noqa: BLE001 - test-only
             errors.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(8)]

@@ -674,7 +674,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
         max_seconds=60.0,
         started=time.monotonic(),
     )
-    await writer
+    _ = await writer
 
     assert outcome["stale_heartbeat"] is False, outcome
     assert outcome["timed_out"] is False, outcome
