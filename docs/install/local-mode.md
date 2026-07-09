@@ -177,10 +177,5 @@ For setups beyond the single-gateway default above, see [Authentication and cred
 
 ## Troubleshooting
 
-**TLS / certificate errors against the AMD LLM Gateway (AMD network only).** If you are using the Primus-SaFE gateway and HTTPS requests to it fail with a certificate verification error inside the container, install the AMD certificate bundle:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
-```
-
-This is only needed for the AMD-hosted gateway; it does not apply when you point `OPENAI_BASE_URL` at your own gateway.
+For TLS or certificate verification failures against the LLM gateway, see
+[TLS or certificate errors against the LLM gateway](../reference/troubleshooting.md#tls-or-certificate-errors-against-the-llm-gateway).

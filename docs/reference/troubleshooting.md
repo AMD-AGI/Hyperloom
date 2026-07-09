@@ -51,6 +51,40 @@ See [Hyperloom authentication and credentials](authentication.md) for credential
 
 ---
 
+## TLS or certificate errors against the LLM gateway
+
+**Symptom**: Preflight or an LLM client fails before authentication with one of:
+
+* `certificate verify failed`
+* `SSL: CERTIFICATE_VERIFY_FAILED`
+* `gateway catalog unreachable after retries`, while `curl -k "$OPENAI_BASE_URL/models"` succeeds
+
+**Cause**: The container or host does not trust the certificate authority used by
+the configured LLM gateway. This is common on AMD-internal networks that use an
+internal CA, or on self-hosted gateways with private certificates.
+
+**Fix**:
+
+1. For the AMD Primus-SaFE gateway, install the AMD certificate bundle inside the
+   container or host:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
+   ```
+2. For a self-hosted gateway with a private CA, configure the standard Python /
+   requests certificate variables before launching:
+   ```bash
+   export REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem
+   export SSL_CERT_FILE=/path/to/ca-bundle.pem
+   ```
+3. Re-run preflight or the installer after updating certificates.
+
+For one-off diagnosis only, you can set
+`INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1` to skip TLS verification for the
+model-catalog probe. Do not leave this enabled in normal runs because the probe
+sends gateway credentials.
+
+---
+
 ## Ray `--num-gpus` rejected
 
 **Symptom**: `ray start --head ... --num-gpus=N` fails with
