@@ -74,7 +74,9 @@ def _fused_add_rmsnorm(x, weight, residual, eps, hidden_size):
     out = torch.empty_like(x2d)
     res_out = torch.empty_like(r2d)
     BLOCK = triton.next_power_of_2(hidden_size)
-    num_warps = 4 if BLOCK <= 1024 else (8 if BLOCK <= 4096 else 16)
+    # num_warps tuned on gfx1250 for H=2880 (BLOCK=4096): 4 warps ~= 1.7x faster
+    # than 8 (op microbench 30us vs 51us) — fewer warps win for this row-reduction.
+    num_warps = 4 if BLOCK <= 4096 else 8
     _fused_add_rmsnorm_kernel[(n_rows,)](
         x2d, r2d, weight, out, res_out,
         hidden_size, eps, BLOCK=BLOCK, num_warps=num_warps,

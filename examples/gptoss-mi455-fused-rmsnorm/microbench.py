@@ -26,7 +26,7 @@ def fused(x, weight, residual):          # mirrors _fused_add_rmsnorm exactly
     n = x2d.shape[0]
     out = torch.empty_like(x2d); rout = torch.empty_like(r2d)
     BLOCK = triton.next_power_of_2(H)
-    _k[(n,)](x2d, r2d, weight, out, rout, H, EPS, BLOCK=BLOCK, num_warps=8)
+    _k[(n,)](x2d, r2d, weight, out, rout, H, EPS, BLOCK=BLOCK, num_warps=4)
     return out.view(orig_shape), rout.view(orig_shape)
 
 
