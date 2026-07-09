@@ -741,7 +741,12 @@ class FrameworkAgentExecutor:
                         break
             else:
                 nogit_backup_root = output_root / "patch_backups"
-                ok, err, backups = _apply_patch_no_git(framework_root, patch, nogit_backup_root)
+                ok, err, backups = _apply_patch_no_git(
+                    framework_root,
+                    patch,
+                    nogit_backup_root,
+                    seq_offset=len(self._nogit_patch_backups),
+                )
                 self._nogit_patch_backups.extend(backups)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})

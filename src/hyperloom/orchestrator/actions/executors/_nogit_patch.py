@@ -8,8 +8,8 @@ backup-based apply/revert channel without git.
 
 Public surface
 --------------
-* :func:`_is_git_tree`          — probe whether a directory is inside a git work-tree.
-* :func:`_apply_patch_no_git`   — apply a unified diff with POSIX ``patch``, backing up targets.
+* :func:`_is_git_tree`           — probe whether a directory is inside a git work-tree.
+* :func:`_apply_patch_no_git`    — apply a unified diff with POSIX ``patch``, backing up targets.
 * :func:`_revert_patches_no_git` — restore backed-up targets (reverse of apply).
 
 Supporting constants / helpers used by both callers:
@@ -18,11 +18,41 @@ Supporting constants / helpers used by both callers:
 * :data:`_PATCH_DEV_NULL`   — the sentinel ``/dev/null`` path in diff headers.
 * :func:`_strip_path_prefix` — drop leading path components like ``git apply -p<n>``.
 * :func:`_is_within`        — containment check (both paths pre-resolved).
+
+Backup naming (#3 fix)
+----------------------
+Backup files are named ``<patch_stem>__<rel_flat>__<seq:04d>.bak`` where
+``rel_flat`` is the target's relative path with ``/`` replaced by ``__`` and
+``seq`` is a caller-supplied global offset (``seq_offset``) plus the record
+index within this apply call.  Callers that accumulate backups across multiple
+``_apply_patch_no_git`` calls (``integrate_patch``, ``framework_agent``) pass
+``seq_offset=len(existing_backups)`` so backup names are globally unique within
+a shared ``backup_root`` directory even when different patches touch files with
+the same basename.
+
+Rename / move revert (#4 fix)
+------------------------------
+When a patch hunk renames a file (``---`` old path ≠ ``+++`` new path, neither
+is ``/dev/null``), ``_apply_patch_no_git`` backs up *both* the old source file
+(so its content can be restored on revert) *and* tracks the new destination
+(so it can be deleted on revert).  Each backup record carries a ``revert_action``
+key:
+
+* ``"restore"`` — copy ``backup_path`` back to ``target`` (modified/created files).
+* ``"delete"``  — remove ``target`` (the rename destination, which did not exist
+  before the patch).
+* ``"restore_old"`` — copy ``backup_path`` back to ``target`` (the rename source,
+  which existed before the patch and must be put back).
+
+``_revert_patches_no_git`` dispatches on ``revert_action`` (falling back to the
+original ``backup_path``-present → restore / absent → delete heuristic for
+records written by older code).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -42,6 +72,9 @@ log = logging.getLogger(__name__)
 _P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 _PATCH_DEV_NULL = "/dev/null"
+
+# Characters unsafe in filenames (replaced with ``_`` in rel_flat).
+_UNSAFE_NAME_RE = re.compile(r"[/\\:<>\"?*|]")
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
@@ -85,10 +118,31 @@ def _is_git_tree(path: Path) -> bool:
         return False
 
 
+def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
+    """Return a backup filename unique within a shared ``backup_root``.
+
+    Encodes both the patch identity and the target path so two patches that
+    touch a file with the same basename never collide.
+
+    Args:
+        patch_stem: ``patch_path.stem`` of the originating patch file.
+        rel_target: Relative path of the target within ``framework_root``.
+        seq: Globally unique sequence number (caller-maintained).
+
+    Returns:
+        A safe filename string ending in ``.bak``.
+    """
+    flat = _UNSAFE_NAME_RE.sub("_", str(rel_target))
+    safe_stem = _UNSAFE_NAME_RE.sub("_", patch_stem)
+    return f"{safe_stem}__{flat}__{seq:04d}.bak"
+
+
 def _apply_patch_no_git(
     framework_root: Path,
     patch_path: Path,
     backup_root: Path,
+    *,
+    seq_offset: int = 0,
 ) -> tuple[bool, str, list[dict[str, Any]]]:
     """Apply ``patch_path`` into ``framework_root`` without git, backing up targets.
 
@@ -96,16 +150,32 @@ def _apply_patch_no_git(
     detection via a dry-run pass, then backs up each target file before
     mutating, mirroring the artifact backup scheme.
 
+    Backup names are globally unique across multiple calls sharing the same
+    ``backup_root`` when callers pass ``seq_offset=len(accumulated_backups)``
+    (see module docstring for the naming scheme).
+
+    Rename/move hunks (``---`` old ≠ ``+++`` new, neither ``/dev/null``) are
+    handled completely: the old source file is backed up so revert can restore
+    it; the new destination is tracked so revert can delete it.
+
     Args:
         framework_root: The source-tree root to apply into (need not be a git repo).
         patch_path: The unified-diff patch file to apply.
         backup_root: Directory under which target backups are written.
+        seq_offset: Starting sequence number for backup filenames within this call.
+            Pass ``len(accumulated_backups)`` when reusing a ``backup_root`` across
+            multiple ``_apply_patch_no_git`` calls to avoid name collisions.
 
     Returns:
         A ``(ok, err, backups)`` triple: ``ok`` is ``True`` on success, ``err``
         is a human-readable failure description, and ``backups`` is a list of
-        per-file backup records in the same format as :meth:`_apply_artifacts`
-        (``target``, ``backup_path`` or ``None`` when the file was created).
+        per-file backup records.  Each record has:
+
+        * ``"target"`` — absolute path of the affected file.
+        * ``"existed"`` — whether the file existed before the patch.
+        * ``"backup_path"`` — path of the saved copy (``None`` for new files).
+        * ``"revert_action"`` — one of ``"restore"``, ``"delete"``, or
+          ``"restore_old"`` (see module docstring).
     """
     # Detect strip level via dry-run.
     detected_level: int | None = None
@@ -136,26 +206,122 @@ def _apply_patch_no_git(
     framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
     backups: list[dict[str, Any]] = []
-    for old, new in patch_file_targets(patch_text):
-        target_raw = new if (new and new != _PATCH_DEV_NULL) else old
-        if not target_raw or target_raw == _PATCH_DEV_NULL:
-            continue
-        rel_target = Path(_strip_path_prefix(target_raw, detected_level))
-        if rel_target.is_absolute() or ".." in rel_target.parts:
-            return False, f"patch target escapes framework root: {target_raw}", backups
-        target = (framework_root_resolved / rel_target).resolve()
-        if not _is_within(target, framework_root_resolved):
-            return False, f"patch target escapes framework root: {target_raw}", backups
-        existed = target.exists()
-        record: dict[str, Any] = {"target": str(target), "existed": existed, "backup_path": None}
-        if existed:
-            bak = backup_root / f"{len(backups):03d}_{target.name}.bak"
-            try:
-                shutil.copy2(target, bak)
-                record["backup_path"] = str(bak)
-            except OSError as exc:
-                return False, f"backup of {target} failed: {exc}", backups
-        backups.append(record)
+    patch_stem = patch_path.stem
+
+    def _resolve_target(raw: str) -> tuple[Path | None, Path | None, str]:
+        """Resolve a raw diff-header path to (rel, abs, error).
+
+        Returns ``(None, None, err_msg)`` on failure.
+        """
+        rel = Path(_strip_path_prefix(raw, detected_level))  # type: ignore[arg-type]
+        if rel.is_absolute() or ".." in rel.parts:
+            return None, None, f"patch target escapes framework root: {raw}"
+        abs_path = (framework_root_resolved / rel).resolve()
+        if not _is_within(abs_path, framework_root_resolved):
+            return None, None, f"patch target escapes framework root: {raw}"
+        return rel, abs_path, ""
+
+    def _backup_existing(abs_path: Path, rel: Path, action: str) -> tuple[dict[str, Any] | None, str]:
+        """Copy ``abs_path`` to a uniquely named backup and return the record."""
+        seq = seq_offset + len(backups)
+        bak = backup_root / _bak_name(patch_stem, rel, seq)
+        try:
+            shutil.copy2(abs_path, bak)
+        except OSError as exc:
+            return None, f"backup of {abs_path} failed: {exc}"
+        return {
+            "target": str(abs_path),
+            "existed": True,
+            "backup_path": str(bak),
+            "revert_action": action,
+        }, ""
+
+    for old_raw, new_raw in patch_file_targets(patch_text):
+        is_create = old_raw == _PATCH_DEV_NULL or not old_raw
+        is_delete = new_raw == _PATCH_DEV_NULL or not new_raw
+        is_rename = (
+            not is_create
+            and not is_delete
+            and old_raw != new_raw
+        )
+
+        if is_create:
+            # New file created by patch: track for deletion on revert.
+            if not new_raw or new_raw == _PATCH_DEV_NULL:
+                continue
+            rel_new, abs_new, err = _resolve_target(new_raw)
+            if err:
+                return False, err, backups
+            backups.append({
+                "target": str(abs_new),
+                "existed": False,
+                "backup_path": None,
+                "revert_action": "delete",
+            })
+
+        elif is_delete:
+            # Existing file deleted by patch: back it up to restore on revert.
+            if not old_raw or old_raw == _PATCH_DEV_NULL:
+                continue
+            rel_old, abs_old, err = _resolve_target(old_raw)
+            if err:
+                return False, err, backups
+            if abs_old.exists():
+                rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
+                if err:
+                    return False, err, backups
+                backups.append(rec)  # type: ignore[arg-type]
+            else:
+                backups.append({
+                    "target": str(abs_old),
+                    "existed": False,
+                    "backup_path": None,
+                    "revert_action": "delete",
+                })
+
+        elif is_rename:
+            # Rename/move: back up old source (to restore on revert) and
+            # track new destination (to delete on revert).
+            rel_old, abs_old, err = _resolve_target(old_raw)
+            if err:
+                return False, err, backups
+            rel_new, abs_new, err = _resolve_target(new_raw)
+            if err:
+                return False, err, backups
+            # Back up old source so it can be restored on revert.
+            if abs_old.exists():  # type: ignore[union-attr]
+                rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
+                if err:
+                    return False, err, backups
+                backups.append(rec)  # type: ignore[arg-type]
+            # Track new destination for deletion on revert.
+            backups.append({
+                "target": str(abs_new),
+                "existed": False,
+                "backup_path": None,
+                "revert_action": "delete",
+            })
+
+        else:
+            # Modification: back up existing target to restore on revert.
+            target_raw = new_raw if (new_raw and new_raw != _PATCH_DEV_NULL) else old_raw
+            if not target_raw or target_raw == _PATCH_DEV_NULL:
+                continue
+            rel_t, abs_t, err = _resolve_target(target_raw)
+            if err:
+                return False, err, backups
+            if abs_t.exists():  # type: ignore[union-attr]
+                rec, err = _backup_existing(abs_t, rel_t, "restore")  # type: ignore[arg-type]
+                if err:
+                    return False, err, backups
+                backups.append(rec)  # type: ignore[arg-type]
+            else:
+                backups.append({
+                    "target": str(abs_t),
+                    "existed": False,
+                    "backup_path": None,
+                    "revert_action": "delete",
+                })
 
     # Apply for real.
     try:
@@ -178,7 +344,10 @@ def _revert_patches_no_git(backups: list[dict[str, Any]]) -> None:
     """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`).
 
     Iterates in reverse so multi-file patches unwind in the correct order.
-    Errors are logged but never raised — best-effort, matching :meth:`_revert_artifacts`.
+    Dispatches on the ``revert_action`` field when present; falls back to the
+    legacy heuristic (``backup_path`` present → restore, absent → delete) for
+    records produced by older code.  Errors are logged but never raised —
+    best-effort, matching :meth:`_revert_artifacts`.
 
     Args:
         backups: The per-file backup records produced by :func:`_apply_patch_no_git`.
@@ -186,11 +355,22 @@ def _revert_patches_no_git(backups: list[dict[str, Any]]) -> None:
     for record in reversed(backups):
         target = Path(record["target"])
         bak = record.get("backup_path")
+        action = record.get("revert_action")
         try:
-            if bak:
-                shutil.copy2(bak, target)
-            elif target.exists():
-                target.unlink()
+            if action == "restore" or (action is None and bak):
+                # Modified / deleted file: restore from backup.
+                if bak:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(bak, target)
+            elif action == "restore_old":
+                # Rename source: restore the original file at its old path.
+                if bak:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(bak, target)
+            elif action == "delete" or (action is None and not bak):
+                # New / rename-destination file: remove it.
+                if target.exists():
+                    target.unlink()
         except OSError as exc:
             log.warning("integrate_patch: no-git revert failed for %s: %s", target, exc)
 
