@@ -37,16 +37,18 @@ not bundle Quark or implement quantization itself; it invokes Quark's published
 skills (`quark-torch-ptq` -> `quark-torch-result-validator` ->
 `quark-torch-llm-eval`) end to end.
 
-Quark is published on PyPI (`pip install amd-quark`), but the current external
-release does not ship the `.claude/skills/quark-torch-*` skill entry points that
-Hyperloom drives. Until those skills are public, use an internal AMD Quark
-repository checkout.
+Quark is open-sourced at
+[`https://github.com/amd/Quark.git`](https://github.com/amd/Quark.git) and is
+also published on PyPI (`pip install amd-quark`). The
+`.claude/skills/quark-torch-*` skill entry points that Hyperloom drives ship on
+the `release/0.12` branch (and later), so clone that branch when you need the
+agent-driven prelude.
 
 When you run `inference_optimizer optimize`, the quantization prelude resolves
 the Quark root in this order:
 
 1. `QUARK_ROOT`
-2. The canonical default `/wekafs/hyperloom/Quark`
+2. The canonical default `/primus/hyperloom/Quark`
 
 `inference_optimizer optimize` has no `--quark-root` flag; that argument only
 exists on the standalone `quantization-agent` CLI. For the `optimize` path,
@@ -58,5 +60,5 @@ fast instead of silently optimizing the unquantized source model.
 
 ```text
 HYPERLOOM_QUANTIZE_ENABLED=1
-QUARK_ROOT=/workspace/Quark
+QUARK_ROOT=/primus/hyperloom/Quark
 ```
