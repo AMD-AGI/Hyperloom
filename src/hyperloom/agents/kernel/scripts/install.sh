@@ -259,15 +259,9 @@ else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
 # When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
-# install. Defaults to 1 so GEAK kernel-opt gets RAG-augmented retrieval
-# out of the box on the canonical GPU-pod path (cuda auto-detect, BGE-
-# large embedding ~1min). Callers that don't want this — e.g. claude-only
-# kernel-opt, CPU-only sandbox where BGE-large takes ~1.5h, or any path
-# where install.sh latency matters more than RAG quality — should set
-# `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` in the launching env (Brain
-# propagates Environment block vars from the prompt into sandbox env, so
-# operators can flip this per-task without editing this script).
+# install. A build failure warns by default; set strict=1 to fail install.
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
+KERNEL_AGENT_RAG_INDEX_STRICT_VAL="${KERNEL_AGENT_RAG_INDEX_STRICT:-0}"
 # Explicit alias for operators who want to skip the final model/index load
 # step during install (e.g. Docker builds without visible GPUs).
 KERNEL_AGENT_SKIP_MODEL_LOAD_VAL="${KERNEL_AGENT_SKIP_MODEL_LOAD:-0}"
@@ -349,6 +343,7 @@ Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  KERNEL_AGENT_RAG_INDEX_STRICT=1       Fail install when the RAG index build fails (default warns).
   KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
                                         Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
   INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
@@ -1328,7 +1323,16 @@ ensure_rag_index() {
     return
   fi
   log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run sh -c "cd '${GEAK_ROOT}' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  if run sh -c "cd '${GEAK_ROOT}' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"; then
+    return 0
+  fi
+  case "$KERNEL_AGENT_RAG_INDEX_STRICT_VAL" in
+    1|true|TRUE|yes|YES|on|ON)
+      die "GEAK RAG index build failed (KERNEL_AGENT_RAG_INDEX_STRICT=$KERNEL_AGENT_RAG_INDEX_STRICT_VAL)"
+      ;;
+  esac
+  warn "GEAK RAG index build failed; continuing install without a prebuilt index"
+  warn "Set KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 to skip or KERNEL_AGENT_RAG_INDEX_STRICT=1 to fail."
 }
 
 ensure_oob() {
