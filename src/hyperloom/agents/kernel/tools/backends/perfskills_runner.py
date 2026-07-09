@@ -97,6 +97,7 @@ def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
         try:
             os.killpg(os.getpgid(proc.pid), sig)
         except (ProcessLookupError, PermissionError):
+            # Process already exited; nothing to signal.
             pass
 
     try:

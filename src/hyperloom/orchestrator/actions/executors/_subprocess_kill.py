@@ -80,6 +80,7 @@ def _signal_group(pgid: int, sig: int) -> None:
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
+        # Group already gone; nothing to signal.
         pass
     except OSError as exc:
         log.warning(
@@ -121,6 +122,7 @@ def kill_my_spawned_server(
             try:
                 proc.kill()
             except OSError:
+                # Process already exited; nothing to signal.
                 pass
         return
 
@@ -137,6 +139,7 @@ def kill_my_spawned_server(
         try:
             proc.terminate()
         except OSError:
+            # Process already exited; nothing to terminate.
             pass
         return
 
@@ -175,6 +178,7 @@ def kill_my_spawned_server(
             proc.pid,
         )
     except OSError:
+        # Child already reaped; nothing to wait on.
         pass
 
 
@@ -482,6 +486,7 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
             if p != path
         )
     except OSError:
+        # Directory listing failed; skip sibling-file discovery.
         pass
     for candidate in candidates:
         try:

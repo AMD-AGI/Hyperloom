@@ -315,6 +315,7 @@ def _collect_lane_timeline(
                 if lane:
                     per_lane_expired[lane] = per_lane_expired.get(lane, 0) + 1
         except _sqlite3.OperationalError:
+            # Telemetry DB locked/absent; skip this expiry pass.
             pass
     finally:
         try:

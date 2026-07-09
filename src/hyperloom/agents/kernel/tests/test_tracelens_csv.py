@@ -1897,6 +1897,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
             try:
                 tla.main()
             except SystemExit:
+                # main() exits via SystemExit on success; swallow it in-test.
                 pass
     finally:
         _os.environ.clear()

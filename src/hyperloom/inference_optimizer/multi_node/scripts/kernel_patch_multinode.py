@@ -90,6 +90,7 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
             try:
                 tmp.unlink()
             except OSError:
+                # Temp file already gone; the original error is re-raised below.
                 pass
         raise
 

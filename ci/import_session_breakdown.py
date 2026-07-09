@@ -582,6 +582,7 @@ def _infer_tp_from_name(name: str) -> int:
         try:
             sizes.append(float(m.group(1)))
         except ValueError:
+            # Non-numeric size token; skip it.
             pass
     if not sizes:
         n_lower = name.lower()

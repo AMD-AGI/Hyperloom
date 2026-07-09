@@ -372,6 +372,7 @@ def harvest_leaked_artifacts(
                     # Already under the workspace — nothing to harvest.
                     continue
                 except ValueError:
+                    # Path is outside the workspace; fall through to harvest it below.
                     pass
                 if not match.is_file():
                     continue

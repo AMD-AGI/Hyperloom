@@ -206,6 +206,7 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
         if float(row.get("best_throughput") or 0.0) > 0.0:
             return True
     except (TypeError, ValueError):
+        # Malformed row value; fall through to the text checks below.
         pass
     for key in ("what_worked", "what_failed", "pitfalls", "lessons"):
         if row.get(key):

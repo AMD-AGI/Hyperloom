@@ -1217,6 +1217,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             try:
                 os.unlink(tmp)
             except OSError:
+                # Temp file already gone; re-raise the original error below.
                 pass
             raise
         # Author-time breakdown capture: snapshot state-owned sections into the

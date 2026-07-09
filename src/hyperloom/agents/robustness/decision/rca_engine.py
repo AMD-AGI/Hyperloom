@@ -307,10 +307,12 @@ class LlmRcaEngine:
         try:
             self._usage_in += int(usage.get("prompt_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Malformed usage value; skip this token count.
             pass
         try:
             self._usage_out += int(usage.get("completion_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Malformed usage value; skip this token count.
             pass
 
     def set_tick(self, tick_id: int) -> None:

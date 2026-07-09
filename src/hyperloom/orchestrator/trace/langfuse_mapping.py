@@ -449,6 +449,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         except (TypeError, ValueError):
+            # Malformed metric payload; skip this event.
             pass
     # Calibration signal: the proposer's predicted gain emitted as its own
     # NUMERIC score on the SAME decision so a trace can compute the
@@ -464,6 +465,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
                 "metadata": meta,
             })
         except (TypeError, ValueError):
+            # Malformed metric payload; skip this event.
             pass
     # Calibration signal: the proposal_scorer's pre-decision rating (mean
     # across raters) emitted as its own NUMERIC score on the SAME decision so
