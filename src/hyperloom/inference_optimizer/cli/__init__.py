@@ -286,6 +286,47 @@ def _orchestration_rules_fragment_path() -> Path:
     return asset_system_prompts_dir() / "orchestration.md"
 
 
+def _normalise_framework_name(value: str | None) -> str:
+    """Normalize a framework string for equality checks."""
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _enforce_expected_framework(
+    framework: str,
+    *,
+    expected: str | None = None,
+) -> None:
+    """Fail fast when a launcher-pinned expected framework is violated.
+
+    Long-running launches often pass through generated shell scripts. A stale
+    script that mutates ``$FRAMEWORK`` can otherwise silently run a different
+    backend than the operator requested. ``EXPECTED_FRAMEWORK`` is the compact
+    launcher-facing guard; ``INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK`` is the
+    namespaced equivalent for platform integrations.
+    """
+    actual = _normalise_framework_name(framework)
+    expected_raw = (
+        expected
+        if expected is not None
+        else (
+            os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "")
+            or os.environ.get("EXPECTED_FRAMEWORK", "")
+        )
+    )
+    wanted = _normalise_framework_name(expected_raw)
+    if not wanted:
+        return
+    if wanted != actual:
+        print(
+            "ERROR: framework mismatch: "
+            f"EXPECTED_FRAMEWORK={wanted!r} but resolved framework={actual!r}. "
+            "Refusing to launch because this would run a different backend "
+            "than the operator requested.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
     """Summarise an objective into the ``(kind, value)`` pair the prompt expects.
 
@@ -1463,6 +1504,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")
         if state.framework:
+            _enforce_expected_framework(state.framework)
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
         if state.gpu_type:
@@ -1645,6 +1687,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
+        _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
 
