@@ -33,10 +33,6 @@ which point it runs a final sweep and writes the report.*
    reproducible session artifacts, and `session_breakdown.json` for downstream
    delivery workflows.
 
-This tree-search orchestration is published as **Arbor**
-([arXiv:2606.12563](https://arxiv.org/abs/2606.12563)) — the research name for
-Hyperloom's Orchestrator / Specialist / Critic loop.
-
 ## Components
 
 Hyperloom is composed of multiple tools, each documented on its own page.
