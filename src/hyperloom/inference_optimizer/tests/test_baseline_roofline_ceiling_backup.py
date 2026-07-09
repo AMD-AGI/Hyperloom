@@ -81,6 +81,9 @@ class TestRecordBaselineRooflineCeiling:
         assert ceiling["ceiling_arm"] == "baseline"
         assert ceiling["roofline_provenance"]["runtime_tp"] == 4
         assert ceiling["roofline_provenance"]["effective_concurrency"] == 64
+        # Compute-peak convention is surfaced (unified max-achievable).
+        assert ceiling["roofline_provenance"]["compute_peak_convention"] == "achievable"
+        assert ceiling["roofline_provenance"]["compute_peak_tflops"] > 0
 
         # Full per-op PerfModel breakdown is attached.
         pm = ceiling["perfmodel_breakdown"]
