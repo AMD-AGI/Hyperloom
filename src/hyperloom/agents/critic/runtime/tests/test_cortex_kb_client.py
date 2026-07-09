@@ -218,7 +218,7 @@ def test_5xx_then_success_recovers(make_client):
 def test_cli_resolves_cortex_client_from_cortex_kb_url(monkeypatch):
     from hyperloom.agents.critic.runtime.cli import _resolve_kb_client
 
-    # Resolve ``CortexKBClient`` from the same ``runtime.cortex_kb_client``
+ # Resolve ``CortexKBClient`` from the same ``runtime.cortex_kb_client``
     # module object that ``runtime.cli`` binds at call time. Sibling suites
     # (e.g. the orchestrator's CriticAgentBackend tests) intentionally evict
     # the cached ``runtime.*`` modules when a backend points at a different

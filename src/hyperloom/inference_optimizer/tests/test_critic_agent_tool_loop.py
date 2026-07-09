@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``CriticAgentBackend._run_reasoning_loop`` — issue #170 web tools (web_search / web_fetch) integration.
+"""Tests for ``CriticAgentBackend._run_reasoning_loop`` — web tools (web_search / web_fetch) integration.
 
 Reuses the runtime-subprocess fake from ``test_critic_agent_backend`` so the
 focus stays on the LLM tool-call loop. Web tool clients are injected via
