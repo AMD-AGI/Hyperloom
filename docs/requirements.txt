@@ -1,7 +1,6 @@
 # Documentation build dependencies for the Hyperloom Sphinx site.
 # Install with:  pip install -r docs/requirements.txt
-sphinx>=7.2
-furo>=2024.1.29
+rocm-docs-core[api_reference]
 myst-parser>=2.0
 linkify-it-py>=2.0
 # Pin transitive dep above CVE-2026-45409 (affects idna 3.9.0).
