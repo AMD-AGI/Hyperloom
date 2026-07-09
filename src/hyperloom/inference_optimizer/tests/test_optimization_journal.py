@@ -359,7 +359,7 @@ def test_summarize_change_falls_back_to_task_kind():
     assert summarize_change("") == "(unknown)"
 
 
-# derive_journal_outcome — Problem 3: fix the "fake KEEP" bug.
+# derive_journal_outcome: fix the "fake KEEP" bug.
 def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
     """The core bug: a reverted integrate_patch is promotable (status != failed)
     but must journal as REVERT, not KEEP."""

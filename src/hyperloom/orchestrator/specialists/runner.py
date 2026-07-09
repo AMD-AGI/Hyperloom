@@ -1193,7 +1193,7 @@ class SpecialistRunner:
         # authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
-        # #5-P2: re-stamp cross-framework provenance from task params so the KB
+        # Re-stamp cross-framework provenance from task params so the KB
         # ledger records source/target framework deterministically, regardless
         # of whether the specialist echoed them in its proposal.
         _cf_params = ctx.task.params or {}
@@ -1528,8 +1528,7 @@ class SpecialistRunner:
         concurrent reader (or a high-frequency incremental rewrite)
         never observes a half-written file.
 
-        tree-reform.MD §7/P2.1: delegates to
-        :func:`hyperloom.common.io.atomic_write_json`.
+        Delegates to :func:`hyperloom.common.io.atomic_write_json`.
 
         Args:
             path (Path): Destination file path.

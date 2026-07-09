@@ -414,16 +414,16 @@ class _SpecialistPseudoRole:
 _SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
 
 
-# REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4): source role → allowed target_agents (only orchestration→kernel).
+# REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel_agent"}),
 }
 
 
-# Critic-only: REVIEW_VERDICT (DESIGN §18.2)
+# Critic-only: REVIEW_VERDICT
 REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
 
-# Verdict vocabulary for review_verdict (DESIGN §18.2)
+# Verdict vocabulary for review_verdict
 REVIEW_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",
@@ -435,7 +435,7 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Robustness-only: kill_task + scheduling-police intents (DESIGN §7.4 / §19.3)
+# Robustness-only: kill_task + scheduling-police intents
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
@@ -1067,8 +1067,7 @@ class PolicyGate:
         """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
 
         Unknown topics are intentionally not rejected here — the
-        Coordinator soft-degrades them to ``"observation"`` (DESIGN
-        §13.2) — so agents can still surface unstructured observations.
+        Coordinator soft-degrades them to ``"observation"`` — so agents can still surface unstructured observations.
 
         Args:
             payload (dict[str, Any]): the send_message payload, expected to
@@ -1084,7 +1083,7 @@ class PolicyGate:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
-        # Unknown topics are soft-degraded by the Coordinator to "observation" (DESIGN §13.2); not rejected here.
+        # Unknown topics are soft-degraded by the Coordinator to "observation"; not rejected here.
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent against the routing matrix.
@@ -1397,7 +1396,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; KB_design §3.11 §4.4 / Inv-11.3).
+        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; Inv-11.3).
 
         Args:
             action_name (str): the action name (or REQUEST ``kind``) being
@@ -1432,7 +1431,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only; KB_design §3.11 §4.5).
+        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only).
 
         Args:
             role_name (str): the name of the emitting role.

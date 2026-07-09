@@ -22,7 +22,7 @@ from hyperloom.agents.critic.runtime.request_models import (
 
 
 # --------------------------------------------------------------------------- #
-# in_memory_kb_client pure helpers                                            #
+# in_memory_kb_client pure helpers #
 # --------------------------------------------------------------------------- #
 def test_normalise_value_none() -> None:
     assert _normalise_value(None) == ""  # line 36
@@ -48,7 +48,7 @@ def test_deep_merge_nested() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# in_memory_kb_client list / upsert / batch / edges                          #
+# in_memory_kb_client list / upsert / batch / edges #
 # --------------------------------------------------------------------------- #
 def test_list_validation_and_filters() -> None:
     kb = InMemoryKBClient(time_fn=lambda: 1.0)

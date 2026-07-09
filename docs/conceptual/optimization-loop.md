@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
 ---
 # Hyperloom optimization loop
 
@@ -28,13 +28,19 @@ observable session artifacts and subprocess JSON bridges are.
 
 ## Phase order
 
-The Coordinator moves monotonically through the live phase chain:
+The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_PR -> EXPLORE -> KERNEL -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
-`phase_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
+For a normal single-pass run (`--max-hours <= 24`) the chain is traversed
+once. Cyclic macro-cycling is enabled by default
+(`INFERENCE_OPTIMIZER_CYCLIC_PHASES`): with a large or unbounded budget
+(`--max-hours > 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_AGENT` /
+`EXPLORE` for another pass instead of closing.
+
+`machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
 analysis refreshes and close sequencing may be enqueued internally even
 when the LLM is not allowed to propose them.
@@ -55,11 +61,13 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_PR
+## FRAMEWORK_AGENT
 
-When enabled, FRAMEWORK_PR is managed by the Coordinator. The only
-protected framework-agent integration is discovery via `fa
-phase-discover`.
+When enabled, the `FRAMEWORK_AGENT` phase (framework-PR enablement) is managed
+by the Coordinator. It covers discovery/ranking/audit via `fa phase-discover`,
+plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
+default), enablement repair, and Critic review of each candidate — discovery is
+one integration among several, not the only one.
 
 For each candidate:
 
@@ -92,19 +100,28 @@ for archived reporting only. New sessions write the merged
 After each KEEP, the runtime revalidates the full stack end to end so
 the reported cumulative gain is not just a sum of per-round deltas.
 
-## KERNEL
+## KERNEL_AGENT
 
-KERNEL phase is the bridge to kernel-agent work. Orchestration may send
-kernel requests, but the Coordinator owns the request handlers and safety
+The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration may
+send kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
-These are the types of live requests:
+The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
+admits these actions:
 
-- `trace_analyze`
-- `run_gemm_tuning`
-- `run_optimization`
+- `kernel_opt`
 - `integrate`
-- `apply_patch`
+- `deep_kernel_analysis`
+- `operator_tuning`
+- `vendor_kernel_config`
+- `gemm_tuning`
+- `roofline`
+- `profile`
+- `recover`
+
+Within the kernel-agent request channel, the handler dispatches request kinds
+such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
+(`request_handlers.py`); these are handler kinds, not phase actions.
 
 Kernel-owned results are recorded separately from non-kernel action
 attempts. A KEEP must be integrated before the run can proceed to final

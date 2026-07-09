@@ -709,14 +709,14 @@ class SpecialistPromptInputs:
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 lessons — positive priors from prior KEEPs; rendered as § 5b.
+    # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # KG graph-recommended knobs (cross-recipe IMPROVES candidates reached via
-    # the architecture family graph); advisory candidates rendered as § 5d.
+    # the architecture family graph); advisory candidates rendered in their own section.
     # Each entry: ``{knob, expected_gain, confidence, source}``.
     kg_recommended_knobs: list[dict[str, Any]] = field(default_factory=list)
     # KG graph-guided config knobs (journal-derived ``KNOB_IMPROVES`` for the
-    # current arch+precision); rendered as § 5e. Unlike ``kg_recommended_knobs``
+    # current arch+precision); rendered in their own section. Unlike ``kg_recommended_knobs``
     # these carry runnable ``args``/``envs``. Each entry:
     # ``{knob, args, envs, name, expected_gain, confidence, source}``.
     kg_guided_knobs: list[dict[str, Any]] = field(default_factory=list)
@@ -1502,7 +1502,7 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     for point in inp.warm_start_pitfalls:
-        # Symmetric with §5b lessons: tolerate plain-string pitfalls from the
+        # Symmetric with lessons: tolerate plain-string pitfalls from the
         # external KB row alongside the structured dict "point" shape.
         if isinstance(point, str):
             description = point.strip()
@@ -1774,7 +1774,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Field contract:",
         "",
-        "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
+        "- ``proposal_set`` items reuse the explore variant schema.",
         (
             "- ``atomic`` (bool, default false): set ``true`` when this "
             "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
@@ -1938,18 +1938,18 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_iron_rules(inp),
     ]
     user_sections = [
-        _section_hardware(inp),  # 0: § 1
-        _section_execution_budget(inp),  # 0a: § 2a (omitted when no budget)
-        _section_gap(inp),  # 1: § 2-3
-        _section_kb_subgraph(inp),  # 2: § 4
-        _section_roofline_evidence(inp),  # 3: § 4a
-        _section_recipe(inp),  # 4: § 5
-        _section_lessons(inp),  # 5: § 5b
-        _section_pitfalls(inp),  # 6: § 5c
-        _section_kg_recommended(inp),  # 6a: § 5d (KG graph-recommended knobs)
-        _section_kg_guided_knobs(inp),  # 6b: § 5e (KG graph-guided runnable knobs)
-        _section_pr_feed(inp),  # 7: § 6
-        _section_source_hint(inp),  # 8: § 7
+        _section_hardware(inp),
+        _section_execution_budget(inp),  # omitted when no budget
+        _section_gap(inp),
+        _section_kb_subgraph(inp),
+        _section_roofline_evidence(inp),
+        _section_recipe(inp),
+        _section_lessons(inp),
+        _section_pitfalls(inp),
+        _section_kg_recommended(inp),  # KG graph-recommended knobs
+        _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
+        _section_pr_feed(inp),
+        _section_source_hint(inp),
     ]
     if inp.notes:
         user_sections.append(

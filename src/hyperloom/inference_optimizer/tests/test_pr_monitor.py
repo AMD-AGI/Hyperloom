@@ -92,6 +92,7 @@ def test_plane_cortex_enabled_when_url_set():
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS
+    # 12-tool PR-Monitor surface.
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 

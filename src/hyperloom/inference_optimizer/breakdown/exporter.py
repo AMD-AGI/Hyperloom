@@ -260,7 +260,7 @@ def build(
     session_section = _pick(
         "session", _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings)
     )
-    # §1b: author-side ``session_meta`` enrichment. Emitted unconditionally from
+    # Author-side ``session_meta`` enrichment. Emitted unconditionally from
     # the manifest + resolved ``session`` block so the block no longer depends on
     # the ci/optimize_submit backfill (which only ran on the GHA submit path).
     session_meta = _pick(
@@ -275,7 +275,7 @@ def build(
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
     )
-    # §2b model basics — verbatim mirror of ``state.model_info`` (computed once
+    # Model basics — verbatim mirror of ``state.model_info`` (computed once
     # at launch). Empty {} on non-transformers models / pre-field sessions.
     model_info = _pick(
         "model_info",
@@ -342,14 +342,14 @@ def build(
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
     sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
-    # PerfSkills/GEAK-e2e KERNEL-phase section. Empty {} on native sessions
+    # GEAK e2e KERNEL-phase section. Empty {} on native sessions
     # (the optimizer was never engaged), so the dashboard hides it and historic
     # breakdowns stay byte-for-byte identical.
-    perfskills = _pick(
-        "perfskills",
+    geak = _pick(
+        "geak",
         _safe_collect(
-            "perfskills",
-            lambda: collectors.collect_perfskills(sd, state, warnings),
+            "geak",
+            lambda: collectors.collect_geak(sd, state, warnings),
             warnings,
             default={},
         ),
@@ -412,7 +412,7 @@ def build(
         "gemm_tuning",
         _safe_collect("gemm_tuning", lambda: collectors.collect_gemm_tuning(state), warnings, default={}),
     )
-    # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
+    # Hot-kernel roofline table from ``<sd>/reports/kernel_roofline.json``.
     kernel_roofline = _pick(
         "kernel_roofline",
         _safe_collect(
@@ -425,7 +425,7 @@ def build(
             default={},
         ),
     )
-    # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1);
+    # Kernel-agent attempt outcome summary;
     # mirrors ``reports/kernel_optimization_summary.json``, empty → dashboard hides Block 1.
     kernel_optimization_summary = _pick(
         "kernel_optimization_summary",
@@ -436,7 +436,7 @@ def build(
             default={},
         ),
     )
-    # Post-optimization concurrency sweep (Breakdown panel integration spec §A2);
+    # Post-optimization concurrency sweep;
     # mirrors ``reports/conc_sweep_summary.json``, empty → dashboard hides Block 2.
     conc_sweep_summary = _pick(
         "conc_sweep_summary",
@@ -457,7 +457,7 @@ def build(
             default=[],
         ),
     )
-    # Optimization-progress curve (Dashboard §2): stack ledger + ceiling/target
+    # Optimization-progress curve: stack ledger + ceiling/target
     # lines from state.json. Renamed from ``roofline`` to avoid clashing with the
     # list-shaped section above.
     roofline_progress = _pick(
@@ -545,10 +545,10 @@ def build(
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
         "session": session_section,
-        # §1b enrichment; always present from the exporter (no longer CI-only).
+        # Session metadata enrichment; always present from the exporter (no longer CI-only).
         "session_meta": session_meta,
         "workload": workload,
-        # §2b structural model summary (state.model_info mirror). Additive
+        # Structural model summary (state.model_info mirror). Additive
         # optional; empty {} on non-transformers models / pre-field sessions.
         "model_info": model_info,
         "baseline": baseline,
@@ -567,9 +567,9 @@ def build(
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
         "sweep": sweep,
-        # PerfSkills/GEAK-e2e KERNEL section (additive, optional); empty {} →
+        # GEAK e2e KERNEL section (additive, optional); empty {} →
         # dashboard hides it on native sessions.
-        "perfskills": perfskills,
+        "geak": geak,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         "attribution": attribution,
@@ -582,18 +582,18 @@ def build(
         # today, forge later). Gain mirrored here; ``attribution`` stays
         # authoritative. Empty {} on non-fp8/sglang or pre-section sessions.
         "gemm_tuning": gemm_tuning,
-        # Hot-kernel roofline table (spec §1); empty → dashboard hides it.
+        # Hot-kernel roofline table; empty → dashboard hides it.
         "kernel_roofline": kernel_roofline,
-        # Kernel-agent attempt outcome summary (spec §A1); empty → hides Block 1.
+        # Kernel-agent attempt outcome summary; empty → hides Block 1.
         "kernel_optimization_summary": kernel_optimization_summary,
-        # Post-optimization concurrency sweep (spec §A2); empty → hides Block 2.
+        # Post-optimization concurrency sweep; empty → hides Block 2.
         "conc_sweep_summary": conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown source).
         "roofline": roofline,
-        # Optimization-progress curve (spec §2); ``ceiling_available`` False
+        # Optimization-progress curve; ``ceiling_available`` False
         # when the watermark roofline pipeline never ran.
         "roofline_progress": roofline_progress,
-        # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6).
+        # Full-trace token + decision timeline.
         # ``decision_trace`` is the per-decision join (phase/tick/decision
         # + token rollup); ``token_rollup`` is the by_phase / by_component
         # / session_total summary. New optional section — v1 readers ignore

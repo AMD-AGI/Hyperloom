@@ -31,7 +31,7 @@ class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue a ``sweep`` task on SWEEP entry (§3.2 §5.4). Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race).
+        """Auto-enqueue a ``sweep`` task on SWEEP entry. Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race).
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -186,12 +186,12 @@ class SweepPhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        # PerfSkills-owned KERNEL: hand the e2e result to the sweep so it reuses
-        # PerfSkills' bench_e2e.sh + overlay instead of relaunching via Magpie.
-        ps_result = getattr(state, "perfskills_result", None) or {}
+        # GEAK-owned KERNEL: hand the e2e result to the sweep so it reuses
+        # GEAK's bench_e2e.sh + overlay instead of relaunching via Magpie.
+        ps_result = getattr(state, "geak_result", None) or {}
         if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
                 and ps_result.get("bench_script"):
-            params["perfskills_result"] = ps_result
+            params["geak_result"] = ps_result
         cb = state.current_best or {}
         if isinstance(cb, dict):
             cb_args = str(cb.get("extra_server_args") or "")
@@ -199,7 +199,7 @@ class SweepPhase(PhaseHandler):
                 params["base_extra_args"] = cb_args
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
-            # Mirror baseline's benchmark_script so re-launch uses the same wrapper (Gap-04).
+            # Mirror baseline's benchmark_script so re-launch uses the same wrapper.
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
@@ -218,7 +218,7 @@ class SweepPhase(PhaseHandler):
 
     @staticmethod
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
-        """Pick a sweep grid (§3.14 R-13): warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor.
+        """Pick a sweep grid: warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor.
 
         Args:
             state: The session SharedState whose ``warm_start_recipe`` may carry

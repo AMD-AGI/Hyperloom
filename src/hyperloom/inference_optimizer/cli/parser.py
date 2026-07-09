@@ -20,6 +20,10 @@ import sys
 from pathlib import Path
 
 from .. import framework_registry
+from hyperloom.orchestrator.roles.agent_role import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+)
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 
@@ -181,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = argparse.ArgumentParser(
         prog="inference_optimizer",
-        description="Inference Optimizer v0.6 — multi-agent SGLang/vLLM optimization",
+        description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
     p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
@@ -229,8 +233,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "emitted to stderr so the operator sees the typo. Used "
         "verbatim only when the probe fails (CPU sandbox / no "
         "rocm-smi). Magpie runner_type is derived separately; "
-        "mi325x currently runs with mi300x runner scripts because "
-        "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh.",
+        "mi308x and mi325x currently run with mi300x runner scripts because "
+        "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
     )
     opt.add_argument(
         "--framework",
@@ -498,7 +502,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument("--target-gain", type=float, default=None, help="Stop when cumulative_gain >= N%% over baseline")
-    grp.add_argument("--target-tput", type=float, default=None, help="Stop when current best tok/s/GPU >= N")
+    grp.add_argument(
+        "--target-tput",
+        type=float,
+        default=None,
+        help="Stop when current best reaches N (serving: tok/s/GPU; xDiT: img/s)",
+    )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
     )
@@ -583,8 +592,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--max-ticks", type=int, default=None, help="Hard tick cap (None = unlimited; mostly for tests)")
     opt.add_argument("--tick-interval-sec", type=float, default=0.0, help="Sleep between ticks (0 = no sleep)")
-    opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
-    opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL))
+    opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL))
     opt.add_argument(
         "--allow-mm-text-fallback",
         action=argparse.BooleanOptionalAction,

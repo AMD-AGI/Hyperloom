@@ -331,7 +331,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
         await c2.stop()
 
 
-# N23 — --resume is N17-layout-aware (formerly test_n23_resume_per_session.py)
+# --resume is N17-layout-aware (formerly test_n23_resume_per_session.py)
 
 
 class TestN23ResumePerSession:
@@ -425,7 +425,7 @@ class TestN23ResumePerSession:
         assert "logs" not in str(picked)
 
 
-# N24 — _load_kernel_agent_env_fallback hard-fails on bad state
+# _load_kernel_agent_env_fallback hard-fails on bad state
 # (formerly test_n24_kernel_agent_env_hardfail.py)
 
 
@@ -552,7 +552,7 @@ class TestN24KernelAgentEnvHardFail:
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
 
 
-# TraceLens root env-propagation regression (issue #722): a stale/placeholder
+# TraceLens root env-propagation regression: a stale/placeholder
 # TRACELENS_ROOT inherited by the coordinator must be corrected from the
 # installer-written env file, and unedited template placeholders must be
 # treated as unset, so trace_analyze never falls back to an empty pod-local dir.

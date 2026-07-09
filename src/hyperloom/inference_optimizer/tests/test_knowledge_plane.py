@@ -158,6 +158,152 @@ def test_collect_kb_provenance_no_warning_when_plane_healthy(tmp_path: Path):
 def test_collect_kb_provenance_no_warning_when_marker_missing(tmp_path: Path):
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
 
-    warnings_list: list = []
-    collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=warnings_list)
-    assert not any(w.startswith("pr_monitor:") for w in warnings_list)
+    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
+    assert out["recipe_snapshot_reads"]["count"] == 0
+    assert out["recipe_snapshot_reads"]["hits"] == 0
+
+
+def test_collect_kb_provenance_attributes_recipe_reads_per_source(
+    tmp_path: Path,
+):
+    """Composite per-path provenance is aggregated into by_source / best_config_by_source."""
+    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
+
+    audit = recipe_snapshot_audit_jsonl(tmp_path)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in [
+        {"method": "get_recipe", "remote": "composite", "resolution": "remote",
+         "hit": True, "result": {
+             "sources": ["gbrain", "cortex"], "best_config_source": "gbrain"}},
+        {"method": "get_recipe", "remote": "composite", "resolution": "remote",
+         "hit": True, "result": {
+             "sources": ["cortex"], "best_config_source": "cortex"}},
+    ]) + "\n", encoding="utf-8")
+
+    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
+    rs = out["recipe_snapshot_reads"]
+    assert rs["by_source"] == {"gbrain": 1, "cortex": 2}
+    assert rs["best_config_by_source"] == {"gbrain": 1, "cortex": 1}
+
+
+def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
+    tmp_path: Path,
+):
+    """The applied warm recipe's KB path is surfaced from its merged provenance."""
+    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
+
+    state = {
+        "warm_start_recipe": {
+            "raw": "{}", "tier": "exact",
+            "recipe": {
+                "_sources": ["gbrain", "cortex"],
+                "_field_sources": {"best_config": "cortex"},
+            },
+        },
+    }
+    out = collect_kb_provenance(tmp_path, state=state, manifest={}, warnings=[])
+    assert out["warm_start_recipe_source"] == "cortex"
+
+
+# CLI flag plumbing reaches _bootstrap_knowledge_plane.
+def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
+    """Pin the dest-name + default contract the bootstrap reads."""
+    from hyperloom.inference_optimizer.cli import _build_parser
+
+    parser = _build_parser()
+    return parser.parse_args(["optimize", "--degraded-kb", *extra])
+
+
+def test_cli_pr_monitor_flags_have_expected_dest_and_defaults():
+    """PR-monitor flags land under the dest names the bootstrap reads."""
+    args = _parse_optimize_args([])
+    # dest is ``degraded_pr`` (store_true, default False).
+    assert args.degraded_pr is False
+    assert args.pr_monitor_url is None
+    assert args.pr_monitor_mcp_url is None
+    assert isinstance(args.pr_feed_window_days, int)
+    assert args.pr_feed_window_days > 0
+
+
+def test_cli_degraded_pr_sets_flag_true():
+    args = _parse_optimize_args(["--degraded-pr"])
+    assert args.degraded_pr is True
+
+
+def test_cli_pr_monitor_url_override_reaches_namespace():
+    args = _parse_optimize_args(
+        [
+            "--pr-monitor-url",
+            "https://localhost:8080/v1",
+        ]
+    )
+    assert args.pr_monitor_url == "https://localhost:8080/v1"
+
+
+def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
+    args = _parse_optimize_args(
+        [
+            "--pr-monitor-mcp-url",
+            "https://localhost:8080/mcp/",
+        ]
+    )
+    assert args.pr_monitor_mcp_url == "https://localhost:8080/mcp/"
+
+
+def test_cli_pr_feed_window_days_override_reaches_namespace():
+    args = _parse_optimize_args(["--pr-feed-window-days", "7"])
+    assert args.pr_feed_window_days == 7
+
+
+def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Argparse ``args`` values propagate into the KnowledgePlane."""
+    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
+
+    constructed_urls: list[str] = []
+
+    class _Stub:
+        def __init__(self, url: str, enabled: bool):
+            self.base_url = url or "https://default.test"
+            self.enabled = enabled
+            constructed_urls.append(self.base_url)
+
+        def healthz(self) -> bool:
+            return True
+
+        def reset_cache(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        pr_mod.PRMonitorClient,
+        "from_args",
+        classmethod(
+            lambda cls, **kw: _Stub(
+                url=kw.get("url") or "",
+                enabled=kw.get("enabled", True),
+            ),
+        ),
+    )
+
+    args = _parse_optimize_args(
+        [
+            "--pr-monitor-url",
+            "https://my-pr-monitor.example/v1",
+            "--pr-monitor-mcp-url",
+            "https://my-pr-monitor.example/mcp/",
+            "--pr-feed-window-days",
+            "14",
+        ]
+    )
+    plane = _bootstrap_knowledge_plane(
+        args,
+        cortex_client=None,
+        session_dir=tmp_path,
+    )
+    assert "my-pr-monitor.example" in constructed_urls[-1]
+    assert plane.pr_feed_window_days == 14
+    assert plane.pr_monitor_mcp_url == "https://my-pr-monitor.example/mcp/"

@@ -547,7 +547,7 @@ class FrameworkAgentExecutor:
         # Patch source modes, in priority order: explicit ``params.patches``
         # → checkout-head (net diff from an isolated worktree at the PR head)
         # → diff_url (curl GitHub's served diff). All produce a .patch
-        # applied + benched identically (Stage 1 below).
+        # applied + benched identically.
         explicit_patches = params.get("patches") or None
         patch_paths: list[Path] = []
         patch_source_mode = ""
@@ -783,7 +783,7 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 2: bench via run_grid (size=1).
+        # Bench via run_grid (size=1).
         try:
             bench_result, gate_evidence = await self._bench_candidate(
                 params=params,
@@ -825,7 +825,7 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 3: KEEP / REVERT.
+        # KEEP / REVERT decision.
         base_tput = float(params.get("base_tput") or 0.0)
         if base_tput <= 0:
             ss = extra.get("shared_state") or extra.get("state")
@@ -840,7 +840,7 @@ class FrameworkAgentExecutor:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
-        # Step 4 / Q5: source patches require the accuracy gate for a KEEP. A
+        # Source patches require the accuracy gate for a KEEP. A
         # measured regression always blocks; a missing verdict blocks only when
         # a baseline accuracy was available (else degrade to throughput-only).
         acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
@@ -871,7 +871,7 @@ class FrameworkAgentExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
-            # G8: distinguish "accuracy required but unevaluated" (None, not a
+            # Distinguish "accuracy required but unevaluated" (None, not a
             # measured regression) from a throughput/regression revert.
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and tput_ok) else "reverted"
@@ -1108,7 +1108,7 @@ class FrameworkAgentExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
-        # G2: when the accuracy gate is required and a baseline accuracy exists,
+        # When the accuracy gate is required and a baseline accuracy exists,
         # force RUN_EVAL=true so a stale config / process env can't silently
         # disable eval and leave the gate unable to produce a verdict.
         bench_extra_envs: dict[str, Any] = {}

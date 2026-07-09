@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.5 §10 / M5 — specialist_done bookkeeping (KB_gaps/Gap-03).
+"""Specialist_done bookkeeping tests.
 
-Gap-03 root cause: ``_handle_intent`` lacked a SPECIALIST_DONE branch, so the
+Root cause: ``_handle_intent`` lacked a SPECIALIST_DONE branch, so the
 intent degraded to an observation and dropped its bookkeeping. Exercises
 ``_record_specialist_result``, the intent-routing path, the dispatcher exit
 hook, streak semantics, round_id idempotence, and unknown-task defense.
@@ -93,7 +93,7 @@ class _StubTaskRegistry:
 # Fixture: lean Coordinator stand-in
 @pytest.fixture
 def coord(tmp_path: Path):
-    """Build a Coordinator via ``__new__`` with just enough attributes for the Gap-03 methods."""
+    """Build a Coordinator via ``__new__`` with just enough attributes for specialist lifecycle methods."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     c = Coordinator.__new__(Coordinator)
@@ -345,7 +345,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
 # 4. _build_specialist_round_entry — output shape
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):
-    """The entry carries the full field set the breakdown ``specialist_runs[]`` consumer expects (KB_design §3.12 §4.3)."""
+    """The entry carries the full field set the breakdown ``specialist_runs[]`` consumer expects."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord_obj = Coordinator.__new__(Coordinator)
@@ -457,7 +457,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             specialist_max_turns=4,
             specialist_per_turn_max_seconds=300.0,
             research_lane_capacity=1,
-            # PR-A2: in-process dispatch so the mocked ClaudeBackend is used.
+            # In-process dispatch so the mocked ClaudeBackend is used.
             specialist_dispatch_mode="inprocess",
             specialist_mcp_config=None,
         )
@@ -619,7 +619,7 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
 
 # 6. Intent routing branch wired into _handle_intent
 def test_handle_intent_dispatch_table_has_specialist_done_branch():
-    """Gap-03 regression: the dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
+    """The dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
     import inspect
 
     from hyperloom.orchestrator.loop.intent_router import IntentRouter

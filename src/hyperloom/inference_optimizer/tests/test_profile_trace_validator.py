@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``profile._validate_trace_structure`` (#210 / Deval's check_torch_trace.py)."""
+"""Tests for ``profile._validate_trace_structure`` (Deval's check_torch_trace.py)."""
 
 from __future__ import annotations
 
@@ -123,7 +123,7 @@ def _build_healthy_layout(tmp_path: Path) -> Path:
 
 
 def test_validator_no_warnings_on_healthy_layout(tmp_path, caplog):
-    """The reference healthy layout (#210) must not trip any of the 6 checks."""
+    """The reference healthy layout must not trip any of the 6 checks."""
     trace_dir = _build_healthy_layout(tmp_path)
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
@@ -136,7 +136,7 @@ def test_validator_warns_on_extend_decode_files_without_steady_state(
     tmp_path,
     caplog,
 ):
-    """#210 symptom: ``_extend_*`` / ``_decode_*`` split files signal
+    """``_extend_*`` / ``_decode_*`` split files signal
     ``profile_by_stage=True`` leaked through."""
     trace_dir = _build_healthy_layout(tmp_path)
     split = trace_dir / "trace_split"
@@ -285,7 +285,7 @@ def test_validator_warns_when_kernel_shape_profiler_absent_in_sglang(
     tmp_path,
     caplog,
 ):
-    """A sglang trace lacking ``kernel_shape_profiler`` warns (PR #207 patch missing)."""
+    """A sglang trace lacking ``kernel_shape_profiler`` warns when the server-side patcher is missing."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
@@ -335,7 +335,7 @@ def test_validator_never_raises_even_on_unreadable_trace(tmp_path, caplog):
 
 
 # ---------------------------------------------------------------------------
-# Issue #431: structured trace_health return (basis for the eager-mode
+# Structured trace_health return (basis for the eager-mode
 # re-profile fallback when CUDA-graph folding zeroes out hot kernels)
 # ---------------------------------------------------------------------------
 def test_trace_health_healthy_layout(tmp_path):
@@ -385,7 +385,7 @@ def test_trace_health_healthy_layout_not_zero_ops(tmp_path):
 
 
 def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):
-    """#431 core symptom: the main trace carries NO execute_* /
+    """The main trace carries NO execute_* /
     user_annotation events (per-kernel device activity folded into
     hipGraphLaunch wrappers under cuda-graph capture). trace_health must
     flag ``per_kernel_attribution_degraded=True`` so the kernel pipeline
@@ -403,7 +403,7 @@ def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):
     )
     health = _validate_trace_structure(trace_dir, "sglang")
     assert health["per_kernel_attribution_degraded"] is True
-    # capture_traces/ is still intact — a capture-fold fallback (#431
+ # capture_traces/ is still intact — a capture-fold fallback (#431
     # proper fix) would have data to mine even though the live trace lost
     # per-kernel attribution.
     assert health["capture_traces_present"] is True
@@ -422,7 +422,7 @@ def test_trace_health_capture_traces_absent(tmp_path):
 
 
 def test_trace_health_return_shape_backward_compatible(tmp_path):
-    """Validator now returns a structured dict (issue #431) while staying
+    """Validator returns a structured dict while staying
     backward compatible: existing callers that ignore the return value are
     unaffected (it never raises)."""
     trace_dir = _build_healthy_layout(tmp_path)
