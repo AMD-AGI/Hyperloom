@@ -558,7 +558,7 @@ def _emit_preflight_diagnostics(
         print(f"  kb_degraded_reason  = {kb_reason}")
         print(f"  pr_degraded_reason  = {pr_reason}")
 
-    # Issue-H: surface Cortex KB offline-queue state; dead-letter pile-up signals a cold-start session.
+    # Surface Cortex KB offline-queue state; dead-letter pile-up signals a cold-start session.
     try:
         _print_cortex_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -707,9 +707,7 @@ def _preflight(
     # "_load_dotenv_fallback", ...)``), and since this function now lives in a
     # sibling module, a bare-name call would resolve this module's own
     # (un-patched) binding and silently bypass the patch. Re-reading the
-    # current package attribute at call time picks up the patched version —
-    # same technique used for coordinator.py's cross-collaborator calls
-    # (tree-reform-lessons.MD §3.3/§5c).
+    # current package attribute at call time picks up the patched version.
     from . import _load_dotenv_fallback as _load_dotenv_fallback_current
     from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
 
@@ -929,7 +927,7 @@ def _preflight(
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
-    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off; SKILL Step 2 step 8.5) ---
+    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off) ---
     # Catches launchers that skip install.sh, else missing-CLI only surfaces at the tick ~6 robustness probe.
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
