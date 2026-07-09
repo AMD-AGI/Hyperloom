@@ -49,7 +49,7 @@ _GIT_TIMEOUT_SEC = 30
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 
 # TraceLens-shipped manifest filename(s). When present in the SGLang patches
-# dir, the manifest is the source of truth for supported versions (#194 §5),
+# dir, the manifest is the source of truth for supported versions,
 # bypassing the hardcoded default; operator env pins still win. Format: one
 # version per line, ``#`` comments, blank lines ignored.
 _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (

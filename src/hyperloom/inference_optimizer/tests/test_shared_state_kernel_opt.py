@@ -364,7 +364,7 @@ def test_kernel_opt_attempts_count_property(state: SharedState):
     assert state.kernel_opt_attempts_count == 2
 
 
-# PR-C: failure_count + max_failures = 1 retirement
+# failure_count + max_failures = 1 retirement.
 def _failed_result(
     kernel_id: str, *, status: str = "failed", error_class: str = "subtask_exception", source_file: str = ""
 ) -> dict:
@@ -447,7 +447,7 @@ def test_resolve_kernel_opt_max_failures_defaults_and_env(monkeypatch):
     assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
 
 
-# PR-C: untried_hot_reusable_kernels report gate
+# untried_hot_reusable_kernels report gate.
 def _set_trace(state: SharedState, *, hot_kernels, task_groups=None):
     state.last_trace_analyze = {
         "hot_kernels": hot_kernels,
@@ -598,7 +598,7 @@ def test_untried_hot_kernels_caps_at_top_n(state: SharedState, monkeypatch):
     assert len(untried) == 3
 
 
-# Issue 3: record_kernel_integrate_result distinguishes integration faults from
+# record_kernel_integrate_result distinguishes integration faults from
 # genuine gate REVERTs and gives faults an independent bounded retry budget.
 def _integrate_result(
     kernel_id: str,
