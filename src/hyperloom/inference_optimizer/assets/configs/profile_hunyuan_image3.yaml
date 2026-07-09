@@ -1,0 +1,53 @@
+# Magpie profile benchmark config for HunyuanImage-3.0 (text-to-image).
+# Same contract as baseline_hunyuan_image3.yaml but with torch_profiler enabled
+# so the loop can attribute time across the autoregressive planning stage, the
+# diffusion denoise steps, and the 3D VAE decode. Resolved by
+# _default_profile_config() when $FRAMEWORK=hunyuan_image3.
+
+benchmark:
+  framework: hunyuan_image3
+  workload_kind: scriptable
+  # benchmark_script: hunyuan_image3_mi355x.sh
+  model: /primus/models/tencent-HunyuanImage-3.0   # OVERRIDDEN at runtime
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+    HYI3_IMAGE_SIZE: "1024x1024"
+    HYI3_DIFF_INFER_STEPS: 50
+    HYI3_BOT_TASK: image
+    HYI3_USE_SYSTEM_PROMPT: "None"
+    HYI3_ATTN_IMPL: sdpa
+    HYI3_MOE_IMPL: eager
+    HYI3_SEED: 42
+    # Profiling: fewer timed images, one warmup, profiler window on the timed
+    # region only. No correctness gate during profiling (REF/WRITE forced empty
+    # by the scriptable choke point in _workload_envs when is_profile).
+    HYI3_NUM_ITERATIONS: 2
+    HYI3_WARMUP_CALLS: 1
+    HYI3_PROMPT: "A brown and white dog running on the grass, photorealistic, warm sunlight"
+    XDIT_QUALITY_REF: ""
+    XDIT_QUALITY_LPIPS_MAX: 0.15
+    XDIT_QUALITY_SSIM_MIN: 0.85
+    XDIT_QUALITY_MSE_MAX: 0.006
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    TOKENIZERS_PARALLELISM: "false"
+    PATH: "/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false
+
+  server_lifecycle:
+    enabled: false
+
+  timeout_seconds: 7200
+
+  profiler:
+    torch_profiler:
+      enabled: true                # profile run: capture the timed region trace
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

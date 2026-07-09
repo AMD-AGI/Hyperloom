@@ -93,6 +93,22 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
+    # HunyuanImage-3.0: an 80B unified autoregressive multimodal MoE text-to-
+    # image model. Unlike the xfuser/diffusers pipelines that back ``xdit``, it
+    # is a transformers ``AutoModelForCausalLM`` (trust_remote_code) driven via
+    # its own ``generate_image`` method, so it does NOT use the xfuser
+    # sequence-parallel runner registry. It is still a SCRIPTABLE image workload
+    # (server-less single command; throughput img/s; LPIPS/SSIM/MSE quality
+    # gate), so it reuses the scriptable env plumbing in _workload_envs
+    # (XDIT_QUALITY_* injection) and the img/s -> e2el_mean_ms metric mapping.
+    "hunyuan_image3": FrameworkSpec(
+        name="hunyuan_image3",
+        kind=SCRIPTABLE,
+        extra_args_env="EXTRA_HUNYUAN_IMAGE3_ARGS",
+        repo_url="https://github.com/Tencent-Hunyuan/HunyuanImage-3.0.git",
+        supports_server_reuse=False,
+        throughput_unit="img/s",
+    ),
 }
 
 DEFAULT_FRAMEWORK = "sglang"
