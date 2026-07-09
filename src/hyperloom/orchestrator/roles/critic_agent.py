@@ -560,7 +560,7 @@ class CriticAgentBackend:
 
         env = self._build_runtime_env()
 
-        # Stage 1 — prepare-review (off-thread because subprocess.run blocks).
+        # prepare-review runs off-thread because subprocess.run blocks.
         await asyncio.to_thread(
             self._runtime_caller,
             RuntimeCall(
@@ -592,7 +592,7 @@ class CriticAgentBackend:
 
         _maybe_inject_cross_domain_constraints(judge_bundle)
 
-        # Stage 2 — Codex reasoning; short-circuit when there are no proposals.
+        # Codex reasoning; short-circuit when there are no proposals.
         proposals = judge_bundle.get("proposals") or []
         if not proposals:
             review = {"review_verdicts": []}
@@ -609,7 +609,7 @@ class CriticAgentBackend:
             encoding="utf-8",
         )
 
-        # Stage 3 — commit-review.
+        # commit-review.
         await asyncio.to_thread(
             self._runtime_caller,
             RuntimeCall(

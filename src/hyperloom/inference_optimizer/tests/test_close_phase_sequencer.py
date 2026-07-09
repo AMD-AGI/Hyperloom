@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase 5-step sequencer tests."""
+"""CLOSE phase five-step sequencer tests."""
 
 from __future__ import annotations
 
@@ -259,7 +259,7 @@ async def test_wait_for_task_terminal_timeout(coord):
     assert state is None
 
 
-# 3. Step 1: report task enqueue
+# Report task enqueue.
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_fresh(coord):
     task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
@@ -291,7 +291,7 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
     assert "internal-report-close_phase_entry" not in coord.tasks._by_key
 
 
-# 4. Step 2: session_breakdown task enqueue
+# Session_breakdown task enqueue.
 @pytest.mark.asyncio
 async def test_enqueue_internal_session_breakdown_task(coord):
     task = await coord._enqueue_internal_session_breakdown_task(
@@ -398,7 +398,7 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
 
 @pytest.mark.asyncio
 async def test_close_sequencer_report_before_session_breakdown(coord):
-    """Step 1 (report) MUST be enqueued before step 2 (session_breakdown)."""
+    """Report task MUST be enqueued before session_breakdown."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._on_enter_close(from_phase="SWEEP")
     insertion = coord.tasks.insertion_order

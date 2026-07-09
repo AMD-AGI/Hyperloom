@@ -173,53 +173,53 @@ class Config:
     fd_probe_enabled: bool = True
     fd_probe_pid: int | None = None
 
-    # -- A6 ray_head_dead signal (2026-05-18) --
+    # -- ray_head_dead signal --
     ray_probe_enabled: bool = True
     ray_probe_timeout_s: float = 5.0
 
-    # -- B4 idempotency_replay signal (2026-05-18) --
+    # -- idempotency_replay signal --
     idempotency_replay_threshold: int = 2
 
-    # -- G decision-audit signals (2026-05-18) --
+    # -- decision-audit signals --
     # Off skips the LocalProbe sub-probe (e.g. ``runs/`` on read-only storage).
     decision_audit_enabled: bool = True
     decision_audit_max_integrate: int = 20
     decision_audit_max_oob_attempts: int = 50
-    # G2 noise-floor cliff; mirrors upstream executors' 1.0% keep threshold.
+    # Noise-floor cliff; mirrors upstream executors' 1.0% keep threshold.
     decision_audit_min_keep_gain_pct: float = 1.0
     decision_audit_dispatch_bypass_epsilon_pct: float = 0.5
 
-    # -- C preflight signals (2026-05-19) --
+    # -- preflight signals --
     # Off disables manifest + kernel_breakdown probes (C1/C2); C3 gated by JIT.
     preflight_enabled: bool = True
-    # C1 — fire when projected HBM headroom < min_headroom_pct. 5% floor: the
+    # Fire when projected HBM headroom < min_headroom_pct. 5% floor: the
     # projection over-estimates HBM by ~5%, so below it headroom is ~0.
     preflight_min_headroom_pct: float = 5.0
     preflight_activation_buf_gib: float = 8.0
-    # C2 — Amdahl kernel ceiling; 1.5x single-kernel speedup = 2026-05 GEAK
+    # Amdahl kernel ceiling; 1.5x single-kernel speedup = 2026-05 GEAK
     # average, 5% min_e2e_ceiling_pct = SKILL noise-floor convention.
     preflight_amdahl_single_kernel_speedup: float = 1.5
     preflight_amdahl_min_e2e_ceiling_pct: float = 5.0
-    # C3 — cold-start vs budget. ``cold_start_minutes=None`` reads
+    # Cold-start vs budget. ``cold_start_minutes=None`` reads
     # ``$INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC`` (default 3600s).
     preflight_cold_start_so_count: int = 20
     preflight_cold_start_minutes: float | None = None
 
-    # -- D2 multi-source server logs (2026-05-19) --
+    # -- multi-source server logs --
     # Colon-separated extra log globs (env-supplied) added to the
     # ``runs/*/*/server.log`` defaults; "" disables extras.
     server_log_extra_globs: str = ""
     # Max number of extra log files scanned per tick.
     server_log_max_extra: int = 5
 
-    # -- E critic-health signals (2026-05-19) --
+    # -- critic-health signals --
     critic_health_enabled: bool = True
     critic_health_max_judge_bundles: int = 20
     critic_health_min_outage_judges: int = 3
     critic_health_min_unavailable_verdicts: int = 3
     critic_health_max_workdir_count: int = 100
 
-    # -- F kernel-pipeline signals (2026-05-19) --
+    # -- kernel-pipeline signals --
     kernel_pipeline_pending_count_threshold: int = 1
     kernel_pipeline_min_pending_ticks: int = 3
     kernel_pipeline_min_geak_sigterm_attempts: int = 2
@@ -230,7 +230,7 @@ class Config:
     auto_probe_inference_server: bool = True
     inference_server_health_url: str = "http://127.0.0.1:8888/health"
 
-    # -- I state-integrity signals (2026-05-19) --
+    # -- state-integrity signals --
     state_integrity_enabled: bool = True
     state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
@@ -451,7 +451,7 @@ def _env_bool(name: str, default: bool) -> bool:
         or ``on`` (case-insensitive); ``False`` for any other set value; and
         ``default`` when the variable is unset.
 
-    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_bool`.
+    Delegates to :func:`hyperloom.common.env.env_bool`.
     """
     return env_bool(name, default)
 
@@ -468,6 +468,6 @@ def _env_int(name: str, default: int) -> int:
         The parsed integer, or ``default`` when the variable is missing or
         cannot be parsed.
 
-    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_int`.
+    Delegates to :func:`hyperloom.common.env.env_int`.
     """
     return env_int(name, default)

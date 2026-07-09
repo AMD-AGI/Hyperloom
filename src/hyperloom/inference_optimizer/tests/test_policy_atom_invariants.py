@@ -25,7 +25,7 @@ from hyperloom.orchestrator.policy.gate import (
 )
 
 
-# G2 — source-level guards: the scaffold is fully removed
+# Source-level guards: the scaffold is fully removed.
 _POLICY_PATH = Path(policy_module.__file__)
 
 

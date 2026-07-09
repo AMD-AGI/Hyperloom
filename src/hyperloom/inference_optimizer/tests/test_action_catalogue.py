@@ -23,8 +23,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 
 
-# DESIGN §16.1 + v0.8 KB_design §3.4. PR-A1: added ``specialist`` and
-# ``integrate_patch``.
+# Expected action catalogue.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (3)
     "target_analysis": "prep",
@@ -180,8 +179,8 @@ def test_every_action_has_valid_family(registry):
 
 
 def test_every_action_uses_only_known_lanes(registry):
-    # v0.8 M5 (KB_design §3.7) introduced ``research_lane`` for the
-    # LLM specialist sub-agent; known-lanes set must include it.
+    # ``research_lane`` supports the LLM specialist sub-agent; known-lanes set
+    # must include it.
     known = {
         "server_lifecycle",
         "workspace_mutation",
@@ -237,7 +236,7 @@ def test_runs_actions_match_pipeline_phases(registry):
 
 
 def test_explore_in_runs_actions():
-    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the per-action runs/<kind>/ owner."""
+    """``explore`` is the per-action runs/<kind>/ owner."""
     from hyperloom.inference_optimizer.session.session_paths import _runs_actions
 
     assert "explore" in _runs_actions()
@@ -314,7 +313,7 @@ def test_typical_runtime_min_positive_for_active_actions(registry):
 
 
 def test_explore_action_metadata(registry):
-    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the canonical merged grid runner."""
+    """``explore`` is the canonical merged grid runner."""
     m = registry.get("explore")
     assert m is not None, "explore action missing from registry"
     assert m.family == "shallow"

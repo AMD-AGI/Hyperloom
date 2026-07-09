@@ -354,7 +354,7 @@ class WritebackCollaborator:
             result=result_payload,
         )
         any_changed = True
-        # FRAMEWORK apply/bench silent failure (P0 death-loop root cause): a
+        # FRAMEWORK apply/bench silent failure: a
         # framework_agent task that settles ``status="failed"`` (or empty) never
         # reaches the promote branch that writes the terminal progress row, so
         # without stamping here the candidate stays "unprocessed" and the pump
@@ -974,7 +974,7 @@ class WritebackCollaborator:
                 and tput > 0
                 and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
             ):
-                # Step 1 — history injection (fires regardless of --no-warm-replay).
+                # History injection (fires regardless of --no-warm-replay).
                 try:
                     self._inject_warm_recipe_history_into_ledger()
                 except Exception as exc:  # noqa: BLE001 — defensive
@@ -982,7 +982,7 @@ class WritebackCollaborator:
                         "PRELUDE: warm-recipe history injection failed: %r",
                         exc,
                     )
-                # Step 2 — warm-recipe replay. Anchor replay gain on the hot
+                # Warm-recipe replay. Anchor replay gain on the hot
                 # baseline_tput contract; candidate replays also return their
                 # hot measure round.
                 try:
@@ -994,13 +994,13 @@ class WritebackCollaborator:
                         "PRELUDE: failed to enqueue warm-replay task: %r",
                         exc,
                     )
-                # Step 3 — auto-analysis (roofline / profile); may defer.
+                # Auto-analysis (roofline / profile); may defer.
                 await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
                     baseline_tput=float(tput),
                 )
-                # Step 4 — research scout (parallel, read-only, CPU-only).
+                # Research scout (parallel, read-only, CPU-only).
                 await self._maybe_enqueue_prelude_research_scout()
-                # Step 5 — static-recon (parallel, read-only, CPU-only): grep
+                # Static-recon (parallel, read-only, CPU-only): grep
                 # the framework source for un-bridged capability switches and
                 # seed bridge candidates as gaps[] before EXPLORE starts.
                 await self._maybe_enqueue_prelude_static_recon()
@@ -1350,7 +1350,7 @@ class WritebackCollaborator:
             # looking result (status != "failed") but with no candidate / no
             # status (empty result dict). Recover the candidate key from the
             # task params and coerce the status so the row is a real terminal
-            # verdict the pump can dedup on, not a blank row keyed on "" (P0).
+            # verdict the pump can dedup on, not a blank row keyed on "".
             if not cand_id and task is not None:
                 task_cand = (getattr(task, "params", None) or {}).get("candidate")
                 cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)

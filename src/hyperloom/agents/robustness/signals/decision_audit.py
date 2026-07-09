@@ -109,7 +109,7 @@ def evaluate_decision_audit_signals(
 
 
 # ---------------------------------------------------------------------------
-# G1 / G2 / G3 — integrate result.json audit
+# integrate result.json audit
 # ---------------------------------------------------------------------------
 
 
@@ -117,14 +117,14 @@ def _integrate_symptoms(
     entries: list[dict[str, Any]],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """Apply the G1/G2/G3 integrate-result rules to recent KEEP/PARTIAL entries.
+    """Apply integrate-result rules to recent KEEP/PARTIAL entries.
 
     Args:
         entries (list[dict[str, Any]]): Recent integrate result records.
         cfg (DecisionAuditConfig): Audit tunables.
 
     Returns:
-        list[Symptom]: Symptoms from the G1/G2/G3 checks across all entries.
+        list[Symptom]: Symptoms from the checks across all entries.
     """
     out: list[Symptom] = []
     for entry in entries:
@@ -140,7 +140,7 @@ def _integrate_symptoms(
 
 
 def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
-    """G1: flag a KEEP/PARTIAL integrate with an empty patch.
+    """Flag a KEEP/PARTIAL integrate with an empty patch.
 
     A ``patch_size_bytes == 0`` means no code changed, so any measured gain
     is noise.
@@ -190,7 +190,7 @@ def _g2_decision_threshold_violated(
     entry: dict[str, Any],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G2: flag a KEEP whose gain is below the noise-floor threshold.
+    """Flag a KEEP whose gain is below the noise-floor threshold.
 
     MEDIUM severity since the real fix is upstream's keep threshold.
 
@@ -237,7 +237,7 @@ def _g3_kernel_dispatch_bypassed(
     entry: dict[str, Any],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G3: flag a KEEP'd patch that likely never executed.
+    """Flag a KEEP'd patch that likely never executed.
 
     Trips when ``dispatched_count == 0``, or it is absent while
     ``|gain_pct| < dispatch_bypass_pre_post_epsilon_pct``. HIGH severity: a
@@ -298,7 +298,7 @@ def _g3_kernel_dispatch_bypassed(
 
 
 # ---------------------------------------------------------------------------
-# G4 / G5 / G6 — ci_metrics audit (if-present only)
+# ci_metrics audit (if-present only)
 # ---------------------------------------------------------------------------
 
 
@@ -306,7 +306,7 @@ def _ci_metrics_symptoms(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """Apply the G4/G5/G6 ci_metrics audit rules when the file is present.
+    """Apply ci_metrics audit rules when the file is present.
 
     Args:
         ci_metrics (dict[str, Any]): Parsed ci_metrics document.
@@ -314,7 +314,7 @@ def _ci_metrics_symptoms(
             evidence.
 
     Returns:
-        list[Symptom]: Symptoms from the G4/G5/G6 checks, possibly empty.
+        list[Symptom]: Symptoms from the checks, possibly empty.
     """
     if not ci_metrics:
         return []
@@ -329,7 +329,7 @@ def _g4_negative_delta_kernel_kept(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G4: flag net-negative kernel changes counted as wins.
+    """Flag net-negative kernel changes counted as wins.
 
     Trips when ``kernels_optimized > 0`` AND
     ``optimized_kernel_delta_pct <= 0``. HIGH because downstream
@@ -377,7 +377,7 @@ def _g5_baseline_zero_without_status(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G5: flag a zero baseline throughput lacking a failure marker.
+    """Flag a zero baseline throughput lacking a failure marker.
 
     Trips when any baseline-throughput field == 0 AND there is no
     ``status="baseline_failed"`` marker — a half-written ci_metrics file
@@ -436,7 +436,7 @@ def _g6_schema_drift(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G6: flag ci_metrics schema drift.
+    """Flag ci_metrics schema drift.
 
     Trips when required schema fields are missing OR legacy field names are
     used. MEDIUM severity (the fix is in ``report_back``).
@@ -479,7 +479,7 @@ def _g6_schema_drift(
 
 
 # ---------------------------------------------------------------------------
-# G7 — OOB optimization_attempts.jsonl audit
+# OOB optimization_attempts.jsonl audit
 # ---------------------------------------------------------------------------
 
 

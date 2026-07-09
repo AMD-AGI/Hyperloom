@@ -88,7 +88,7 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert "max_position_embeddings=2048" in final_md
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
-    # PR-review-1: fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
+    # Fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
     breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
 

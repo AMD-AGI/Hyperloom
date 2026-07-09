@@ -22,20 +22,20 @@ import tracelens_skill_runner as tlr  # noqa: E402
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):
-    """Issue #667: the candidate-build pool defaults to a large value, not 10."""
+    """The candidate-build pool defaults to a large value, not 10."""
     monkeypatch.delenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", raising=False)
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
     assert tla._default_top_k() > 10
 
 
 def test_default_top_k_env_override(monkeypatch):
-    """Issue #667: HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
+    """HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "25")
     assert tla._default_top_k() == 25
 
 
 def test_default_top_k_zero_means_unbounded(monkeypatch):
-    """Issue #667: 0/negative disables the build-time cap (huge internal cap)."""
+    """Zero or negative disables the build-time cap (huge internal cap)."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "0")
     assert tla._default_top_k() >= 1_000_000
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "-5")
@@ -43,7 +43,7 @@ def test_default_top_k_zero_means_unbounded(monkeypatch):
 
 
 def test_default_top_k_invalid_falls_back(monkeypatch):
-    """Issue #667: a non-integer env value falls back to the default pool."""
+    """A non-integer env value falls back to the default pool."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "not-an-int")
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
@@ -324,7 +324,7 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# Issue #769 regression: the torch.profiler Chrome-trace category for a GPU
+# Regression: the torch.profiler Chrome-trace category for a GPU
 # kernel is literally "kernel". A global rename (#734 / commit 33ac6cc) once
 # replaced this data-format literal with "kernel_agent", so is_kernel_event
 # matched nothing and count_gpu_kernel_events returned 0 for every healthy
@@ -1748,7 +1748,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "trace_split_no_steady_state" in result["error"]
 
 
-# #194 §3 — splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
+# Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
 # selection uses the analytic PD ratio instead of an empirical heuristic.
 def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
     """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
@@ -1896,7 +1896,7 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# parse_analysis_md — TraceLens final-report contract (#155 review)
+# parse_analysis_md — TraceLens final-report contract
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
 )
@@ -1977,7 +1977,7 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
     assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
 
 
-# docx §2 — Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
+# Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
 def _write_two_pitem_analysis_md(md: Path) -> None:
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -2024,7 +2024,7 @@ def _write_two_pitem_analysis_md(md: Path) -> None:
 
 
 def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """docx §2: within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
+    """Within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -2043,7 +2043,7 @@ def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
 
 
 def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """docx §2 budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
+    """Budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -2055,7 +2055,7 @@ def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
     )
 
 
-# normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
+# normalize_upstream_category — TraceLens orchestrator_prepare.py enum
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -2119,7 +2119,7 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
-# PR-A §1: _extract_pitem_prose extracts Reasoning / Resolution / Impact
+# _extract_pitem_prose extracts Reasoning / Resolution / Impact.
 _SYNTHETIC_PITEM_BODY = """\
 #### 🔴 P1: RMSNorm fused with quantization (Triton)
 
@@ -2369,7 +2369,7 @@ def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
     assert tlr.parse_analysis_md(md, top_k=10) == []
 
 
-# PR-A §2: classify_patchability gate + skip_reason audit field
+# classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
     """Previously-reusable candidate stays reusable; skip_reason is empty."""
     cand = {
@@ -2605,7 +2605,7 @@ def test_build_audit_summary_handles_empty_input():
     assert summary["skipped"] == []
 
 
-# PR-B §1: source-function aggregation
+# Source-function aggregation.
 def test_parse_launcher_path_extracts_python_frame():
     """``<path>(<line>): <fn>`` is the canonical TraceLens shape."""
     path, line, func = tlr._parse_launcher_path(
@@ -3364,7 +3364,7 @@ def test_aggregate_canonicalizes_native_source_path():
     assert set(groups[0]["kernel_ids"]) == {"k001", "k002"}
 
 
-# PR-B §1 + §2: build_task_groups (tracelens_analysis.py wrapper)
+# build_task_groups (tracelens_analysis.py wrapper)
 # ===========================================================================
 def test_build_task_groups_filters_non_reusable():
     """build_task_groups skips candidates with reusable_native_kernel=False
@@ -3394,7 +3394,7 @@ def test_build_task_groups_filters_non_reusable():
     assert "k002" not in groups[0]["kernel_ids"]
 
 
-# PR-B §1: summary.json carries task_groups[] view
+# summary.json carries task_groups[] view.
 def test_build_audit_summary_includes_task_groups():
     summary = tla.build_audit_summary(
         candidates=[],
@@ -3446,7 +3446,7 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     assert tla._default_workspace_path() == "/legacy/workspace"
 
 
-# T3 — Idle-% sanity gate on the Executive Summary (§1/§2). High idle => pivot to params;
+# Idle-% sanity gate on the Executive Summary. High idle => pivot to params;
 # default threshold 80% (overridable via HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD).
 
 _EXEC_SUMMARY_LOW_IDLE = """\

@@ -23,7 +23,7 @@ Fields::
     baseline_accuracy   float — GSM8K score after `baseline`
     current_best        dict  — {action: str, tput: float, accuracy: float}
     cumulative_gain     float — % over baseline
-    stop_reason         str   — set when graceful stop fires (§9)
+    stop_reason         str   — set when graceful stop fires
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent
                                 exception is recorded; also appends to
@@ -625,7 +625,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     )
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
-    # (Stage-1, default OFF) When True the Coordinator may run explore-style
+    # Default OFF. When True the Coordinator may run explore-style
     # config-grid exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor)
     # before the phase advances, giving FRAMEWORK the EXPLORE config-search
     # capability. Absent from PHASE_LLM_PROPOSABLE_ACTIONS; the Coordinator
@@ -639,7 +639,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_config_exploration_results: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # Stage-2a FRAMEWORK config-exploration subphase state machine:
+    # FRAMEWORK config-exploration subphase state machine:
     # "" (not started) -> "running" -> "done". Drives the advance-time hold.
     framework_config_lane_state: str = ""
     # Rounds dispatched in the current FRAMEWORK config-exploration subphase;
@@ -663,7 +663,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     specialist_reauthor_attempts: dict[str, int] = field(
         default_factory=dict,
     )
-    # P0-4 backstop: per-candidate-key count of Critic-review submissions. If a
+    # Backstop: per-candidate-key count of Critic-review submissions. If a
     # candidate is submitted for review more than the abort threshold (a
     # terminal-row leak somewhere let it be re-selected), the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it, so no single candidate
@@ -851,9 +851,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``find-recipe`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by specialist prompt § 5c. Resume tolerates older snapshots.
+    # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 snapshot of ``lessons`` output (positive priors), symmetric with warm_start_pitfalls; consumed by specialist prompt § 5b. Empty under --degraded-kb or T0 failure.
+    # T0 snapshot of ``lessons`` output (positive priors), symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
@@ -2201,7 +2201,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Write the canonical 11-field ``last_trace_analyze`` dict (single writer). ``roofline_snapshot_id`` increments monotonically; PR #321 retired ``last_trace_analyze_baseline`` (roofline_snapshots feeds report.py Roofline Comparison).
+        """Write the canonical 11-field ``last_trace_analyze`` dict (single writer). ``roofline_snapshot_id`` increments monotonically; ``last_trace_analyze_baseline`` was retired in favor of roofline_snapshots feeding report.py Roofline Comparison.
 
         Args:
             payload (dict[str, Any]): The trace_analyze task payload (supplies

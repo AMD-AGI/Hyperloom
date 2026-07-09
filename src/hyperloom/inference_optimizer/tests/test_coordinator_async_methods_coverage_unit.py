@@ -440,7 +440,7 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     )
 
 
-# -- Problem 3: journal no longer records a reverted patch as KEEP -----------
+# -- Journal no longer records a reverted patch as KEEP ----------------------
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
     """Regression for the "fake KEEP" bug: a reverted integrate_patch reaches the
     fact hook with kept=True (``status != failed`` is promotable), yet the

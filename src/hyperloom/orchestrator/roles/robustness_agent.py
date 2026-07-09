@@ -296,8 +296,8 @@ class RobustnessAgentBackend:
         """Build the subprocess environment for ``runtime.cli`` invocations.
 
         The module now resolves via the normal installed ``hyperloom``
-        namespace, so no ``PYTHONPATH`` prepending is needed (tree-reform.MD
-        P2.5 promoted robustness-agent into ``hyperloom.agents.robustness``).
+        namespace, so no ``PYTHONPATH`` prepending is needed (robustness-agent
+        lives in ``hyperloom.agents.robustness``).
 
         Returns:
             A copy of the current environment with the robustness

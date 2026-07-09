@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.2 §5.4 / KB_gaps/Gap-05 — SWEEP phase auto-dispatch tests.
+"""SWEEP phase auto-dispatch tests.
 
-KB_gaps/Gap-05: SWEEP entry must auto-construct a grid and enqueue the
+SWEEP entry must auto-construct a grid and enqueue the
 ``sweep`` action (recipe grid wins over SKILL.md defaults). Covers the
 grid-builder helper, the enqueue + ``_on_enter_sweep`` hook, the e2e
 Coordinator path, and the PolicyGate ``sweep_phase_singleton`` rule.
@@ -840,7 +840,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert coord.tasks._tasks == {}
 
 
-# 3b. Q3 — skip auto-sweep on cyclic reloop when no validated gain landed
+# Skip auto-sweep on cyclic reloop when no validated gain landed.
 @pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_sweep(coord):
     """Reloop SWEEP with an unchanged validated gain must skip the auto-sweep + conc_sweep."""
@@ -892,7 +892,7 @@ async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
 # 4. End-to-end via real Coordinator
 @pytest.mark.asyncio
 async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
-    """End-to-end: a SWEEP transition + hook dispatcher persists the sweep task under the v0.8 idempotency_key."""
+    """End-to-end: a SWEEP transition + hook dispatcher persists the sweep task under the idempotency_key."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])

@@ -63,7 +63,7 @@ def test_is_pause_specialist_hint_requires_suffix():
     assert not is_pause_specialist_hint("skip_to_kernel")
 
 
-# 2. compute_plateau_explore (KB_design §3.8 §5.1 AND-of)
+# compute_plateau_explore AND condition.
 def test_plateau_explore_empty_state_returns_false():
     state = SimpleNamespace()
     triggered, ev = compute_plateau_explore(state)
@@ -146,7 +146,7 @@ def test_plateau_explore_supports_threshold_overrides():
     assert triggered is True
 
 
-# 3. compute_plateau_kernel (KB_design §3.8 §5.2 OR-of)
+# compute_plateau_kernel OR condition.
 def test_plateau_kernel_revert_streak_triggers():
     """3 consecutive REVERTs → triggered."""
     state = SimpleNamespace(

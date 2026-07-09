@@ -402,10 +402,10 @@ def _match_benchmark_for_kernel(
 
 
 def _profile_timeout_sec() -> int:
-    """Per-subprocess profiling timeout (seconds) for GEAK's Step 5.
+    """Per-subprocess profiling timeout (seconds) for GEAK profiling.
 
     Injected as a ``timeout <N>`` prefix on the test_command so a default-matrix
-    benchmark (e.g. aiter test_pa.py) can't stall Step 5 for hours; SIGTERM at N
+    benchmark (e.g. aiter test_pa.py) can't stall profiling for hours; SIGTERM at N
     surfaces as a normal profiling failure.
 
     Returns:
@@ -1120,7 +1120,7 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     return "\n".join(lines) + _build_kernel_contract_block(candidate)
 
 
-# PR-B §3: ordered optimization directions keyed by bound type so the first lever
+# Ordered optimization directions keyed by bound type so the first lever
 # matches the kernel's bottleneck (``compute`` flips the top two; ``unknown`` is the default order).
 _PRIORITY_BULLETS: dict[str, list[str]] = {
     "memory": [
@@ -1586,7 +1586,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "runtime_flags": runtime_flags,
         "env_vars": candidate.get("env_vars") or {},
         "kernel_params": kernel_params,
-        # PR-K: source attribution. launcher_source_file is the @compile_ops wrapper;
+        # Source attribution. launcher_source_file is the @compile_ops wrapper;
         # kernel_path above is the device source to rewrite. Both empty/False when un-promoted.
         "launcher_source_file": str(candidate.get("launcher_source_file", "") or ""),
         "source_promoted_from_launcher": bool(
@@ -1665,7 +1665,7 @@ def build_prompt(
         "step / low $ telemetry header and your impulse is 'submit now to be safe'\n"
         "— that impulse is WRONG. Make the edit. Run the test. Iterate.\n"
     )
-    # PR-K: render a hard-rule notice when the source was promoted from a @compile_ops
+    # Render a hard-rule notice when the source was promoted from a @compile_ops
     # wrapper to the device file, so the LLM rewrites the device file. Empty if un-promoted.
     promotion_block = ""
     launcher_source = str(candidate.get("launcher_source_file", "") or "").strip()
@@ -4302,7 +4302,7 @@ def build_verification(
         correctness_signal = _extract_correctness_from_geak(bp.get("geak_final_report", ""))
         if correctness_signal is not None:
             correctness_source = "geak_report"
-    # PR-E (default ON): trust GEAK status=complete + measured speedup as correctness=True
+    # Default ON: trust GEAK status=complete + measured speedup as correctness=True
     # for import-only harnesses (HYPERLOOM_TRUST_GEAK_CORRECTNESS=0 to disable). See _trust_geak_correctness.
     if (
         correctness_signal is None

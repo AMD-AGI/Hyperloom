@@ -26,7 +26,7 @@ SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 
 
-# §1 Session metadata
+# Session metadata
 class Recovery(TypedDict, total=False):
     """Crash / interruption / resume history for one optimization session.
 
@@ -116,7 +116,7 @@ class SessionMeta(TypedDict, total=False):
     recovery: Recovery  # crash / interruption / resume history
 
 
-# §2 Workload configuration
+# Workload configuration
 class WorkloadObjective(TypedDict, total=False):
     """Optimization goal the session was asked to pursue.
 
@@ -168,7 +168,7 @@ class Workload(TypedDict, total=False):
     objective: WorkloadObjective
 
 
-# §2b Model basics — architecture/scale summary parsed from the served model's
+# Model basics — architecture/scale summary parsed from the served model's
 # ``config.json`` (see ``model_config_utils.summarize_model_config``). Empty
 # ``{}`` on non-transformers models (e.g. diffusion) and on sessions whose
 # state predates the field. Mirrored verbatim from ``state.model_info``.
@@ -225,7 +225,7 @@ class ModelInfo(TypedDict, total=False):
     num_experts_per_tok: int
 
 
-# §3 Baseline
+# Baseline
 class BaselineAttemptSummary(TypedDict, total=False):
     """One recorded attempt to establish the baseline measurement.
 
@@ -309,7 +309,7 @@ class Baseline(TypedDict, total=False):
     roofline_ceiling: dict[str, Any]
 
 
-# §4 Final state — SaFE contract core
+# Final state — SaFE contract core
 class Final(TypedDict, total=False):
     """Final validated optimization state — the SaFE contract core.
 
@@ -355,7 +355,7 @@ class Final(TypedDict, total=False):
     closing_report_task_id: str
 
 
-# §5 Phase timeline — chronological events
+# Phase timeline — chronological events
 class PhaseEvent(TypedDict, total=False):
     """One chronological event in the optimization timeline.
 
@@ -403,7 +403,7 @@ class PhaseEvent(TypedDict, total=False):
     extras: dict[str, Any]
 
 
-# §6 Capability summary — Capability cards in UI
+# Capability summary — Capability cards in UI
 class CapabilityEntry(TypedDict, total=False):
     status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
@@ -453,7 +453,7 @@ class CapabilitySummary(TypedDict, total=False):
     specialist: CapabilityEntry
 
 
-# §7 / §8 GEAK / OOB invocations
+# GEAK / OOB invocations
 class KernelMetadata(TypedDict, total=False):
     """Descriptive metadata for a kernel targeted by a backend invocation.
 
@@ -495,7 +495,7 @@ class Invocation(TypedDict, total=False):
     cli_log_path: str | None
 
 
-# §9 Kernel lifecycle (4+1 stages)
+# Kernel lifecycle
 class DetectedKernel(TypedDict, total=False):
     """A hot kernel surfaced by profiling (stage 1 of the kernel lifecycle).
 
@@ -646,7 +646,7 @@ class KernelLifecycle(TypedDict, total=False):
     rejected: list[RejectedKernel]
 
 
-# §9b Kernel journey — kernel-major unified lifecycle view
+# Kernel journey — kernel-major unified lifecycle view
 class KernelToolMetadata(TypedDict, total=False):
     """Provenance for an external kernel tool (tracelens / geak / oob / kernel_agent).
 
@@ -822,10 +822,10 @@ class KernelJourneyEntry(TypedDict, total=False):
         micro_speedup (float | None): Best achieved micro-benchmark speedup
             across attempts (kernel-level), or None. Pair with
             ``e2e.e2e_gain_pct`` for the speedup-vs-e2e correlation.
-        discovery (DiscoveredHotKernel): Stage-1 discovery snapshot.
-        dispatch (KernelDispatch): Stage-2 dispatch decision.
-        backend_attempts (list[KernelBackendAttempt]): Stage-3 backend attempts.
-        e2e (KernelE2E): Stage-4 end-to-end integrate outcome.
+        discovery (DiscoveredHotKernel): Discovery snapshot.
+        dispatch (KernelDispatch): Dispatch decision.
+        backend_attempts (list[KernelBackendAttempt]): Backend attempts.
+        e2e (KernelE2E): End-to-end integrate outcome.
         roofline (dict[str, Any]): A copy of the matching ``kernel_roofline``
             entry (arithmetic intensity / efficiency / bound type / rocprof
             roofline), attached at export. Absent when no roofline ran.
@@ -867,7 +867,7 @@ class KernelJourney(TypedDict, total=False):
     kernels: list[KernelJourneyEntry]
 
 
-# §10 Param search
+# Param search
 class ParamSearchEntry(TypedDict, total=False):
     """One candidate variant from ``explore_search.{tested,accepted,rejected}``.
 
@@ -946,7 +946,7 @@ class ParamSearch(TypedDict, total=False):
     backend_winners_history: list[dict[str, Any]]
 
 
-# §11 Sweep
+# Sweep
 class SweepPoint(TypedDict, total=False):
     """One measured point in a concurrency/shape sweep grid.
 
@@ -1109,7 +1109,7 @@ class Perfskills(TypedDict, total=False):
     kill_timeout_s: int | None
 
 
-# §12 Critic / Robustness
+# Critic / Robustness
 class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
@@ -1171,7 +1171,7 @@ class CriticRobustness(TypedDict, total=False):
     kb_writes_summary: "CriticKBWritesSummary"
 
 
-# §13 Telemetry
+# Telemetry
 class GpuMonitorAggregate(TypedDict, total=False):
     """Aggregated GPU power/thermal/clock telemetry over the session.
 
@@ -1224,7 +1224,7 @@ class Telemetry(TypedDict, total=False):
     lane_timeline: list[LaneTimelineEntry]
 
 
-# §14 Attribution
+# Attribution
 class StackGainEntry(TypedDict, total=False):
     """One KEEP/validation event with its incremental gain contribution.
 
@@ -1299,7 +1299,7 @@ class SourceBreakdown(TypedDict, total=False):
 
 
 class PhaseBreakdownExplore(TypedDict, total=False):
-    """v0.8 M7 (KB_design §3.12 §4.6) — explore-phase gain split by specialist domain.
+    """Explore-phase gain split by specialist domain.
 
     ``by_domain`` keys are normalized to the bare SpecialistDomain.key;
     non-specialist provenance is ``default_grid`` / ``llm_direct``, v1
@@ -1316,7 +1316,7 @@ class PhaseBreakdownExplore(TypedDict, total=False):
 
 
 class PhaseBreakdownKernel(TypedDict, total=False):
-    """v0.8 M7 — kernel-phase gain split by ``kernel_id`` (KB_design §3.12 §4.6)."""
+    """Kernel-phase gain split by ``kernel_id``."""
 
     total_gain_pct: float
     by_kernel_id: dict[str, float]
@@ -1337,7 +1337,7 @@ class PhaseBreakdownGemmTuning(TypedDict, total=False):
 
 
 class PhaseBreakdown(TypedDict, total=False):
-    """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6).
+    """Per-phase gain attribution.
 
     Splits the validated total gain across the phase state machine, with each
     phase carrying its own per-sub-bucket breakdown.
@@ -1385,9 +1385,9 @@ class Attribution(TypedDict, total=False):
     notes: list[str]  # human-readable caveats
 
 
-# §16 Phase segments — phase state machine
+# Phase segments — phase state machine
 class PhaseSegment(TypedDict, total=False):
-    """One contiguous segment of the v0.8 M2 phase state machine.
+    """One contiguous segment of the phase state machine.
 
     Captures a phase the session occupied between two transitions, including
     the entry evidence and the events that fell within the segment window.
@@ -1418,7 +1418,7 @@ class PhaseSegment(TypedDict, total=False):
     elapsed_seconds: float | None
 
 
-# §15 KB Provenance — RecipeKB / PR Monitor integration
+# KB Provenance — RecipeKB / PR Monitor integration
 class KBQueueStats(TypedDict, total=False):
     """Depth statistics for the on-disk KB write queues.
 
@@ -1434,7 +1434,7 @@ class KBQueueStats(TypedDict, total=False):
 
 
 class KBFlusherStatus(TypedDict, total=False):
-    """``kb_provenance.flusher_status`` (v0.8 KB_gaps/Dead-E): boot marker merged with a live pid probe."""
+    """``kb_provenance.flusher_status``: boot marker merged with a live pid probe."""
 
     enabled: bool  # cli flag (false when --no-kb-flusher or --degraded-kb)
     spawned: bool  # daemon was actually subprocess.Popen'd this boot
@@ -1589,7 +1589,7 @@ class SourceFiles(TypedDict, total=False):
     robustness_workdir: str | None
 
 
-# Roofline — optimization-progress curve for the dashboard (spec §2):
+# Roofline — optimization-progress curve for the dashboard:
 # a stepped line from baseline through every KEEP against ceiling/target
 # reference lines, all derived from ``state.json``.
 class RooflineTrajectoryPoint(TypedDict, total=False):
@@ -1627,8 +1627,8 @@ class RooflineProgress(TypedDict, total=False):
     """Top-level ``roofline_progress`` section (renamed from ``roofline`` to avoid the markdown-renderer key clash).
 
     Carries reference lines (ceiling = vendor peak, target = ceiling ×
-    ratio, default 0.70 per spec §2.1), the ``trajectory[]`` stepped line
-    (baseline + KEEPs), and raw ``snapshots[]``. Edge cases (spec §5): no
+    ratio, default 0.70), the ``trajectory[]`` stepped line
+    (baseline + KEEPs), and raw ``snapshots[]``. Edge cases: no
     snapshot → ``ceiling_available = False``; no KEEP → trajectory is just
     the baseline point.
     """
@@ -1784,7 +1784,7 @@ class GemmTuning(TypedDict, total=False):
 # Kernel Roofline — hot-kernel table for the dashboard, mirroring
 # ``<session_dir>/reports/kernel_roofline.json``.
 class KernelRooflineEntry(TypedDict, total=False):
-    """One hot-kernel row (on-disk shape passed through verbatim; fields per spec §1)."""
+    """One hot-kernel row (on-disk shape passed through verbatim)."""
 
     kernel_id: str  # ``k001``..``k010``
     name: str  # ``aiter::ck_moe_stage1`` etc
@@ -1814,7 +1814,7 @@ class KernelRoofline(TypedDict, total=False):
 
 # Kernel Optimization Summary (spec A1; PR #399 lishuoshuo): mirror of
 # ``reports/kernel_optimization_summary.json``, passed through verbatim so
-# new producer fields ride through; ``by_kernel[]`` rows stay loose (spec §A1.4).
+# new producer fields ride through; ``by_kernel[]`` rows stay loose.
 class KernelOptimizationSummary(TypedDict, total=False):
     schema_version: int  # producer schema (currently 1; int, unlike conc_sweep's str)
     session_id: str  # global id ``{model}_{ts}_{short_uuid}``
@@ -1827,7 +1827,7 @@ class KernelOptimizationSummary(TypedDict, total=False):
     dispatch_skip_reason: dict[str, Any]  # {} or {reason, kernels_considered, message, ts} when a dispatch found no eligible kernels
     field_glossary: dict[str, str]  # {field_name: explanation} for tooltips
     top_takeaways: list[str]  # 2-4 deterministic (non-LLM) sentences
-    by_kernel: list[dict[str, Any]]  # one row per top kernel, sorted gpu_pct desc; shape per §A1.4
+    by_kernel: list[dict[str, Any]]  # one row per top kernel, sorted gpu_pct desc
     report_path: str  # rel-to-session path to the mirrored source report
 
 
@@ -1854,12 +1854,12 @@ class ConcSweepSummary(TypedDict, total=False):
     budget_exhausted: bool
     report_json_path: str
     report_csv_path: str  # for the "download CSV" button
-    roofline_ceiling: dict[str, Any]  # per-CONC theoretical peak + MBU% (§A2.9); may be absent on old products
+    roofline_ceiling: dict[str, Any]  # per-CONC theoretical peak + MBU%; may be absent on old products
     report_path: str  # rel-to-session path to the mirrored source report
 
 
 # ---------------------------------------------------------------------------
-# Full-trace: unified token + decision timeline (FULL_TRACE_DESIGN §6)
+# Full-trace: unified token + decision timeline
 # ---------------------------------------------------------------------------
 class TokenBucket(TypedDict, total=False):
     """Aggregated token counters for one grouping (phase / component / total).
@@ -2212,18 +2212,18 @@ class SessionBreakdown(TypedDict, total=False):
     # ``attribution`` stays authoritative. Additive optional — empty {} on
     # non-fp8/sglang sessions and on sessions that predate it.
     gemm_tuning: GemmTuning
-    # Hot-kernel table (spec §1), mirror of ``reports/kernel_roofline.json``.
+    # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
-    # Kernel-agent attempt outcome summary (spec §A1); empty → dashboard hides Block 1.
+    # Kernel-agent attempt outcome summary; empty → dashboard hides Block 1.
     kernel_optimization_summary: KernelOptimizationSummary
-    # Post-optimization concurrency sweep (spec §A2); empty → dashboard hides Block 2.
+    # Post-optimization concurrency sweep; empty → dashboard hides Block 2.
     conc_sweep_summary: ConcSweepSummary
     # Per-snapshot roofline comparison list driving the markdown ``## Roofline`` section.
     roofline: list[dict[str, Any]]
-    # Optimization-progress curve (spec §2); renamed from ``roofline`` to
+    # Optimization-progress curve; renamed from ``roofline`` to
     # coexist with the list-shaped ``roofline`` above.
     roofline_progress: RooflineProgress
-    # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6). New
+    # Full-trace token + decision timeline. New
     # optional section: a v1/v2 reader that doesn't know about it simply
     # ignores it. Empty dict on sessions that ran before the trace
     # subsystem landed (no reports/trace/ files).

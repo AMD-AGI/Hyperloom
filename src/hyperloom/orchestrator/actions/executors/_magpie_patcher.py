@@ -461,7 +461,7 @@ def _apply_patch_atomic_reason(src: Path) -> str:
 
     Unlike a bare bool, the reason lets a caller distinguish an EXPECTED no-op
     (already-patched / upstream-atomic) from a GENUINE failure (unrecognized
-    shape / I/O error) where bugs.md §C #1 is actually unmitigated.
+    shape / I/O error) where the script-tearing race is actually unmitigated.
 
     Args:
         src (Path): The ``benchmarker.py`` file to patch in place.
@@ -597,7 +597,7 @@ class MagpiePatchStatus:
     remote_trust_ok: bool
     # Classified atomic-patch outcome (``_ATOMIC_REASON_*``). Lets callers tell
     # an EXPECTED no-op (upstream-atomic / already-patched / missing tree) apart
-    # from a GENUINE failure where bugs.md §C #1 is unmitigated.
+    # from a GENUINE failure where the atomic-write safeguard is absent.
     atomic_reason: str = _ATOMIC_REASON_MISSING
     # Whether the redundant ``--concurrent-requests`` eval flag was stripped
     # from every generic benchmark script (or none needed it). ``False`` means

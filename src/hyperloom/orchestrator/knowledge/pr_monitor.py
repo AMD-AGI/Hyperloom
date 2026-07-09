@@ -3,7 +3,7 @@
 """PR Monitor REST client.
 
 Stdlib-only client for the ``primus-cortex-pr-api`` REST surface. Fail-soft
-(Inv-6.3), read-only, cross-cluster aware (KB_design §3.14 R-02).
+(Inv-6.3), read-only, cross-cluster aware.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ class PRSummary:
 class PRMonitorError(RuntimeError):
     """Raised for unrecoverable PR Monitor interactions.
 
-    Most callers treat it as "PR feed unavailable" (KB_design §3.14 R-02).
+    Most callers treat it as "PR feed unavailable".
     """
 
 

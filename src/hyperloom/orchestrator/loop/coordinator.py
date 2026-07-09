@@ -408,7 +408,7 @@ def _format_inbox_event(m: "Message") -> str:
 
 @dataclass
 class PendingProposal:
-    """A propose_action intent waiting for Critic Review (§18)."""
+    """A propose_action intent waiting for Critic Review."""
 
     proposal_msg_id: str
     from_agent: str
@@ -482,8 +482,7 @@ class CoordinatorState:
 
 
 class _CoordinatorMeta(type):
-    """Class-level delegation for extracted collaborator methods (tree-reform.MD
-    P2.2 3b-1). Instance access is handled by ``Coordinator.__getattr__``; class
+    """Class-level delegation for extracted collaborator methods. Instance access is handled by ``Coordinator.__getattr__``; class
     access (``Coordinator._extracted_method`` — used by tests that copy methods
     onto stub classes / call them unbound) resolves here to the owning
     collaborator *class*'s function. Collaborator modules are imported lazily to
@@ -507,13 +506,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # (instance-level uses the lazy properties directly). Kept in sync with the
     # lazy collaborator properties + ``_DELEGATED``.
     _COLLAB_MODULES = {
-        # Phase handlers, registered in call-chain order (tree-reform.MD P2.2
-        # 3b-2/3b-3): machine -> prelude -> sweep -> close -> internal ->
+        # Phase handlers, registered in call-chain order: machine -> prelude ->
+        # sweep -> close -> internal ->
         # kernel_stack -> kernel -> explore -> framework. ``framework`` is
         # placed last because it owns the most delegated methods (48, the
         # largest of the 9 phase clusters). Module paths are relative to
-        # ``hyperloom.orchestrator`` (tree-reform.MD P2.3 stage B: phase
-        # handlers moved into the ``phases/`` subpackage).
+        # ``hyperloom.orchestrator``.
         "phase_machine": ("phases.machine", "MachinePhase"),
         "phase_prelude": ("phases.prelude", "PreludePhase"),
         "phase_sweep": ("phases.sweep", "SweepPhase"),
@@ -670,7 +668,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # executors get it via ctx.extra; durable backstop for per-dispatch
         # ``base_tput`` injection.
         self.sub.shared_state = self.shared_state
-        # Serving-disjoint physics invariant (GPU_optimization_plan §0/B1): the
+        # Serving-disjoint physics invariant: the
         # live serving process holds the first ``serving_tp`` cards, so they are
         # carved off the specialist pool to avoid shared-card measurement
         # corruption. ``shared_state.tp`` is restored on resume; the ``TP`` env
@@ -971,14 +969,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.__dict__["_recorder"] = r
         return r
 
-    # tree-reform.MD P2.2 3b-0/3b-1: methods extracted into collaborator objects
-    # are delegated back by name here (symmetric to each collaborator's
+    # Methods extracted into collaborator objects are delegated back by name here
+    # (symmetric to each collaborator's
     # ``__getattr__`` back to this coordinator). ``coord.foo`` / ``self.foo`` /
     # ``self._coord.foo`` all keep resolving, and instance-attr monkeypatches
     # still shadow them (normal lookup wins over __getattr__). Each value is the
     # name of the property returning the owning collaborator.
     _DELEGATED = {
-        # router (3b-0)
+        # router
         "_handle_intent": "router", "_handle_propose_action": "router",
         "_handle_review_verdict": "router", "_handle_single_verdict": "router",
         "_handle_delegate": "router", "_handle_specialist_done": "router",
@@ -986,11 +984,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_kill_task": "router", "_handle_prune_branch": "router",
         "_handle_escalate_strategy_change": "router", "_handle_send_message": "router",
         "_handle_alert": "router", "_handle_update_state": "router",
-        # recorder (3b-0)
+        # recorder
         "_aggregate_research_evidence": "recorder", "_harvest_research_scout": "recorder",
         "_record_specialist_result": "recorder",
-        # Phase handlers (tree-reform.MD P2.2 3b-2/3b-3), grouped in the same
-        # call-chain order as _COLLAB_MODULES/the @property block above:
+        # Phase handlers, grouped in the same call-chain order as
+        # _COLLAB_MODULES/the @property block above:
         # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->
         # kernel -> explore -> framework (framework last: largest cluster).
         "_ensure_phase_initialised": "phase_machine",
@@ -1549,7 +1547,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # Max re-author rounds per candidate on a needs_review verdict.
     _MAX_REAUTHOR_ATTEMPTS: int = 1
 
-    # P0-4 backstop: max Critic-review submissions for a single candidate before
+    # Backstop: max Critic-review submissions for a single candidate before
     # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
@@ -1673,7 +1671,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001
             log.exception("failed to persist Coordinator exception metadata")
 
-    # Long-run interface (DESIGN §9 + §21)
+    # Long-run interface
     async def run(
         self,
         *,
@@ -1686,7 +1684,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (DESIGN §9.1, priority order): signal, target_reached, time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached, time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.

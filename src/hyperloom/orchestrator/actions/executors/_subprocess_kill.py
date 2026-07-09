@@ -563,7 +563,7 @@ def run_with_session_kill(
     descendant tree on every exit path.
 
     Unlike ``subprocess.run`` (which discards the Popen handle and can't reach
-    leaked grandchildren — the bugs.md §B server leak), this launches via
+    leaked grandchildren — the known server leak), this launches via
     ``Popen(start_new_session=True)`` and reaps the tree in a ``finally:``.
     Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
     ``subprocess.run``.

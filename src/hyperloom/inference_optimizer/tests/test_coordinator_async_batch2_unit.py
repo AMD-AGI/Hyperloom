@@ -1131,8 +1131,8 @@ async def test_promote_baseline_no_warmup_parses_materialized(
     monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"  # skip cascade
-    # tree-reform.MD P2.2 3b-1: _promote_to_shared_state moved to the _writeback
-    # collaborator, which binds _parse_baseline_workload_extra in its own module.
+    # _promote_to_shared_state lives in the writeback collaborator, which binds
+    # _parse_baseline_workload_extra in its own module.
     import hyperloom.orchestrator.loop.writeback as mod
 
     monkeypatch.setattr(mod, "_parse_baseline_workload_extra", lambda path: {"isl": 256})

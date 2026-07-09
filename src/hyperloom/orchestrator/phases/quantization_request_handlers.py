@@ -49,10 +49,8 @@ async def run_quantization_prelude_async(
     Raises:
         SystemExit: If quantization failed or produced no usable model.
     """
-    # hyperloom.agents.quantization is always installed alongside orchestrator
-    # (tree-reform.MD P2.5 promoted it into the hyperloom namespace); imported
-    # lazily so this module loads even where its runtime deps (e.g. Quark) are
-    # absent.
+    # Import lazily so this module loads even where the quantization runtime
+    # deps (e.g. Quark) are absent.
     from hyperloom.agents.quantization import quantize_via_prompt
 
     workspace = Path(workspace)

@@ -208,7 +208,7 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["FOO"] == "bar"
 
 
-# Regression: gpu_type injection sets runner_type AND force-pins the generic `{framework}_{gpu_type}.sh` (Magpie priority 1). See `design/magpie-generic-script-and-user-data-path.md` §3.
+# Regression: gpu_type injection sets runner_type AND force-pins the generic `{framework}_{gpu_type}.sh` (Magpie priority 1).
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
     import yaml
@@ -516,7 +516,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     assert "--profiler-config.max_iterations 128" in extra, extra
 
 
-# Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
+# Regression: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
 def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path,
     monkeypatch,
@@ -573,7 +573,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     tmp_path,
     monkeypatch,
 ):
-    """The §2 override is profile-only; baseline / sweep paths keep the seq_cost-based NUM_PROMPTS."""
+    """The profile-only NUM_PROMPTS override does not affect baseline / sweep paths (they keep the seq_cost-based value)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -596,7 +596,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
 
 
-# Regression #194 §4 / §5: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
+# Regression: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
     """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
     from hyperloom.orchestrator.actions.executors import _workload_envs
@@ -628,7 +628,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of §1 iterations."""
+    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of the default iteration count."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -649,7 +649,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     monkeypatch,
     caplog,
 ):
-    """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
+    """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the default safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -721,7 +721,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    # Safe §1 flags still present.
+    # Safe profiler flags still present.
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     # TraceLens-only flags absent.
     assert "capture_torch_profiler_dir" not in extra, extra
@@ -1639,7 +1639,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
     session_dir,
     monkeypatch,
 ):
-    """Issue #667: without an explicit ``top_k`` the handler must NOT pass
+    """Without an explicit ``top_k`` the handler must NOT pass
     ``--top-k`` so tracelens_analysis.py applies its own large-pool default
     (candidate-build cap decoupled from the dispatch-side budget)."""
     fake_trace = session_dir / "fake_trace_dir"
@@ -1668,7 +1668,7 @@ async def test_trace_analyze_handler_forwards_explicit_top_k(
     session_dir,
     monkeypatch,
 ):
-    """Issue #667: an explicit ``top_k`` request param is still forwarded to
+    """An explicit ``top_k`` request param is still forwarded to
     the tool as ``--top-k <n>`` (operator/LLM override path)."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2499,15 +2499,15 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    # Step 1: handler boundary carries the warning.
+    # Handler boundary carries the warning.
     assert res["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
-    # Step 2: SharedState persists it.
+    # SharedState persists it.
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze({"trace_input": str(session_dir)}, res)
     assert state.last_trace_analyze["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
-    # Step 3: prompt rendering surfaces it.
+    # Prompt rendering surfaces it.
     rendered = state._format_last_trace_analyze()
     assert "high_gpu_idle_pct" in rendered
     assert "42.0%" in rendered
@@ -2727,7 +2727,7 @@ def test_handlers_dispatch_table():
     assert not krh.has_handler("totally_unknown_kind")
 
 
-# PR-B §1: _batch_kernel_candidates collapses task_group members
+# _batch_kernel_candidates collapses task_group members.
 def _write_candidates_json(tmp_path, payload):
     p = tmp_path / "kernel_candidates.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
@@ -2736,7 +2736,7 @@ def _write_candidates_json(tmp_path, payload):
 
 def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
     """Two reusable kernels in the same task_group dispatch as ONE candidate (the primary), with the full group attached."""
-    # PR-I: rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
+    # Rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2797,7 +2797,7 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
 
 def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
     """When the group's primary_kernel_id is non-reusable, dispatch falls back to the first reusable member instead of dropping the group."""
-    # PR-I: rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
+    # Rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2841,7 +2841,7 @@ def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_pat
 
 def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
     """With no task_groups[] (legacy runs), the candidate list matches pre-PR-B behaviour."""
-    # PR-I: legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001 (orthogonal to PR-I).
+    # Legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2966,7 +2966,9 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             await c.stop()
 
 
-# PR-X: batch dispatch enablers — _DEFAULT_KERNEL_BATCH_PARALLEL sized for a full node, and Coordinator force-injects candidates_path so the batch path fires deterministically (LLM values still win).
+# Batch dispatch enablers: _DEFAULT_KERNEL_BATCH_PARALLEL is sized for a full
+# node, and Coordinator force-injects candidates_path so the batch path fires
+# deterministically (LLM values still win).
 def test_default_kernel_batch_parallel_matches_full_node():
     """Default fanout is sized for a single MI300X / MI355X node (8 GPU)
     so a typical ``run_optimization`` batch (TraceLens emits 3-8 reusable
@@ -3035,7 +3037,8 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
             await c.stop()
 
 
-# PR-B: multi-KEEP integrate queue + streaming batch record — streaming record_partial callback, batch_mode dedup, and base_tput auto-injection on integrate.
+# Multi-KEEP integrate queue + streaming batch record: streaming record_partial
+# callback, batch_mode dedup, and base_tput auto-injection on integrate.
 @pytest.mark.asyncio
 async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     session_dir,
@@ -3747,7 +3750,7 @@ def test_batch_candidates_filters_rejected_kernel_ids(
     session_dir,
     _candidates_factory,
 ):
-    """PR-C: a kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
+    """A kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
@@ -3772,7 +3775,7 @@ def test_batch_candidates_filters_kernels_with_recorded_attempts(
     session_dir,
     _candidates_factory,
 ):
-    """PR-C max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
+    """max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(

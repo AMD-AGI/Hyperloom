@@ -567,7 +567,7 @@ def test_task_tool_granted_and_todowrite_granted():
 
 
 # --------------------------------------------------------------------------- #
-# Problem 2 — domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
+# domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
 # on legitimate keys leaking through params.tags untranslated).
 # --------------------------------------------------------------------------- #
 def test_normalize_dispatch_tags_translates_key_to_anchor():

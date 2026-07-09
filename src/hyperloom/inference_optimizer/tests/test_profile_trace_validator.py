@@ -335,7 +335,7 @@ def test_validator_never_raises_even_on_unreadable_trace(tmp_path, caplog):
 
 
 # ---------------------------------------------------------------------------
-# Issue #431: structured trace_health return (basis for the eager-mode
+# Structured trace_health return (basis for the eager-mode
 # re-profile fallback when CUDA-graph folding zeroes out hot kernels)
 # ---------------------------------------------------------------------------
 def test_trace_health_healthy_layout(tmp_path):
