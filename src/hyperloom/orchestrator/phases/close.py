@@ -55,7 +55,7 @@ class ClosePhase(PhaseHandler):
         return "time_exhausted"
 
     def _session_integrated_kernel_patch(self) -> bool:
-        """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/perfskills entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
+        """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/geak_e2e entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
 
         Returns:
             ``True`` when at least one kernel-level optimization landed.

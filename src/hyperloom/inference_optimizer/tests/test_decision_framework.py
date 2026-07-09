@@ -493,7 +493,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     result = await krh.run_optimization_handler(
         {
             "candidates_path": str(candidates),
-            "backend_order": "geak,claude,codex",
+            "backend_order": "geak_v3,claude,codex",
             "budget_minutes": 60,
             "max_parallel": 2,
         },
@@ -502,7 +502,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
     assert result["batch_mode"] is True
     assert result["batch_kernel_ids"] == ["k003", "k006"]
-    assert result["backend_order"] == ["geak", "claude", "codex"]
+    assert result["backend_order"] == ["geak_v3", "claude", "codex"]
     assert result["kernel_id"] == "k006"
     assert result["proposal"]["decision"] == "KEEP"
     assert result["verification"]["micro_speedup"] == pytest.approx(1.31)
@@ -510,8 +510,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     by_kernel: dict[str, list[str]] = {}
     for kernel_id, backend in calls:
         by_kernel.setdefault(kernel_id, []).append(backend)
-    assert by_kernel["k003"] == ["geak", "claude", "codex"]
-    assert by_kernel["k006"] == ["geak", "claude"]
+    assert by_kernel["k003"] == ["geak_v3", "claude", "codex"]
+    assert by_kernel["k006"] == ["geak_v3", "claude"]
 
 
 # E — record_kernel_opt retires kernels stuck in PARTIAL (regression for the r24 custom_allreduce GEAK retry-loop that only retired on REVERT).
@@ -629,11 +629,11 @@ def test_record_kernel_opt_persists_test_command():
             },
             "attempts": [
                 {
-                    "backend": "geak",
+                    "backend": "geak_v3",
                     "status": "ok",
                     "backend_paths": {
                         "test_command": "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py",
-                        "output_dir": "/tmp/geak_out",
+                        "output_dir": "/tmp/geak_v3_out",
                     },
                 }
             ],
