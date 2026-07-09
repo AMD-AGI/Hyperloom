@@ -745,12 +745,33 @@ class ExplorePhase(PhaseHandler):
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
         # Mirror _handle_delegate lane/ttl resolution (incl. benchmark_lane for
-        # bench-enabled specialists) so the retry contends for the same pools.
+        # bench-enabled specialists, gpu_research_lane + GPU-TTL for any
+        # needs_gpu specialist) so the retry task holds the same pools as the
+        # original and cannot run concurrently with serving.
         lanes, ttl = self._registry_lanes_ttl("specialist")
-        from ..specialists.profile import resolve_specialist_profile
+        from ..specialists.profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
 
         if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
             lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
+        needs_gpu_raw = retry_params.get("needs_gpu", False)
+        needs_gpu = (
+            needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
+            if isinstance(needs_gpu_raw, str)
+            else bool(needs_gpu_raw)
+        )
+        if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
+            # bench specialist: needs_gpu defaulted at warm time (_warm_specialist_params);
+            # ensure it is set here too so gpu_research_lane is acquired.
+            needs_gpu = True
+        if needs_gpu:
+            lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
+            try:
+                ttl = self._gpu_lease_ttl_sec(int(ttl or 0))
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "specialist auto-retry: gpu_research_lane TTL re-source failed; "
+                    "using registry default"
+                )
 
         # Stable base key across attempts: strip any prior ``-autoretryN``
         # suffix (distinct from _handle_delegate's ``-retryN`` collision keys
