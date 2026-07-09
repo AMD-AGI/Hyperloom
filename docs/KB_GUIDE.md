@@ -125,7 +125,7 @@ optimization knowledge until the local store accumulates data.
 ## 6. See also
 
 * [ENV_AND_AUTH.md](ENV_AND_AUTH.md) — credentials and path env.
-* [CONFIGURATION_REFERENCE.md](CONFIGURATION_REFERENCE.md) — all environment
+* [reference/environment-variables.md](reference/environment-variables.md) — all environment
   variables, including the KB-related ones.
 * [HOW_THE_OPTIMIZATION_LOOP_WORKS.md](HOW_THE_OPTIMIZATION_LOOP_WORKS.md) —
   how warm-start context participates in the optimization loop.

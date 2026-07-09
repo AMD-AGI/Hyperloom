@@ -166,7 +166,7 @@ gateway. It therefore requires a separate issuer key with prefix `crsr_...`:
 | Variable                | Default           | Description                                                                                                                                                                          |
 |-------------------------|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `CURSOR_API_KEY`        | unset             | Cursor SDK key. Never inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset. |
-| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7` | Override the default Cursor model id.                                                                                                                                                |
+| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7-thinking-xhigh` | Override the default Cursor model id.                                                                                                                                                |
 
 The selection notes carry `cursor_key_present: bool` for observability.
 If you pass `--backends cursor` explicitly without a key set, the

@@ -5,7 +5,7 @@ the `inference_optimizer` runtime (producer) and any downstream
 consumer (`claw-stats-service`, results service, notebooks, custom
 dashboards). One file per session, written to
 `$SESSION_DIR/session_breakdown.json` at session end (and on
-operator demand via [`scripts/dump_session_breakdown.py`](OPERATOR_SCRIPTS.md)).
+operator demand via [`hyperloom.inference_optimizer.tools.dump_session_breakdown`](OPERATOR_SCRIPTS.md)).
 
 The authoritative source of truth for the wire shape is
 [`src/hyperloom/inference_optimizer/breakdown/schema.py`](../src/hyperloom/inference_optimizer/breakdown/schema.py).

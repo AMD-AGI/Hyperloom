@@ -142,9 +142,9 @@ captured shapes, source paths, dedup'd task groups) and writes
 an apples-to-apples optimizer on identical info.
 
 ```bash
-cd /wekafs/sapmajum/PROJECTS/OUTS/mixtral_autonomous
+cd /path/to/Hyperloom
 
-python3 geak_vs_forge_driver.py \
+python3 src/hyperloom/agents/kernel/tools/geak_vs_forge_driver.py \
   --analysis  <.../tracelens/analysis.md> \
   --csv-dir   <.../tracelens/perf_report_csvs> \
   --framework sglang \
@@ -268,9 +268,9 @@ patch selection, or v4 runs driven outside HL's batch handler.
 Apply **all** kernels at once with repeated `--pair PATCH:TARGET`:
 
 ```bash
-cd /wekafs/sapmajum/PROJECTS/HL_fresh/kernel-agent
+cd /path/to/Hyperloom
 
-python3 tools/apply_and_bench.py \
+python3 src/hyperloom/agents/kernel/tools/apply_and_bench.py \
   --pair "<exp_root>/.../attention/final_patch.diff:/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu" \
   --pair "<exp_root>/.../quant/final_patch.diff:/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu" \
   --model    <your-model-name> \

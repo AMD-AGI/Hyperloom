@@ -444,7 +444,7 @@ when the file is absent, invalid, or stale.
 ```bash
 inference_optimizer optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # sglang (default) / vllm / atom (atom: single-node only, IR-8)
+  --framework vllm \           # sglang (default) / vllm / atom / xdit
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --max-hours 2 \
@@ -458,7 +458,7 @@ supply session metadata directly via CLI flags / env vars:
 | Surface | CLI flag | Env var | Notes |
 |---|---|---|---|
 | Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom) |
+| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
@@ -812,10 +812,11 @@ inference_optimizer optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours
 GPU_TYPE=mi300x inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi325x`, `mi355x`. **`mi325x` is mapped to
-`mi300x`** with a warning, since the two GPUs share the same arch and
-Magpie has not shipped `sglang_mi325x.sh` / `vllm_mi325x.sh` yet. If you
-need a true MI325X-specific script, uncomment the `benchmark_script:`
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
+`mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
+same runner family and Magpie has not shipped `sglang_mi308x.sh` /
+`sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet. If you
+need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:`
 template in the relevant YAML and point it at your script under
 `InferenceX/benchmarks/...`.
 

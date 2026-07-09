@@ -157,7 +157,7 @@ gateway. It requires a **separate** issuer key with prefix `crsr_...`:
 | Variable                | Default                  | Description                                                                                                                                                                       |
 |-------------------------|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `CURSOR_API_KEY`        | unset                    | Cursor SDK key. **Never** inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset; set it to keep `cursor` in the ladder. |
-| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7`        | Override the default Cursor model id.                                                                                                                                              |
+| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7-thinking-xhigh` | Override the default Cursor model id.                                                                                                                                              |
 
 The selection notes carry `cursor_key_present: bool` for observability.
 If you pass `--backends cursor` explicitly without a key set, the
@@ -183,11 +183,11 @@ export GEAK_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 export OOB_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 ```
 
-Preflight **preserves** intentional operator overrides. It only
-force-rewrites URLs that still point at the removed legacy local proxy
-(`127.0.0.1:4002`). GEAK reads its endpoint from the generated litellm
-yaml (`$GEAK_CONFIG`); preflight syncs `base_url:` there when the
-resolved gateway changes.
+Preflight **preserves** intentional operator overrides. If `GEAK_BASE_URL` or
+`OOB_BASE_URL` is set, Hyperloom treats it as deliberate and does not rewrite it;
+remove stale `127.0.0.1:4002` overrides by hand. GEAK reads its endpoint from
+the generated litellm yaml (`$GEAK_CONFIG`); preflight syncs `base_url:` there
+when the resolved gateway changes.
 
 ---
 
@@ -232,6 +232,7 @@ shared WekaFS session storage does not collocate concurrent pods' clones.
 | Variable                  | Set by operator? | Default / auto-clone target      | Description                                                                 |
 |---------------------------|------------------|----------------------------------|-----------------------------------------------------------------------------|
 | `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely        | `/opt/hyperloom/open-source-repos` | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, GEAK, OOB. Writable `/opt` required unless overridden. |
+| `FORGE_PATH`              | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge` (via `local_setup.sh`) | KernelForge checkout root for the `forge` backend. `local_setup.sh` also exports `KERNEL_FORGE_ROOT` with the same value. |
 | `OOB_SRC`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge/OOB` (via `local_setup.sh`) | OOB kernel-opt backends (claude / codex / cursor). Derived from [KernelForge](https://github.com/AMD-AGI/KernelForge) checkout. |
 | `INFERENCEX_PATH`         | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX` | [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline / target analysis. Preflight can also clone here when unset. |
 | `TRACELENS_ROOT`          | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens` | [TraceLens](https://github.com/AMD-AGI/TraceLens) for profile & kernel detection; pinned to a fixed SHA on auto-clone. |
@@ -260,8 +261,8 @@ At preflight, `src/hyperloom/inference_optimizer/cli/__init__.py`:
 * Resolves Anthropic and OpenAI base URLs (§2).
 * Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
 * Fills unset alias env vars (`GEAK_*`, `OOB_*`, etc.).
-* Force-rewrites any leftover URL still pinned at `127.0.0.1:4002` to
-  the real upstream gateway (stale installs only).
+* Preserves explicit `GEAK_BASE_URL` / `OOB_BASE_URL` overrides, including stale
+  ones; clear any old `127.0.0.1:4002` env values before launch.
 
 **401 recovery (current):**
 
@@ -318,17 +319,18 @@ Re-export the key(s) and re-run `install.sh` (idempotent). Preflight
 and all aliases pick up the new value on the next CLI launch.
 
 **Q: I still see `127.0.0.1:4002` in my env or Claude config.**
-That is a stale legacy proxy URL. Run any optimize CLI command (preflight
-rewrites it) or delete the stale `customApiUrl` from
-`~/.claude/config.json` and re-run install.
+That is a stale legacy proxy URL. Delete stale `GEAK_BASE_URL` /
+`OOB_BASE_URL` / `OPENAI_BASE_URL` values from the shell or `.env`, then re-run
+install/preflight. If only `~/.claude/config.json` is stale, install/preflight
+rewrites `customApiUrl` to the resolved upstream gateway.
 
 ---
 
 ## 8. See also
 
-* [Configuration reference](CONFIGURATION_REFERENCE.md) — every
+* [Configuration reference](reference/environment-variables.md) — every
   environment variable read by the code, including non-credential
   tunables.
 * [KB guide](KB_GUIDE.md) — local recipe KB and optional Cortex KB setup.
-* [Troubleshooting](TROUBLESHOOTING.md) — common 401 / gateway /
+* [Troubleshooting](reference/troubleshooting.md) — common 401 / gateway /
   Ray-GPU symptoms.

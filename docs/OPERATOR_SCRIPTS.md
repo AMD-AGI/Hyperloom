@@ -5,9 +5,9 @@ A short reference for the operator-facing scripts under
 they are utilities you run by hand against a finished or in-progress
 session directory.
 
-All scripts respect the `$USER_DATA_PATH` env (default
-`/workspace/hyperloom`) when no explicit `--session-dir` is given. See
-[`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §4.
+When no explicit `--session-dir` is given, scripts resolve the active session
+from `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`, then `USER_DATA_PATH`, then the
+default `/workspace/hyperloom`. See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §4.
 
 ---
 
@@ -82,7 +82,7 @@ python -m hyperloom.inference_optimizer.tools.dump_session_report \
 
 # With LLM-polished prose (OpenAI-compatible endpoint):
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
-OPENAI_BASE_URL=http://127.0.0.1:4002/v1 \
+OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1 \
 OPENAI_API_KEY=... \
 python -m hyperloom.inference_optimizer.tools.dump_session_report \
     --input  /wekafs/.../session_breakdown.json \
@@ -154,10 +154,10 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 
 ## 4. A/B helper scripts (advanced)
 
-The same scripts directory also contains:
+The same experiments package also contains:
 
-* `ab_torch_compile_kernels.py`
-* `ab_torch_compile_magpie.py`
+* `src/hyperloom/inference_optimizer/experiments/ab_torch_compile_kernels.py`
+* `src/hyperloom/inference_optimizer/experiments/ab_torch_compile_magpie.py`
 
 These are internal A/B harnesses used during torch.compile
 investigation work; they are not part of the customer-facing workflow
@@ -172,5 +172,5 @@ as reference implementations rather than supported operator tools.
   — the schema produced by `dump_session_breakdown.py`.
 * [`OPERATIONS.md`](OPERATIONS.md) — retention recommendations,
   including which scripts' outputs to back up long-term.
-* [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — symptoms vs which
+* [`reference/troubleshooting.md`](reference/troubleshooting.md) — symptoms vs which
   script to reach for first.

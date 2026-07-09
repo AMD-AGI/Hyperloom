@@ -326,7 +326,7 @@ def _validate_credentials() -> None:
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
         "Configure ONE of:\n"
         "  1. Single gateway (AMD / LiteLLM-style):\n"
-        "       export SAFE_API_KEY=sk-xxxxx\n"
+        "       export SAFE_API_KEY=ak-your-safe-apikey\n"
         "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
         "  2. Split entrypoints (native Anthropic + OpenAI):\n"
         "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"

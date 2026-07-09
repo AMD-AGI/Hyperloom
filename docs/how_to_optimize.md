@@ -112,17 +112,15 @@ When the loop exits, Hyperloom writes the final report, reproducible session
 artifacts, and `session_breakdown.json` for downstream consumers. Delivery
 systems can use those artifacts to package or review the optimized stack. For
 the shape of that artifact, see
-[`session_breakdown.json` integration](INTEGRATION_SESSION_BREAKDOWN.md).
+[`session_breakdown.json` integration](reference/session-breakdown.md).
 
 ## Worked examples
 
 For full, real optimization runs with configs, patches, and measured gains, see
-the case studies:
-
-- [GLM-5 — discovering optimizations hard to spot manually](CASE_STUDY_GLM5.md)
-- [DeepSeek-R1 — fast scale-up on a new workload](CASE_STUDY_DEEPSEEK_R1.md)
+the [Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)
+reproduction repository.
 
 ## Troubleshooting
 
-If a run fails on first launch (auth-proxy 401, Ray `--num-gpus`, VRAM issues),
-see [Troubleshooting](TROUBLESHOOTING.md).
+If a run fails on first launch (gateway 401, Ray `--num-gpus`, VRAM issues),
+see [Troubleshooting](reference/troubleshooting.md).

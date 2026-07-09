@@ -272,10 +272,11 @@ and requires a separate `crsr_...` key.
 
 **Fix**:
 
-* If you don't have a Cursor account: do not include `cursor` in
-  `KERNEL_OPT_BACKEND_ORDER`. The default `forge,geak` ladder is fully
-  functional without it. If you explicitly requested `--backends cursor` and
-  don't have a key, remove the flag.
+* If you don't have a Cursor account: do not include `cursor` in an explicit
+  `KERNEL_OPT_BACKEND_ORDER`. The auto-derived default drops `cursor` when
+  `CURSOR_API_KEY` is unset and continues with `forge,geak,claude,codex`.
+  If you explicitly requested `--backends cursor` and don't have a key, remove
+  the flag.
 * If you do have a Cursor account:
   ```bash
   export CURSOR_API_KEY=crsr_...

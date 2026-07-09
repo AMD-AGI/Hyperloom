@@ -48,5 +48,5 @@ Hyperloom is composed of multiple tools, each documented on its own page.
 
 - [Installation](installation.md) — set up Hyperloom locally or via the hosted UI.
 - [How-to: run your first optimization](how_to_optimize.md) — step-by-step usage.
-- [API reference](api/index) — generated from in-code docstrings.
-- [Release notes](release_notes.md) — per-version changes.
+- [API reference](reference/api-reference.rst) — generated from in-code docstrings.
+- [Release notes](release-notes.md) — per-version changes.

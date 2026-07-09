@@ -104,10 +104,10 @@ Earlier launchers may have waited for the Coordinator to emit a
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
 
-The default kernel-opt ladder is now `forge,geak`. Out-of-box (OOB) backends (`claude`,
-`codex`, `cursor`) run only when explicitly listed in `KERNEL_OPT_BACKEND_ORDER`
-and `cursor` still requires `$CURSOR_API_KEY`. If you had a custom order
-hard-coded (for example, `claude,geak`), confirm it is still intentional.
+The default kernel-opt ladder is now `forge,geak,claude,codex,cursor`; `cursor`
+is dropped from the auto-derived default when `$CURSOR_API_KEY` is unset. If you
+had a custom order hard-coded (for example, `claude,geak`), confirm it is still
+intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 

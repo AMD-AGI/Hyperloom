@@ -69,6 +69,6 @@ quantization section for details.
 ## Related guides
 
 - [Environment & authentication](ENV_AND_AUTH.md)
-- [Configuration reference](CONFIGURATION_REFERENCE.md)
+- [Configuration reference](reference/environment-variables.md)
 - [Operations & self-host runbook](OPERATIONS.md)
-- [Troubleshooting](TROUBLESHOOTING.md)
+- [Troubleshooting](reference/troubleshooting.md)

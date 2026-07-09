@@ -127,7 +127,7 @@ The `--compat-report-path` argument was removed.
 New in 0.6: `HYPERLOOM_ENABLE_PMC_ROOFLINE=1` layers Magpie PMC
 roofline analysis on top of TraceLens. Useful for compute-bound
 workloads; adds ~3 minutes per profile call. See
-[`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md) §7.
+[`reference/environment-variables.md`](reference/environment-variables.md) §7.
 
 ### Optional: opt into the Cursor backend
 
@@ -167,7 +167,7 @@ For any minor / patch upgrade:
 1. Pull the new Hyperloom revision into `$REPO_ROOT`.
 2. Re-run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
-   refreshes the auth-proxy, and regenerates `kernel-agent.env.sh`.
+   refreshes generated LLM gateway aliases, and regenerates `kernel-agent.env.sh`.
 3. Re-source the env file:
    ```bash
    . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
@@ -186,6 +186,6 @@ Your local KB and historical sessions are preserved.
 * [`CHANGELOG.md`](../CHANGELOG.md) — full per-release notes.
 * [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) — credential & path env
   reference.
-* [`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md) — every
+* [`reference/environment-variables.md`](reference/environment-variables.md) — every
   environment variable read by the runtime.
 * [`OPERATIONS.md`](OPERATIONS.md) — self-host runbook.
