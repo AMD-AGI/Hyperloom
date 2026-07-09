@@ -66,6 +66,11 @@ from ._kernel_decisions import (
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+
+# Recognized trace-analysis routes: the TraceLens ``agent`` (default) / ``deterministic``
+# routes and the independent, TraceLens-free ``bypass`` backend (explicit). An unknown
+# value (e.g. an LLM typo) must not silently mis-route — it falls back to ``agent``.
+_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
@@ -2414,24 +2419,10 @@ async def trace_analyze_handler(
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
-    # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
-    # vanished mid-run (#722), self-heal it before the fail-fast validation.
-    tracelens_root = _resolve_tracelens_root()
-    # Self-heal when the checkout is missing OR incomplete (exists but no .git,
-    # e.g. a concurrent install's half-done clone). Gating only on is_dir()
-    # would let an incomplete default checkout bypass self-heal (#722/PR#789).
-    if not (tracelens_root / ".git").exists():
-        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-    tl_err = _tracelens_root_error(tracelens_root)
-    if tl_err:
-        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
-
-    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
-    workspace_path = payload.get("workspace_path") or str(session_dir)
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
-
-    # Backfill workload context from SharedState so the tool gets the right framework/platform/model/analysis_mode when Orchestration omits them.
+    # Backfill workload context from SharedState so the tool gets the right
+    # framework/platform/model/analysis_mode when Orchestration omits them.
+    # Resolved up-front because the framework decides the default analysis route
+    # (bypass needs no TraceLens root; that resolution is gated + done below).
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -2441,6 +2432,59 @@ async def trace_analyze_handler(
     analysis_mode = (payload.get("analysis_mode") or "").strip()
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
+
+    # Analysis route: the DEFAULT for all frameworks (text-gen + xDiT) is the
+    # TraceLens ``agent`` route (the shipped/production default). The independent,
+    # TraceLens-free ``bypass`` backend stays available as an explicit route
+    # (``bypass`` via payload ``analysis_route`` or ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``)
+    # — that is how development/validation exercises it. ``deterministic`` is the
+    # no-LLM TraceLens variant. An explicit route always wins; the value is coerced
+    # to str first so a non-string payload value cannot raise AttributeError.
+    explicit_route = (
+        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
+    )
+    # Reject an unknown route rather than silently mis-routing: an LLM typo like
+    # ``"foobar"`` would otherwise be truthy and quietly change routing. Warn +
+    # fall back to the default ``agent`` route instead.
+    route_health_warnings: list[dict[str, Any]] = []
+    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
+        log.warning(
+            "trace_analyze: unknown analysis_route %r (expected one of %s); "
+            "falling back to the default 'agent' route",
+            explicit_route, sorted(_VALID_ANALYSIS_ROUTES),
+        )
+        route_health_warnings.append({
+            "code": "invalid_analysis_route",
+            "severity": "warning",
+            "message": (
+                f"unknown analysis_route {explicit_route!r} (expected one of "
+                f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
+            ),
+            "requested_route": explicit_route,
+        })
+        explicit_route = ""
+    analysis_route = explicit_route or "agent"
+    is_bypass = analysis_route == "bypass"
+    # Resolve TraceLens root independently of inherited env (the coordinator may
+    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
+    # vanished mid-run (#722), self-heal it before the fail-fast validation.
+    # Skipped entirely on the bypass route, which never touches TraceLens.
+    tracelens_root: Path | None = None
+    if not is_bypass:
+        tracelens_root = _resolve_tracelens_root()
+        # Self-heal when the checkout is missing OR incomplete (exists but no
+        # .git, e.g. a concurrent install's half-done clone). Gating only on
+        # is_dir() would let an incomplete default checkout bypass self-heal
+        # (#722/PR#789).
+        if not (tracelens_root / ".git").exists():
+            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+        tl_err = _tracelens_root_error(tracelens_root)
+        if tl_err:
+            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+
+    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     # Scriptable image frameworks (xDiT diffusion) are server-less and have no
     # LLM decode steady-state window, so the TraceLens steady-state splitter
@@ -2454,20 +2498,23 @@ async def trace_analyze_handler(
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
 
+    # Bypass runs the independent TraceLens-free backend; both tools share the
+    # same CLI surface below except ``--tracelens-root`` (TraceLens-only).
+    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
         "python3",
-        str(_kernel_agent_tool_path("tracelens_analysis.py")),
+        str(_kernel_agent_tool_path(tool_name)),
         "--trace-input",
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
         workspace_path,
+    ]
+    if not is_bypass:
         # Pass the resolved root explicitly so the tool never depends on the
         # subprocess inheriting TRACELENS_ROOT from the coordinator env.
-        "--tracelens-root",
-        str(tracelens_root),
-    ]
+        cmd += ["--tracelens-root", str(tracelens_root)]
     # Kernel-candidate POOL size (issue #667): only forward --top-k when the
     # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
     # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
@@ -2485,11 +2532,16 @@ async def trace_analyze_handler(
         cmd += ["--analysis-mode", str(analysis_mode)]
 
     if scriptable:
-        # No steady-state window to extract; skip the splitter entirely.
-        cmd += ["--skip-split"]
-        # Forward the denoise-step count so the diffusion workload roofline can
-        # emit per-denoise-step timings. Priority: payload override (steps in
-        # the profiled window) > baseline workload metadata (full schedule).
+        # --skip-split is a TraceLens-only splitter control; the bypass backend
+        # has its own steady-state windowing (ProfilerStep anchoring) and does not
+        # define this flag, so route-converge it (sending it to bypass would crash
+        # argparse -> trace_analyze_failed -> degraded roofline).
+        if not is_bypass:
+            cmd += ["--skip-split"]
+        # Forward the denoise-step count to BOTH routes so the diffusion workload
+        # roofline can emit per-denoise-step timings (bypass consumes it too).
+        # Priority: payload override (steps in the profiled window) > baseline
+        # workload metadata (full schedule).
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -2529,12 +2581,9 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent). Coerce to str
-    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
-    # bool/list emitted by the LLM) cannot raise AttributeError here.
-    analysis_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
+    # Forward the analysis route switch (deterministic vs agent) to the
+    # TraceLens tool. ``analysis_route`` was resolved above; the bypass tool
+    # takes no ``--analysis-route`` flag so it is intentionally excluded here.
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
@@ -2603,7 +2652,9 @@ async def trace_analyze_handler(
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
         # Guarantee ``trace_health_warnings`` is always a list (empty = nothing wrong).
-        result.setdefault("trace_health_warnings", [])
+        # Prepend any route-validation warning (e.g. an unknown analysis_route that
+        # fell back to bypass) so it is surfaced to record_trace_analyze / the LLM.
+        result["trace_health_warnings"] = route_health_warnings + list(result.get("trace_health_warnings") or [])
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
@@ -2622,19 +2673,20 @@ async def trace_analyze_handler(
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
             # Discovery source = the route that actually ran. The tool reports
-            # the authoritative mode (``orchestrator_mode``); the deterministic
-            # (no-LLM) route is surfaced to the dashboard as ``bypass`` while the
-            # LLM route stays ``tracelens``. Fall back to the requested
-            # ``analysis_route`` when the tool didn't echo a mode (e.g. early
-            # failure). Both routes drive the same TraceLens toolchain, so the
-            # version provenance (``tool``) stays ``tracelens`` either way.
+            # the authoritative mode (``orchestrator_mode``). The TraceLens
+            # deterministic (no-LLM) route is surfaced as ``bypass`` while the
+            # TraceLens LLM route stays ``tracelens``. The independent bypass
+            # route (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``) is its own
+            # source and does not touch TraceLens, so its ``tool`` is ``bypass``.
             _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
-            _is_bypass = _orch_mode == "deterministic" or analysis_route == "deterministic"
+            _independent_bypass = _orch_mode == "bypass" or is_bypass
+            _is_bypass = _independent_bypass or _orch_mode == "deterministic" or analysis_route == "deterministic"
             _disc_source = "bypass" if _is_bypass else "tracelens"
+            _disc_tool = "bypass" if _independent_bypass else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
                 source=_disc_source,
-                tool="tracelens",
+                tool=_disc_tool,
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
@@ -3135,13 +3187,21 @@ def _names_specific_kernel(payload: dict) -> bool:
 
 
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
-    """Load every candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
+    """Load every unique candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
+
+    Under the P0 contract ``hot_kernels`` is the FULL ranked hotspot set and
+    ``skipped_kernels`` is its non-routable subset, so the two on-disk lists
+    OVERLAP. Candidates are therefore de-duplicated by kernel identity
+    (``kernel_id`` then ``name``), keeping the first (``hot_kernels``) copy, so
+    ``kernels_considered`` counts each hotspot once instead of double-counting
+    every non-routable kernel. Rows carrying neither id nor name cannot be
+    identified and are always kept (never silently dropped).
 
     Args:
         payload: Request payload carrying ``candidates_path``.
 
     Returns:
-        Every candidate dict from the artifact, or an empty list when the
+        Every unique candidate dict from the artifact, or an empty list when the
         artifact is missing or unreadable.
     """
     candidates_path = payload.get("candidates_path")
@@ -3154,10 +3214,20 @@ def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for key in ("hot_kernels", "kernel_candidates", "skipped_kernels"):
         value = data.get(key)
-        if isinstance(value, list):
-            out.extend(item for item in value if isinstance(item, dict))
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            ident = str(item.get("kernel_id") or item.get("name") or "")
+            if ident:
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            out.append(item)
     return out
 
 

@@ -106,7 +106,8 @@ jobs:
             ${{ github.workspace }}
         run: |
           pylint --errors-only \
-            inference_optimizer \
+            hyperloom.inference_optimizer \
+            hyperloom.orchestrator \
             hyperloom.agents.robustness \
             hyperloom.agents.framework \
             hyperloom.agents.critic.runtime \

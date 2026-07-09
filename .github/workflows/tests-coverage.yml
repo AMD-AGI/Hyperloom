@@ -131,12 +131,15 @@ jobs:
           # kernel} (measured as part of the "src/hyperloom" source tree
           # below instead of standalone "critic-agent/runtime" /
           # "robustness_agent" / "framework-agent/src" / "quantization_agent" /
-          # "kernel-agent/tools" entries). The "kernel-agent/tools" bucket key
-          # (used only as the Job Summary column header) is kept unchanged;
-          # only its path-segment value moves to the new in-tree location.
+          # "kernel-agent/tools" entries). The per-tree bucket keys MUST match
+          # the configured coverage ``source`` list (``src/hyperloom`` / ``OOB``
+          # / ``ci``) so every configured tree renders a real percentage in the
+          # Job Summary; a key absent from ``source`` (e.g. the pre-migration
+          # standalone ``inference_optimizer`` / ``kernel-agent/tools`` buckets)
+          # is never displayed, and the main ``src/hyperloom`` tree would show
+          # ``n/a`` if it lacked a segment here.
           _SOURCE_SEGMENTS = {
-              "inference_optimizer": ["/inference_optimizer/"],
-              "kernel-agent/tools": ["/hyperloom/agents/kernel/tools/"],
+              "src/hyperloom": ["/hyperloom/"],
               "OOB": ["/OOB/", "/agent_mcp_server/"],
               "ci": ["/ci/"],
           }
