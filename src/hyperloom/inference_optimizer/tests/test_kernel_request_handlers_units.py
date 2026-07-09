@@ -526,16 +526,16 @@ class TestBackendOrder:
     def test_documented_kernel_opt_backends_env_is_honored(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak")
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak_v3")
 
-        assert krh._backend_order({}) == ["geak"]
+        assert krh._backend_order({}) == ["geak_v3"]
 
     def test_documented_kernel_opt_backends_env_is_case_normalized(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK , CoDeX ")
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK_V3 , CoDeX ")
 
-        assert krh._backend_order({}) == ["geak", "codex"]
+        assert krh._backend_order({}) == ["geak_v3", "codex"]
 
 
 # _candidate_env_allowed
@@ -1139,7 +1139,7 @@ class TestRunGemmTuningHandler:
 
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
-# of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
+# of the kernel-agent default; the legacy 90 forced quick-mode timing.
 class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
@@ -1434,7 +1434,7 @@ class TestBatchParallelConcurrencyCap:
         ]
         out = asyncio.run(
             krh._run_optimization_batch(
-                payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 10},
+                payload={"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex", "max_parallel": 10},
                 candidates=candidates,
                 session_dir=tmp_path,
             )
@@ -1473,7 +1473,7 @@ class TestBatchParallelConcurrencyCap:
         ]
         out = asyncio.run(
             krh._run_optimization_batch(
-                payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 7},
+                payload={"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex", "max_parallel": 7},
                 candidates=candidates,
                 session_dir=tmp_path,
             )
@@ -1742,7 +1742,7 @@ class TestTracelensRootResolution:
         self, tmp_path, monkeypatch
     ):
         # Default (non-override) root missing: handler must ATTEMPT self-heal
-        # (#722) before the fail-fast. We stub the heal to a no-op so the root
+        #  before the fail-fast. We stub the heal to a no-op so the root
         # stays missing and the handler still returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
@@ -1761,7 +1761,7 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
-        # #722/PR#789: a default checkout that EXISTS but is incomplete (dir
+ # a default checkout that EXISTS but is incomplete (dir
         # present, no .git) must still trigger self-heal — gating on is_dir()
         # alone would skip it.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -1788,7 +1788,7 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
-        # #722/PR#789: a NON-default operator override that exists but is
+ # a NON-default operator override that exists but is
         # incomplete (dir present, no .git) must fail fast — never adopted as
         # usable, never auto-cloned.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -1836,7 +1836,7 @@ class TestTracelensRootResolution:
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
-        # #722: the default path is persisted as TRACELENS_ROOT in
+ # the default path is persisted as TRACELENS_ROOT in
         # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
         # A missing default path must still attempt self-heal.
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
@@ -1888,7 +1888,7 @@ class TestKernelOptArtifactBundleRecording:
                     "micro_speedup": 1.25,
                     "compile_passed": True,
                     "correctness_passed": True,
-                    "best_backend": "geak",
+                    "best_backend": "geak_v3",
                     "best_artifact_path": "/repo/aiter/ops/moe.py",
                     "best_artifact_bundle": bundle,
                     "deploy_snapshot_dir": "/tmp/snap",

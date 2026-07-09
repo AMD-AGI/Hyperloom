@@ -1,18 +1,18 @@
 ---
 myst:
     html_meta:
-        "description": "Diagnose and fix common Hyperloom failures: auth-proxy 401s, Ray GPU issues, VRAM exhaustion, TraceLens CLI errors, KB write failures, and session resume problems."
-        "keywords": "Hyperloom, troubleshooting, auth-proxy, Ray, VRAM, OOM, GEAK, TraceLens, IntelliKit, KB, LLM inference, AMD GPU, session resume, debugging"
+        "description": "Diagnose and fix common Hyperloom failures: LLM gateway 401s, Ray GPU issues, VRAM exhaustion, TraceLens CLI errors, KB write failures, and session resume problems."
+        "keywords": "Hyperloom, troubleshooting, LLM gateway, Ray, VRAM, OOM, GEAK, TraceLens, IntelliKit, KB, LLM inference, AMD GPU, session resume, debugging"
 ---
 # Troubleshooting Hyperloom
 
 A consolidated symptom → cause → fix index for the failures Hyperloom
 users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
-[`inference_optimizer/SKILL.md`](../inference_optimizer/SKILL.md),
-[`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
-[`critic-agent/SKILL.md`](../critic-agent/SKILL.md),
-[`robustness-agent/SKILL.md`](../robustness-agent/SKILL.md).
+[`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
+[`kernel/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/kernel/SKILL.md),
+[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
+[`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
 
 ---
 
@@ -38,17 +38,50 @@ upstream gateway — there is no local auth-proxy.
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
    ```bash
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
    # If check-only reports issues, re-run without --check-only:
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`),
-   not `127.0.0.1:4002`. If it still shows the old proxy address, run
-   any `inference_optimizer` CLI command — preflight force-rewrites stale
-   legacy URLs automatically.
+   not `127.0.0.1:4002`. Also clear any stale `GEAK_BASE_URL` / `OOB_BASE_URL`
+   / `OPENAI_BASE_URL` env overrides that still point at the removed proxy.
 
-See [Hyperloom authentication and credentials](reference/authentication.md) for credential setup and gateway configuration.
+See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
+
+---
+
+## TLS or certificate errors against the LLM gateway
+
+**Symptom**: Preflight or an LLM client fails before authentication with one of:
+
+* `certificate verify failed`
+* `SSL: CERTIFICATE_VERIFY_FAILED`
+* `gateway catalog unreachable after retries`, while `curl -k "$OPENAI_BASE_URL/models"` succeeds
+
+**Cause**: The container or host does not trust the certificate authority used by
+the configured LLM gateway. This is common on AMD-internal networks that use an
+internal CA, or on self-hosted gateways with private certificates.
+
+**Fix**:
+
+1. For the AMD Primus-SaFE gateway, install the AMD certificate bundle inside the
+   container or host:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
+   ```
+2. For a self-hosted gateway with a private CA, configure the standard Python /
+   requests certificate variables before launching:
+   ```bash
+   export REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem
+   export SSL_CERT_FILE=/path/to/ca-bundle.pem
+   ```
+3. Re-run preflight or the installer after updating certificates.
+
+For one-off diagnosis only, you can set
+`INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1` to skip TLS verification for the
+model-catalog probe. Do not leave this enabled in normal runs because the probe
+sends gateway credentials.
 
 ---
 
@@ -125,8 +158,8 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`kernel-agent/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`kernel-agent/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`src/hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
+`src/hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
@@ -160,7 +193,7 @@ the baseline benchmark fails with VRAM allocation errors.
 The Robustness agent classifies repeated OOMs as a `log_error_pattern`
 high-severity symptom and emits an `escalate_strategy_change` intent;
 check the latest finding in
-`$USER_DATA_PATH/agents/robustness/findings/<session_id>.jsonl` for
+`$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl` for
 context.
 
 ---
@@ -171,27 +204,28 @@ context.
 baseline files; logs mention a missing `profiler_mcp` or one of the
 other GEAK MCP packages.
 
-**Cause**: `install.sh` did not finish installing all five GEAK MCP
-packages (`rag-mcp`, `profiler-mcp`, `metrix-mcp`,
-`cross-session-memory-mcp`, `automated-test-discovery`). Common
-trigger: pip install failed on a transient registry hiccup and the
-installer continued.
+**Cause.** `install.sh` did not finish installing the GEAK MCP packages
+(`rag-mcp`, `profiler-mcp`, `cross-session-memory-mcp`,
+`automated-test-discovery`). `metrix-mcp` is no longer installed separately;
+its functionality is provided through `profiler-mcp`. Common trigger: pip
+install failed on a transient registry hiccup and the installer continued.
 
 **Fix**:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
 
 ---
 
-## TraceLens CLI not found
+## TraceLens root or CLI check fails
 
-**Symptom**: `tracelens_analysis` returns `CLI not found` or
+**Symptom.** `trace_analyze` returns `TraceLens root not found`,
+`incomplete (not a git checkout)`, or
 `TraceLens_generate_perf_report_pytorch_inference: command not found`.
 
 **Cause**: TraceLens-internal isn't installed, or the legacy
@@ -203,7 +237,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -242,7 +276,7 @@ auto-re-cloned and fails fast once `/tmp` is reaped.
    default is re-resolved to `/opt`, then reinstall:
    ```bash
    unset TRACELENS_ROOT   # remove any hard-coded /tmp path from env or .env first
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
    The installer rewrites `kernel-agent.env.sh` with the `/opt` default
    and clones and pins TraceLens there.
@@ -252,7 +286,7 @@ auto-re-cloned and fails fast once `/tmp` is reaped.
    ```bash
    export HYPERLOOM_OPEN_SOURCE_ROOT="$USER_DATA_PATH/open-source-repos"
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 3. **Keep an operator checkout** only if you deliberately maintain one —
    set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
@@ -261,7 +295,7 @@ auto-re-cloned and fails fast once `/tmp` is reaped.
 
 ---
 
-## Cursor backend gets HTTP 401 (separate from gateway 401)
+## Cursor backend gets HTTP 401 (separate from the AMD gateway creds)
 
 **Symptom**: The OOB `cursor` backend specifically returns 401 even
 though `claude` / `codex` work fine.
@@ -272,25 +306,26 @@ and requires a separate `crsr_...` key.
 
 **Fix**:
 
-* If you don't have a Cursor account: do not include `cursor` in
-  `KERNEL_OPT_BACKEND_ORDER`. The default `forge,geak` ladder is fully
-  functional without it. If you explicitly requested `--backends cursor` and
-  don't have a key, remove the flag.
+* If you don't have a Cursor account: do not include `cursor` in an explicit
+  `KERNEL_OPT_BACKEND_ORDER`. The auto-derived default drops `cursor` when
+  `CURSOR_API_KEY` is unset and continues with `forge,geak,claude,codex`.
+  If you explicitly requested `--backends cursor` and don't have a key, remove
+  the flag.
 * If you do have a Cursor account:
   ```bash
   export CURSOR_API_KEY=crsr_...
-  bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"   # picks up the new key
+  bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"   # picks up the new key
   ```
 
-See [Hyperloom authentication and credentials](reference/authentication.md) §3 for the Cursor key
+See [Hyperloom authentication and credentials](authentication.md) §3 for the Cursor key
 specifics.
 
 ---
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom**: `inference_optimizer optimize --resume` exits with
-`manifest.json missing` or `state.json missing`.
+**Symptom.** `inference_optimizer optimize --resume` exits with
+`manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
 original session, or the session never reached the point of writing
@@ -298,16 +333,17 @@ original session, or the session never reached the point of writing
 
 **Fix**:
 
-1. Verify env:
+1. Verify env and locate the real session dir (the default
+   `per_model_ts` layout nests it at
+   `$USER_DATA_PATH/<model>/<UTC_ts>/`, not the workspace root):
    ```bash
    echo "$USER_DATA_PATH"
-   ls "$USER_DATA_PATH"/{manifest,state}.json
+   find "$USER_DATA_PATH" -name manifest.json
    ```
-2. If you used a custom path the first time, re-export it before
-   resuming:
+2. If you used a custom path the first time, pass the actual session
+   directory explicitly:
    ```bash
-   export USER_DATA_PATH=/path/to/your/session
-   inference_optimizer optimize --resume
+   inference_optimizer optimize --resume --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.
@@ -337,7 +373,7 @@ denied, or the optional remote Cortex KB URL is unreachable.
 3. To skip KB hooks deliberately for a diagnosis run, pass `--degraded-kb`.
 
 KB unreachability is **never** fatal. Hyperloom continues with local-only or
-degraded KB behavior. See [Integrate Recipe/Cortex knowledge base in Hyperloom](reference/integrate-kb.md) for the detailed
+degraded KB behavior. See [Integrate Recipe/Cortex knowledge base in Hyperloom](integrate-kb.md) for the detailed
 resolver order.
 
 ---
@@ -348,8 +384,8 @@ resolver order.
 marker and the run proceeds without an external reference (no "vs
 B200" number in the report).
 
-**Cause**: `--compare-against-gpu` was not supplied. Since v0.6, the
-`classify` action no longer derives this automatically.
+**Cause**: `--compare-against-gpu` was not supplied. The removed `classify`
+action no longer derives this automatically.
 
 **Fix**: Add the flag at launch:
 
@@ -381,7 +417,7 @@ export INFERENCE_OPTIMIZER_RESCUE_PATHS="/tmp/inferencex_results:/var/tmp/bench"
 
 The harvest step scans these on each tick and copies any orphaned
 `result.json` into the session dir. See
-[Environment variables](reference/environment-variables.md) §6.
+[Environment variables](environment-variables.md) §6.
 
 ---
 
@@ -390,17 +426,21 @@ The harvest step scans these on each tick and copies any orphaned
 Three commands give you a fast situation report:
 
 ```bash
+# Resolve the active session dir first (from launch-info or a running shell).
+# Defaults to INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR when set.
+SD="${INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR:-$SESSION_DIR}"
+
 # 1. Are events landing?
-python -m inference_optimizer.scripts.event_counts
+python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
 
 # 2. What was the last action's outcome?
-jq '.optimization_stack | last' "$SESSION_DIR/state.json"
+jq '.optimization_stack | last' "$SD/state.json"
 
 # 3. Any Robustness findings since the last tick?
-tail -n 5 "$USER_DATA_PATH"/agents/robustness/findings/*.jsonl 2>/dev/null
+tail -n 5 "$SD"/agents/robustness/findings/*.jsonl 2>/dev/null
 ```
 
-See [Hyperloom operator scripts](reference/operator-scripts.md) for the full set of
+See [Hyperloom operator scripts](operator-scripts.md) for the full set of
 inspection tools.
 
 ---
@@ -415,4 +455,4 @@ If the steps above did not resolve your issue, use the following options to get 
   `session_breakdown.json` (or partial state.json) for the failed
   session, and the relevant log excerpt.
 * For security-relevant issues, follow the disclosure process in
-  [`SECURITY.md`](../SECURITY.md) instead.
+  [`SECURITY.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/SECURITY.md) instead.

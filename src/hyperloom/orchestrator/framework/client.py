@@ -21,11 +21,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# tree-reform.MD P2.5: framework-agent was promoted into
-# hyperloom.agents.framework (always importable alongside orchestrator now
-# that both live under the same installed ``hyperloom`` distribution), so the
-# former IO-only ``except ImportError`` fallback copy of
-# ``_FRAMEWORK_TO_REPO_URL`` is no longer needed.
+# framework-agent is importable alongside orchestrator under the installed
+# ``hyperloom`` distribution, so the former IO-only ``except ImportError``
+# fallback copy of ``_FRAMEWORK_TO_REPO_URL`` is no longer needed.
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
 
@@ -274,7 +272,7 @@ async def phase_audit(
         target_framework: Optional cross-framework porting target; when it
             differs from the candidate's source framework, the audit runs in
             cross-framework mode (design #5).
-        target_framework_source_roots: Design §Q1 (adopted): explicit source
+        target_framework_source_roots: explicit source
             roots for ``target_framework`` (the porting destination). Cross-
             framework audits prefer this over the ``framework_source_roots``
             fallback so ``metrics.roots_source=="explicit"`` and the R6 risk

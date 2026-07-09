@@ -371,9 +371,9 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     tmp_path,
     monkeypatch,
 ):
-    """#524: a vLLM engine-core bootstrap failure — server.log carries
+    """A vLLM engine-core bootstrap failure has server.log carrying
     ``Engine core initialization failed`` while Magpie exits nonzero without a
-    benchmark_* workspace — is classified ``server_init_dead`` with the
+    benchmark_* workspace and is classified ``server_init_dead`` with the
     server.log root cause surfaced in ``error`` (not a generic
     ``subprocess_nonzero`` from Magpie's wrapper noise)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
@@ -419,7 +419,7 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     tmp_path,
     monkeypatch,
 ):
-    """#524: when the liveness watchdog reaps a hung server
+    """When the liveness watchdog reaps a hung server
     (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead``
     even when no server.log marker is independently visible."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -457,7 +457,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     tmp_path,
     monkeypatch,
 ):
-    """#524: when Magpie DOES create a benchmark_* workspace but it carries no
+    """When Magpie DOES create a benchmark_* workspace but it carries no
     valid measurement, a server.log death marker takes precedence — the
     failure is classified ``server_init_dead`` (not the generic ``no_report`` /
     ``invalid_measurement``) and the real engine fault is surfaced in
@@ -503,7 +503,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
 
 
 def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
-    """#524 hardening: a stale server.log death marker left behind in a reused
+    """A stale server.log death marker left behind in a reused
     output_dir must NOT bias a fresh attempt's classification. The executor
     clears the prior log before launching, so an attempt that boots fine but
     yields no report is classified by its own outcome (``no_report``) — never
@@ -548,7 +548,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
 
 
 def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
-    """#523: a checkout already on a local filesystem is returned unchanged
+    """A checkout already on a local filesystem is returned unchanged
     (no needless copy)."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
@@ -561,7 +561,7 @@ def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
 
 
 def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
-    """#523: a checkout on a (simulated) network mount is mirrored to local
+    """A checkout on a simulated network mount is mirrored to local
     disk and the returned path points at the local copy, not the original."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
@@ -591,7 +591,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     tmp_path,
     monkeypatch,
 ):
-    """#523: callers can include a task/output-dir key in the mirror hash so
+    """Callers can include a task/output-dir key in the mirror hash so
     two overlapping baselines sharing one wekafs checkout never rmtree/replace
     a directory that another server is currently ``cd``-ed into."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
@@ -615,7 +615,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
 
 
 def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
-    """#523: the relocation can be opted out of via env even on a network
+    """The relocation can be opted out of via env even on a network
     mount (escape hatch for multi-node / shared-mount setups)."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
@@ -632,7 +632,7 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     tmp_path,
     monkeypatch,
 ):
-    """#523: when the mirror copy itself fails (e.g. local disk full), the
+    """When the mirror copy itself fails (e.g. local disk full), the
     helper degrades to the original network-mount path instead of raising, so
     the run still proceeds (pre-fix behaviour) rather than aborting."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
@@ -659,7 +659,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     tmp_path,
     monkeypatch,
 ):
-    """#523: if the copy lands but the mirror is missing the load-bearing
+    """If the copy lands but the mirror is missing the load-bearing
     ``benchmarks/benchmark_lib.sh`` (partial / corrupt tree), the helper
     rejects it and returns the original path rather than handing Magpie a
     broken ``cd`` target."""
@@ -681,7 +681,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
 
 
 def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
-    """#523 end-to-end (unit): when INFERENCEX_PATH is on a network mount, the
+    """When INFERENCEX_PATH is on a network mount, the
     local mirror is what Magpie actually ``cd``-s into. Asserts BOTH channels:
 
     * the materialized YAML's ``benchmark.inferencex_path`` (the field Magpie's
@@ -753,7 +753,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     """The Magpie *parent* subprocess cwd is anchored to the stable task
     output_dir (never the default ``/tmp``) as defence-in-depth. (The actual
-    #523 cuda-graph fix is the local-InferenceX mirror — see
+    cuda-graph fix is the local-InferenceX mirror — see
     ``test_baseline_points_magpie_at_local_inferencex`` — because Magpie
     re-roots the server via ``cd <inferencex>``.)"""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
@@ -791,7 +791,7 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
 
 
 def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
-    """AMD-AGI/Magpie#34 — atom baseline engages the lifecycle double-run like vllm/sglang."""
+    """Atom baseline engages the lifecycle double-run like vllm/sglang."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="atom")
     output_dir = tmp_path / "ws"
@@ -865,7 +865,7 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
 def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     tmp_path,
 ):
-    """#5: when the reuse port is occupied by a zombie (healthy but no
+    """When the reuse port is occupied by a zombie (healthy but no
     metadata), pre-start cleanup must (a) unlink stale pid/json without
     sending signals to potentially-recycled PIDs, and (b) invoke
     _kill_stale_servers() to reap the zombie listener."""
@@ -1164,7 +1164,7 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     assert not (pid_dir / "vllm_8888.json").exists()
 
 
-# -- #522: _classify_subprocess_error unit tests ----------------------------
+# -- _classify_subprocess_error unit tests ----------------------------
 
 from hyperloom.orchestrator.actions.executors.baseline import (
     _classify_subprocess_error,
@@ -1206,3 +1206,29 @@ def test_classify_value_error_with_argv_dump_not_arg_error():
         )
         == "subprocess_nonzero"
     )
+
+
+def test_classify_subprocess_error_none_tail_does_not_crash():
+    # A slow (>=FAST_EXIT) failure with no captured stderr must not raise:
+    # stderr_tail.lower() is hoisted above the elapsed gate, so a None tail
+    # would AttributeError without the guard.
+    assert _classify_subprocess_error(600.0, None) == "subprocess_nonzero"
+
+
+def test_classify_kv_cache_oom_after_weight_load():
+    # KV-cache OOM can surface well after the 30s fast-exit window (weights
+    # take minutes to load), so it must be detected regardless of elapsed time.
+    tail = (
+        "ValueError: Loaded weights leave no GPU memory for the KV cache "
+        "under --mem-fraction-static=0.7. Raise --mem-fraction-static above 0.737"
+    )
+    assert _classify_subprocess_error(600.0, tail) == "kv_cache_oom"
+
+
+def test_classify_kv_cache_oom_fast_exit():
+    tail = "no GPU memory for the KV cache"
+    assert _classify_subprocess_error(3.0, tail) == "kv_cache_oom"
+
+
+def test_classify_non_kv_oom_still_nonzero():
+    assert _classify_subprocess_error(600.0, "some other runtime failure") == "subprocess_nonzero"

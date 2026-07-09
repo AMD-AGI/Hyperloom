@@ -22,7 +22,7 @@ from ._common import (
 
 
 
-# §13b Roofline (single-path + watermark refresh model)
+# Roofline (single-path + watermark refresh model)
 def collect_roofline(
     state: dict[str, Any],
     warnings: list[str],
@@ -76,9 +76,9 @@ def collect_roofline(
 _KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
 
 
-# Roofline — optimization-progress curve (Dashboard integration spec §2).
+# Roofline — optimization-progress curve.
 # Conservative achievable fraction of vendor-peak bandwidth Hyperloom
-# targets (vendor specs are theoretical maxima); see spec §2.
+# targets (vendor specs are theoretical maxima).
 DEFAULT_ROOFLINE_TARGET_RATIO = 0.70
 
 

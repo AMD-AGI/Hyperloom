@@ -72,6 +72,35 @@ def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
     return (bool(args) or bool(envs)), args, envs
 
 
+def _order_concs_anchor_first(concs: list[int], anchor: int) -> list[int]:
+    """Reorder the ladder so the operating-point CONC runs first, de-duplicated.
+
+    The optimization's operating point (``state.conc``) is the single most
+    decision-relevant load level. Running it first means a budget-truncated
+    sweep still yields the pair that matters most, then expands outward. When
+    the anchor is unset (``<=0``) or absent from the ladder this is a no-op that
+    preserves the caller's order, so the behaviour is fully general — it never
+    hard-codes a specific concurrency.
+
+    Args:
+        concs: Requested concurrency ladder (caller order preserved for the tail).
+        anchor: Operating-point concurrency to prioritise; ``<=0`` disables.
+
+    Returns:
+        The ladder with ``anchor`` moved to the front (if present), duplicates removed.
+    """
+    ordered: list[int] = []
+    seen: set[int] = set()
+    if anchor > 0 and anchor in concs:
+        ordered.append(anchor)
+        seen.add(anchor)
+    for conc in concs:
+        if conc not in seen:
+            ordered.append(conc)
+            seen.add(conc)
+    return ordered
+
+
 def _build_grid(
     *,
     concs: list[int],
@@ -80,8 +109,14 @@ def _build_grid(
     num_prompts_factor: int,
     optimized_args: str,
     optimized_envs: dict[str, str],
+    anchor_conc: int = 0,
 ) -> list[GridVariant]:
     """Two-arm grid: ``baseline`` × ``optimized`` crossed with every requested CONC.
+
+    Emission order is CONC-major (anchor-first) with the two arms interleaved as
+    an adjacent ``baseline``/``optimized`` pair per CONC. This guarantees that a
+    budget-truncated run leaves *complete* A/B pairs — starting at the operating
+    point — instead of a full baseline arm with no optimized counterpart.
 
     Args:
         concs: Concurrency values to sweep.
@@ -90,6 +125,7 @@ def _build_grid(
         num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
         optimized_args: Extra server args for the optimized arm.
         optimized_envs: Extra environment variables for the optimized arm.
+        anchor_conc: Operating-point concurrency to run first; ``<=0`` keeps order.
 
     Returns:
         The list of grid variants spanning both arms and all concurrencies.
@@ -106,8 +142,8 @@ def _build_grid(
     # _build_variant_yaml, so this overrides the RUN_EVAL=true default.
     skip_eval = not sweep_run_eval_enabled()
     out: list[GridVariant] = []
-    for arm_name, arm_args, arm_envs in arms:
-        for conc in concs:
+    for conc in _order_concs_anchor_first(concs, anchor_conc):
+        for arm_name, arm_args, arm_envs in arms:
             num_prompts = max(int(conc) * int(num_prompts_factor), int(conc))
             envs = dict(arm_envs)
             envs.update(
@@ -516,6 +552,7 @@ async def run_conc_sweep(
         num_prompts_factor=num_prompts_factor,
         optimized_args=opt_args,
         optimized_envs=opt_envs,
+        anchor_conc=int(getattr(state, "conc", 0) or 0),
     )
 
     # Independent total wall-clock budget (<=0 disables); variants run one at a time so we can stop cleanly when exhausted.

@@ -26,6 +26,29 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 
 
+_KERNEL_AGENT_DEFAULT_MAX_TURNS = 5
+
+
+def _resolve_kernel_agent_max_turns() -> int:
+    """Resolve the kernel_agent Claude turn budget.
+
+    Reads ``INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS`` (a positive int);
+    falls back to ``_KERNEL_AGENT_DEFAULT_MAX_TURNS`` (5, unchanged default)
+    on unset/invalid/<=0. Lets an operator raise the budget to avoid a
+    "Reached maximum number of turns" failure on complex kernel tasks
+    without editing the reactor logic.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "").strip()
+    if not raw:
+        return _KERNEL_AGENT_DEFAULT_MAX_TURNS
+    try:
+        val = int(raw)
+    except ValueError:
+        return _KERNEL_AGENT_DEFAULT_MAX_TURNS
+    return val if val >= 1 else _KERNEL_AGENT_DEFAULT_MAX_TURNS
+
+
+
 def _build_backends(
     *,
     claude_model: str,
@@ -118,8 +141,8 @@ def _build_backends(
         )
 
     backends: dict[str, Any] = {
-        # Orchestration runs as a persistent ReAct conversation (plan
-        # Step 1): the same Claude session is resumed across ticks so the
+        # Orchestration runs as a persistent ReAct conversation: the same
+        # Claude session is resumed across ticks so the
         # model's plan / chain-of-thought persists instead of being
         # re-derived from a full state dump each turn. The conversational
         # floors (max_turns / call_timeout) are applied inside
@@ -137,7 +160,10 @@ def _build_backends(
         if kernel_codex:
             backends["kernel_agent"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel_agent"] = ClaudeBackend(model=claude_model, max_turns_default=5)
+            backends["kernel_agent"] = ClaudeBackend(
+                model=claude_model,
+                max_turns_default=_resolve_kernel_agent_max_turns(),
+            )
     return backends
 
 
