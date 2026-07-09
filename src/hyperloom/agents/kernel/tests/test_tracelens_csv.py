@@ -1093,6 +1093,85 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
+# P0 contract: ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL
+# ranked hotspot set (routable + non-routable) while ``routable_kernels`` /
+# ``skipped_kernels`` carry the reusable / non-reusable subsets. This locks the
+# TraceLens-side disk contract (twin of the bypass ``build_candidates`` tests)
+# so read-disk consumers (breakdown collectors, ``_all_kernel_candidates``) can
+# rely on the routable-only -> full change staying intentional and stable.
+def _contract_candidates():
+    return [
+        {"kernel_id": "k001", "name": "fused_moe", "duration_us": 300.0, "gpu_pct": 30.0,
+         "source_file": "/repo/aiter/moe.py", "reusable_native_kernel": True},
+        {"kernel_id": "k002", "name": "aten::mm", "duration_us": 200.0, "gpu_pct": 20.0,
+         "source_file": "", "reusable_native_kernel": False},
+        # No ``reusable_native_kernel`` key at all -> non-routable (``is not True``).
+        {"kernel_id": "k003", "name": "Cijk_vendor_gemm", "duration_us": 150.0, "gpu_pct": 15.0,
+         "source_file": ""},
+        {"kernel_id": "k004", "name": "aiter::rmsnorm", "duration_us": 100.0, "gpu_pct": 10.0,
+         "source_file": "/repo/aiter/rmsnorm.py", "reusable_native_kernel": True},
+    ]
+
+
+def test_write_reports_kernel_candidates_contract_full_hot_with_routable_skipped_subsets(tmp_path):
+    """kernel_candidates.json: hot_kernels is full; routable/skipped are disjoint subsets whose union == hot."""
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
+    analysis_md.parent.mkdir(parents=True, exist_ok=True)
+    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
+    args = _make_write_reports_args(trace)
+
+    artifacts = tla.write_reports(
+        tmp_path / "run",
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=_contract_candidates(),
+        args=args,
+        existing_report_path=analysis_md,
+    )
+    payload = json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
+
+    hot_ids = [c["kernel_id"] for c in payload["hot_kernels"]]
+    routable_ids = [c["kernel_id"] for c in payload["routable_kernels"]]
+    skipped_ids = [c["kernel_id"] for c in payload["skipped_kernels"]]
+
+    # hot_kernels is the FULL ranked set, order preserved.
+    assert hot_ids == ["k001", "k002", "k003", "k004"]
+    # routable == exactly the ``reusable_native_kernel is True`` rows.
+    assert routable_ids == ["k001", "k004"]
+    assert all(c.get("reusable_native_kernel") is True for c in payload["routable_kernels"])
+    # skipped == exactly the non-True rows (False or absent).
+    assert skipped_ids == ["k002", "k003"]
+    assert all(c.get("reusable_native_kernel") is not True for c in payload["skipped_kernels"])
+    # Contract invariants: partition of hot with no overlap and no leakage.
+    assert set(routable_ids) | set(skipped_ids) == set(hot_ids)
+    assert set(routable_ids) & set(skipped_ids) == set()
+    assert set(skipped_ids) <= set(hot_ids)
+    assert len(payload["hot_kernels"]) == len(payload["routable_kernels"]) + len(payload["skipped_kernels"])
+
+
+def test_write_reports_tracelens_report_hot_kernels_is_full_set(tmp_path):
+    """tracelens_report.json mirrors the FULL hot_kernels set (no routable-only truncation)."""
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
+    analysis_md.parent.mkdir(parents=True, exist_ok=True)
+    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
+    args = _make_write_reports_args(trace)
+
+    artifacts = tla.write_reports(
+        tmp_path / "run",
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=_contract_candidates(),
+        args=args,
+        existing_report_path=analysis_md,
+    )
+    report = json.loads(Path(artifacts["tracelens_report_json"]).read_text(encoding="utf-8"))
+    assert [c["kernel_id"] for c in report["hot_kernels"]] == ["k001", "k002", "k003", "k004"]
+
+
 # #124 — SDK runner for TraceLens analysis-orchestrator skill
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     skill = tmp_path / "analysis-orchestrator.md"
@@ -4140,11 +4219,15 @@ def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
     assert "Exposed memcpy (device copy) | 1.00%" in text
 
 
-def test_minimal_analysis_md_omits_system_signals_without_timeline(tmp_path):
-    """No gpu_timeline.csv -> no System-Level Signals section (no fabrication)."""
+def test_minimal_analysis_md_system_signals_present_but_dash_without_timeline(tmp_path):
+    """No gpu_timeline.csv + no idle -> the System-Level Signals section is still
+    present (shared canonical spine, identical to the bypass route) but every
+    value is an em dash rather than a fabricated 0."""
     report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=None)
     text = report.read_text(encoding="utf-8")
-    assert "## System-Level Signals" not in text
+    assert "## System-Level Signals" in text
+    assert "| Signal | % of total GPU time | Note |" in text
+    assert "| GPU idle | \u2014 | - |" in text  # unknown share -> em dash, not 0
 
 
 def test_deterministic_other_bucket_keeps_resolvable_graph_op(
