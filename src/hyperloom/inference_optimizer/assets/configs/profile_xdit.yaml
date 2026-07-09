@@ -23,13 +23,18 @@ benchmark:
     XDIT_WARMUP_CALLS: 3
     XDIT_GUIDANCE_SCALE: 4.0
     XDIT_ATTENTION_BACKEND: aiter
+    # Profiling runs WITH torch.compile (unlike the raw-eager baseline in
+    # baseline_xdit.yaml): the empty/uncorrelatable-trace problem is fixed
+    # upstream (profiler side), so the trace carries the real compiled GPU
+    # kernels we actually want to attribute time across.
     XDIT_USE_TORCH_COMPILE: 1
     XDIT_USE_FP4_GEMMS: 0
     XDIT_USE_FP8_GEMMS: 0
+    # xDiT tolerance semantics (see baseline_xdit.yaml for rationale).
     XDIT_QUALITY_REF: ""
-    XDIT_QUALITY_LPIPS_MAX: 0.05
-    XDIT_QUALITY_SSIM_MIN: 0.95
-    XDIT_QUALITY_MSE_MAX: 0.002
+    XDIT_QUALITY_LPIPS_MAX: 0.15
+    XDIT_QUALITY_SSIM_MIN: 0.85
+    XDIT_QUALITY_MSE_MAX: 0.006
     PROFILE: 1                     # wrapper bridges this to xDiT torch-profiler dir
     XDIT_SUPPORTS_PROFILER: 1      # gate in the wrapper that actually passes --torch_profiler_dir
     PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

@@ -1946,7 +1946,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             # failures, so the breakdown exporter can surface the raw crash.
             "stderr_tail": (
                 self._stderr_tail(result.get("error"))
-                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout"}
+                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout", "kv_cache_oom"}
                 else None
             ),
             "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
@@ -2004,7 +2004,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "error_class": error_class_str,
             "error_excerpt": self._truncate_excerpt(result.get("error")),
             "stderr_tail": (
-                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout"} else None
+                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout", "kv_cache_oom"} else None
             ),
             "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
             "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
@@ -2140,6 +2140,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
             return 0.0, 0.0
 
+    def _roofline_throughput_unit(self) -> str:
+        """Return the throughput unit for roofline snapshots of this workload.
+
+        Diffusion (xDiT) ceilings are images/sec; text-gen is tokens/sec. The
+        numeric ``*_tok_per_sec`` fields keep their names for wire stability;
+        this unit tells consumers how to render them.
+        """
+        framework = str(getattr(self, "framework", "") or "").strip().lower()
+        return "img/s" if framework == "xdit" else "tok/s"
+
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.
 
@@ -2184,6 +2194,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
             cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
             bound_kind=breakdown.bound_kind,
+            throughput_unit=self._roofline_throughput_unit(),
             framework=str(getattr(self, "framework", "") or ""),
         )
         # Mark provenance: this is the baseline-arm ceiling backup, not a
@@ -2437,6 +2448,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
                 cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
                 bound_kind=breakdown.bound_kind,
+                throughput_unit=self._roofline_throughput_unit(),
                 framework=fw,
                 e2e_mean_ms=e2e_mean_ms,
                 roofline_ideal_ms=roofline_ideal_ms,
