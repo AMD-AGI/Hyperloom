@@ -12,10 +12,10 @@ LLM-powered agents side-by-side on the same tasks in isolated workspaces and
 scores them with objective, reproducible metrics for compilation, correctness,
 and GPU performance.
 
-Within Hyperloom, AgentKernelArena provides the benchmarking harness used to
-compare Hyperloom's kernel-optimization agents against other AI coding agents
-under identical, reproducible conditions. It is also used to validate that
-kernel tasks are correct and self-contained before they enter the leaderboard.
+AgentKernelArena is not part of Hyperloom's default install or optimization
+loop. Use it as a companion evaluation arena when you want to compare
+Hyperloom's kernel-optimization agents against other AI coding agents under
+identical, reproducible conditions.
 
 - **Source**: <https://github.com/AMD-AGI/AgentKernelArena>
 - **License**: MIT
@@ -136,15 +136,12 @@ make docker-run CONFIG=config.yaml RUN_ARGS="--resume-latest"
 
 ## Role in Hyperloom
 
-AgentKernelArena is the evaluation harness used to compare Hyperloom's
+AgentKernelArena is a companion evaluation harness for comparing Hyperloom's
 kernel-optimization agents against other AI coding agents on standardized GPU
 kernel tasks. Its task categories (`hip2hip`, `triton2triton`, `flydsl2flydsl`,
-and others) overlap directly with the kernel types that Hyperloom's kernel agent
-handles through GEAK and Kernel-Forge.
-
-The task validator is also used to verify that kernels produced by Hyperloom
-optimization runs are correct and self-contained before they are published as
-benchmark tasks.
+and others) overlap with the kernel types that Hyperloom's kernel agent handles
+through GEAK and KernelForge, but Hyperloom does not clone or invoke
+AgentKernelArena in the normal runtime path.
 
 ## API reference
 
