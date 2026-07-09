@@ -495,7 +495,32 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 # FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
 DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+import os as _os_fw_ratio  # noqa: E402 — env override for #5-P2 cross-framework budget
+
+def _default_framework_force_exit_ratio() -> float:
+    """FRAMEWORK force-exit ratio; env-overridable via
+    ``INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO``.
+
+    Default 0.6 reserves the last 40% of budget for later phases. When the
+    FRAMEWORK cross-framework pipeline is the primary objective (#5-P2) and
+    earlier phases already consumed budget, lower this so FRAMEWORK can spend
+    the remaining wall-clock processing forced candidates instead of
+    force-exiting to SWEEP with a full pending queue.
+    """
+    raw = (_os_fw_ratio.environ.get(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", ""
+    ) or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if 0.0 <= v <= 1.0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return 0.6
+
+
+DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
 # FRAMEWORK per-candidate plateau: after this many consecutive *benchmarked*
 # candidate tests (status ``reverted``/``kept``) without a KEEP, the phase has
 # shown no leverage on the current batch and exits to EXPLORE. Non-benchmarked

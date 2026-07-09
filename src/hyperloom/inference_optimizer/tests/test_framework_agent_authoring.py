@@ -1017,6 +1017,56 @@ def test_discover_batch_does_not_tag_cross_repo_candidates_when_kill_switch_set(
     assert by_ref["PR:9"].get("framework") in (None, "")
 
 
+def test_discover_batch_overrides_misdefaulted_cross_repo_framework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design #5-P2 regression: fa phase-discover defaults a cross-repo candidate's
+    ``framework`` to the SESSION framework (e.g. a sgl-project PR surfaced under a
+    vllm session's pr_intel query comes back framework="vllm"). Filling blanks only
+    (the prior behaviour) left it mis-tagged and audited as same-framework, so the
+    sglang->vllm port never fired. The candidate's OWN repo must win and re-tag it
+    "sglang" so it routes to the cross-framework specialist."""
+    monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
+    sglang_url = _fa_client.repo_url_for_framework("sglang")
+    vllm_url = _fa_client.repo_url_for_framework("vllm")
+
+    async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
+        # A vllm session: fa returns a sgl-project PR under the vllm query with
+        # framework mis-defaulted to the session framework ("vllm").
+        return {
+            "batch_id": "b1",
+            "candidates": [
+                {
+                    "pr_url": "https://github.com/sgl-project/sglang/pull/29322",
+                    "repo": "https://github.com/sgl-project/sglang.git",
+                    "ref": "PR:29322",
+                    "framework": "vllm",
+                },
+                {
+                    "pr_url": "https://github.com/ROCm/vllm/pull/9",
+                    "repo": "https://github.com/ROCm/vllm.git",
+                    "ref": "PR:9",
+                    "framework": "vllm",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub.shared_state.framework = "vllm"
+    monkeypatch.setattr(stub, "_framework_agent_discover_repo_urls", lambda framework: [vllm_url])
+
+    ok = asyncio.run(Coordinator._discover_next_framework_batch(stub))  # type: ignore[arg-type]
+    assert ok
+    candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
+    by_ref = {c["ref"]: c for c in candidates}
+    # sgl-project PR re-tagged to its own origin framework -> cross-framework route.
+    assert by_ref["PR:29322"]["framework"] == "sglang"
+    # Genuine same-framework vllm candidate is left as vllm.
+    assert by_ref["PR:9"]["framework"] == "vllm"
+
+
 def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
