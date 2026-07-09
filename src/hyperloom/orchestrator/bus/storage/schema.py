@@ -270,6 +270,7 @@ def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
         if row is not None:
             return int(row[0])
     except sqlite3.OperationalError:
+        # Table/row may not exist yet; treat as no value.
         pass
     finally:
         cur.close()

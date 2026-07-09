@@ -1807,11 +1807,13 @@ def _probe_wal_size(session_dir: Path) -> dict[str, Any]:
         if wal_path.is_file():
             out["wal_bytes"] = int(wal_path.stat().st_size)
     except OSError:
+        # Stat failed; leave the size unset.
         pass
     try:
         if db_path.is_file():
             out["db_bytes"] = int(db_path.stat().st_size)
     except OSError:
+        # Stat failed; leave the size unset.
         pass
     return out
 
@@ -1919,11 +1921,13 @@ def _probe_agent_files(session_dir: Path) -> dict[str, Any]:
                 if inbox.is_file():
                     inbox_bytes = int(inbox.stat().st_size)
             except OSError:
+                # Stat failed; leave the size unset.
                 pass
             try:
                 if outbox.is_file():
                     outbox_bytes = int(outbox.stat().st_size)
             except OSError:
+                # Stat failed; leave the size unset.
                 pass
             if inbox_bytes or outbox_bytes:
                 out[role] = {
