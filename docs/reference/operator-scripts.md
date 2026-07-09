@@ -11,9 +11,9 @@ A short reference for the operator-facing scripts under
 they are utilities you run by hand against a finished or in-progress
 session directory.
 
-All scripts respect the `$USER_DATA_PATH` env (default
-`/workspace/hyperloom`) when no explicit `--session-dir` is given. See
-[Hyperloom authentication and credentials](authentication.md).
+When no explicit `--session-dir` is given, scripts resolve the active session
+from `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`, then `USER_DATA_PATH`, then the
+default `/workspace/hyperloom`. See [Hyperloom authentication and credentials](authentication.md).
 
 ---
 

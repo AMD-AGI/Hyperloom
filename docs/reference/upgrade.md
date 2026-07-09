@@ -7,7 +7,7 @@ myst:
 # Upgrade Hyperloom version
 
 Per-version migration steps. This page is a companion to
-[`CHANGELOG.md`](../CHANGELOG.md): the changelog answers *what
+[`CHANGELOG.md`](../../CHANGELOG.md): the changelog answers *what
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
@@ -193,7 +193,7 @@ Your local KB and historical sessions are preserved.
 
 Use these resources for related reference information:
 
-* [`CHANGELOG.md`](../CHANGELOG.md) — Full per-release notes.
+* [`CHANGELOG.md`](../../CHANGELOG.md) — Full per-release notes.
 * [Hyperloom authentication and credentials](authentication.md) — Credential and path env reference.
 * [Environment variables](environment-variables.md) — Every
   environment variable read by the runtime.

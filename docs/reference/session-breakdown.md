@@ -23,7 +23,7 @@ dashboards). One file per session, written to
 operator demand using [`dump_session_breakdown.py`](operator-scripts.md)).
 
 The authoritative source of truth for the wire shape is
-[`inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/breakdown/schema.py).
+[`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py).
 This page describes the contract from a consumer's perspective.
 
 ---
@@ -439,7 +439,7 @@ TypedDict shapes.)
   ```
 
 All three paths share the same builder
-(`inference_optimizer.breakdown.build`), so the output is identical
+(`hyperloom.inference_optimizer.breakdown.build`), so the output is identical
 regardless of producer.
 
 ---
@@ -467,4 +467,4 @@ Use the following resources for related reference information.
 
 * [Hyperloom operator scripts](operator-scripts.md) — How to produce a breakdown from a finished session directory.
 * [Hyperloom self-hosting and operations guide](operations.md) — Retention recommendations.
-* [`../inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/breakdown/schema.py) — TypedDict source of truth.
+* [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py) — TypedDict source of truth.

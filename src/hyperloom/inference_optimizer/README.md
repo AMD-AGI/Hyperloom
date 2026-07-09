@@ -15,16 +15,16 @@ installed by `pip install hyperloom-inference_optimizer`.
 * **[SKILL.md](SKILL.md)** — the agent-facing instructions: full
   optimization protocol, prompt templates, failure handling, and
   knowledge-base usage. Cursor and Claw load this on demand.
-* **[../README.md](../README.md)** — repository-level overview,
+* **[../../../README.md](../../../README.md)** — repository-level overview,
   hosted and local quickstart, results table, and migration notes.
-* **[../docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md](../docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)**
+* **[../../../docs/conceptual/optimization-loop.md](../../../docs/conceptual/optimization-loop.md)**
   — the conversational orchestration loop, phase chain, and KB-driven
   priors with a worked example.
-* **[../docs/ENV_AND_AUTH.md](../docs/ENV_AND_AUTH.md)** — credential
+* **[../../../docs/reference/authentication.md](../../../docs/reference/authentication.md)** — credential
   and environment configuration.
-* **[../docs/CONFIGURATION_REFERENCE.md](../docs/CONFIGURATION_REFERENCE.md)**
+* **[../../../docs/reference/environment-variables.md](../../../docs/reference/environment-variables.md)**
   — exhaustive list of every environment variable read by the runtime.
-* **[../docs/INTEGRATION_SESSION_BREAKDOWN.md](../docs/INTEGRATION_SESSION_BREAKDOWN.md)**
+* **[../../../docs/reference/session-breakdown.md](../../../docs/reference/session-breakdown.md)**
   — the `session_breakdown.json` contract for downstream consumers.
 
 ## Quick CLI

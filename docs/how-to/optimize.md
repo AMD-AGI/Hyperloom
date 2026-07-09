@@ -27,7 +27,7 @@ idempotent, the second run is fast and safe.
 ```
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model
@@ -74,7 +74,7 @@ happens in each phase.
 Paste this prompt into Cursor Chat to resume an existing session:
 
 ```text
-@inference_optimizer/SKILL.md
+@src/hyperloom/inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 
@@ -94,9 +94,13 @@ fields to read first are:
 
 | Field | What it tells you |
 |-------|-------------------|
-| `final.throughput_tok_s_per_gpu` | Validated end-of-session throughput — the headline number |
+| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM / Atom |
 | `final.cumulative_gain_pct_validated` | Validated gain over baseline |
 | `final.action_path` | Ordered list of changes that make up the final optimized stack |
+
+For scriptable diffusion workloads (`--framework xdit`), the headline metric is
+`final.e2el_mean_ms` (lower is better) and reports use `img/s` as the throughput
+unit.
 
 For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see

@@ -62,7 +62,7 @@ key. This key provides access to TraceLens, GEAK, and OOB services.
 
 | Resource | Hosted default |
 |----------|---------------|
-| GPUs per session | 1–8 × MI300X / MI325X / MI355X (single-node); 16+ via RayJob (multi-node) |
+| GPUs per session | 1–8 × MI300X / MI308X / MI325X / MI355X (single-node); 16+ via RayJob (multi-node) |
 | Concurrent sessions per account | 2 |
 | Session wall-clock | 24 hours (extensible on request) |
 | `USER_DATA_PATH` quota | 200 GB per session, with daily snapshots |

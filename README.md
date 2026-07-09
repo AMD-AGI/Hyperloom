@@ -21,19 +21,17 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 
 | | |
 |---|---|
-| **[Local Mode Quickstart (Cursor)](docs/QUICKSTART_LOCAL_MODE.md)** | Run Hyperloom in Docker on your own AMD GPU machine and drive it from Cursor |
-| **[Bare-Metal Quickstart (No Docker)](docs/QUICKSTART_BAREMETAL.md)** | Install Hyperloom directly on a ROCm host — no container |
-| **[Quantization (AMD Quark)](docs/QUANTIZATION_QUARK.md)** | Optional `--quantize` prelude: Quark checkout requirement and `QUARK_ROOT` resolution |
-| **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | DFS over a heuristic-scored action tree \[1\]; dynamic specialist construction per bottleneck; KB built from open-source PRs (sglang, aiter, triton) and session outcomes; Orchestrator / Domain Specialists / Critic architecture; convergent discovery across specialists |
-| **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
-| **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
-| **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
-| **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
-| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | Local recipe KB and optional Cortex KB setup |
-| **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
-| **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
-| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Gateway 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
-| **[Upgrading](docs/UPGRADING.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
+| **[Install Hyperloom](docs/install/hyperloom-installation.md)** | Set up Hyperloom locally or on bare metal |
+| **[Hosted UI Quickstart](docs/install/quickstart.md)** | Launch Hyperloom through the PrimusClaw UI |
+| **[Run an Optimization](docs/how-to/optimize.md)** | Step-by-step workload launch guide |
+| **[How the Optimization Loop Works](docs/conceptual/optimization-loop.md)** | DFS over a heuristic-scored action tree \[1\]; dynamic specialist construction per bottleneck; KB built from open-source PRs and session outcomes |
+| **[Authentication & Credentials](docs/reference/authentication.md)** | LLM gateway credentials, split entrypoints, Cursor key, and path env |
+| **[Environment Variables](docs/reference/environment-variables.md)** | Every environment variable read by the runtime |
+| **[Knowledge-Base Integration](docs/reference/integrate-kb.md)** | Local recipe KB and optional Cortex KB setup |
+| **[`session_breakdown.json` Integration](docs/reference/session-breakdown.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
+| **[Operations & Self-Host Runbook](docs/reference/operations.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
+| **[Troubleshooting](docs/reference/troubleshooting.md)** | Gateway 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
+| **[Upgrading](docs/reference/upgrade.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
 
 ---
 
@@ -47,25 +45,25 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 1. Go to **[crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
-   <p align="center"><img width="500" alt="Hyperloom Landing" src="slides/hyperloom_landing.png" /></p>
+   <p align="center"><img width="500" alt="Hyperloom Landing" src="docs/images/hyperloom_landing.png" /></p>
 3. Hyperloom (tab): End-to-end Model Performance Optimization
-   <p align="center"><img width="500" alt="Hyperloom PrimusClaw UI" src="slides/hyperloom_claw_v2.png" /></p>
+   <p align="center"><img width="500" alt="Hyperloom PrimusClaw UI" src="docs/images/hyperloom_claw_v2.png" /></p>
 4. TraceLens-only (tab): Model Performance/gap analysis and bridge planning
-   <p align="center"><img width="500" alt="TraceLens Config" src="slides/tracelens_quickstart.png" /></p>
+   <p align="center"><img width="500" alt="TraceLens Config" src="docs/images/tracelens_quickstart.png" /></p>
 5. GEAK-only: Kernel optimization
-   <p align="center"><img width="500" alt="GEAK Config" src="slides/geak_quickstart.png" /></p>
+   <p align="center"><img width="500" alt="GEAK Config" src="docs/images/geak_quickstart.png" /></p>
 
 ---
 
 ## Quickstart — Local Mode (Cursor)
 
-Local Mode runs Hyperloom in a Docker container on your AMD GPU machine. Cursor attaches to the container and launches optimization. See **[docs/QUICKSTART_LOCAL_MODE.md](docs/QUICKSTART_LOCAL_MODE.md)** for the full setup guide (own-GPU quickstart, optional Primus-SaFE path, and launch instructions).
+Local Mode runs Hyperloom in a Docker container on your AMD GPU machine. Cursor attaches to the container and launches optimization. See **[docs/install/hyperloom-installation.md](docs/install/hyperloom-installation.md)** for the full setup guide.
 
 ---
 
 ## Quickstart — Bare-Metal (No Docker)
 
-Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `src/hyperloom/inference_optimizer/assets/install_baremetal.sh`, then drive it from Cursor. See **[docs/QUICKSTART_BAREMETAL.md](docs/QUICKSTART_BAREMETAL.md)** for the full setup guide (prerequisites, credential setup, optional SGLang/vLLM install, and launch instructions).
+Bare-Metal mode installs Hyperloom directly on a host that already provides the ROCm base (ROCm runtime + ROCm-built torch), with the serving framework either preinstalled or installed by the script — no Docker required. Configure `.env`, run `src/hyperloom/inference_optimizer/assets/install_baremetal.sh`, then drive it from Cursor. See **[docs/install/hyperloom-installation.md](docs/install/hyperloom-installation.md)** for the setup guide.
 
 ---
 
@@ -93,7 +91,7 @@ PrimusClaw tier:
 
 | Resource                          | Hosted default                                                                 |
 |-----------------------------------|---------------------------------------------------------------------------------|
-| Per-session GPU budget            | 1–8 × MI300X / MI325X / MI355X for single-node runs (matches TP); 16+ GPUs via RayJob for multi-node (nodes ≥ 2) |
+| Per-session GPU budget            | 1–8 × MI300X / MI308X / MI325X / MI355X for single-node runs (matches TP); 16+ GPUs via RayJob for multi-node (nodes ≥ 2) |
 | Concurrent sessions per account   | 2                                                                               |
 | Session wall-clock                | 24 hours (extensible on request)                                                |
 | `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |
@@ -107,7 +105,7 @@ the [Hyperloom support form](https://crusoe.primus-safe.amd.com/hyperloom/)
 or open an issue if your organization needs a quote.
 
 For higher limits, dedicated capacity, or air-gapped deployment, self-host
-Hyperloom in your own cluster following [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Hyperloom in your own cluster following [`docs/reference/operations.md`](docs/reference/operations.md).
 Self-hosted Hyperloom is MIT licensed (see
 [Licensing](#licensing)); there is no per-seat or per-session fee.
 

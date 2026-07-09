@@ -8,8 +8,10 @@ myst:
 
 This is the single authoritative reference for credentials and
 environment configuration in Hyperloom. If any other document
-(`README.md`, `inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
-`robustness-agent/SKILL.md`) appears to contradict this page, this page wins. Open an issue against the contradicting file.
+(`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`,
+`src/hyperloom/agents/kernel/SKILL.md`,
+`src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
+page, this page wins. Open an issue against the contradicting file.
 
 Hyperloom needs at most three classes of configuration:
 
@@ -190,8 +192,9 @@ export GEAK_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 export OOB_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 ```
 
-Preflight preserves intentional operator overrides. It only force-rewrites
-URLs still pointing at the removed legacy local proxy (`127.0.0.1:4002`).
+Preflight preserves intentional operator overrides. If `GEAK_BASE_URL` or
+`OOB_BASE_URL` is set, Hyperloom treats it as deliberate and does not rewrite it;
+remove stale `127.0.0.1:4002` overrides by hand.
 
 ---
 
@@ -237,6 +240,7 @@ explicit path pointing at a missing directory fails preflight.
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, GEAK, and OOB. Writable `/opt` required unless overridden. |
+| `FORGE_PATH`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge`                | KernelForge checkout root for the `forge` backend. `local_setup.sh` also exports `KERNEL_FORGE_ROOT` with the same value. |
 | `OOB_SRC`                    | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge/OOB`           | OOB kernel-opt backends (claude / codex / cursor). Derived from the KernelForge checkout.                           |
 | `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis.        |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; pinned to a fixed SHA on auto-clone. |
@@ -263,8 +267,8 @@ At preflight, the inference optimizer CLI:
 - Resolves Anthropic and OpenAI base URLs.
 - Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
 - Fills unset alias env vars (`GEAK_*`, `OOB_*`, and so on).
-- Force-rewrites any leftover URL still pinned at `127.0.0.1:4002` to
-  the real upstream gateway (stale installs only).
+- Preserves explicit `GEAK_BASE_URL` / `OOB_BASE_URL` overrides, including stale
+  ones; clear any old `127.0.0.1:4002` env values before launch.
 
 **401 recovery:**
 
@@ -331,9 +335,10 @@ and all aliases pick up the new value on the next CLI launch.
 
 **Q: I still see `127.0.0.1:4002` in my env or Claude config.**
 
-That is a stale legacy proxy URL. Run any `inference_optimizer` CLI
-command (preflight rewrites it automatically), or delete the stale
-`customApiUrl` from `~/.claude/config.json` and re-run install.
+That is a stale legacy proxy URL. Delete stale `GEAK_BASE_URL` /
+`OOB_BASE_URL` / `OPENAI_BASE_URL` values from the shell or `.env`, then re-run
+install/preflight. If only `~/.claude/config.json` is stale, install/preflight
+rewrites `customApiUrl` to the resolved upstream gateway.
 
 ---
 

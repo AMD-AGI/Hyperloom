@@ -769,13 +769,13 @@ What this controls:
 - Which Magpie YAML the executors default to —
   `baseline_{sglang,vllm,atom}.yaml` and
   `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
-  `_default_profile_config()` in `action_executors/profile.py` picks
+  `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks
   the right file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
   (`_default_grid_for_framework("atom", ...)` in
-  `action_executors/explore.py`, populated by
+  `src/hyperloom/orchestrator/actions/executors/explore.py`, populated by
   `_atom_default_grid()`); sglang and vllm continue to rely on
   the orchestration LLM emitting `provenance='default_grid'`
   variants and will fail with `error_class="empty_grid"` on a

@@ -58,7 +58,7 @@ copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved
 version = version_number
 release = version_number
 
-external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
+external_toc_path = "./sphinx/_toc.yml.in"  # Defines Table of Content structure definition path
 
 """
 Doxygen Settings

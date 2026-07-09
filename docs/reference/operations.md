@@ -39,11 +39,11 @@ GEAK / out-of-box (OOB) workers. The Coordinator pod itself is small.
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
 | Kernel-agent + Ray head            | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
-| Ray worker (GEAK / OOB attempt)    | 8 cores   | 32 GiB    | 1 × MI300X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
-| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
+| Ray worker (GEAK / OOB attempt)    | 8 cores   | 32 GiB    | 1 × MI300X / MI308X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
+| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI308X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
 
-Minimum viable node: one AMD GPU (MI300X / MI325X / MI355X) with
+Minimum viable node: one AMD GPU (MI300X / MI308X / MI325X / MI355X) with
 ≥ 256 GiB system RAM, 32 cores, and 500 GB local fast disk for the
 session dir + GEAK build artifacts.
 
@@ -172,8 +172,9 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
 If `~/.claude/config.json` still points at `127.0.0.1:4002`, treat it as
-a stale pre-0.8 config. Re-run any `inference_optimizer` CLI command or the
-installer above so preflight rewrites it to the upstream gateway.
+a stale pre-0.8 config and re-run install/preflight. Also clear any stale
+`GEAK_BASE_URL` / `OOB_BASE_URL` / `OPENAI_BASE_URL` env overrides yourself;
+explicit endpoint overrides are preserved by design.
 
 ---
 
@@ -228,7 +229,8 @@ ingest it whole on session end.
 2. Re-run `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
 3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
-   gateway, not `127.0.0.1:4002`.
+   gateway, not `127.0.0.1:4002`. Clear stale `GEAK_BASE_URL`, `OOB_BASE_URL`,
+   or `OPENAI_BASE_URL` overrides that still point at the removed proxy.
 
 ### Scenario D: Local KB store corrupted
 

@@ -9,10 +9,10 @@ myst:
 A consolidated symptom → cause → fix index for the failures Hyperloom
 users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
-[`inference_optimizer/SKILL.md`](../inference_optimizer/SKILL.md),
-[`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
-[`critic-agent/SKILL.md`](../critic-agent/SKILL.md),
-[`robustness-agent/SKILL.md`](../robustness-agent/SKILL.md).
+[`inference_optimizer/SKILL.md`](../../src/hyperloom/inference_optimizer/SKILL.md),
+[`kernel/SKILL.md`](../../src/hyperloom/agents/kernel/SKILL.md),
+[`critic/SKILL.md`](../../src/hyperloom/agents/critic/SKILL.md),
+[`robustness/SKILL.md`](../../src/hyperloom/agents/robustness/SKILL.md).
 
 ---
 
@@ -44,9 +44,8 @@ upstream gateway — there is no local auth-proxy.
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`),
-   not `127.0.0.1:4002`. If it still shows the old proxy address, run
-   any `inference_optimizer` CLI command — preflight force-rewrites stale
-   legacy URLs automatically.
+   not `127.0.0.1:4002`. Also clear any stale `GEAK_BASE_URL` / `OOB_BASE_URL`
+   / `OPENAI_BASE_URL` env overrides that still point at the removed proxy.
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
 
@@ -421,4 +420,4 @@ If the steps above did not resolve your issue, use the following options to get 
   `session_breakdown.json` (or partial state.json) for the failed
   session, and the relevant log excerpt.
 * For security-relevant issues, follow the disclosure process in
-  [`SECURITY.md`](../SECURITY.md) instead.
+  [`SECURITY.md`](../../SECURITY.md) instead.

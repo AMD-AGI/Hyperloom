@@ -12,16 +12,15 @@ Choose the mode that fits your environment:
   GPU machine; Cursor attaches to the container and launches optimization. This
   is the recommended path. Follow the steps below.
 - **Bare-metal (no Docker)** — install directly on a ROCm host that already
-  provides the runtime. See the
-  [bare-metal quickstart](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/QUICKSTART_BAREMETAL.md)
-  in the repository.
+  provides the runtime. Use the same bootstrap and runtime install steps below,
+  or the bare-metal installer at `src/hyperloom/inference_optimizer/assets/install_baremetal.sh`.
 - **Hosted UI** — no local GPU required. See
   [Quickstart — hosted UI](quickstart.md) instead.
 
 ## Prerequisites
 
 - Docker.
-- An MI300X, MI325X, or MI355X machine with ROCm-compatible Docker
+- An MI300X, MI308X, MI325X, or MI355X machine with ROCm-compatible Docker
   access (see [Hyperloom compatibility matrix](../compatibility.md)).
 - Cursor, connected to that machine using Remote SSH or Dev Containers.
 - An API key from the [LLM Gateway](https://llm.amd.com/). This key provides

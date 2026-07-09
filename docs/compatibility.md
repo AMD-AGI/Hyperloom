@@ -22,12 +22,13 @@ These AMD Instinct GPUs are validated with Hyperloom:
 | GPU | Architecture | Status |
 |-----|--------------|--------|
 | AMD Instinct™ MI300X GPU | gfx942 | Supported |
+| AMD Instinct™ MI308X GPU | gfx942 | Supported |
 | AMD Instinct™ MI325X GPU | gfx942 | Supported |
 | AMD Instinct™ MI355X GPU | gfx950 | Supported |
 
 ```{note}
-MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom
-keeps the resolved GPU type distinct (`mi325x`), but Magpie benchmark
+MI308X and MI325X share the gfx942/CDNA3 runner family with MI300X. Hyperloom
+keeps the resolved GPU type distinct (`mi308x` / `mi325x`), but Magpie benchmark
 rendering reuses the MI300X runner scripts and image family unless a dedicated
 image is supplied.
 ```
@@ -68,6 +69,7 @@ These are the Hyperloom components:
 | TraceLens | <https://github.com/AMD-AGI/TraceLens> |
 | Magpie | <https://github.com/AMD-AGI/Magpie> |
 | IntelliKit | <https://github.com/AMDResearch/intellikit> |
+| KernelForge | <https://github.com/AMD-AGI/KernelForge> |
 | GEAK | <https://github.com/AMD-AGI/GEAK> |
 | AgentKernelArena |<https://github.com/AMD-AGI/AgentKernelArena> |
 | AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |
