@@ -55,7 +55,7 @@ correct env-wins semantics.
 
 ```bash
 export REPO_ROOT="$(pwd)"   # hyperloom repo root that owns .env (or `cd` there)
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
 # install.sh writes the pod-local env at $HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh
 # (= $USER_DATA_PATH/runtime/kernel-agent.env.sh by default).
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
@@ -117,8 +117,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   Anthropic URL derived from `$OPENAI_BASE_URL` with a trailing `/v1`
   stripped) + `~/.codex/auth.json`. The AMD primus-safe gateway accepts
   both `x-api-key` (what claude/codex CLIs send) and
-  `Authorization: Bearer` natively, so no local auth-proxy is in the
-  loop. The cursor backend talks to
+  `Authorization: Bearer` natively. The cursor backend talks to
   Cursor's own gateway via `@cursor/sdk` and requires `CURSOR_API_KEY`
   (separate Cursor account, prefix `crsr_...`).
 
@@ -131,7 +130,7 @@ Use `--check-only` to verify the current environment without installing,
 and `--dry-run` to print planned actions:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
 ### Step 2 — Start Ray with all visible GPUs
@@ -164,11 +163,6 @@ If a tool fails with HTTP 401 / `Primus.00009 token not present` /
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
-
-A stale `customApiUrl=http://127.0.0.1:4002/...` in
-`~/.claude/config.json` left over from a previous install can also
-trigger this — re-run `install.sh` to have `ensure_llm_auth_files`
-rewrite the file to the upstream URL.
 
 If a pod or venv was rebuilt and `ray --version` fails / Ray CLI rejects
 `--num-gpus`, repair the Ray/Click pair (Click >= 8.3 is incompatible

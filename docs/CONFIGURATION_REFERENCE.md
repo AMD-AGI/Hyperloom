@@ -55,14 +55,9 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 
 ## 3. LLM gateway credentials
 
-> The local auth-proxy has been removed. LLM calls now go directly to the
-> upstream gateway; any leftover `127.0.0.1:4002` URL is stale and is
-> force-rewritten to the gateway at preflight. `AUTH_PROXY_PORT` is no
-> longer read.
-
 | Variable           | Required | Default | Description                                                                                                  |
 |--------------------|----------|---------|--------------------------------------------------------------------------------------------------------------|
-| `OOB_API_KEY`      | no       | inherits `SAFE_API_KEY` | API key forwarded to OOB / Ray runtime (preflight, kernel-agent tools). Not tied to the removed auth-proxy. |
+| `OOB_API_KEY`      | no       | inherits `SAFE_API_KEY` | API key forwarded to OOB / Ray runtime (preflight, kernel-agent tools). |
 
 ---
 

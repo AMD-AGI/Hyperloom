@@ -20,9 +20,8 @@ upstream SKILL file for the component you're touching:
 * `OpenAI SDK: AuthenticationError`
 
 **Cause.** The `claude` / `codex` CLIs and sub-agents call the upstream
-gateway directly (the local auth-proxy was removed). A 401 means the
-resolved gateway credentials are missing/expired, or a stale legacy
-proxy URL (`127.0.0.1:4002`) is still pinned in the CLI config.
+gateway directly. A 401 means the resolved gateway credentials are
+missing or expired.
 
 **Fix.**
 
@@ -32,12 +31,9 @@ proxy URL (`127.0.0.1:4002`) is still pinned in the CLI config.
    ```bash
    bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
    ```
-3. Clear any stale `127.0.0.1:4002` endpoint from `~/.claude/config.json`
-   (preflight force-rewrites it to the gateway, but a read-only config
-   can pin the dead URL).
 
-See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §5 for direct gateway wiring
-and 401 recovery.
+See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §5 for gateway wiring and 401
+recovery.
 
 ---
 

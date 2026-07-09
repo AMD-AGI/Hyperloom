@@ -183,11 +183,9 @@ export GEAK_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 export OOB_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 ```
 
-Preflight **preserves** intentional operator overrides. It only
-force-rewrites URLs that still point at the removed legacy local proxy
-(`127.0.0.1:4002`). GEAK reads its endpoint from the generated litellm
-yaml (`$GEAK_CONFIG`); preflight syncs `base_url:` there when the
-resolved gateway changes.
+Preflight **preserves** intentional operator overrides. GEAK reads its
+endpoint from the generated litellm yaml (`$GEAK_CONFIG`); preflight
+syncs `base_url:` there when the resolved gateway changes.
 
 ---
 
@@ -248,20 +246,16 @@ path fails preflight (issue #722 guard).
 
 ---
 
-## 5. Direct upstream wiring (no local auth-proxy)
+## 5. Direct upstream wiring
 
-Older Hyperloom builds ran a local auth-proxy on `127.0.0.1:4002` to
-rewrite `x-api-key` into `Authorization: Bearer`. **That component has
-been removed.** Claude, Codex, and GEAK now talk to the upstream gateway
-directly. The AMD primus-safe gateway accepts both header styles natively.
+Claude, Codex, and GEAK talk to the upstream gateway directly. The AMD
+primus-safe gateway accepts both header styles natively.
 
 At preflight, `src/hyperloom/inference_optimizer/cli/__init__.py`:
 
 * Resolves Anthropic and OpenAI base URLs (§2).
 * Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
 * Fills unset alias env vars (`GEAK_*`, `OOB_*`, etc.).
-* Force-rewrites any leftover URL still pinned at `127.0.0.1:4002` to
-  the real upstream gateway (stale installs only).
 
 **401 recovery (current):**
 
@@ -270,7 +264,7 @@ At preflight, `src/hyperloom/inference_optimizer/cli/__init__.py`:
 2. Re-run preflight (any `inference_optimizer` CLI command) or
    `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
-   upstream gateway, not `127.0.0.1:4002`.
+   upstream gateway.
 
 The `cursor` backend always bypasses your LLM gateway (Cursor's own
 issuer). GEAK uses `GEAK_API_KEY` / `GEAK_BASE_URL` (or the generated
@@ -316,13 +310,6 @@ separate routable endpoint (#521).
 **Q: My organization rotates the LLM gateway key weekly. How?**
 Re-export the key(s) and re-run `install.sh` (idempotent). Preflight
 and all aliases pick up the new value on the next CLI launch.
-
-**Q: I still see `127.0.0.1:4002` in my env or Claude config.**
-That is a stale legacy proxy URL. Run any optimize CLI command (preflight
-rewrites it) or delete the stale `customApiUrl` from
-`~/.claude/config.json` and re-run install.
-
----
 
 ## 8. See also
 

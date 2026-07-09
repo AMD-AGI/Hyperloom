@@ -101,8 +101,8 @@ Notes:
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network
   storage (NFS, WekaFS) works but adds latency to the per-tick
   state.json reads.
-* LLM calls go directly to the upstream gateway (no local auth-proxy) —
-  no in-pod Service / NetworkPolicy required for LLM traffic.
+* LLM calls go directly to the upstream gateway — no in-pod Service /
+  NetworkPolicy required for LLM traffic.
 
 ### Lifecycle
 
@@ -144,10 +144,10 @@ find "$USER_DATA_PATH" -mindepth 2 -maxdepth 2 -type d -name '20??????T??????Z' 
 
 ## 4. LLM gateway credentials
 
-Hyperloom no longer runs a local auth-proxy. The `claude` / `codex`
-CLIs and sub-agents call the upstream gateway directly, authenticated
-by the resolved API keys (`SAFE_API_KEY` / `CURSOR_API_KEY` / provider
-keys). If those keys are missing or expired, LLM calls return HTTP 401.
+The `claude` / `codex` CLIs and sub-agents call the upstream gateway
+directly, authenticated by the resolved API keys (`SAFE_API_KEY` /
+`CURSOR_API_KEY` / provider keys). If those keys are missing or expired,
+LLM calls return HTTP 401.
 
 Recovery when calls start returning 401:
 
@@ -156,9 +156,6 @@ Recovery when calls start returning 401:
 2. Re-run preflight (any `inference_optimizer` CLI command) or
    `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`
    to refresh the resolved gateway aliases.
-3. Clear any stale legacy proxy URL (`127.0.0.1:4002`) left in
-   `~/.claude/config.json`; preflight force-rewrites it to the upstream
-   gateway, but a read-only config can pin the dead endpoint.
 
 ---
 
@@ -212,8 +209,7 @@ ingest it whole on session end.
    are present and valid in the pod.
 2. Re-run preflight or
    `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`
-   to refresh resolved gateway aliases; clear any stale
-   `127.0.0.1:4002` URL in `~/.claude/config.json`.
+   to refresh resolved gateway aliases.
 3. If 401s persist, rotate `SAFE_API_KEY` (rare — the key is
    long-lived) and re-run.
 
