@@ -449,6 +449,34 @@ def _perfskills_revalidation_decision(
     return "validated" if (cfg_ok and engaged) else "fallback"
 
 
+def _perfskills_sweep_measured_tput(res: dict[str, Any]) -> float | None:
+    """Extract a single measured throughput from a ``sweep_via_perfskills`` result.
+
+    Used by the GEAK-harness (2a) rebench to source the MEASURED headline
+    throughput (rather than GEAK's self-reported speedup). Prefers
+    ``best_for_each_conc`` (already the per-conc best), falling back to the first
+    succeeded ``sweep_grid`` entry. Returns ``None`` when no positive throughput
+    is present.
+    """
+    if not isinstance(res, dict):
+        return None
+    best = res.get("best_for_each_conc")
+    if isinstance(best, dict):
+        for entry in best.values():
+            if isinstance(entry, dict):
+                t = entry.get("output_throughput")
+                if isinstance(t, (int, float)) and t > 0:
+                    return float(t)
+    grid = res.get("sweep_grid")
+    if isinstance(grid, list):
+        for entry in grid:
+            if isinstance(entry, dict) and entry.get("status") == "succeeded":
+                t = entry.get("output_throughput")
+                if isinstance(t, (int, float)) and t > 0:
+                    return float(t)
+    return None
+
+
 def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
     """Extract a CLI flag's value from a server-args string.
 
@@ -538,6 +566,201 @@ def _resolve_serving_fidelity(
         out["mem_fraction"] = mem
 
     return out
+
+
+#: Launch flags that are RUN-/TOPOLOGY-specific (host, device set, model path,
+#: parallelism, ports, seeds) — the consuming harness sets these itself per
+#: launch, so they are stripped from the forwarded ``server_launch_flags``.
+#: Everything NOT listed here (engine knobs: mem-fraction, radix cache,
+#: chunked-prefill, cuda-graph, attention backend, quant, kv-cache dtype, …) is
+#: kept, so the sync is COMPLETE by construction (allow-nothing blacklist rather
+#: than a hand-picked whitelist that silently drops un-enumerated knobs).
+_RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
+    {
+        "--model-path",
+        "--tokenizer-path",
+        "--served-model-name",
+        "--host",
+        "--port",
+        "--nccl-port",
+        "--dist-init-addr",
+        "--base-gpu-id",
+        "--gpu-id-step",
+        "--node-rank",
+        "--nnodes",
+        "--tensor-parallel-size",
+        "--tp-size",
+        "--tp",
+        "--data-parallel-size",
+        "--dp-size",
+        "--pipeline-parallel-size",
+        "--pp-size",
+        "--random-seed",
+        "--download-dir",
+        "--pid",
+    }
+)
+
+#: Profiling-only launch flags: present on a roofline/profile server launch but
+#: NOT part of a clean throughput baseline. Stripped so a scraped argv never
+#: carries profiler instrumentation into the reproduced baseline.
+_PROFILING_LAUNCH_FLAGS: frozenset[str] = frozenset(
+    {
+        "--enable-profile-cuda-graph",
+        "--enable-shape-discovery-for-cuda-graph-profile",
+        "--enable-profile",
+        "--enable-torch-compile-debug-mode",
+        "--debug-cuda-graph",
+    }
+)
+
+#: Per-backend token that marks the START of the launch argv on a captured
+#: command line (``server.log`` header / ``set -x`` stderr echo). A new backend
+#: is one map entry; an unknown backend disables the scrape (no guess).
+_LAUNCH_ARGV_MARKERS: dict[str, str] = {
+    "sglang": "launch_server",
+    "vllm": "vllm",
+}
+
+
+def _split_launch_flags(argv_tail: str) -> str:
+    """Drop run/topology-specific + profiling-only flags from a launch argv tail.
+
+    Keeps every ENGINE knob (the whole point: no whitelist) and removes only the
+    per-run flags in :data:`_RUN_SPECIFIC_LAUNCH_FLAGS` and the profiler-only
+    flags in :data:`_PROFILING_LAUNCH_FLAGS`, handling both ``--flag value`` and
+    ``--flag=value`` forms plus valueless store-true flags.
+    """
+    try:
+        toks = shlex.split(argv_tail)
+    except ValueError:
+        toks = argv_tail.split()
+    kept: list[str] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        base = tok.split("=", 1)[0]
+        if base in _RUN_SPECIFIC_LAUNCH_FLAGS or base in _PROFILING_LAUNCH_FLAGS:
+            # ``--flag=value`` is one token; ``--flag value`` consumes the next
+            # token too (unless the next token is itself a flag => valueless).
+            if "=" not in tok and i + 1 < len(toks) and not toks[i + 1].startswith("-"):
+                i += 2
+            else:
+                i += 1
+            continue
+        kept.append(tok)
+        i += 1
+    return " ".join(kept)
+
+
+def _launch_argv_from_log(path: str, marker: str) -> str:
+    """Extract + normalize the engine launch argv from one benchmark log."""
+    import re as _re
+
+    pat = _re.compile(
+        r"(?:-m\s+\S*" + _re.escape(marker) + r"\S*|" + _re.escape(marker) + r")\b(.*)$"
+    )
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if marker not in line or "--model-path" not in line:
+                    continue
+                m = pat.search(line)
+                tail = (m.group(1) if m else "").strip()
+                if not tail:
+                    idx = line.find("--")
+                    tail = line[idx:].strip() if idx >= 0 else ""
+                flags = _split_launch_flags(tail)
+                if flags:
+                    return flags
+    except OSError:
+        return ""
+    return ""
+
+
+def _scrape_resolved_launch_flags(
+    session_dir: Any, backend: str, target_tput: float = 0.0
+) -> str:
+    """Recover the orchestrator's FULL resolved server-launch flags from logs.
+
+    The recipe YAML only carries the recipe-level ``EXTRA_*_ARGS`` delta; the
+    harness launch script (e.g. InferenceX ``sglang_mi300x.sh``) bakes in the
+    rest (``--mem-fraction-static``, ``--disable-radix-cache``,
+    ``--chunked-prefill-size`` …). The ONLY complete, authoritative record of
+    what the engine actually ran with is the launched argv, echoed into each
+    benchmark's ``server.log`` / ``benchmark_stderr.log``.
+
+    Selection is by THROUGHPUT, not recency: we find the benchmark whose measured
+    ``output_throughput`` equals ``target_tput`` (``current_best``'s number) and
+    scrape ITS sibling server log — i.e. replay the exact launch that produced
+    the throughput we are asking PerfSkills to reproduce. This is deterministic
+    and never mistakes a profiling/roofline or losing-candidate launch for the
+    baseline. Falls back to the most recent clean launch when no throughput
+    match exists (or ``target_tput<=0``).
+
+    Args:
+        session_dir: The run's session directory (root of ``runs/``).
+        backend: Serving backend ("sglang" | "vllm" | …).
+        target_tput: ``current_best`` throughput to match a benchmark by.
+
+    Returns:
+        The resolved engine-knob flag string (run-specific + profiling stripped),
+        or ``""`` when no argv is found (consumer keeps its adapter defaults).
+    """
+    marker = _LAUNCH_ARGV_MARKERS.get(str(backend or "").strip().lower())
+    if not marker:
+        return ""
+    try:
+        import glob as _glob
+
+        runs_root = Path(session_dir) / "runs"
+        # 1) Throughput-matched selection: find the benchmark dir whose
+        #    inferencex_result.json output_throughput == target_tput, scrape its
+        #    sibling server log. Deterministic reproduction of THE best launch.
+        if target_tput and target_tput > 0:
+            best_path, best_err = "", 1e9
+            for rp in _glob.glob(
+                str(runs_root / "**" / "inferencex_result.json"), recursive=True
+            ):
+                if "perfskills" in rp or "_baseline_source_overlay" in rp:
+                    continue
+                try:
+                    tp = float(
+                        (json.loads(Path(rp).read_text(encoding="utf-8")) or {}).get(
+                            "output_throughput"
+                        )
+                        or 0.0
+                    )
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if tp <= 0:
+                    continue
+                err = abs(tp - target_tput) / target_tput
+                if err < best_err:
+                    best_err, best_path = err, rp
+            if best_path and best_err <= 0.005:  # within 0.5% => same measurement
+                bench_dir = Path(best_path).parent
+                for name in ("server.log", "benchmark_stderr.log"):
+                    flags = _launch_argv_from_log(str(bench_dir / name), marker)
+                    if flags:
+                        return flags
+        # 2) Fallback: most recent clean (non-profiling) launch across the run.
+        candidates: list[tuple[float, str]] = []
+        for name in ("server.log", "benchmark_stderr.log"):
+            for p in _glob.glob(str(runs_root / "**" / name), recursive=True):
+                if "perfskills" in p or "_baseline_source_overlay" in p:
+                    continue
+                try:
+                    candidates.append((os.path.getmtime(p), p))
+                except OSError:
+                    continue
+        for _, path in sorted(candidates, reverse=True):
+            flags = _launch_argv_from_log(path, marker)
+            if flags:
+                return flags
+    except Exception:  # noqa: BLE001 — best-effort; absence => adapter default
+        return ""
+    return ""
 
 
 def _format_inbox_event(m: "Message") -> str:
@@ -1976,6 +2199,94 @@ class Coordinator:
             "optimization_stack": stack,
         }
 
+    def build_env_spec(self) -> dict[str, Any]:
+        """Fully-reproducible descriptor of ``current_best``'s launch environment.
+
+        Layers, in the order a consumer must apply them to reconstruct the exact
+        stack ``current_best`` was measured on:
+
+          * ``config``  — cumulative server args + env vars (the reversible layer).
+          * ``source_snapshots`` — ordered durable source-layer snapshots
+            (``scope=source_patch`` entries), each a self-contained directory
+            (see :mod:`source_snapshot`) that reconstructs the patched framework
+            tree independent of the mutable live checkout.
+          * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
+          * ``launch_recipe`` — the baseline Magpie recipe to launch from.
+
+        This is the single source of truth the PerfSkills handoff forwards so the
+        baseline ref is materialized from the SAME layers as ``current_best``
+        (not just its flags/env), closing the cross-harness baseline gap.
+        """
+        materialized = self._materialize_stack_config_for_resume()
+        stack = [
+            e
+            for e in (getattr(self.shared_state, "optimization_stack", []) or [])
+            if isinstance(e, dict)
+        ]
+        source_snapshots: list[dict[str, Any]] = []
+        for entry in stack:
+            if entry.get("scope") != "source_patch":
+                continue
+            snap = str(entry.get("source_snapshot") or "").strip()
+            if not snap:
+                # A source_patch with no durable snapshot (e.g. a pre-fix legacy
+                # KEEP) is surfaced so the consumer can flag an unreproducible
+                # baseline rather than silently launch a weaker stock tree.
+                source_snapshots.append(
+                    {
+                        "id": str(entry.get("variant_name") or entry.get("name") or ""),
+                        "snapshot_dir": "",
+                        "framework_root": str(entry.get("framework_root") or ""),
+                        "base_sha": str(entry.get("base_sha") or ""),
+                        "reproducible": False,
+                    }
+                )
+                continue
+            source_snapshots.append(
+                {
+                    "id": str(entry.get("variant_name") or entry.get("name") or ""),
+                    "snapshot_dir": snap,
+                    "framework_root": str(entry.get("framework_root") or ""),
+                    "base_sha": str(entry.get("base_sha") or ""),
+                    "reproducible": True,
+                }
+            )
+        # FULL resolved engine config (not just the current_best delta): the
+        # complete server-launch flag set the orchestrator actually ran, scraped
+        # from the authoritative launched argv. This is what closes the CONFIG
+        # layer of the cross-harness baseline gap — mem-fraction, radix cache,
+        # chunked-prefill and every other engine knob the recipe/delta never
+        # carried. ``extra_server_args``/``extra_envs`` remain the current_best
+        # DELTA (a consumer merges the delta on top, delta winning on conflict).
+        server_launch_flags = ""
+        try:
+            cb_now = getattr(self.shared_state, "current_best", None)
+            _target_tput = (
+                float((cb_now or {}).get("tput") or 0.0)
+                if isinstance(cb_now, Mapping)
+                else 0.0
+            )
+            server_launch_flags = _scrape_resolved_launch_flags(
+                getattr(self, "session_dir", ""),
+                str(os.environ.get("FRAMEWORK", "") or "sglang"),
+                target_tput=_target_tput,
+            )
+        except Exception:  # noqa: BLE001 — additive; never block env_spec
+            server_launch_flags = ""
+        return {
+            "schema_version": 1,
+            "config": {
+                "extra_server_args": materialized.get("extra_server_args") or "",
+                "extra_envs": dict(materialized.get("extra_envs") or {}),
+                # Authoritative, COMPLETE engine flags (run-specific stripped);
+                # empty => consumer keeps its own adapter defaults (prior behavior).
+                "server_launch_flags": server_launch_flags,
+            },
+            "source_snapshots": source_snapshots,
+            "overlay_pythonpath": materialized.get("final_overlay") or "",
+            "launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
+        }
+
     async def _resume_consistency_pass(self) -> dict[str, Any]:
         """One-shot resume audit + recovery for stack/current_best consistency.
 
@@ -2228,6 +2539,12 @@ class Coordinator:
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",
                 "scope": "source_patch",
+                # Same durable source-layer handles as the primary KEEP lift so a
+                # source_patch recovered on THIS path is equally reproducible in
+                # the PerfSkills baseline (no path is left snapshot-less).
+                "source_snapshot": result.get("source_snapshot") or "",
+                "framework_root": result.get("framework_root") or "",
+                "base_sha": result.get("base_sha") or "",
             }
         else:
             return False
@@ -2597,16 +2914,39 @@ class Coordinator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
-            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-            self.shared_state.cumulative_gain_provenance = "perfskills_same_harness_geak"
-            self.shared_state.resume_pending_revalidation = False
+            if self._perfskills_legacy_promote():
+                # Legacy: current_best/stack were written up front; stamp the
+                # same-harness validated watermark from GEAK's OWN headline speedup.
+                self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
+                self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                self.shared_state.cumulative_gain_provenance = "perfskills_same_harness_geak"
+                self.shared_state.resume_pending_revalidation = False
+                gain_out = (geak_sp - 1.0) * 100.0
+            else:
+                # Rebench-first: write the headline from the GEAK-harness MEASURED
+                # throughput (engages by construction via the launch-script replay),
+                # keeping the leaderboard number a same-harness total rather than a
+                # self-reported speedup.
+                measured = _perfskills_sweep_measured_tput(res)
+                if measured is None:
+                    log.warning(
+                        "perfskills 2a: succeeded sweep but no measurable throughput; "
+                        "candidate stays pending"
+                    )
+                    return {"validated": False, "status": res.get("status"), "reason": reason}
+                self._promote_perfskills_from_candidate(
+                    ps,
+                    measured_tput=measured,
+                    provenance="perfskills_same_harness_geak",
+                )
+                base = float(self.shared_state.baseline_tput or 0.0)
+                gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("perfskills 2a: SharedState.save failed")
-            return {"validated": True, "gain": (geak_sp - 1.0) * 100.0, "reason": reason}
+            return {"validated": True, "gain": gain_out, "reason": reason}
         log.warning(
             "perfskills 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
             res.get("status"), geak_sp, reason,
@@ -6759,7 +7099,11 @@ class Coordinator:
         )
 
         handoff = {
-            "schema_version": 1,
+            # v2 adds ``baseline_env_spec`` (the full layered env of current_best:
+            # config + durable source snapshots + overlay). Consumers that only
+            # understand v1 ignore the new key and degrade to the flags/env-only
+            # baseline (back-compatible).
+            "schema_version": 2,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
             "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
             "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
@@ -6808,6 +7152,14 @@ class Coordinator:
             handoff["bench_protocol"] = bench_protocol
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.
         handoff.update(_serving_fidelity)
+        # Full layered environment of current_best so PerfSkills materializes its
+        # baseline ref from the SAME config + source-patch snapshots + overlay
+        # (not just accepted_flags/accepted_env). This is what makes the ref ==
+        # orchestrator best (same-harness) instead of a stock-framework baseline.
+        try:
+            handoff["baseline_env_spec"] = self.build_env_spec()
+        except Exception:  # noqa: BLE001 — env_spec is additive; never block handoff
+            log.exception("perfskills: build_env_spec failed; handoff stays v1-compatible")
 
         out_dir = self.session_dir / "perfskills"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -6831,7 +7183,13 @@ class Coordinator:
             runner_timeout_s: int | None = None,
         ) -> None:
             state.perfskills_result = result
-            self._promote_perfskills_result(result)
+            if self._perfskills_legacy_promote():
+                self._promote_perfskills_result(result)
+            else:
+                # Rebench-first: record the recovered win as an UNVALIDATED
+                # candidate; the caller enqueues the main-flow rebench that will
+                # write the headline once it lands.
+                self._record_perfskills_candidate(result)
             self._record_perfskills_kernel_journey(result)
             evidence = {
                 "status": result.get("status"),
@@ -6884,6 +7242,13 @@ class Coordinator:
                 "(crash before handback); promoting recovered result."
             )
             _promote_recovered_result(recovered, recovered_from="existing_result_json")
+            if not self._perfskills_legacy_promote() and recovered.get("status") == "ok":
+                try:
+                    await self._enqueue_internal_stack_rebench(
+                        reason="perfskills_e2e_win_recovered"
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception("perfskills: enqueue rebench for recovered result failed")
             return
 
         try:
@@ -6974,6 +7339,18 @@ class Coordinator:
                     recovered_from="sigterm_flushed_result_json",
                     runner_timeout_s=runner_timeout,
                 )
+                # Rebench-first: enqueue the main-flow rebench. Under a budget cap
+                # it may not get to run, in which case the candidate honestly
+                # stays pending (never a self-reported headline).
+                if not self._perfskills_legacy_promote():
+                    try:
+                        await self._enqueue_internal_stack_rebench(
+                            reason="perfskills_e2e_win_sigterm_recovered"
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "perfskills: enqueue rebench for sigterm-recovered result failed"
+                        )
                 return
             _finish_skip({
                 "status": "error",
@@ -7004,13 +7381,44 @@ class Coordinator:
         result.setdefault("returncode", proc.returncode)
         state.perfskills_result = result
 
-        self._promote_perfskills_result(result)
+        # Invariant guard: PerfSkills self-reports when its baseline ref failed to
+        # reproduce ``orchestrator_best_tput_same_config`` (env_spec materialization
+        # mismatch). Such a run optimized against a PHANTOM baseline, so any gain is
+        # non-comparable — never promote it; wind down honestly. This replaces the
+        # old after-the-fact cross-harness rollback with a hard, upstream gate.
+        if str(result.get("status") or "") == "baseline_reproduction_failed":
+            log.warning(
+                "PerfSkills baseline_reproduction_failed: ref did not match "
+                "orchestrator best (%s); refusing to promote a phantom-baseline gain",
+                result.get("error"),
+            )
+            _finish_skip({
+                "status": "baseline_reproduction_failed",
+                "error_class": "baseline_reproduction_failed",
+                "error": (str(result.get("error") or "")[:500] or
+                          "PerfSkills baseline ref != orchestrator best (env_spec mismatch)"),
+                "ref_tput": result.get("ref_tput"),
+                "orchestrator_best_tput_same_config": result.get(
+                    "orchestrator_best_tput_same_config"
+                ),
+            })
+            return
+
+        if self._perfskills_legacy_promote():
+            # Legacy escape hatch: promote the self-reported value up front, then
+            # remediate with a 2a/2b revalidation.
+            self._promote_perfskills_result(result)
+        else:
+            # Rebench-first (default): record the win as an UNVALIDATED candidate
+            # only; the headline is written later from the measured rebench.
+            self._record_perfskills_candidate(result)
         self._record_perfskills_kernel_journey(result)
-        # 修改点7 — the promote above records a PROVISIONAL cross-harness gain and
-        # sets resume_pending_revalidation; enqueue the same-harness config-identity
-        # rebench (2b, GEAK-harness 2a fallback) that turns it into a validated
-        # gain. Best-effort: a failure to enqueue leaves the provisional gain +
-        # pending flag, which reports surface honestly (never a false validated).
+        # Enqueue the same-harness config-identity rebench (2b, GEAK-harness 2a
+        # fallback). Rebench-first: this is the ONLY path that writes the headline
+        # (via _promote_to_shared_state / _validate_perfskills_via_geak_harness);
+        # until it lands the candidate stays out of current_best / the gain ledger.
+        # Best-effort: a failure to enqueue leaves the candidate pending, which
+        # reports surface honestly (never a false validated).
         if str(result.get("status") or "") == "ok":
             try:
                 await self._enqueue_internal_stack_rebench(reason="perfskills_e2e_win")
@@ -7054,6 +7462,198 @@ class Coordinator:
             isinstance(item, dict) and item.get("action") == "perfskills_e2e"
             for item in (self.shared_state.optimization_stack or [])
         )
+
+    def _perfskills_legacy_promote(self) -> bool:
+        """Whether to keep the LEGACY "promote self-reported value, revalidate
+        later" PerfSkills flow (escape hatch).
+
+        Default OFF: PerfSkills now aligns with explore/forge — the main-flow
+        rebench measures first and only a validated measurement writes the
+        headline (current_best / optimization_stack / cumulative_gain*). Set
+        ``INFERENCE_OPTIMIZER_PERFSKILLS_LEGACY_PROMOTE=1`` to restore the old
+        provisional-first behaviour.
+        """
+        return str(
+            os.environ.get("INFERENCE_OPTIMIZER_PERFSKILLS_LEGACY_PROMOTE", "").strip()
+        ).lower() in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def _parse_perfskills_accepted_config(
+        result: dict[str, Any],
+    ) -> tuple[str, dict[str, str]]:
+        """Parse ``result.accepted_config`` into (flags, env dict).
+
+        Single source of truth for turning the bench-style ``{"flags":..,
+        "env":..}`` blob into a reproducible (server-args, real-env) pair — used
+        by both the candidate record and the rebench-validated promote so they
+        never diverge. Any ``KEY=VAL`` token in ``env`` becomes a real env var;
+        any ``--flag`` token folds into flags (see ``_split_env_and_flags``).
+        """
+        accepted_cfg = result.get("accepted_config") or {}
+        accepted_flags = str(accepted_cfg.get("flags") or "").strip()
+        parsed_envs, extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
+        if extra_flags:
+            accepted_flags = (accepted_flags + " " + extra_flags).strip()
+        return accepted_flags, parsed_envs
+
+    def _record_perfskills_candidate(self, result: dict[str, Any]) -> None:
+        """Record a PerfSkills e2e win as an UNVALIDATED candidate (no headline).
+
+        The rebench-first flow's counterpart to the legacy
+        ``_promote_perfskills_result``: it stores the accepted config + the
+        optimizer's OWN (audit-only) throughput/speedup under
+        ``perfskills_pending`` but deliberately does NOT touch ``current_best`` /
+        ``optimization_stack`` / ``cumulative_gain*``. The headline is written
+        only later, from a measured main-flow rebench, by
+        ``_promote_perfskills_from_candidate`` (mirrors forge's "no integrate →
+        not in optimization_stack"). The candidate config is the single source
+        the rebench (2b/2a) launches from — so it must be captured verbatim.
+        """
+        if not isinstance(result, dict) or result.get("status") not in ("ok",):
+            return
+        new_tput = float(result.get("final_throughput_tok_s") or 0.0)
+        if new_tput <= 0:
+            return
+        accepted_flags, parsed_envs = self._parse_perfskills_accepted_config(result)
+        base = float(self.shared_state.baseline_tput or 0.0)
+        self_gain = ((new_tput - base) / base * 100.0) if base > 0 else None
+        am = result.get("alignment_metrics") or {}
+        self.shared_state.perfskills_pending = {
+            "status": "awaiting_rebench",
+            # Audit-only self-reported numbers (NEVER the headline until rebench).
+            "self_reported_tput": new_tput,
+            "self_reported_speedup": result.get("throughput_speedup"),
+            "self_reported_gain_pct": self_gain,
+            "self_reported_basis": result.get("final_throughput_basis"),
+            # Reproducible config the rebench launches from.
+            "accepted_flags": accepted_flags,
+            "accepted_envs": dict(parsed_envs),
+            "final_overlay": result.get("final_overlay") or "",
+            "final_launch_script": result.get("final_launch_script"),
+            "bench_script": result.get("bench_script"),
+            "eval_dir": result.get("eval_dir"),
+            # GEAK's own within-harness speedups, for the report's audit cross-check.
+            "alignment": {
+                "hot_geak_speedup": am.get("hot_geak_speedup"),
+                "cold_geak_speedup": am.get("cold_geak_speedup"),
+                "hot_speedup": am.get("hot_speedup"),
+                "cold_speedup": am.get("cold_speedup"),
+                "final_basis": am.get("final_basis") or result.get("final_throughput_basis"),
+                "geak_throughput_speedup": result.get("throughput_speedup"),
+            },
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        # Surface a large cross-harness measurement divergence as a warning only
+        # (reporting/audit); it never gates scheduling and no gain is written here.
+        bb = result.get("baseline_basis") or {}
+        mdiv = bb.get("measurement_divergence_pct")
+        try:
+            mdiv_f = abs(float(mdiv)) if mdiv is not None else None
+        except (TypeError, ValueError):
+            mdiv_f = None
+        if mdiv_f is not None and mdiv_f > _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT:
+            log.warning(
+                "perfskills candidate: large cross-harness measurement divergence "
+                "%.2f%% (|.|>%.1f%%) — candidate held out of headline until a "
+                "main-flow rebench validates it",
+                float(mdiv), _PERFSKILLS_MEASUREMENT_DIVERGENCE_WARN_PCT,
+            )
+
+    def _promote_perfskills_from_candidate(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        provenance: str,
+    ) -> None:
+        """Write the PerfSkills headline from a MEASURED main-flow rebench.
+
+        The single headline writer in the rebench-first flow. Given the accepted
+        config from ``result`` (the PerfSkills result.json) and a throughput
+        ``measured_tput`` produced by the orchestrator (2b) or GEAK (2a) harness,
+        it lifts ``current_best`` (config/overlay/scripts + the MEASURED tput),
+        appends the ``perfskills_e2e`` optimization_stack entry + gain ledger,
+        and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` as a
+        same-harness total ``(measured − baseline)/baseline`` — EXACTLY the
+        explore/integrate convention (never a cross-harness or self-reported
+        number). Clears ``perfskills_pending`` and the revalidation flag.
+        """
+        if not isinstance(result, dict):
+            return
+        try:
+            measured = float(measured_tput)
+        except (TypeError, ValueError):
+            return
+        if measured <= 0:
+            return
+        accepted_flags, parsed_envs = self._parse_perfskills_accepted_config(result)
+
+        cb = dict(self.shared_state.current_best or {})
+        cb_envs = dict(cb.get("extra_envs") or {}) if isinstance(cb.get("extra_envs"), Mapping) else {}
+        cb_envs.update(parsed_envs)
+        cb.update({
+            "action": "perfskills_e2e",
+            "tput": measured,
+            "ttft_mean_ms": result.get("ttft_ms"),
+            "tpot_mean_ms": result.get("tpot_ms"),
+            "extra_server_args": accepted_flags,
+            "extra_envs": cb_envs,
+            "perfskills_launch_script": result.get("final_launch_script"),
+            "perfskills_bench_script": result.get("bench_script"),
+            "perfskills_eval_dir": result.get("eval_dir"),
+            "final_overlay": result.get("final_overlay") or "",
+            "workspace": result.get("eval_dir"),
+        })
+        # Audit cross-check: GEAK's OWN within-harness speedups next to the
+        # measured headline (never fed into the leaderboard number).
+        am = result.get("alignment_metrics") or {}
+        cb["perfskills_alignment"] = {
+            "hot_geak_speedup": am.get("hot_geak_speedup"),
+            "cold_geak_speedup": am.get("cold_geak_speedup"),
+            "hot_speedup": am.get("hot_speedup"),
+            "cold_speedup": am.get("cold_speedup"),
+            "final_basis": am.get("final_basis") or result.get("final_throughput_basis"),
+            "geak_throughput_speedup": result.get("throughput_speedup"),
+        }
+        self.shared_state.current_best = cb
+
+        ts = datetime.now(timezone.utc).isoformat()
+        if not self._perfskills_win_already_recorded():
+            entry = {
+                "action": "perfskills_e2e",
+                "variant_name": "perfskills_e2e",
+                "tput": measured,
+                "candidate_extra_server_args": accepted_flags,
+                "extra_envs": dict(parsed_envs),
+                "final_overlay": result.get("final_overlay") or "",
+                "workspace": result.get("eval_dir"),
+                "accepted_kernels": result.get("accepted_kernels") or [],
+                "accepted_heads": result.get("accepted_heads") or [],
+                "report_path": result.get("report_path"),
+                "source": "perfskills_e2e",
+                "ts": ts,
+            }
+            self.shared_state.optimization_stack.append(entry)
+            self.shared_state.append_stack_gain_entry(
+                action="perfskills_e2e",
+                variant_name="perfskills_e2e",
+                new_tput=measured,
+                extra_server_args=accepted_flags,
+                ts=ts,
+            )
+
+        base = float(self.shared_state.baseline_tput or 0.0)
+        if base > 0:
+            gain = (measured - base) / base * 100.0
+            self.shared_state.cumulative_gain = gain
+            self.shared_state.cumulative_gain_validated = gain
+            self.shared_state.cumulative_gain_validated_ts = ts
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack
+            )
+        self.shared_state.cumulative_gain_provenance = provenance
+        self.shared_state.resume_pending_revalidation = False
+        self.shared_state.perfskills_pending = {}
 
     def _promote_perfskills_result(self, result: dict[str, Any]) -> None:
         """Fold a PerfSkills e2e win into current_best + the validated gain ledger.
@@ -15970,15 +16570,36 @@ class Coordinator:
                         min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
                     if decision == "validated":
-                        self.shared_state.cumulative_gain_validated = (
-                            (float(measured) - self.shared_state.baseline_tput)
-                            / self.shared_state.baseline_tput
-                            * 100.0
-                        )
-                        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                        self.shared_state.cumulative_gain_provenance = "perfskills_orch_harness_validated"
-                        self.shared_state.resume_pending_revalidation = False
+                        if self._perfskills_legacy_promote():
+                            # Legacy: current_best/stack were written up front by
+                            # the provisional promote; here we only stamp the
+                            # same-harness validated watermark.
+                            self.shared_state.cumulative_gain_validated = (
+                                (float(measured) - self.shared_state.baseline_tput)
+                                / self.shared_state.baseline_tput
+                                * 100.0
+                            )
+                            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                            self.shared_state.cumulative_gain_provenance = "perfskills_orch_harness_validated"
+                            self.shared_state.resume_pending_revalidation = False
+                        else:
+                            # Rebench-first: THIS is where the headline is first
+                            # written — from the measured orchestrator-harness
+                            # rebench. Lifts current_best + optimization_stack +
+                            # the validated gain and clears perfskills_pending.
+                            ps = (
+                                self.shared_state.perfskills_result
+                                if isinstance(
+                                    getattr(self.shared_state, "perfskills_result", None), dict
+                                )
+                                else {}
+                            )
+                            self._promote_perfskills_from_candidate(
+                                ps,
+                                measured_tput=float(measured),
+                                provenance="perfskills_orch_harness_validated",
+                            )
                     else:
                         # 2b inconclusive (config-identity or engagement) → GEAK
                         # harness replay (2a). Leaves pending flag set; 2a clears
@@ -16110,6 +16731,12 @@ class Coordinator:
                     "workspace": result.get("workspace"),
                     "provenance": "integrate_patch",
                     "scope": "source_patch",
+                    # Durable source-layer handles so current_best stays
+                    # relaunchable (and reproducible in the PerfSkills baseline)
+                    # regardless of later git hygiene on the shared live tree.
+                    "source_snapshot": result.get("source_snapshot") or "",
+                    "framework_root": result.get("framework_root") or "",
+                    "base_sha": result.get("base_sha") or "",
                 }
                 self._lift_to_current_best("integrate_patch", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:

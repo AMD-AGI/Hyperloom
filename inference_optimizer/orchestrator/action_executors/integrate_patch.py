@@ -1987,6 +1987,52 @@ class IntegratePatchExecutor:
                     )
         except Exception:  # noqa: BLE001 — commit durability is best-effort
             log.exception("integrate_patch: commit-on-KEEP raised")
+        # Durability: snapshot the KEEP's realized source layer into a
+        # session-scoped, self-contained directory so a later candidate's
+        # ``git reset``/``clean``/``stash pop`` on the shared live tree cannot
+        # wipe it (the root cause of current_best becoming unrelaunchable and
+        # the PerfSkills baseline falling back to the stock framework). Generic:
+        # keyed on the touched patch targets + applied artifacts, never on a
+        # specific file. Best-effort — a snapshot failure never blocks the KEEP.
+        source_snapshot_dir = ""
+        source_base_sha = ""
+        try:
+            from ..source_snapshot import snapshot_source_layer
+
+            if framework_root is not None:
+                # HEAD is the clean base: KEEP edits are uncommitted (non-cyclic)
+                # so HEAD == pre-apply sha; in cyclic mode HEAD already includes
+                # them and the overlay is idempotent on re-checkout. Either way
+                # this is the base the snapshot files overlay onto.
+                _cp = _run_git_cp(
+                    ["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0
+                )
+                if _cp is not None and getattr(_cp, "returncode", 1) == 0:
+                    source_base_sha = (_cp.stdout or "").strip()
+                rel_paths = list(_patch_touched_paths(framework_root, applied))
+                rel_paths += [
+                    str(a.get("rel_target") or "")
+                    for a in (applied_artifacts or [])
+                    if isinstance(a, dict)
+                ]
+                dest = (
+                    self.session_dir
+                    / "optimization_stack"
+                    / "src"
+                    / (specialist_task_id or str(getattr(ctx.task, "task_id", "") or "keep"))
+                )
+                snap = snapshot_source_layer(
+                    framework_root=framework_root,
+                    base_sha=source_base_sha,
+                    rel_paths=rel_paths,
+                    dest_dir=dest,
+                    provenance="integrate_patch",
+                    extra={"specialist_task_id": specialist_task_id},
+                )
+                if snap:
+                    source_snapshot_dir = str(snap.get("snapshot_dir") or "")
+        except Exception:  # noqa: BLE001 — snapshot is best-effort durability
+            log.exception("integrate_patch: source-layer snapshot failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -2002,6 +2048,11 @@ class IntegratePatchExecutor:
             "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            # Durable source-layer snapshot handles (consumed by the coordinator
+            # lift -> optimization_stack entry -> env_spec -> handoff).
+            "source_snapshot": source_snapshot_dir,
+            "framework_root": str(framework_root or ""),
+            "base_sha": source_base_sha,
         })
 
     # Helpers

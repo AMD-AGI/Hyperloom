@@ -1402,6 +1402,16 @@ def collect_final(
         # native/legacy sessions (renders as validated, unchanged).
         "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),
         "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
+        # A PerfSkills(GEAK) e2e candidate whose self-reported win has NOT yet
+        # been confirmed by a main-flow rebench. Present => the renderer surfaces
+        # it as an audit-only note and EXCLUDES it from the headline gain (the
+        # candidate is intentionally absent from current_best / action_path until
+        # a measured rebench validates it). Empty on native/validated sessions.
+        "perfskills_pending": (
+            dict(state.get("perfskills_pending") or {})
+            if isinstance(state.get("perfskills_pending"), dict)
+            else {}
+        ),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation": stack_len > val_stack_len > 0,

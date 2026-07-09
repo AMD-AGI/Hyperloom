@@ -189,15 +189,21 @@ def test_promote_falls_back_to_final_when_alignment_absent(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_geak_harness_fallback_uses_promoted_basis_speedup(
+async def test_geak_harness_fallback_writes_measured_headline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """2a validated gain == GEAK's headline (throughput_speedup), not hot A/B."""
-    coord = _coord(tmp_path, baseline=2844.209, best_tput=3236.489)
+    """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED
+    throughput (not a self-reported speedup), and it lifts current_best +
+    optimization_stack the same way the orchestrator (2b) path does."""
+    base = 2844.209
+    measured = base * 1.088  # what the GEAK-harness replay actually measured
+    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
     coord.shared_state.perfskills_result = {
         "status": "ok",
-        "throughput_speedup": 1.088,        # GEAK headline (cold basis)
+        "throughput_speedup": 1.088,
         "final_throughput_basis": "cold",
+        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=0"},
+        "final_overlay": "",
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
         "alignment_metrics": {
             "hot_geak_speedup": 1.1329,     # the INFLATED number we must NOT use
@@ -207,7 +213,8 @@ async def test_geak_harness_fallback_uses_promoted_basis_speedup(
     }
 
     async def _fake_sweep(**_kwargs):
-        return {"status": "succeeded"}
+        # bench-e2e replay measured this throughput at the validated regime.
+        return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
 
     monkeypatch.setattr(
         "inference_optimizer.orchestrator.action_executors._perfskills_sweep.sweep_via_perfskills",
@@ -218,11 +225,17 @@ async def test_geak_harness_fallback_uses_promoted_basis_speedup(
 
     assert out["validated"] is True
     ss = coord.shared_state
-    # Validated == GEAK's own headline (+8.8%), NOT the hot A/B (+13.29%).
-    assert ss.cumulative_gain_validated == pytest.approx(8.8, abs=0.05)
+    expected_pct = (measured - base) / base * 100.0
+    # Validated == the MEASURED same-harness total (≈+8.8%), NOT the hot A/B (+13.29%).
+    assert ss.cumulative_gain_validated == pytest.approx(expected_pct, abs=1e-6)
     assert ss.cumulative_gain_validated != pytest.approx(13.29, abs=0.05)
     assert ss.cumulative_gain_provenance == "perfskills_same_harness_geak"
     assert ss.resume_pending_revalidation is False
+    # Rebench-first writes the headline HERE: current_best.tput == measured, and
+    # the perfskills_e2e stack entry now exists.
+    assert ss.current_best["tput"] == pytest.approx(measured)
+    assert any(e.get("action") == "perfskills_e2e" for e in ss.optimization_stack)
+    assert not ss.perfskills_pending  # candidate cleared on promote
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
@@ -357,3 +370,97 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     assert called["n"] == 1
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert ss.cumulative_gain_provenance != "perfskills_orch_harness_validated"
+
+
+# ── Rebench-first: candidate recorded, headline deferred to measured rebench ──
+
+
+def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:
+    return {
+        "status": "ok",
+        "final_throughput_tok_s": final,
+        "final_throughput_basis": "cold",
+        "throughput_speedup": 1.088,
+        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=0"},
+        "final_overlay": "",
+        "final_launch_script": "/x/launch.sh",
+        "bench_script": "/x/bench.sh",
+        "eval_dir": "/x/eval",
+        "alignment_metrics": {"cold_geak_speedup": 1.088, "final_basis": "cold"},
+    }
+
+
+def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
+    """`_record_perfskills_candidate` stores an audit-only pending candidate and
+    leaves current_best / optimization_stack / the gain ledger untouched."""
+    base = 2844.209
+    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
+    before_best = dict(coord.shared_state.current_best)
+    coord._record_perfskills_candidate(_ok_result(final=3236.489))
+
+    ss = coord.shared_state
+    # Headline is UNCHANGED — no premature promote.
+    assert ss.current_best == before_best
+    assert ss.cumulative_gain == pytest.approx(0.0)
+    assert ss.cumulative_gain_validated == pytest.approx(0.0)
+    assert not any(e.get("action") == "perfskills_e2e" for e in ss.optimization_stack)
+    # The candidate is recorded as pending with audit-only self-reported numbers.
+    pend = ss.perfskills_pending
+    assert pend.get("status") == "awaiting_rebench"
+    assert pend.get("self_reported_tput") == pytest.approx(3236.489)
+    assert pend.get("self_reported_gain_pct") == pytest.approx((3236.489 - base) / base * 100.0)
+    assert pend.get("accepted_flags") == "--max-num-batched-tokens 24576"
+    assert pend.get("accepted_envs") == {"VLLM_ROCM_USE_AITER": "0"}
+
+
+def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None:
+    """`_promote_perfskills_from_candidate` lifts the headline from a MEASURED
+    tput (never the self-reported number) and clears the pending candidate."""
+    base = 2844.209
+    measured = 3270.0
+    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
+    result = _ok_result(final=3236.489)  # self-reported win
+    coord.shared_state.perfskills_result = result
+    coord._record_perfskills_candidate(result)
+    assert coord.shared_state.perfskills_pending.get("status") == "awaiting_rebench"
+    coord._promote_perfskills_from_candidate(
+        result,
+        measured_tput=measured,
+        provenance="perfskills_orch_harness_validated",
+    )
+    ss = coord.shared_state
+    expected_pct = (measured - base) / base * 100.0
+    # Headline uses the MEASURED tput, not the self-reported 3236.489.
+    assert ss.current_best["tput"] == pytest.approx(measured)
+    assert ss.current_best["extra_server_args"] == "--max-num-batched-tokens 24576"
+    assert ss.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER") == "0"
+    assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
+    assert ss.cumulative_gain == pytest.approx(expected_pct)
+    assert ss.cumulative_gain_provenance == "perfskills_orch_harness_validated"
+    assert ss.resume_pending_revalidation is False
+    assert any(e.get("action") == "perfskills_e2e" for e in ss.optimization_stack)
+    assert not ss.perfskills_pending
+
+
+def test_report_shows_pending_candidate_excluded_from_headline() -> None:
+    """A pending PerfSkills candidate renders as an audit note + warning and is
+    NOT presented as a validated headline gain."""
+    bd = {
+        "session": {"image": ""},
+        "baseline": {"throughput_tok_s_per_gpu": 2844.2},
+        "final": {
+            "throughput_tok_s_per_gpu": 2844.2,
+            "cumulative_gain_pct_validated": 0.0,
+            "cumulative_gain_pct_per_round_sum": 0.0,
+            "cumulative_gain_provenance": "",
+            "revalidation_pending": False,
+            "action_path": [],
+            "perfskills_pending": {"status": "awaiting_rebench", "self_reported_gain_pct": 13.79},
+        },
+    }
+    sec = render_final(bd)
+    facts = " ".join(sec.key_facts)
+    warns = " ".join(sec.warnings)
+    assert "AWAITING" in facts and "13.79" in facts or "13.8" in facts
+    assert "Validated cumulative gain" not in facts
+    assert "audit-only" in warns and "not been" in warns.lower() or "NOT" in warns

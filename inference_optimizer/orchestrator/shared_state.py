@@ -551,6 +551,13 @@ class SharedState:
     # entries need a fresh post-resume stack rebench.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     resume_pending_revalidation: bool = False
+    # A PerfSkills(GEAK) e2e candidate that has landed a self-reported win but is
+    # NOT yet confirmed by a main-flow (orchestrator / GEAK-harness) rebench. It
+    # carries the accepted config + the optimizer's OWN (audit-only) numbers, but
+    # is deliberately KEPT OUT of current_best / optimization_stack / the headline
+    # gain until the rebench validates it (mirrors forge's "no integrate → not in
+    # optimization_stack"). Cleared once promoted from a measured rebench.
+    perfskills_pending: dict[str, Any] = field(default_factory=dict)
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""
@@ -3321,6 +3328,12 @@ class SharedState:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
+        perfskills_pending_tag = (
+            " ⚠ perfskills candidate awaiting main-flow rebench — NOT in headline until validated"
+            if isinstance(getattr(self, "perfskills_pending", None), dict)
+            and self.perfskills_pending.get("status") == "awaiting_rebench"
+            else ""
+        )
         from .. import framework_registry
 
         lines = [
@@ -3330,7 +3343,7 @@ class SharedState:
             f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}",
+            f"{unvalidated_tag}{resume_revalidation_tag}{perfskills_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt (visible without a checklist).
         untried_hot = self.untried_hot_reusable_kernels()

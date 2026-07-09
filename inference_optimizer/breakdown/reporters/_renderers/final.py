@@ -45,6 +45,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     action_path = f.get("action_path") or []
     gain_provenance = str(f.get("cumulative_gain_provenance") or "")
     revalidation_pending = bool(f.get("revalidation_pending"))
+    # A PerfSkills(GEAK) e2e candidate that self-reported a win but was NOT
+    # confirmed by a main-flow rebench: it is deliberately excluded from the
+    # headline (current_best / action_path / validated gain). Surface it as an
+    # audit-only note + warning so the report neither hides it nor lets its
+    # self-reported number masquerade as a validated headline gain.
+    perfskills_pending = f.get("perfskills_pending") if isinstance(f.get("perfskills_pending"), dict) else {}
+    pending_awaiting = perfskills_pending.get("status") == "awaiting_rebench"
     # The gain is PROVISIONAL (not same-harness-validated) when its provenance
     # says so, or a revalidation is pending and no positive validated number
     # exists yet. In that case we must NOT present the (zeroed/absent) validated
@@ -52,6 +59,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     # Show the provisional number, clearly labelled, plus a credibility warning.
     is_provisional = ("provisional" in gain_provenance) or (
         revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
+    )
+    # A pending PerfSkills candidate with no positive validated gain yet means the
+    # headline is genuinely unvalidated — suppress the "Validated cumulative gain:
+    # +0.00%" line (which reads like the optimization did nothing) and let the
+    # audit note below carry the (self-reported, not-yet-confirmed) number.
+    headline_unvalidated = pending_awaiting and not (
+        isinstance(gain_v, (int, float)) and gain_v > 0
     )
 
     facts: list[str] = []
@@ -86,7 +100,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "pending; the validated gain will replace this number once it lands."
         )
     else:
-        if gain_v is not None:
+        if gain_v is not None and not headline_unvalidated:
             facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
             decisions.append(
                 Decision(
@@ -96,10 +110,27 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                     rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
                 )
             )
-        if gain_round is not None:
+        if gain_round is not None and not headline_unvalidated:
             facts.append(
                 f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
             )
+    if perfskills_pending and perfskills_pending.get("status") == "awaiting_rebench":
+        self_gain = perfskills_pending.get("self_reported_gain_pct")
+        self_gain_str = (
+            fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+        )
+        facts.append(
+            f"PerfSkills candidate (self-reported {self_gain_str}) is AWAITING a "
+            "main-flow rebench — excluded from the headline gain and final stack "
+            "until a measured rebench validates it."
+        )
+        warnings.append(
+            "A PerfSkills(GEAK) e2e candidate self-reported a win but has NOT been "
+            "confirmed by a same-harness main-flow rebench, so it is intentionally "
+            "kept out of current_best / action_path / the validated gain. Its "
+            "self-reported number is audit-only and must not be presented as the "
+            "headline result."
+        )
     if action_path:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
     if extra_args:
@@ -125,6 +156,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("cumulative_gain_pct_per_round_sum", gain_round),
             ("cumulative_gain_provenance", gain_provenance or None),
             ("revalidation_pending", revalidation_pending or None),
+            ("perfskills_pending", perfskills_pending or None),
             ("validated_at_stack_len", val_stack_len),
             ("validated_ts", val_ts),
             ("stack_changed_after_validation", stack_changed),

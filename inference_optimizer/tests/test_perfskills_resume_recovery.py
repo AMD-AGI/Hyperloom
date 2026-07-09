@@ -46,7 +46,13 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A validated result written before a coordinator crash must be recovered."""
+    """A result written before a coordinator crash must be RECOVERED on resume.
+
+    Rebench-first: recovery records the win as an UNVALIDATED candidate (into
+    ``perfskills_result`` + ``perfskills_pending``) and enqueues the main-flow
+    rebench — it does NOT promote the self-reported value into current_best /
+    the gain ledger. The headline is only written once the rebench validates it.
+    """
     perfskills_dir = tmp_path / "perfskills"
     perfskills_dir.mkdir()
     result = {
@@ -65,6 +71,7 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
 
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
+    coord.tasks = _TaskRegistry()
     coord.shared_state = SharedState(
         baseline_tput=100.0,
         current_best={"action": "baseline", "tput": 100.0},
@@ -86,18 +93,26 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
 
     await coord._run_perfskills_kernel_phase(from_phase="KERNEL")
 
+    # The result.json is recovered into state, but as an UNVALIDATED candidate.
     assert coord.shared_state.perfskills_result["status"] == "ok"
-    assert coord.shared_state.current_best["action"] == "perfskills_e2e"
-    assert coord.shared_state.current_best["tput"] == 116.0
-    assert coord.shared_state.cumulative_gain == pytest.approx(16.0)
-    assert coord.shared_state.optimization_stack[0]["action"] == "perfskills_e2e"
+    assert coord.shared_state.perfskills_pending["status"] == "awaiting_rebench"
+    assert coord.shared_state.perfskills_pending["self_reported_tput"] == 116.0
+    # No premature headline: current_best / gain / stack are untouched.
+    assert coord.shared_state.current_best["action"] == "baseline"
+    assert coord.shared_state.cumulative_gain == pytest.approx(0.0)
+    assert not any(
+        e.get("action") == "perfskills_e2e" for e in coord.shared_state.optimization_stack
+    )
     assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
+
+    # The main-flow rebench was enqueued to validate the recovered candidate.
+    rebench = [t for t in coord.tasks.created if (t.params or {}).get("perfskills_fallback")]
+    assert rebench, "recovery must enqueue a perfskills main-flow rebench"
 
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["perfskills_result"]["status"] == "ok"
-    assert saved["cumulative_gain"] == pytest.approx(16.0)
+    assert saved["perfskills_pending"]["status"] == "awaiting_rebench"
 
-    coord.tasks = _TaskRegistry()
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
 
     assert task.kind == "sweep"
