@@ -1958,7 +1958,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             # failures, so the breakdown exporter can surface the raw crash.
             "stderr_tail": (
                 self._stderr_tail(result.get("error"))
-                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout"}
+                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout", "kv_cache_oom"}
                 else None
             ),
             "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
@@ -2016,7 +2016,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "error_class": error_class_str,
             "error_excerpt": self._truncate_excerpt(result.get("error")),
             "stderr_tail": (
-                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout"} else None
+                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout", "kv_cache_oom"} else None
             ),
             "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
             "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
