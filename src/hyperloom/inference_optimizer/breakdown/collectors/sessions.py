@@ -544,7 +544,7 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     resumed run reads as if it proceeded monotonically. This folds those
     signals into the §1 ``session.recovery`` block so a reader can see the run
     was interrupted and continued (the context behind gaps like an empty
-    ``perfskills_result`` lost to a kill before the tick-boundary save). Pure /
+    ``geak_result`` lost to a kill before the tick-boundary save). Pure /
     best-effort: unparseable fields are skipped, never raised.
 
     Args:
@@ -679,7 +679,7 @@ def collect_session(
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history so a resumed run is not read as
-        # a clean monotonic one (context behind e.g. an empty perfskills_result).
+        # a clean monotonic one (context behind e.g. an empty geak_result).
         "recovery": _collect_recovery(state),
     }
 

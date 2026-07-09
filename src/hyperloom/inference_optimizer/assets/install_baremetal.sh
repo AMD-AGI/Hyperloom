@@ -20,7 +20,7 @@
 # Phase 5  combined env    — write runtime/hyperloom.env.sh
 # Phase 6  verify + print launch prompt
 #
-# Scope: core (native optimizer). PerfSkills/GEAK-e2e, live Langfuse, Quark,
+# Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
 
 set -euo pipefail
@@ -832,7 +832,7 @@ main() {
     die "expected ${local_env} after local_setup.sh but it is missing"
   fi
 
-  # Phase 4: runtime install (core scope — no --with-perfskills; Langfuse stays
+  # Phase 4: runtime install (core scope — no --with-geak; Langfuse stays
   # off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env).
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)

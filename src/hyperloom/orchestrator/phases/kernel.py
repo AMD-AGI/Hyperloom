@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, PerfSkills e2e run,
+"""KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, GEAK e2e run,
 GEMM-tuning keep/promote, and watermark-roofline gating."""
 
 from __future__ import annotations
@@ -33,10 +33,6 @@ from ..loop.coordinator_helpers import (  # noqa: F401 - re-exported for callers
     effective_closing_grace_sec,
     format_exc_brief,
     serialize_verdict_advisory,
-)
-from ..loop.coordinator import (
-    PERFSKILLS_GEAK_BACKEND,
-    _relabel_perfskills_geak_journey,
 )
 from .base import PhaseHandler
 
@@ -72,26 +68,26 @@ class KernelPhase(PhaseHandler):
         else:
             log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
 
-    def _perfskills_enabled(self) -> bool:
-        """Whether the KERNEL_AGENT phase is delegated to the PerfSkills e2e optimizer.
+    def _geak_enabled(self) -> bool:
+        """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer.
 
         The single source of truth is the kernel backend order
         (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when
-        ``perfskills`` appears there, it owns the whole phase.  The
+        ``geak`` appears there, it owns the whole phase.  The
         ``kernel_optimizer`` state field is the persisted record of that
         decision (derived from the order at startup); it is used as a resume
         fallback so this stays correct even when the env var is not re-exported
         in a fresh shell.
         """
-        from ..kernel.request_handlers import perfskills_selected
+        from ..kernel.request_handlers import geak_selected
 
-        if perfskills_selected():
+        if geak_selected():
             return True
         return (
             str(getattr(self.shared_state, "kernel_optimizer", "") or "")
             .strip()
             .lower()
-            == "perfskills"
+            == "geak"
         )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
@@ -107,11 +103,11 @@ class KernelPhase(PhaseHandler):
                 from_phase or "<unknown>",
             )
             return
-        if self._perfskills_enabled():
-            # PerfSkills owns the whole KERNEL_AGENT phase: one in-process e2e run
+        if self._geak_enabled():
+            # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run
             # seeded with the EXPLORE best config, then hand straight to SWEEP
-            # (which reuses PerfSkills' final_launch.sh + bench_e2e.sh).
-            await self._run_perfskills_kernel_phase(from_phase=from_phase)
+            # (which reuses GEAK' final_launch.sh + bench_e2e.sh).
+            await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
             # No GEMM tuning here: refresh the snapshot (explore gains) before the LLM drives GEAK.
@@ -323,11 +319,11 @@ class KernelPhase(PhaseHandler):
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
-        """Extract Hyperloom's bench measurement protocol for the PerfSkills handoff.
+        """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
 
         Reads the materialized baseline recipe's ``benchmark.envs`` (the exact
         knobs Magpie benched with) and falls back to the process env. Returns
-        only the keys that resolve so absent values leave PerfSkills on its own
+        only the keys that resolve so absent values leave GEAK on its own
         standalone defaults. Never raises — measurement-protocol propagation must
         not block the KERNEL_AGENT phase.
         """
@@ -367,10 +363,10 @@ class KernelPhase(PhaseHandler):
                 protocol[proto_key] = val
         return protocol
 
-    def _perfskills_timeouts(self) -> tuple[int, int, bool]:
-        """Resolve the PerfSkills e2e timeouts from the live run budget.
+    def _geak_timeouts(self) -> tuple[int, int, bool]:
+        """Resolve the GEAK e2e timeouts from the live run budget.
 
-        The KERNEL_AGENT phase-entry hook runs PerfSkills synchronously, so a fixed
+        The KERNEL_AGENT phase-entry hook runs GEAK synchronously, so a fixed
         subprocess default would (a) ignore ``--max-hours`` / the run deadline
         and (b) keep the tick loop from reaching the deadline → closing-phase
         check until it returns. To stay inside the budget we cap the run so it
@@ -388,12 +384,12 @@ class KernelPhase(PhaseHandler):
         """
         # Standalone fallback ONLY: the 12h (43200s) default applies when no run
         # deadline is set (budget_known=False) — e.g. a unit test invoking the
-        # hook directly, or PerfSkills run outside an orchestrated session. When
+        # hook directly, or GEAK run outside an orchestrated session. When
         # Hyperloom DRIVES the run (deadline known) the budget MUST come from
         # Hyperloom's live deadline / KERNEL_AGENT phase allocation, so this default
         # never caps a Hyperloom-driven run (a long --max-hours session can
         # legitimately allot KERNEL more than 12h).
-        env_default_timeout = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))
+        env_default_timeout = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))
         deadline = self._run_deadline
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
@@ -401,11 +397,11 @@ class KernelPhase(PhaseHandler):
         grace = effective_closing_grace_sec(
             float(getattr(self.shared_state, "max_minutes", 0) or 0), None,
         )
-        margin = float(os.environ.get("PERFSKILLS_BUDGET_MARGIN_S", "300"))
+        margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
         # Reserve the closing window: the subprocess (incl. result.json flush)
         # must be killed with at least ``grace`` left so closing can still run.
         kill_budget = remaining - grace
-        # Also honour the KERNEL_AGENT phase's own wall-clock budget: PerfSkills runs
+        # Also honour the KERNEL_AGENT phase's own wall-clock budget: GEAK runs
         # synchronously inside the phase-entry hook, so a run longer than the
         # phase allocation would overrun the phase budget the same way it would
         # overrun the session deadline. Cap by min(session, kernel_phase).
@@ -417,15 +413,15 @@ class KernelPhase(PhaseHandler):
         # Hyperloom-authoritative budget: the runner self-stops ``margin`` before
         # the hard subprocess kill, and the kill reserves the closing-grace
         # window. Derived purely from the live budget — the 12h env default does
-        # NOT cap it (requirement: PerfSkills time comes from Hyperloom here).
+        # NOT cap it (requirement: GEAK time comes from Hyperloom here).
         kill_timeout = int(max(0.0, kill_budget))
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
-    async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
-        """Delegate the KERNEL_AGENT phase to PerfSkills (one whole-pipeline e2e run).
+    async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
+        """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run).
 
-        Builds a handoff from the EXPLORE best config, runs the PerfSkills
+        Builds a handoff from the EXPLORE best config, runs the GEAK
         runner out-of-process (it owns all Claude-SDK / Workflow detail),
         records the optimized launch/bench scripts + throughput into state, then
         signals SWEEP via the ``skip_to_sweep`` escalate hint.
@@ -441,13 +437,13 @@ class KernelPhase(PhaseHandler):
             "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
         }
         # Bench measurement protocol: forward the SAME knobs Hyperloom
-        # actually benched with so PerfSkills' internal e2e measures identically.
-        # Without this PerfSkills falls back to its own standalone defaults
+        # actually benched with so GEAK' internal e2e measures identically.
+        # Without this GEAK falls back to its own standalone defaults
         # (e.g. RANDOM_RANGE_RATIO=1 fixed-length vs Hyperloom's 0 variable-length)
         # and the cross-harness numbers diverge. Source of truth = the materialized
         # baseline recipe's benchmark.envs (the exact values Magpie ran), with a
         # process-env fallback. Only keys that resolve are sent; absent keys leave
-        # PerfSkills on its own defaults so it still runs standalone.
+        # GEAK on its own defaults so it still runs standalone.
         bench_protocol = self._resolve_bench_protocol(
             str(getattr(state, "baseline_config_path", "") or "")
         )
@@ -462,12 +458,12 @@ class KernelPhase(PhaseHandler):
             "accepted_env": accepted_env,
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
             "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
-            "exp_root": str(self.session_dir / "perfskills"),
-            # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
+            "exp_root": str(self.session_dir / "geak"),
+            # Align GEAK' bench CLIENT to Hyperloom's exact one (InferenceX
             # benchmark_serving.py) so final/sweep numbers are cross-harness comparable.
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
-            # Pin the serving / optimization GPU set so PerfSkills never guesses:
+            # Pin the serving / optimization GPU set so GEAK never guesses:
             # honour an explicit visibility mask, else 0..tp-1 (matches run_e2e
             # map_args' own default). Removes ambiguity when Hyperloom drives.
             "gpu_ids": (
@@ -479,14 +475,14 @@ class KernelPhase(PhaseHandler):
         if bench_protocol:
             handoff["bench_protocol"] = bench_protocol
 
-        out_dir = self.session_dir / "perfskills"
+        out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
         handoff_path = out_dir / "handoff.json"
         handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
         from ..kernel.request_handlers import _kernel_agent_tool_path
 
-        def _read_perfskills_result(path: Path) -> dict[str, Any]:
+        def _read_geak_result(path: Path) -> dict[str, Any]:
             if not path.is_file():
                 return {}
             try:
@@ -500,9 +496,9 @@ class KernelPhase(PhaseHandler):
             recovered_from: str,
             runner_timeout_s: int | None = None,
         ) -> None:
-            state.perfskills_result = result
-            self._promote_perfskills_result(result)
-            self._record_perfskills_kernel_journey(result)
+            state.geak_result = result
+            self._promote_geak_result(result)
+            self._record_geak_kernel_journey(result)
             evidence = {
                 "status": result.get("status"),
                 "throughput_speedup": result.get("throughput_speedup"),
@@ -513,20 +509,20 @@ class KernelPhase(PhaseHandler):
             }
             if runner_timeout_s is not None:
                 evidence["runner_timeout_s"] = runner_timeout_s
-            self._record_phase_entry_evidence(perfskills=evidence)
+            self._record_phase_entry_evidence(geak=evidence)
             state.save(self.session_dir)
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
 
         def _finish_skip(result: dict[str, Any]) -> None:
-            """Record a (failed/skipped) PerfSkills outcome + wind down to SWEEP.
+            """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
 
-            Always records the normalized outcome into ``perfskills_result``,
+            Always records the normalized outcome into ``geak_result``,
             mirrors the failure reason onto the phase-entry evidence (so the
             session-breakdown surfaces WHY the e2e run did not land), then sets
             the ``skip_to_sweep`` hint so the coordinator never deadlocks.
             """
-            state.perfskills_result = result
-            self._record_phase_entry_evidence(perfskills={
+            state.geak_result = result
+            self._record_phase_entry_evidence(geak={
                 "status": result.get("status"),
                 "error_class": result.get("error_class"),
                 "error": (str(result.get("error") or "")[:500] or None),
@@ -536,37 +532,37 @@ class KernelPhase(PhaseHandler):
 
         # Crash-recovery: a validated result.json written before the coordinator
         # crashed (handback never reached state.save) must be promoted on resume.
-        # Guard with ``_perfskills_win_already_recorded`` so a prior cycle's
-        # result.json (``perfskills/`` is a fixed path) does not short-circuit a
+        # Guard with ``_geak_win_already_recorded`` so a prior cycle's
+        # result.json (``geak/`` is a fixed path) does not short-circuit a
         # fresh KERNEL entry in a later macro-cycle.
         result_path = out_dir / "result.json"
-        recovered = _read_perfskills_result(result_path)
+        recovered = _read_geak_result(result_path)
         if (
             recovered.get("status") == "ok"
-            and not self._perfskills_win_already_recorded()
+            and not self._geak_win_already_recorded()
         ):
             log.info(
-                "PerfSkills result.json exists but state has no recorded win "
+                "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
             )
             _promote_recovered_result(recovered, recovered_from="existing_result_json")
             return
 
         try:
-            runner = _kernel_agent_tool_path("backends/perfskills_runner.py")
+            runner = _kernel_agent_tool_path("backends/geak_runner.py")
         except Exception as exc:  # noqa: BLE001
-            log.exception("PerfSkills runner not resolvable; skipping KERNEL")
+            log.exception("GEAK runner not resolvable; skipping KERNEL")
             _finish_skip({"status": "error", "error_class": "runner_not_found",
                           "error": repr(exc)})
             return
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always
         # reserve the closing-grace window.
-        runner_timeout, kill_timeout, budget_known = self._perfskills_timeouts()
-        min_run = int(os.environ.get("PERFSKILLS_MIN_RUN_S", "600"))
+        runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
+        min_run = int(os.environ.get("GEAK_MIN_RUN_S", "600"))
         if budget_known and runner_timeout < min_run:
             log.warning(
-                "PerfSkills: only %ds budget remains (< min %ds); skipping e2e "
+                "GEAK: only %ds budget remains (< min %ds); skipping e2e "
                 "and winding down to SWEEP so the closing report runs in time.",
                 runner_timeout, min_run,
             )
@@ -582,7 +578,7 @@ class KernelPhase(PhaseHandler):
 
         cmd = ["python3", str(runner), str(handoff_path), str(out_dir),
                "--timeout-s", str(runner_timeout)]
-        log.info("KERNEL entry: delegating to PerfSkills e2e (from=%s) "
+        log.info("KERNEL entry: delegating to GEAK e2e (from=%s) "
                  "runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
                  from_phase or "<unknown>", runner_timeout, kill_timeout,
                  budget_known, " ".join(cmd))
@@ -591,7 +587,7 @@ class KernelPhase(PhaseHandler):
         # runner -> run_e2e -> vllm/node tree (grace to flush result.json), then
         # SIGKILL. A bare subprocess.run(timeout=) would SIGKILL only the direct
         # child and orphan run_e2e + its servers.
-        term_grace = int(os.environ.get("PERFSKILLS_TERM_GRACE_S", "180"))
+        term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
         def _run() -> subprocess.CompletedProcess:
             p = subprocess.Popen(
@@ -623,17 +619,17 @@ class KernelPhase(PhaseHandler):
             proc = await asyncio.to_thread(_run)
             stderr_tail = (proc.stderr or "")[-2000:]
             if proc.returncode != 0:
-                log.warning("PerfSkills runner rc=%s: %s", proc.returncode, stderr_tail)
+                log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
         except subprocess.TimeoutExpired:
-            log.warning("PerfSkills runner exceeded kill_timeout=%ds; SIGTERM'd "
+            log.warning("GEAK runner exceeded kill_timeout=%ds; SIGTERM'd "
                         "to let it flush, then reclaimed the closing window",
                         kill_timeout)
             # The graceful SIGTERM gives run_e2e a window to flush result.json
             # (recover-from-disk). If it landed a real win, keep it instead of
             # discarding the whole KERNEL_AGENT phase as a timeout.
-            recovered = _read_perfskills_result(result_path)
+            recovered = _read_geak_result(result_path)
             if recovered.get("status") == "ok":
-                log.info("PerfSkills flushed an OK result.json under SIGTERM "
+                log.info("GEAK flushed an OK result.json under SIGTERM "
                          "grace; promoting the recovered win despite the cap.")
                 _promote_recovered_result(
                     recovered,
@@ -644,19 +640,19 @@ class KernelPhase(PhaseHandler):
             _finish_skip({
                 "status": "error",
                 "error_class": "timeout",
-                "error": (f"PerfSkills e2e killed after {kill_timeout}s "
+                "error": (f"GEAK e2e killed after {kill_timeout}s "
                           f"(budget-capped); closing window preserved"),
                 "runner_timeout_s": runner_timeout,
                 "kill_timeout_s": kill_timeout,
             })
             return
         except Exception as exc:  # noqa: BLE001
-            log.exception("PerfSkills runner crashed")
+            log.exception("GEAK runner crashed")
             _finish_skip({"status": "error", "error_class": "runner_crashed",
                           "error": repr(exc)})
             return
 
-        result: dict[str, Any] = _read_perfskills_result(result_path)
+        result: dict[str, Any] = _read_geak_result(result_path)
         if not result:
             _finish_skip({
                 "status": "error",
@@ -668,11 +664,11 @@ class KernelPhase(PhaseHandler):
             return
         # Carry the actual exit code so the breakdown can audit a nonzero rc.
         result.setdefault("returncode", proc.returncode)
-        state.perfskills_result = result
+        state.geak_result = result
 
-        self._promote_perfskills_result(result)
-        self._record_perfskills_kernel_journey(result)
-        self._record_phase_entry_evidence(perfskills={
+        self._promote_geak_result(result)
+        self._record_geak_kernel_journey(result)
+        self._record_phase_entry_evidence(geak={
             "status": result.get("status"),
             "throughput_speedup": result.get("throughput_speedup"),
             "final_throughput_tok_s": result.get("final_throughput_tok_s"),
@@ -685,31 +681,31 @@ class KernelPhase(PhaseHandler):
             "kernel_agent", "orchestration", "response",
             {
                 "in_reply_to": "",
-                "kind": "perfskills_e2e_done",
+                "kind": "geak_e2e_done",
                 "status": str(result.get("status") or "unknown"),
                 "speedup": result.get("throughput_speedup"),
                 "result_path": str(result_path),
             },
             priority=1,
         ))
-        # KERNEL is a one-shot under PerfSkills: wind down to SWEEP.
+        # KERNEL is a one-shot under GEAK: wind down to SWEEP.
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
 
-    def _perfskills_win_already_recorded(self) -> bool:
-        """Whether a PerfSkills e2e win is already in this session's state.
+    def _geak_win_already_recorded(self) -> bool:
+        """Whether a GEAK e2e win is already in this session's state.
 
         Used to gate crash-recovery from an existing ``result.json`` so a prior
-        cycle's win (``perfskills/`` is a fixed path) is not re-promoted on a
+        cycle's win (``geak/`` is a fixed path) is not re-promoted on a
         later KERNEL entry. Mirrors the ``optimization_stack`` dedup in
-        ``_promote_perfskills_result``.
+        ``_promote_geak_result``.
         """
         return any(
-            isinstance(item, dict) and item.get("action") == "perfskills_e2e"
+            isinstance(item, dict) and item.get("action") == "geak_e2e"
             for item in (self.shared_state.optimization_stack or [])
         )
 
-    def _promote_perfskills_result(self, result: dict[str, Any]) -> None:
-        """Fold a PerfSkills e2e win into current_best + the validated gain ledger.
+    def _promote_geak_result(self, result: dict[str, Any]) -> None:
+        """Fold a GEAK e2e win into current_best + the validated gain ledger.
 
         Also appends an ``optimization_stack`` entry and the matching
         ``gain_per_stack_entry`` so the session-breakdown attribution section
@@ -725,14 +721,14 @@ class KernelPhase(PhaseHandler):
             return
         cb = dict(self.shared_state.current_best or {})
         cb.update({
-            "action": "perfskills_e2e",
+            "action": "geak_e2e",
             "tput": new_tput,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
             # Sweep-reuse handles: the optimized self-contained launch + bench scripts.
-            "perfskills_launch_script": result.get("final_launch_script"),
-            "perfskills_bench_script": result.get("bench_script"),
-            "perfskills_eval_dir": result.get("eval_dir"),
+            "geak_launch_script": result.get("final_launch_script"),
+            "geak_bench_script": result.get("bench_script"),
+            "geak_eval_dir": result.get("eval_dir"),
             "workspace": result.get("eval_dir"),
         })
         self.shared_state.current_best = cb
@@ -743,17 +739,17 @@ class KernelPhase(PhaseHandler):
         ts = datetime.now(timezone.utc).isoformat()
         accepted_cfg = result.get("accepted_config") or {}
         already = any(
-            isinstance(item, dict) and item.get("action") == "perfskills_e2e"
+            isinstance(item, dict) and item.get("action") == "geak_e2e"
             for item in (self.shared_state.optimization_stack or [])
         )
         if not already:
             entry = {
-                "action": "perfskills_e2e",
-                "variant_name": "perfskills_e2e",
+                "action": "geak_e2e",
+                "variant_name": "geak_e2e",
                 "tput": new_tput,
                 "candidate_extra_server_args": str(accepted_cfg.get("flags") or ""),
                 "extra_envs": (
-                    {"PERFSKILLS_ACCEPTED_ENV": str(accepted_cfg.get("env"))}
+                    {"GEAK_ACCEPTED_ENV": str(accepted_cfg.get("env"))}
                     if accepted_cfg.get("env") else {}
                 ),
                 "workspace": result.get("eval_dir"),
@@ -761,13 +757,13 @@ class KernelPhase(PhaseHandler):
                 "accepted_kernels": result.get("accepted_kernels") or [],
                 "accepted_heads": result.get("accepted_heads") or [],
                 "report_path": result.get("report_path"),
-                "source": "perfskills_e2e",
+                "source": "geak_e2e",
                 "ts": ts,
             }
             self.shared_state.optimization_stack.append(entry)
             self.shared_state.append_stack_gain_entry(
-                action="perfskills_e2e",
-                variant_name="perfskills_e2e",
+                action="geak_e2e",
+                variant_name="geak_e2e",
                 new_tput=new_tput,
                 extra_server_args=str(accepted_cfg.get("flags") or ""),
                 ts=ts,
@@ -780,14 +776,14 @@ class KernelPhase(PhaseHandler):
                 datetime.now(timezone.utc).isoformat()
             )
 
-    def _record_perfskills_kernel_journey(self, result: dict[str, Any]) -> None:
-        """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
+    def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
+        """Replay GEAK e2e's kernel_journey.json into the breakdown recorder.
 
-        GEAK-e2e is a whole-pipeline e2e optimizer whose authored kernels do
+        GEAK e2e is a whole-pipeline e2e optimizer whose authored kernels do
         not go through the per-kernel SDK recorder path. It emits a
         self-contained ``kernel_journey.json`` whose per-kernel
         sub-objects are shaped EXACTLY as the recorder's
-        ``record_kernel_{dispatch,backend_result,e2e}`` inputs (see GEAK-e2e
+        ``record_kernel_{dispatch,backend_result,e2e}`` inputs (see GEAK e2e
         ``interface/run_e2e.py`` ``build_kernel_journey``). We replay them
         verbatim so the assembler folds the e2e optimizer's kernels into
         ``kernel_journey`` next to tracelens discovery — no mapping logic here,
@@ -810,22 +806,19 @@ class KernelPhase(PhaseHandler):
         if not isinstance(journey, dict):
             return
 
-        # The GEAK-e2e pipeline's GEAK is a distinct variant ("geak_v4") from
-        # the kernel-agent's generic ``geak`` backend. Relabel it before replay
-        # so SBD/trace (versions map, kernel_journey backend lanes) never
-        # conflate the two provenances. See ``_relabel_perfskills_geak_journey``.
-        _relabel_perfskills_geak_journey(journey)
-
+        # The e2e optimizer's kernel backend is the CANONICAL ``geak`` token now
+        # (formerly the ``geak_v4`` e2e optimizer); the legacy per-kernel backend is
+        # the distinct ``geak_v3`` token, so the two no longer collide in
+        # SBD/trace. The journey is replayed verbatim — no relabel needed.
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         sdir = self.session_dir
         commit = str(getattr(self.shared_state, "code_revision", "") or "")
-        # Replay GEAK-e2e's discovery substream so the
+        # Replay GEAK e2e's discovery substream so the
         # assembler backfills each kernel's discovery-sourced fields
-        # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
-        # not tracelens, so the route is ``bypass``; ``tool=geak_v4`` keeps the
-        # version provenance under the GEAK-e2e variant instead of minting an
-        # empty bypass entry (and apart from the generic ``geak`` lane).
+        # (name/gpu_pct/bound_type/source_file). GEAK e2e profiles via rocprofv3,
+        # not tracelens, so the route is ``bypass``; ``tool=geak`` records the
+        # version provenance under the canonical GEAK e2e token.
         for run in (journey.get("discovery_runs") or []):
             if not isinstance(run, dict):
                 continue
@@ -836,10 +829,10 @@ class KernelPhase(PhaseHandler):
                     status=str(run.get("status") or "success"),
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
-                    tool=PERFSKILLS_GEAK_BACKEND,
+                    tool="geak",
                 )
             except Exception:  # noqa: BLE001
-                log.debug("perfskills kernel_journey discovery replay failed",
+                log.debug("geak kernel_journey discovery replay failed",
                           exc_info=True)
         for k in (journey.get("kernels") or []):
             if not isinstance(k, dict):
@@ -875,7 +868,7 @@ class KernelPhase(PhaseHandler):
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                     )
             except Exception:  # noqa: BLE001
-                log.debug("perfskills kernel_journey replay failed for %s", kid,
+                log.debug("geak kernel_journey replay failed for %s", kid,
                           exc_info=True)
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):

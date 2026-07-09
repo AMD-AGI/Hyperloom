@@ -427,13 +427,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "native" (GEAK/per-kernel loop, default) or
-    # "perfskills" (one-shot whole-pipeline e2e optimizer cloned from upstream;
-    # see src/hyperloom/agents/kernel/tools/backends/perfskills_runner.py).
+    # KERNEL-phase optimizer: "native" (geak_v3 per-kernel loop, default) or
+    # "geak" (one-shot whole-pipeline e2e optimizer cloned from upstream;
+    # see src/hyperloom/agents/kernel/tools/backends/geak_runner.py).
     kernel_optimizer: str = "native"
-    # Snapshot of the last PerfSkills e2e run (result.json + final_launch.sh /
+    # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
-    perfskills_result: dict[str, Any] = field(default_factory=dict)
+    geak_result: dict[str, Any] = field(default_factory=dict)
     # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
     explore_enabled: bool = True
     # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
