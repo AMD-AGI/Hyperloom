@@ -614,7 +614,7 @@ def test_sidecar_usage_roundtrips_through_parser(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_pkg_toplevel_at_package_boundary(tmp_path):
-    """_pkg_toplevel walks up while __init__.py present and stops at parent."""
+    """_pkg_toplevel returns the top-level package dir (not its parent)."""
     pkg = tmp_path / "mypkg" / "sub"
     pkg.mkdir(parents=True)
     (tmp_path / "mypkg" / "__init__.py").touch()
@@ -622,8 +622,9 @@ def test_pkg_toplevel_at_package_boundary(tmp_path):
     src_file = pkg / "module.py"
     src_file.touch()
     result = forge_submit._pkg_toplevel(str(src_file))
-    # Should stop at tmp_path (parent of mypkg, which has no __init__.py)
-    assert Path(result) == tmp_path
+    # Should be mypkg/ itself (the topmost dir that still has __init__.py),
+    # NOT tmp_path — so we copy only that package, not its siblings.
+    assert Path(result) == tmp_path / "mypkg"
 
 
 def test_pkg_toplevel_non_package(tmp_path):
@@ -632,6 +633,25 @@ def test_pkg_toplevel_non_package(tmp_path):
     src.touch()
     result = forge_submit._pkg_toplevel(str(src))
     assert Path(result) == tmp_path
+
+
+def test_pkg_sys_path_root_is_parent_of_top_package(tmp_path):
+    """_pkg_sys_path_root returns the parent of the top-level package."""
+    pkg = tmp_path / "mypkg" / "sub"
+    pkg.mkdir(parents=True)
+    (tmp_path / "mypkg" / "__init__.py").touch()
+    (pkg / "__init__.py").touch()
+    src_file = pkg / "module.py"
+    src_file.touch()
+    # PYTHONPATH root must be tmp_path so ``import mypkg`` resolves.
+    assert Path(forge_submit._pkg_sys_path_root(str(src_file))) == tmp_path
+
+
+def test_pkg_sys_path_root_non_package(tmp_path):
+    """For a non-package file the sys.path root is its own directory."""
+    src = tmp_path / "module.py"
+    src.touch()
+    assert Path(forge_submit._pkg_sys_path_root(str(src))) == tmp_path
 
 
 def test_prepare_worktree_nogit_creates_git_repo(tmp_path):
@@ -688,6 +708,52 @@ def test_prepare_worktree_nogit_uses_kernel_repo_when_provided(tmp_path):
     assert (scratch_path / "README.md").exists()
     # kernel relative to repo_root is preserved
     assert Path(scratch_kernel) == scratch_path / "mypkg" / "kernel.py"
+
+
+def test_prepare_worktree_nogit_copies_only_target_package(tmp_path):
+    """Without an explicit kernel_repo, only the target top-level package is
+    copied — NOT the whole dist-packages/site-packages dir with its siblings.
+
+    Regression: a naive walk-to-parent would set copy_root to the dist-packages
+    dir and shutil.copytree the entire tree (torch, vllm, ...) — 5-15 GB per
+    submit, risking ENOSPC.
+    """
+    # Simulate a dist-packages dir with two installed packages.
+    dist = tmp_path / "dist-packages"
+    target = dist / "vllm" / "model_executor" / "models"
+    target.mkdir(parents=True)
+    (dist / "vllm" / "__init__.py").touch()
+    (dist / "vllm" / "model_executor" / "__init__.py").touch()
+    (target / "__init__.py").touch()
+    kernel_file = target / "deepseek_v2.py"
+    kernel_file.write_text("# kernel\n", encoding="utf-8")
+
+    # A large sibling package that must NOT be copied.
+    sibling = dist / "torch"
+    sibling.mkdir()
+    (sibling / "__init__.py").touch()
+    (sibling / "big_blob.bin").write_bytes(b"x" * 4096)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    result = forge_submit._prepare_worktree_nogit(
+        str(kernel_file), "", out_dir, "forge/test/kernel"
+    )
+    if result is None:
+        pytest.skip("git not available or copytree failed")
+
+    scratch_dir, scratch_kernel, _ = result
+    scratch_path = Path(scratch_dir)
+
+    # scratch_dir is the PYTHONPATH root (== dist-packages equivalent), so the
+    # target package is nested under it and ``import vllm`` resolves.
+    assert Path(scratch_kernel) == (
+        scratch_path / "vllm" / "model_executor" / "models" / "deepseek_v2.py"
+    )
+    assert Path(scratch_kernel).read_text() == "# kernel\n"
+    # The sibling package must be absent — proving we did not copy dist-packages.
+    assert not (scratch_path / "torch").exists()
 
 
 def test_submit_nogit_fallback_does_not_skip(tmp_path, monkeypatch):

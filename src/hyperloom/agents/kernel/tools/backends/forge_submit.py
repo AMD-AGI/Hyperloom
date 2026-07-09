@@ -189,17 +189,40 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
 
 
 def _pkg_toplevel(source_file: str) -> str:
-    """Walk up from ``source_file`` to find the topmost importable package directory.
+    """Return the topmost importable package directory containing ``source_file``.
 
-    Ascends while an ``__init__.py`` is present, stopping at the first directory
-    that has no ``__init__.py`` (the *parent* of the root package, i.e. the
-    directory you would add to ``sys.path``). Falls back to the parent directory
-    of ``source_file`` when the file is not part of a package.
+    Ascends while an ``__init__.py`` is present and returns the *last* directory
+    that still has one — i.e. the root package directory itself (e.g. ``vllm/``
+    for ``.../dist-packages/vllm/model_executor/models/deepseek_v2.py``), NOT its
+    parent. Its parent is the directory you would add to ``sys.path``; use
+    :func:`_pkg_sys_path_root` for that.
+
+    Falls back to the parent directory of ``source_file`` when the file is not
+    part of a package (no ``__init__.py`` beside it).
     """
-    p = Path(source_file).resolve().parent
-    while (p / "__init__.py").exists():
-        p = p.parent
-    return str(p)
+    parent = Path(source_file).resolve().parent
+    if not (parent / "__init__.py").exists():
+        # Not inside a package — the file's own directory is the top level.
+        return str(parent)
+    top = parent
+    while (top.parent / "__init__.py").exists():
+        top = top.parent
+    return str(top)
+
+
+def _pkg_sys_path_root(source_file: str) -> str:
+    """Return the directory to place on ``sys.path`` / ``PYTHONPATH``.
+
+    This is the parent of the topmost importable package (so ``import <pkg>``
+    resolves), or ``source_file``'s own directory when it is not part of a
+    package.
+    """
+    top = Path(_pkg_toplevel(source_file))
+    parent = Path(source_file).resolve().parent
+    if str(top) == str(parent) and not (parent / "__init__.py").exists():
+        # Non-package file: its own directory is already the import root.
+        return str(parent)
+    return str(top.parent)
 
 
 def _prepare_worktree_nogit(
@@ -213,11 +236,17 @@ def _prepare_worktree_nogit(
     When ``source_file`` lives outside any git repository (e.g. a pip-installed
     package under ``/usr/local/lib/python3.12/dist-packages/``), this function:
 
-    1. Determines the copy root: ``kernel_repo`` when provided, otherwise the
-       topmost importable package directory above ``source_file``.
-    2. Copies the root to ``output_dir/worktree`` (ignoring ``.git``,
-       ``__pycache__``, ``*.egg-info``, ``build/``, ``dist/`` to keep the copy
-       small and fast).
+    1. Determines the scratch layout root (== the PYTHONPATH root): the explicit
+       ``kernel_repo`` when provided, otherwise the *parent* of the single
+       top-level package containing ``source_file`` (so ``import <pkg>`` still
+       resolves from the scratch copy).
+    2. Copies only what is needed to ``output_dir/worktree`` — the whole tree
+       for an explicit ``kernel_repo``, but for a pip-installed package only that
+       one top-level package subtree (e.g. ``vllm/``), NEVER the entire
+       ``dist-packages``/``site-packages`` directory (which would copy every
+       installed package — torch, vllm, ... — 5-15 GB per submit, risking
+       ENOSPC). Ignores ``.git``, ``__pycache__``, ``*.egg-info``, ``build/``,
+       ``dist/`` to keep the copy small and fast.
     3. ``git init`` + sets ``user.name``/``user.email`` + ``git add -A`` +
        initial commit so Forge's ``IterationLoop`` (which uses ``git
        commit``/``reset --hard``) can manage its iterative keep/revert loop.
@@ -236,14 +265,32 @@ def _prepare_worktree_nogit(
         Those are detected by :func:`_needs_inplace` before this function is
         ever called.
     """
-    copy_root = Path(kernel_repo).resolve() if kernel_repo else Path(_pkg_toplevel(source_file))
     src_abs = Path(source_file).resolve()
+
+    # The scratch layout root == the directory placed on PYTHONPATH, so that
+    # ``import <pkg>`` resolves the scratch copy. When kernel_repo is given
+    # explicitly we honour it (the caller pointed us at a specific tree);
+    # otherwise we derive the single top-level package's parent — NOT the whole
+    # dist-packages/site-packages dir, which would drag in every installed
+    # package (torch, vllm, ...) and can be 5-15 GB per submit (ENOSPC risk).
+    if kernel_repo:
+        layout_root = Path(kernel_repo).resolve()
+        copy_subtrees: list[Path] | None = None  # copy the whole repo
+    else:
+        layout_root = Path(_pkg_sys_path_root(source_file))
+        pkg_top = Path(_pkg_toplevel(source_file))
+        # Copy only the top-level package subtree (e.g. vllm/), unless the file
+        # is not part of a package (pkg_top == layout_root) — then copy just it.
+        copy_subtrees = None if str(pkg_top) == str(layout_root) else [pkg_top]
+
     try:
-        rel = src_abs.relative_to(copy_root)
+        rel = src_abs.relative_to(layout_root)
     except ValueError:
-        # source_file not inside copy_root — fallback: use source_file's parent dir
-        copy_root = src_abs.parent
+        # source_file not inside layout_root — fallback: use its parent dir and
+        # copy only that directory's contents.
+        layout_root = src_abs.parent
         rel = Path(src_abs.name)
+        copy_subtrees = None
 
     scratch_dir = output_dir / "worktree"
     # Clean any leftover scratch from a previous (failed) attempt.
@@ -258,9 +305,19 @@ def _prepare_worktree_nogit(
         return ignored
 
     try:
-        shutil.copytree(str(copy_root), str(scratch_dir), ignore=_ignore)
+        if copy_subtrees is None:
+            # Whole layout_root (explicit kernel_repo, or a non-package file's dir).
+            shutil.copytree(str(layout_root), str(scratch_dir), ignore=_ignore)
+        else:
+            # Only the named top-level package(s), preserving their path relative
+            # to layout_root so ``import <pkg>`` still resolves from scratch_dir.
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            for sub in copy_subtrees:
+                dest = scratch_dir / sub.relative_to(layout_root)
+                shutil.copytree(str(sub), str(dest), ignore=_ignore)
     except OSError as exc:
-        log.warning("forge: non-git scratch copy failed (%s): %s", copy_root, exc)
+        log.warning("forge: non-git scratch copy failed (root=%s): %s", layout_root, exc)
+        shutil.rmtree(scratch_dir, ignore_errors=True)
         return None
 
     # Bootstrap a real git repo so IterationLoop's commit/revert machinery works.
