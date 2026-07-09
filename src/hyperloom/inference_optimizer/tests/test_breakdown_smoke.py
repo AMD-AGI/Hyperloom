@@ -166,7 +166,7 @@ def _build_fixture(sd: Path) -> None:
                         "arithmetic_intensity": 4.0,
                         "source_file": "/path/to/rmsnorm.py",
                         "reusable_native_kernel": True,
-                        "recommended_backends": ["claude", "geak"],
+                        "recommended_backends": ["claude", "geak_v3"],
                         "recommended_actions": ["run_optimization"],
                     },
                 ],
@@ -1805,7 +1805,7 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
                 "verification": {"compile_passed": False, "correctness_passed": None, "micro_speedup": 1.0},
                 "backend_ladder": [
                     {
-                        "backend": "geak",
+                        "backend": "geak_v3",
                         "status": "failed",
                         "produced_artifact": False,
                         "elapsed_sec": 213.5,

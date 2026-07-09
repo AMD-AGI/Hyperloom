@@ -2120,10 +2120,10 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
 # -- _session_integrated_kernel_patch (post-opt roofline gate) ---------------
 @pytest.mark.parametrize(
     "action",
-    ["integrate", "integrate_patch", "gemm_tuning", "perfskills_e2e"],
+    ["integrate", "integrate_patch", "gemm_tuning", "geak_e2e"],
 )
 def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator, action: str) -> None:
-    """Any kernel-level optimization (source patch, GEMM tuning, perfskills) gates the post-opt roofline on."""
+    """Any kernel-level optimization (source patch, GEMM tuning, geak) gates the post-opt roofline on."""
     coord.shared_state.optimization_stack = [{"action": action}]
     assert coord._session_integrated_kernel_patch() is True
 

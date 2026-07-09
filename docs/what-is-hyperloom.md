@@ -41,14 +41,17 @@ Hyperloom is composed of multiple tools, each documented on its own page:
 | [IntelliKit](components/intellikit.md) | Low-level GPU profiling primitives |
 | [Magpie](components/magpie.md) | Benchmark engine with trace-collection support |
 | [TraceLens](components/tracelens.md) | Agentic trace analysis and roofline targets |
+| KernelForge | Deterministic forge backend (first in the default kernel backend order) and OOB source checkout carrier |
 | [GEAK](components/geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) |
-| [AgentKernelArena](components/agentkernelarena.md) | Standardized evaluation arena for agent benchmarking |
+| [AgentKernelArena](components/agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking (not part of the default install or optimization loop) |
 
 ## Next steps
 
 Use these resources to get started with Hyperloom:
 
-- [Install Hyperloom](install/hyperloom-installation.md) — Set up Hyperloom locally or through the hosted UI.
+- [Hosted UI quickstart](install/quickstart.md) — Launch through the hosted UI.
+- [Local Mode quickstart](install/local-mode.md) — Set up a Docker container and Cursor.
+- [Bare-metal quickstart](install/bare-metal.md) — Install directly on a ROCm host.
 - [Run your first optimization](how-to/optimize.md) — Step-by-step usage.
 - [API reference](reference/api-reference.rst) — Generated from in-code docstrings.
 - [Release notes](release-notes.md) — Per-version changes.
