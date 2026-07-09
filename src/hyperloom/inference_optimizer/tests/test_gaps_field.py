@@ -34,7 +34,7 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 # 1. Field surface
 def test_gaps_field_exists_default_empty_list():
-    """KB_gaps/Gap-09 PR 5.1 — SharedState exposes a ``gaps: list[dict]`` field defaulting to ``[]``."""
+    """SharedState exposes a ``gaps: list[dict]`` field defaulting to ``[]``."""
     s = SharedState()
     assert hasattr(s, "gaps")
     assert s.gaps == []
@@ -73,7 +73,7 @@ def test_core_state_fields_includes_gaps():
 
 
 def test_policy_gate_rejects_update_state_for_gaps():
-    """KB_gaps/Gap-09 PR 5.2 — orchestration cannot mutate gaps[] via ``update_state`` (rule='state_field')."""
+    """Orchestration cannot mutate gaps[] via ``update_state`` (rule='state_field')."""
     gate = PolicyGate(role_registry=default_role_registry())
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -457,7 +457,7 @@ async def test_warm_specialist_params_noop_when_gap_unknown(coord):
 
 # 7. Cortex traverse fallback (defensive)
 class _StubKnowledgePlane:
-    """Minimal KnowledgePlane double returning one issue_node row from ``cortex_traverse_issues`` (Gap-09 §5.3)."""
+    """Minimal KnowledgePlane double returning one issue_node row from ``cortex_traverse_issues``."""
 
     def __init__(self, rows: list[dict[str, Any]] | None = None, raises: Exception | None = None):
         self._rows = rows or []

@@ -468,7 +468,7 @@ def _roofline_task(snapshot_id: int = 1) -> Task:
 
 
 def _roofline_result(snapshot_id: int = 1) -> dict:
-    """Mirrors RooflineExecutor's success result (design §8.4)."""
+    """Mirrors RooflineExecutor's success result."""
     return {
         "status": "succeeded",
         "executed_at_iso": "2026-05-19T15:55:00+00:00",
@@ -1253,7 +1253,7 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
-    """#431: trace_analyze succeeds (status=ok) but returns 0 hot kernels
+    """trace_analyze succeeds (status=ok) but returns 0 hot kernels
     because cuda-graph capture folded per-kernel activity (profile
     trace_health flags per_kernel_attribution_degraded). The executor must
     append a ``cuda_graph_attribution_degraded`` trace_health_warnings entry

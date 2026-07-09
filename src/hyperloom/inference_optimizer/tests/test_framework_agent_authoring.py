@@ -865,7 +865,7 @@ def test_audit_candidate_same_framework_omits_target_framework(
 ) -> None:
     """Candidate framework == session framework (the common case, incl. blank
     candidate.framework) -> phase_audit called without target_framework, exactly
-    as before the #5-P1 wiring (design doc L0 guard: same-framework is unaffected)."""
+    as before the cross-framework wiring; same-framework is unaffected."""
     captured: dict[str, Any] = {}
 
     async def _phase_audit(**kwargs: Any) -> dict[str, Any]:
@@ -908,7 +908,7 @@ def test_audit_candidate_cross_framework_sets_target_framework(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Design #5-P1 wiring: a candidate discovered from a DIFFERENT framework's
+    """A candidate discovered from a DIFFERENT framework's
     repo must be audited in cross-framework mode against this session's own
     (target) framework, with the target's own live source roots attached."""
     captured: dict[str, Any] = {}
@@ -951,7 +951,7 @@ def test_discover_batch_tags_cross_repo_candidates_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Design #5-P2 mesh-coordinator lane (default ON): a candidate discovered from
+    """A candidate discovered from
     a DIFFERENT framework's repo (already queried via the pr_intel_specialist
     cross-repo set) gets tagged with its origin framework WITHOUT any env opt-in;
     the session's own-repo candidates are left untagged, exactly as before."""
