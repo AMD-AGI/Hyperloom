@@ -1,7 +1,7 @@
 # framework-agent
 
 vllm/sglang source-layer optimisation companion for
-[`inference_optimizer`](../src/hyperloom/inference_optimizer/). The live Hyperloom
+[`inference_optimizer`](../../inference_optimizer/). The live Hyperloom
 integration uses the FRAMEWORK discovery path:
 
 - **FRAMEWORK discovery** (`fa phase-discover`) — returns upstream PR
@@ -24,21 +24,21 @@ When a `(model, backend)` combo will not start, the enablement building
 blocks turn the failure into an authored bridging patch, gated on *does it
 run* rather than *is it faster*:
 
-1. **Classify** — `framework_agent.enablement.classify_failure(log)` parses a
+1. **Classify** — `hyperloom.agents.framework.enablement.classify_failure(log)` parses a
    launch/import/build log into a `FailureSignature`
    (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
    `import_error` / `shape_mismatch` / `not_implemented` /
    `capability_disabled`) with the offending file/symbol and a `bridge_layer`.
-2. **Discover** — `framework_agent.enablement_discovery.build_search_plan(...)`
+2. **Discover** — `hyperloom.agents.framework.enablement_discovery.build_search_plan(...)`
    picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via
    `repo_map.bridge_repo_urls` for the failure's bridge layer) and ranks
    candidate PR titles for *enablement* intent (`enable` / `support` / `add` /
    `fix` / `port`).
-3. **Author** — `framework_agent.enablement_authoring.build_mandate(...)`
+3. **Author** — `hyperloom.agents.framework.enablement_authoring.build_mandate(...)`
    produces the `EnablementMandate` (allowed source roots + task description +
    patch invariants) handed to Hyperloom's `enablement_specialist` /
    `SpecialistRunner`, which writes the patch into an isolated worktree.
-4. **Verify** — `framework_agent.enablement.runnable_decision(...)` is the
+4. **Verify** — `hyperloom.agents.framework.enablement.runnable_decision(...)` is the
    KEEP/REVERT gate: the launch probe must exit 0 (no timeout) and any minimal
    correctness check must pass; the same failure re-appearing is a reject.
 
@@ -49,9 +49,9 @@ the always-allowed `aiter`).
 ## Quick start
 
 ```bash
-# Install (idempotent)
-cd Hyperloom/framework-agent
-bash scripts/install.sh        # or: pip install -e '.[test]'
+# Install from the repo root (idempotent)
+cd Hyperloom
+bash src/hyperloom/agents/framework/scripts/install.sh        # or: pip install -e '.[test]'
 
 # Live IO discovery path
 fa phase-discover --request /path/to/request.json --out -
@@ -71,7 +71,7 @@ fa kb search --domain framework_optimization --query "fp8 kv cache"
 ```bash
 pytest -q                      # all 160+ unit tests
 pytest -q tests/test_logging_setup.py tests/test_isolation.py \
-          tests/test_decision.py tests/test_explore_modes.py
+          tests/test_decision.py tests/test_explorer.py
 ```
 
 ## Used by inference_optimizer
@@ -100,9 +100,6 @@ and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
 
 ## Design references
 
-- [`framework-explorer-merged-design.md`](../claw-dev/docs-zh/framework-explorer-merged-design.md)
-  — PR exploration tool (existing).
-- [`hyperloom-framework-agent-design.md`](../claw-dev/docs-zh/hyperloom-framework-agent-design.md)
-  — 5th-role design (v1.3).
-- [`hyperloom-framework-agent-implementation-plan.md`](../claw-dev/docs-zh/hyperloom-framework-agent-implementation-plan.md)
-  — PR-A/B/C/D/E/F/G/H/I execution plan.
+The current runtime contract is documented in this directory's `SKILL.md`,
+`AGENTS.md`, and `references/` files. Historical design notes live outside the
+packaged Hyperloom tree.

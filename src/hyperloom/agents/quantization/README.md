@@ -1,4 +1,4 @@
-# quantization_agent
+# quantization-agent (`hyperloom.agents.quantization`)
 
 Hyperloom sub-agent that drives AMD Quark's PTQ workflow from a single
 natural-language prompt.
@@ -45,7 +45,7 @@ No human interaction at any point.
 ### CLI
 
 ```bash
-python -m quantization_agent.cli \
+python -m hyperloom.agents.quantization.cli \
     --prompt "$PROMPT" \                       # natural-language request
     --workspace /scratch/run-1/wks \           # per-run scratch dir
     --quark-root /path/to/Quark \              # or $QUARK_ROOT
@@ -53,6 +53,8 @@ python -m quantization_agent.cli \
     --acceptable-eval-gap 0.05 \               # max relative quality gap
     --max-requantize-attempts 1                # Python-level retry cap
 ```
+
+The equivalent console script is `quantization-agent`.
 
 Exit codes: `0` success/partial · `1` failed · `2` argparse error ·
 `3` operator-rejected checkpoint.
@@ -64,7 +66,7 @@ The CLI prints a JSON summary (`status` + `quantized_model_dir` +
 
 ```python
 import asyncio
-from quantization_agent import quantize_via_prompt
+from hyperloom.agents.quantization import quantize_via_prompt
 
 async def main():
     result = await quantize_via_prompt(
@@ -140,7 +142,7 @@ Claude SDK auth (`ANTHROPIC_API_KEY` or equivalent) is handled by
 ## Tests
 
 ```bash
-pytest quantization_agent/tests/
+pytest src/hyperloom/agents/quantization/tests/
 ```
 
 All tests run offline — no network, no GPU, no Claude SDK calls (a fake-SDK
@@ -150,7 +152,7 @@ operator promotion, and budget exhaustion.
 
 ## Public API
 
-`from quantization_agent import …`
+`from hyperloom.agents.quantization import …`
 
 | symbol                       | purpose                                                                 |
 | ---------------------------- | ----------------------------------------------------------------------- |

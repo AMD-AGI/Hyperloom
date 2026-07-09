@@ -9,9 +9,8 @@ description: |
 globs:
   - "**/inference*optim*"
   - "**/inference_optimizer*"
-  # tree-reform.MD P2.3: the Coordinator/orchestrator moved to
-  # src/hyperloom/orchestrator/ (out of src/hyperloom/inference_optimizer/); keep this
-  # skill triggering on it since it still owns the launcher's runtime story.
+  # The Coordinator/orchestrator lives under src/hyperloom/orchestrator/;
+  # keep this skill triggering on it since it still owns the launcher's runtime story.
   - "**/hyperloom/orchestrator/**"
 ---
 
@@ -30,8 +29,8 @@ The CLI starts a Python Coordinator that coordinates:
 - Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
-- Robustness: default `--robustness-agent` — drives the `robustness-agent/`
-  subprocess runtime for health monitoring, RCA, and scheduling-police
+- Robustness: default `--robustness-agent` — drives the
+  `hyperloom.agents.robustness` subprocess runtime for health monitoring, RCA, and scheduling-police
   intents. `--robustness-mock` for offline / smoke tests.
   - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
     `LocalProbeSource` targets sandbox-local resources only (ray status,
@@ -40,7 +39,7 @@ The CLI starts a Python Coordinator that coordinates:
     probe surfaces as a HIGH false positive that floods the bus. The CLI
     auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
     WARNING; pass `--robustness-mock` explicitly to suppress it. See
-    `multi_node/SKILL.md` (Robustness limitation in multi-node mode).
+    `src/hyperloom/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
 State lives under a **session directory** (per optimization run).
 The **workspace root** is ``$USER_DATA_PATH`` (default
@@ -119,8 +118,8 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
-`kernel-agent/scripts/install.sh` clones
+`$HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens`; when unset,
+`src/hyperloom/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
 an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
@@ -308,27 +307,27 @@ Rules that look reasonable but break the current flow:
 Two commands: Step 1 implements **IR-2** (install gate), Step 2 launches.
 Both are idempotent; do not replicate them inside chat.
 
-### Credentials (env only)
+### Credentials
 
-`SAFE_API_KEY` and `OPENAI_BASE_URL` are the only credentials this skill
-needs and must be exported in the calling shell before running install
-or the CLI (typically by sourcing `$HYPERLOOM_KERNEL_AGENT_ROOT/env.sh`
-after Step 1). `install.sh` and the CLI's `_preflight()` read them from
-`os.environ` only — no `.env` files are loaded.
+The common single-gateway setup uses `SAFE_API_KEY` and `OPENAI_BASE_URL`.
+Split-gateway deployments may provide provider-specific `ANTHROPIC_*` /
+`OPENAI_*` credentials instead. Shell-exported values win; `$REPO_ROOT/.env`
+is loaded only to fill missing values by `install.sh` and the CLI preflight.
+After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd)"   # repo root containing kernel-agent/ + src/hyperloom/inference_optimizer/ + .env
+export REPO_ROOT="$(pwd)"   # repo root containing src/hyperloom/ + .env
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
-first, then chains to `kernel-agent/scripts/install.sh` for the kernel
-optimization environment. `kernel-agent/scripts/install.sh` remains valid for
+first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
+optimization environment. `src/hyperloom/agents/kernel/scripts/install.sh` remains valid for
 standalone kernel-agent debugging, but should not be the main entrypoint for a
 full inference optimizer session.
 
@@ -343,12 +342,12 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | Component | Provided by |
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
-| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
+| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`) | `ensure_magpie` |
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-Chained from `kernel-agent/scripts/install.sh` (single chain at the end
-of `src/hyperloom/inference_optimizer/install.sh`):
+Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
+of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
@@ -360,7 +359,7 @@ of `src/hyperloom/inference_optimizer/install.sh`):
 | `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
-regenerated by `install.sh` and contains the proxy-rewritten URLs, auth aliases,
+regenerated by `install.sh` and contains gateway URLs, auth aliases,
 GEAK config path, and InferenceX path. Source it (don't try to derive these by
 hand). Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
@@ -375,10 +374,10 @@ does not consume these.
 
 | Prompt field | Env name | Consumer |
 |---|---|---|
-| `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
+| `OOB_SRC: <path>` | `$OOB_SRC` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_oob` |
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
-| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (public) |
-| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal; only when set) |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (public) |
+| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
@@ -445,7 +444,7 @@ when the file is absent, invalid, or stale.
 ```bash
 inference_optimizer optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # sglang (default) / vllm / atom (atom: single-node only, IR-8)
+  --framework vllm \           # sglang (default) / vllm / atom / xdit
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --max-hours 2 \
@@ -459,9 +458,9 @@ supply session metadata directly via CLI flags / env vars:
 | Surface | CLI flag | Env var | Notes |
 |---|---|---|---|
 | Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom) |
+| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
-| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); defaults to `moe_mla` when unset. For richer advisory model context see Step 1.5 (`model_arch.json`) |
+| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
 
@@ -520,11 +519,11 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
-# to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
+# to $HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens and pin it to a
 # fixed SHA. Only export it as an operator override to point at a
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.
@@ -558,7 +557,7 @@ fallback}, probed against `<OPENAI_BASE_URL>/models`; see
 critic-agent runtime probe (`## Critic Backend Selection`).
 
 Don't manually pip-install SDKs, edit `~/.claude/config.json`, start Ray,
-or `curl /v1/models` — `_preflight()` owns these. See `kernel-agent/SKILL.md`
+or `curl /v1/models` — `_preflight()` owns these. See `src/hyperloom/agents/kernel/SKILL.md`
 for the chained installer truth.
 
 ### Recovery
@@ -770,13 +769,13 @@ What this controls:
 - Which Magpie YAML the executors default to —
   `baseline_{sglang,vllm,atom}.yaml` and
   `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
-  `_default_profile_config()` in `action_executors/profile.py` picks
+  `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks
   the right file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
   (`_default_grid_for_framework("atom", ...)` in
-  `action_executors/explore.py`, populated by
+  `src/hyperloom/orchestrator/actions/executors/explore.py`, populated by
   `_atom_default_grid()`); sglang and vllm continue to rely on
   the orchestration LLM emitting `provenance='default_grid'`
   variants and will fail with `error_class="empty_grid"` on a
@@ -795,7 +794,7 @@ shell — set it when you resume a non-default session.
 atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
 are in PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo
-URL `https://github.com/ROCm/ATOM.git` is in `framework_agent.repo_map`.
+URL `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`.
 Unlike sglang/vllm, atom is the only framework with a programmatic
 cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
 `atom_prefix_cache`, `atom_kv_fp8` on FP8, model-class-gated `atom_ep` /
@@ -813,10 +812,11 @@ inference_optimizer optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours
 GPU_TYPE=mi300x inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi325x`, `mi355x`. **`mi325x` is mapped to
-`mi300x`** with a warning, since the two GPUs share the same arch and
-Magpie has not shipped `sglang_mi325x.sh` / `vllm_mi325x.sh` yet. If you
-need a true MI325X-specific script, uncomment the `benchmark_script:`
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
+`mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
+same runner family and Magpie has not shipped `sglang_mi308x.sh` /
+`sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet. If you
+need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:`
 template in the relevant YAML and point it at your script under
 `InferenceX/benchmarks/...`.
 
@@ -1067,7 +1067,7 @@ Override the probe dir via `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
 ## Pre-GEAK Unittest Harness (unittest skill)
 
 Before `backend=geak` attempts, the main agent generates a GEAK-compatible
-test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+test harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill
 searches for existing tests, collects shapes/dtypes from TraceLens and
 profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
 / `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
@@ -1077,7 +1077,7 @@ The resulting `test_command` is passed via `--test-command` to
 produce a valid harness (after up to 3 retries), `--test-command` is omitted
 and GEAK falls back to its own test discovery cascade.
 
-Validation uses `kernel-agent/skills/unittest/validate_harness.py` for both
+Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for both
 static checks (argparse + 4 flags + GEAK output markers) and runtime
 verification (run correctness + benchmark with reduced iterations).
 

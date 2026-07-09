@@ -23,7 +23,7 @@ dashboards). One file per session, written to
 operator demand using [`dump_session_breakdown.py`](operator-scripts.md)).
 
 The authoritative source of truth for the wire shape is
-[`inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/breakdown/schema.py).
+[`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py).
 This page describes the contract from a consumer's perspective.
 
 ---
@@ -70,8 +70,9 @@ Compatibility rules:
 * All values are JSON-serializable (no dataclasses, enums, or
   Python-specific types in the wire shape).
 
-The `exporter_version` field carries the producing Hyperloom version
-(for example, `"0.6.0"`) for incident triage and per-version filtering.
+The `exporter_version` field carries the exporter implementation version
+(currently `"session-breakdown-1.0.0"`), independent of the Hyperloom package
+version, for incident triage and per-version filtering.
 
 ---
 
@@ -83,7 +84,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
-  "exporter_version": "0.6.0",
+  "exporter_version": "session-breakdown-1.0.0",
 
   "session":            { /* §3  SessionMeta */ },
   "workload":           { /* §4  Workload */ },
@@ -102,9 +103,33 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "attribution":        { /* §16 Gain attribution per stack entry */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
-  "source_files":       { /* §17 SourceFiles — raw artefact paths */ }
+  "source_files":       { /* §17 SourceFiles — raw artefact paths */ },
+
+  /* Optional sections — present when the run produced the relevant data.
+     Consumers MUST tolerate their absence (total=False TypedDict). */
+  "model_info":                  { /* model architecture summary */ },
+  "phase_segments":              [ /* per-phase segment records */ ],
+  "explore_search":              { /* EXPLORE dedup ledger */ },
+  "perfskills":                  { /* perf-skill telemetry */ },
+  "kb_provenance":               { /* KB read/write provenance */ },
+  "specialist_runs":             [ /* specialist sub-agent runs */ ],
+  "optimization_stack":          { /* accepted KEEP stack */ },
+  "gemm_tuning":                 { /* FP8 GEMM tuning results */ },
+  "kernel_roofline":             { /* kernel roofline snapshot */ },
+  "kernel_optimization_summary": { /* kernel-opt rollup */ },
+  "conc_sweep_summary":          { /* post-run concurrency sweep */ },
+  "roofline":                    { /* roofline analysis */ },
+  "roofline_progress":           [ /* roofline watermark crossings */ ],
+  "decision_trace":              { /* KEEP/REVERT decisions + token rollup */ },
+  "token_usage":                 { /* LLM token spend rollup (see below) */ },
+  "langfuse":                    { /* Langfuse push receipt */ },
+  "kernel_journey":              { /* kernel lifecycle journey */ },
+  "versions":                    { /* component/version stamps */ }
 }
 ```
+
+The `session` (SessionMeta) section also carries `user_data_path` and a
+`recovery` sub-object in addition to the fields documented in §3.
 
 All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session
@@ -244,12 +269,13 @@ The same `kernel_id` appears in multiple lists as it progresses.
 
 ## `param_search`
 
-The canonical ledger is `explore`, with `ParamSearchEntry` records for
-every tested variant: `status` ∈ `accepted` / `rejected` / `tested`,
-the `extra_server_args` / `extra_envs` it injected, the
+The canonical field is `explore_search` (the native merged ledger), with
+`ParamSearchEntry` records for every tested variant: `status` ∈ `accepted` /
+`rejected` / `tested`, the `extra_server_args` / `extra_envs` it injected, the
 `output_throughput` it measured, and the resulting `gain_pct`. The
-`params` and `backends` ledgers are compatibility aliases emitted for
-archived sessions and old readers. The section also includes
+`param_search` ledger is a v1-reader compatibility alias for the same data;
+`params` and `backends` are older compatibility aliases emitted for archived
+sessions and old readers. The section also includes
 `synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
 
 ---
@@ -315,7 +341,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
-  "exporter_version": "0.6.0",
+  "exporter_version": "session-breakdown-1.0.0",
 
   "session": {
     "session_id": "sess-20260517-1130",
@@ -329,13 +355,13 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "host": "claw-sandbox-7",
     "code_revision": "a1b2c3d",
     "pid": 12345,
-    "session_dir": "/workspace/hyperloom",
+    "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
     "tick_count": 89,
     "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x-profilerfix"
   },
 
   "workload": {
-    "framework": "sglang",
+    "framework_name": "sglang",
     "framework_version": "0.5.11",
     "model_name": "GLM-5-FP8",
     "model_path": "/wekafs/models/GLM-5-FP8",
@@ -433,13 +459,13 @@ TypedDict shapes.)
 * **Offline and historical**: See
   [Hyperloom operator scripts](operator-scripts.md):
   ```bash
-  python -m inference_optimizer.scripts.dump_session_breakdown \
+  python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
       --session-dir /path/to/session \
       [--output /tmp/breakdown.json]
   ```
 
 All three paths share the same builder
-(`inference_optimizer.breakdown.build`), so the output is identical
+(`hyperloom.inference_optimizer.breakdown.build`), so the output is identical
 regardless of producer.
 
 ---
@@ -467,4 +493,4 @@ Use the following resources for related reference information.
 
 * [Hyperloom operator scripts](operator-scripts.md) — How to produce a breakdown from a finished session directory.
 * [Hyperloom self-hosting and operations guide](operations.md) — Retention recommendations.
-* [`../inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/breakdown/schema.py) — TypedDict source of truth.
+* [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py) — TypedDict source of truth.

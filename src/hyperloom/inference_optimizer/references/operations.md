@@ -39,7 +39,8 @@ inference_optimizer optimize \
 - `--model`: required model path.
 - `--framework`: `sglang` (default), `vllm`, or `atom`; atom is single-node only.
 - `--gpu-type`: optional; omitted means rocm-smi auto-detect.
-- `--model-class`: defaults to `moe_mla`; examples: `dense`, `moe_mla`,
+- `--model-class`: optional; when unset, Coordinator boot infers it from
+  model metadata or model-path family keywords. Examples: `dense`, `moe_mla`,
   `moe_swa`, `moe_mla_nsa`.
 - `--compare-against-gpu`: optional external reference GPU.
 - `--quantize`: only when requested; read `quantization.md` first.
@@ -49,7 +50,7 @@ inference_optimizer optimize \
 After IR-2, smoke-test the CLI in the same shell:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"

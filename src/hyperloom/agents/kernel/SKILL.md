@@ -55,7 +55,7 @@ correct env-wins semantics.
 
 ```bash
 export REPO_ROOT="$(pwd)"   # hyperloom repo root that owns .env (or `cd` there)
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
 # install.sh writes the pod-local env at $HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh
 # (= $USER_DATA_PATH/runtime/kernel-agent.env.sh by default).
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
@@ -117,8 +117,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   Anthropic URL derived from `$OPENAI_BASE_URL` with a trailing `/v1`
   stripped) + `~/.codex/auth.json`. The AMD primus-safe gateway accepts
   both `x-api-key` (what claude/codex CLIs send) and
-  `Authorization: Bearer` natively, so no local auth-proxy is in the
-  loop. The cursor backend talks to
+  `Authorization: Bearer` natively. The cursor backend talks to
   Cursor's own gateway via `@cursor/sdk` and requires `CURSOR_API_KEY`
   (separate Cursor account, prefix `crsr_...`).
 
@@ -131,7 +130,7 @@ Use `--check-only` to verify the current environment without installing,
 and `--dry-run` to print planned actions:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
 ### Step 2 — Start Ray with all visible GPUs
@@ -165,11 +164,6 @@ If a tool fails with HTTP 401 / `Primus.00009 token not present` /
 curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
 
-A stale `customApiUrl=http://127.0.0.1:4002/...` in
-`~/.claude/config.json` left over from a previous install can also
-trigger this — re-run `install.sh` to have `ensure_llm_auth_files`
-rewrite the file to the upstream URL.
-
 If a pod or venv was rebuilt and `ray --version` fails / Ray CLI rejects
 `--num-gpus`, repair the Ray/Click pair (Click >= 8.3 is incompatible
 with the Ray 2.44 CLI in this environment):
@@ -195,7 +189,7 @@ Inputs:
 Run:
 
 ```bash
-python "$REPO_ROOT/kernel-agent/tools/tracelens_analysis.py" \
+python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/tracelens_analysis.py" \
   --trace-input "$TRACE_INPUT" \
   --session-id "$SESSION_ID" \
   --model-name "$MODEL_NAME" \
@@ -228,7 +222,7 @@ Inputs:
 Run:
 
 ```bash
-python "$REPO_ROOT/kernel-agent/tools/kernel_optimization.py" \
+python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/kernel_optimization.py" \
   --session-id "$SESSION_ID" \
   --kernel-id "$KERNEL_ID" \
   ${BACKENDS:+--backends "$BACKENDS"} \
@@ -250,7 +244,7 @@ and report it instead of crashing the resident session.
 #### Pre-GEAK Unittest Harness (unittest skill)
 
 Before `backend=geak` attempts, the main agent generates a GEAK-compatible
-test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+test harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill
 searches for existing tests, collects shapes/dtypes from TraceLens, and
 generates a 4-mode harness (`--correctness`/`--profile`/`--benchmark`/`--full-benchmark`).
 
@@ -260,7 +254,7 @@ The resulting `test_command` is passed via `--test-command` to
 If the skill fails to produce a valid harness, omit `--test-command` and
 GEAK falls back to its own test discovery.
 
-Validation uses `kernel-agent/skills/unittest/validate_harness.py` for
+Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for
 static checks (argparse + 4 flags + output markers) and runtime verification
 (run correctness + benchmark modes, check exit codes and markers).
 
@@ -527,7 +521,7 @@ writes:
 
 ### Per-attempt stdout file naming
 
-`run_attempt` (in `kernel-agent/tools/kernel_optimization.py`) materialises
+`run_attempt` (in `src/hyperloom/agents/kernel/tools/kernel_optimization.py`) materialises
 one file per attempt under `runs/<session_id>/optimized/`:
 
 | Mode             | Filename                                                  | Contents                                                                 |

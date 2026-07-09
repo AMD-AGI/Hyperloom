@@ -59,6 +59,7 @@ Options:
 
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
+  FORGE_PATH, KERNEL_FORGE_ROOT, KERNEL_FORGE_PATH,
   OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
   KERNEL_FORGE_REPO, INFERENCEX_REPO, INFERENCEX_REF,
   TRACELENS_REPO, TRACELENS_REF,
@@ -382,17 +383,26 @@ resolve_tracelens() {
 resolve_oob_src() {
   if [ -n "${OOB_SRC:-}" ]; then
     [ -d "$OOB_SRC" ] || die "OOB_SRC is set but does not exist: ${OOB_SRC}"
+    if [ "$(basename "$OOB_SRC")" = "OOB" ]; then
+      FORGE_PATH="${FORGE_PATH:-$(cd "$(dirname "$OOB_SRC")" && pwd)}"
+      KERNEL_FORGE_ROOT="${KERNEL_FORGE_ROOT:-$FORGE_PATH}"
+      export FORGE_PATH KERNEL_FORGE_ROOT
+    fi
     log "OOB_SRC: using existing ${OOB_SRC}"
     return 0
   fi
 
   local root="${_open_source_root}/KernelForge"
   clone_or_update "KernelForge" "$KERNEL_FORGE_REPO" "$root" ""
+  FORGE_PATH="${FORGE_PATH:-$root}"
+  KERNEL_FORGE_ROOT="${KERNEL_FORGE_ROOT:-$FORGE_PATH}"
   OOB_SRC="${root}/OOB"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
     [ -d "$OOB_SRC" ] || die "KernelForge checkout does not contain OOB/: ${OOB_SRC}"
   fi
+  export FORGE_PATH KERNEL_FORGE_ROOT
   export OOB_SRC
+  log "FORGE_PATH: ${FORGE_PATH}"
   log "OOB_SRC: ${OOB_SRC}"
 }
 
@@ -429,6 +439,10 @@ write_local_env() {
     # --deps-root / HYPERLOOM_DEPS_ROOT override would leave those consumers on
     # /opt/hyperloom/open-source-repos and mis-classify managed vs override (#722).
     write_export HYPERLOOM_OPEN_SOURCE_ROOT "$_open_source_root"
+    if [ -n "${FORGE_PATH:-}" ]; then
+      write_export FORGE_PATH "$FORGE_PATH"
+      write_export KERNEL_FORGE_ROOT "$KERNEL_FORGE_ROOT"
+    fi
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
     write_export TRACELENS_ROOT "$TRACELENS_ROOT"

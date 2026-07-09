@@ -14,10 +14,12 @@ subtrees:
 
 - caption: Install
   entries:
-  - file: install/hyperloom-installation.md
-    title: Install Hyperloom
   - file: install/quickstart.md
     title: Quickstart — hosted UI
+  - file: install/local-mode.md
+    title: Quickstart — local mode
+  - file: install/bare-metal.md
+    title: Quickstart — bare metal
 
 - caption: Components
   entries:
@@ -25,21 +27,23 @@ subtrees:
     title: Components
     subtrees:
     - entries:
-      - url: https://advanced-micro-devices-demo--131.com.readthedocs.build/projects/intellikit/en/131/index.html
+      - file: components/intellikit.md
         title: IntelliKit
-      - url: https://advanced-micro-devices-demo--50.com.readthedocs.build/projects/magpie/en/50/
+      - file: components/magpie.md
         title: Magpie
-      - url: https://advanced-micro-devices-tracelens--772.com.readthedocs.build/en/772/
+      - file: components/tracelens.md
         title: TraceLens
-      - url: https://advanced-micro-devices-demo--311.com.readthedocs.build/projects/geak/en/311/
+      - file: components/geak.md
         title: GEAK
-      - url: https://advanced-micro-devices-agentkernelarena--55.com.readthedocs.build/en/55/
+      - file: components/agentkernelarena.md
         title: AgentKernelArena
 
 - caption: How to
   entries:
   - file: how-to/optimize.md
-    title: Run a Hyperloom optimization 
+    title: Run a Hyperloom optimization
+  - file: how-to/quantization-quark.md
+    title: Quantization with AMD Quark
 
 - caption: Conceptual
   entries:
@@ -56,6 +60,16 @@ subtrees:
     title: Authentication and credentials
   - file: reference/troubleshooting.md
     title: Troubleshooting
+  - file: reference/integrate-kb.md
+    title: Knowledge base integration
+  - file: reference/operator-scripts.md
+    title: Operator scripts
+  - file: reference/session-breakdown.md
+    title: session_breakdown.json
+  - file: reference/operations.md
+    title: Operations
+  - file: reference/upgrade.md
+    title: Upgrade
 
 - caption: About
   entries:
