@@ -1018,7 +1018,10 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
             "output_throughput": tput_f,
             "request_throughput": data.get("request_throughput"),
             "total_token_throughput": data.get("total_token_throughput"),
-            "raw_result_path": _rel(result_path, variant_dir.parents[2]),
+            "raw_result_path": _rel(
+                result_path,
+                variant_dir.parents[2] if len(variant_dir.parents) >= 3 else variant_dir,
+            ),
         }
     return {
         "arm": arm,

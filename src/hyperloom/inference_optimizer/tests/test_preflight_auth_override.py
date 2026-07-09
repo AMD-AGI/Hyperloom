@@ -1163,3 +1163,28 @@ def test_expected_framework_guard_rejects_mismatch(monkeypatch, capsys):
 def test_expected_framework_guard_accepts_match(monkeypatch):
     monkeypatch.setenv("EXPECTED_FRAMEWORK", "VLLM")
     cli._enforce_expected_framework("vllm")
+
+
+def test_expected_framework_guard_namespaced_env_var(monkeypatch):
+    monkeypatch.delenv("EXPECTED_FRAMEWORK", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "vllm")
+    with pytest.raises(SystemExit) as exc:
+        cli._enforce_expected_framework("sglang")
+    assert exc.value.code == 2
+
+
+def test_expected_framework_guard_namespaced_takes_precedence(monkeypatch):
+    # Namespaced var wins over the compact one, so a matching compact value
+    # cannot rescue a namespaced mismatch.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "vllm")
+    monkeypatch.setenv("EXPECTED_FRAMEWORK", "sglang")
+    with pytest.raises(SystemExit):
+        cli._enforce_expected_framework("sglang")
+
+
+def test_expected_framework_guard_unset_is_noop(monkeypatch):
+    monkeypatch.delenv("EXPECTED_FRAMEWORK", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", raising=False)
+    # No env pins -> guard is a no-op regardless of framework.
+    cli._enforce_expected_framework("sglang")
+    cli._enforce_expected_framework("anything")

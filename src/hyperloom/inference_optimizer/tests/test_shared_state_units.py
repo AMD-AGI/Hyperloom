@@ -504,3 +504,25 @@ def test_record_action_failure_captures_stderr_tail_for_kv_cache_oom():
     )
     assert entry["stderr_tail"] is not None
     assert "no GPU memory for the KV cache" in entry["stderr_tail"]
+
+
+def test_record_action_attempt_kv_cache_oom_captures_stderr_tail():
+    # kv_cache_oom is a subprocess-style failure, so record_action_attempt must
+    # capture its stderr_tail into <action>_attempts (parallel to the
+    # subprocess_nonzero path).
+    s = SharedState()
+    s.record_action_attempt(
+        action="baseline",
+        task_id="t-kvoom",
+        status="failed",
+        decision="no_promote",
+        result={
+            "error_class": "kv_cache_oom",
+            "error": "Loaded weights leave no GPU memory for the KV cache",
+            "reported_success": False,
+        },
+    )
+    attempt = s.baseline_attempts[-1]
+    assert attempt["error_class"] == "kv_cache_oom"
+    assert attempt["stderr_tail"] is not None
+    assert "no GPU memory for the KV cache" in attempt["stderr_tail"]

@@ -1504,6 +1504,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")
         if state.framework:
+            _enforce_expected_framework(state.framework)
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
         if state.gpu_type:

@@ -64,3 +64,25 @@ def test_collect_conc_sweep_summary_absent_and_no_runs_returns_empty(tmp_path: P
     (session / "reports").mkdir(parents=True)
     warnings: list[str] = []
     assert collect_conc_sweep_summary(session, warnings) == {}
+
+
+def test_collect_conc_sweep_summary_keeps_report_when_not_beaten(tmp_path: Path):
+    session = tmp_path / "session"
+    (session / "reports").mkdir(parents=True)
+    (session / "reports" / "conc_sweep_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "summary": {"successful_pairs": 2, "failed_pairs": 0},
+                "comparison": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Runs hold only one successful pair -> must NOT override the 2-pair report.
+    _write_result(session, "task_a", "baseline_conc1", 100.0)
+    _write_result(session, "task_a", "optimized_conc1", 130.0)
+    warnings: list[str] = []
+    summary = collect_conc_sweep_summary(session, warnings)
+    assert summary["summary"]["successful_pairs"] == 2
+    assert summary.get("source") != "recovered_from_runs"

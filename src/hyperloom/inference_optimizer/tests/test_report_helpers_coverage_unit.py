@@ -255,3 +255,23 @@ def test_format_md_renders_stop_explanation():
     )
     assert "Why it stopped" in md
     assert "Robustness escalated" in md
+
+
+# ---- stop_reason explanation vocabulary coverage (M1) ----
+def test_every_stop_reason_vocab_member_has_explanation():
+    from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
+
+    missing = sorted(r for r in STOP_REASON_VOCAB if not rp._explain_stop_reason(r))
+    assert missing == [], f"stop reasons without an explanation: {missing}"
+
+
+def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
+    # A KV-cache OOM message can also contain the generic "out of memory"
+    # phrase; the more specific bucket must win (L1).
+    assert (
+        rp._classify_root_cause_type(
+            "kv_cache_oom",
+            "CUDA out of memory; no GPU memory for the KV cache",
+        )
+        == "kv_cache_oom"
+    )

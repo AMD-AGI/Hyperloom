@@ -145,15 +145,13 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
     Returns:
         The coarse root-cause enum string for the dashboard / ops contract.
     """
+    from .baseline import _KV_CACHE_OOM_MARKERS
+
     blob = f"{error_class} {error_text}".lower()
+    if error_class == "kv_cache_oom" or any(m in blob for m in _KV_CACHE_OOM_MARKERS):
+        return "kv_cache_oom"
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
-    if (
-        error_class == "kv_cache_oom"
-        or "no gpu memory for the kv cache" in blob
-        or "mem-fraction-static" in blob
-    ):
-        return "kv_cache_oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:
         return "benchmark_timeout"
     if (
@@ -343,21 +341,56 @@ def _build_failure_summary(
 
 
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
+    # Terminal reasons the coordinator loop sets directly (DESIGN 9.1).
     "target_reached": "Target reached: the requested --target-gain / --target-tput was met.",
     "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
-    "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
+    "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",
+    "emergency": (
+        "Emergency stop: recoverable crashes spiked past the safety threshold inside the crash "
+        "window; the best validated result was preserved before exit."
+    ),
+    "coordinator_exception": "The coordinator loop raised an unhandled exception; the last validated result was preserved.",
+    "custom": "A caller-supplied stop condition (stop_when) fired.",
+    "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
+    # Policy / robustness governor.
+    "policy_loop": "The policy gate detected a decision loop and stopped to avoid spinning on the same transition.",
+    "crash_threshold_exceeded": "Too many recoverable crashes accumulated; the run stopped to preserve the validated result.",
     "robustness_escalated": (
         "Robustness escalated: the run stopped early (not a target hit). Common triggers are an "
         "approaching deadline, a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
         "The best validated result was locked in before exit."
     ),
-    "crash_threshold_exceeded": "Too many recoverable crashes accumulated; the run stopped to preserve the validated result.",
+    "user_stop_requested": "Stopped on an explicit operator request.",
+    "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
+    # PRELUDE-phase early exits (before optimization begins).
+    "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
+    "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
+    "time_exhausted_during_prelude": "The wall-clock budget was exhausted while still in PRELUDE, before optimization began.",
+    # Cortex knowledge-plane bootstrap failures.
+    "cortex_t0_failed": "Cortex knowledge-plane bootstrap (t0) failed; the run stopped early.",
+    "cortex_drain_failed": "Cortex knowledge-plane drain failed; the run stopped early.",
+    "cortex_commit_failed": "Cortex knowledge-plane commit failed; the run stopped early.",
+    # Search / phase plateaus and completions.
     "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
-    "sweep_done": "SWEEP finished the configured concurrency/shape grid.",
+    "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
+    "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
-    "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
-    "user_stop_requested": "Stopped on an explicit operator request.",
+    "explore_force_exit_low_budget": "EXPLORE force-exited: the remaining wall-clock budget was too low to start new work.",
+    "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
+    "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
+    "framework_agent_force_exit_low_budget": "The framework-enablement agent force-exited on a low remaining budget.",
+    "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    # Pre-flight gates (fail fast before booting a server).
+    "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
+    "unsupported_model_arch": "Preflight gate: the model architecture (e.g. multimodal / vision) is unsupported.",
+    "model_config_incompatible": (
+        "Preflight gate: config.json is corrupt or declares RoPE scaling without a max-position field, "
+        "which would crash engine init."
+    ),
+    "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
+    "enablement_stalled": "The enablement loop made no forward progress for several consecutive rounds and stopped instead of re-deriving the same fix.",
 }
 
 
