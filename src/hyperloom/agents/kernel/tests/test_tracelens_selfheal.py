@@ -108,7 +108,7 @@ def test_is_default_tracelens_root_distinguishes_override(tl_module, tmp_path, m
 def test_incomplete_non_default_override_is_unusable_and_not_default(tl_module, tmp_path, monkeypatch):
     """A non-default override dir that exists but lacks .git is both
     'not default' (so main won't self-heal it) and 'not complete' (so main's
-    post-check fails fast) — PR#789 fail-fast semantics."""
+    post-check fails fast)."""
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
     override = tmp_path / "operator" / "TraceLens"
     override.mkdir(parents=True)

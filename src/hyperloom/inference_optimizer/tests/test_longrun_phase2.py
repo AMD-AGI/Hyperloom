@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase 2 (exploration depth — bottleneck re-direction) acceptance tests — R3.
+"""Long-run exploration-depth bottleneck re-direction acceptance tests.
 
 Covers:
 * cyclic EXPLORE plateau is *actionable* (winds the cycle down via

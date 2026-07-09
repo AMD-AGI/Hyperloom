@@ -1487,7 +1487,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
     coord: Coordinator,
     caplog,
 ) -> None:
-    """Regression (#486): successful specialist recording must not emit the
+    """Successful specialist recording must not emit the
     research-evidence failure log."""
     import logging
 
