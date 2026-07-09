@@ -341,17 +341,34 @@ class DispatcherCollaborator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
-                    # A framework-authoring specialist leases the whole machine
-                    # from ``framework_gpu_pool``; every other GPU specialist
-                    # leases from the carved ``gpu_specialist_pool``.
+                    # Whole-machine, time-shared lane vs serving-disjoint pool.
+                    # Framework-authoring AND bench-capable specialists lease the
+                    # whole machine from ``framework_gpu_pool`` (serialized with
+                    # serving via ``gpu_research_lane`` + ``benchmark_lane`` — the
+                    # server is torn down between rounds, so their cards are free
+                    # in the gap). Every other GPU specialist (non-bench probes)
+                    # leases from the carved serving-disjoint ``gpu_specialist_pool``.
+                    # See ``specialists.profile.uses_whole_machine_gpu_lane``.
+                    from ..specialists.profile import (
+                        uses_whole_machine_gpu_lane,
+                    )
+
+                    whole_machine_lane = uses_whole_machine_gpu_lane(params)
                     is_framework_authoring = bool(
                         params.get("framework_agent_authoring")
                     )
-                    if is_framework_authoring:
+                    if whole_machine_lane:
                         gpu_pool = self.framework_gpu_pool
-                        # Default to the whole machine; an explicit gpu_count
-                        # still wins (capped at pool capacity).
-                        default_gpu_count = gpu_pool.capacity or 1
+                        if is_framework_authoring:
+                            # Default to the whole machine; an explicit gpu_count
+                            # still wins (capped at pool capacity).
+                            default_gpu_count = gpu_pool.capacity or 1
+                        else:
+                            # Bench specialist: size to the serving TP it shards a
+                            # server across (the bench floor below still applies).
+                            default_gpu_count = (
+                                self._resolve_serving_tp() or gpu_pool.capacity or 1
+                            )
                     else:
                         gpu_pool = self.gpu_specialist_pool
                         # Default ``gpu_count`` to the serving TP; an explicit

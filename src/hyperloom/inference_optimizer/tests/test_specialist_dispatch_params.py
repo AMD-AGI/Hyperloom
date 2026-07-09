@@ -480,11 +480,41 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
 
-def test_bench_specialist_policy_uses_effective_tp_and_carved_pool(orchestration_role, monkeypatch):
-    """Policy must reject a bench specialist that dispatch would floor to TP
-    but could never lease after serving-disjoint carving."""
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+def test_bench_specialist_whole_machine_lane_allows_full_node(orchestration_role, monkeypatch):
+    """A bench specialist takes the whole-machine, time-shared GPU lane
+    (serialized with serving via ``gpu_research_lane``; server torn down between
+    rounds), so serving occupying the whole node (TP == #GPUs) NO LONGER denies
+    it — the serving-disjoint carve does not apply to the whole-machine pool.
+
+    Regression for the EXPLORE-phase GPU-specialist fix: previously this was
+    rejected with ``specialist_gpu_request_exceeds_capacity`` (disjoint pool
+    size 0)."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    gate = _gate_with_gpu_capacity(4, tp=4)
+    # gpu_count is floored to serving TP=4; the whole-machine pool has all 4
+    # cards (no serving carve), so this is now schedulable and must not raise.
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "start a TP-sharded server and rebench a patch",
+                "mode": "patch",
+                "bench": True,
+                "gpu_count": 1,
+            }
+        ),
+    )
+
+
+def test_bench_specialist_denied_when_whole_machine_too_small(orchestration_role, monkeypatch):
+    """A bench specialist is still denied when the whole node physically has
+    fewer cards than the serving TP it must shard a server across."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1")
     gate = _gate_with_gpu_capacity(4, tp=4)
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
@@ -495,20 +525,20 @@ def test_bench_specialist_policy_uses_effective_tp_and_carved_pool(orchestration
                     "task_description": "start a TP-sharded server and rebench a patch",
                     "mode": "patch",
                     "bench": True,
-                    "gpu_count": 1,
                 }
             ),
         )
     assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"
     assert "effective gpu_count=4" in str(exc.value)
-    assert "pool size=0" in str(exc.value)
+    assert "whole-machine GPU pool size=2" in str(exc.value)
 
 
-def test_bench_specialist_omitted_gpu_count_allows_sufficient_carved_pool(orchestration_role, monkeypatch):
-    """Omitting gpu_count defaults to serving TP and is valid when enough
-    serving-disjoint specialist cards remain."""
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+def test_bench_specialist_omitted_gpu_count_allows_whole_machine(orchestration_role, monkeypatch):
+    """Omitting gpu_count defaults a bench specialist to serving TP and is valid
+    when the whole-machine pool has at least that many cards."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     gate = _gate_with_gpu_capacity(8, tp=4)
     gate._validate_specialist_dispatch(
         orchestration_role,

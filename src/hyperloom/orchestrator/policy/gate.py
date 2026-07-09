@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..framework.paths import resolve_source_file_allowlist
-from ..bus.gpu_pool import resolve_gpu_specialist_devices
+from ..bus.gpu_pool import (
+    resolve_gpu_specialist_devices,
+    resolve_whole_machine_devices,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -267,6 +270,18 @@ def _effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
             serving_tp=_serving_tp_for_policy(shared_state),
         ),
     )
+
+
+def _whole_machine_pool_size() -> int:
+    """Policy-time size of the whole-machine (framework/bench) GPU pool.
+
+    Mirrors ``Coordinator.framework_gpu_pool`` (``resolve_whole_machine_devices``):
+    every visible card, with *no* serving carve and no
+    ``gpu_specialist_capacity`` gate. Used to validate whole-machine, time-shared
+    GPU specialists (framework-authoring + bench) which the dispatcher routes to
+    ``framework_gpu_pool`` rather than the serving-disjoint pool.
+    """
+    return len(resolve_whole_machine_devices())
 
 
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
@@ -1957,23 +1972,37 @@ class PolicyGate:
                     "before dispatching GPU specialists."
                 ),
             )
-        from ..specialists.profile import resolve_specialist_profile
+        from ..specialists.profile import (
+            resolve_specialist_profile,
+            uses_whole_machine_gpu_lane,
+        )
 
         if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
             gpu_count = serving_tp
-        effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
+        # Whole-machine, time-shared specialists (framework-authoring + bench)
+        # are validated against the whole-machine pool, NOT the serving-disjoint
+        # pool: the dispatcher routes them to ``framework_gpu_pool`` and they
+        # serialize with serving via ``gpu_research_lane`` (server torn down
+        # between rounds), so the serving carve does not apply. Without this a
+        # bench specialist is spuriously denied whenever serving occupies the
+        # whole node (serving-disjoint size == 0 at TP == #GPUs).
+        if uses_whole_machine_gpu_lane(params):
+            effective_pool_size = _whole_machine_pool_size()
+            pool_desc = "whole-machine GPU pool"
+        else:
+            effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
+            pool_desc = "serving-disjoint GPU specialist pool"
         if gpu_count > effective_pool_size:
             raise PolicyDenied(
                 "delegate{action='specialist'}: "
-                f"effective gpu_count={gpu_count} exceeds serving-disjoint "
-                f"GPU specialist pool size={effective_pool_size} "
+                f"effective gpu_count={gpu_count} exceeds {pool_desc} "
+                f"size={effective_pool_size} "
                 f"(configured capacity={ceiling}, serving_tp={serving_tp})",
                 rule="specialist_gpu_request_exceeds_capacity",
                 hint=(
                     "Lower params.gpu_count for non-bench probes, omit it for "
-                    "bench specialists only when the specialist pool has at "
-                    "least serving TP free cards, or start a session with a "
-                    "larger/disjoint GPU specialist pool."
+                    "bench specialists only when the pool has at least serving "
+                    "TP free cards, or start a session with a larger GPU pool."
                 ),
             )
 
