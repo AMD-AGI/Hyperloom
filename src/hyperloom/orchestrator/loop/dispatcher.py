@@ -203,23 +203,6 @@ class DispatcherCollaborator:
             await self.locks.reap_dead_holders()
         except Exception:  # noqa: BLE001
             log.exception("dispatcher: dead-holder lease reap failed")
-        # TTL-expired running-task self-heal (runs EVERY tick, complement to the
-        # dead-holder path above): a task whose run_task finally never executed
-        # (killed process, asyncio cancellation before the finally block) leaves
-        # its tasks row stuck at state='running' even after its leases have been
-        # reaped by the TTL path. reclaim_expired_running detects this from the
-        # tasks table alone (no lease JOIN needed, so it fires even after the
-        # lease is gone) and flips the row to 'failed', making it retry-eligible.
-        try:
-            expired_tasks = await self.tasks.reclaim_expired_running(reason="pump_watchdog")
-            if expired_tasks:
-                log.warning(
-                    "dispatcher: reclaimed %d expired running task(s): %s",
-                    len(expired_tasks),
-                    ", ".join(t[:12] for t in expired_tasks),
-                )
-        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
-            log.exception("dispatcher: expired-running task reclaim failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
         # fast task can complete and be reaped (leaving ``inflight``) before its

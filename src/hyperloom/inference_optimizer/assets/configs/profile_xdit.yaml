@@ -23,6 +23,9 @@ benchmark:
     XDIT_WARMUP_CALLS: 3
     XDIT_GUIDANCE_SCALE: 4.0
     XDIT_ATTENTION_BACKEND: aiter
+    # Keep compile parity with baseline_xdit.yaml: the empty/uncorrelatable-trace
+    # problem is fixed upstream (profiler side), so profiling no longer forces
+    # eager here — the trace is expected to carry proper GPU device kernels.
     XDIT_USE_TORCH_COMPILE: 1
     XDIT_USE_FP4_GEMMS: 0
     XDIT_USE_FP8_GEMMS: 0
