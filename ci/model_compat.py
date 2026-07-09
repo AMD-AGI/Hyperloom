@@ -248,6 +248,7 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
         if mpe is not None and int(mpe) <= SHORT_CTX_MAX:
             return ("short_ctx", f"max_position_embeddings={mpe}<={SHORT_CTX_MAX}")
     except (TypeError, ValueError):
+        # Missing/invalid field; fall through to the next heuristic.
         pass
 
     # 3) Phi3 longrope

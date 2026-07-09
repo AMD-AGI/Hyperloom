@@ -142,11 +142,13 @@ def test_kill_my_spawned_server_reaps_grandchildren():
         try:
             pid_file.unlink()
         except FileNotFoundError:
+            # PID file already gone; nothing to clean up.
             pass
         if proc.poll() is None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
+                # Process already exited; nothing to signal.
                 pass
 
 
@@ -233,6 +235,7 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
+                # Process already exited; nothing to signal.
                 pass
 
 
