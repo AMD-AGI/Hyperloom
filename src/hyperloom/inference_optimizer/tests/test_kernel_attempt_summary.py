@@ -45,7 +45,7 @@ def _top15_entry(
         "bound_type": bound_type,
         "arithmetic_intensity": arithmetic_intensity,
         "reusable_native_kernel": reusable,
-        "recommended_backends": (list(backends) if backends is not None else ["geak", "claude", "codex"]),
+        "recommended_backends": (list(backends) if backends is not None else ["geak_v3", "claude", "codex"]),
         "kernel_category": "test",
     }
 
@@ -240,7 +240,7 @@ def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None
         "sid1",
         "k001",
         backends=[
-            {"backend": "geak", "status": "failed", "attempt_id": "geak-1", "optimized_path": ""},
+            {"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1", "optimized_path": ""},
             {"backend": "claude", "status": "failed", "attempt_id": "claude-1", "optimized_path": ""},
             {"backend": "codex", "status": "failed", "attempt_id": "codex-1", "optimized_path": ""},
         ],
@@ -317,7 +317,7 @@ def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
         "sid1",
         "k001",
         backends=[
-            {"backend": "geak", "status": "completed", "attempt_id": "geak-1", "optimized_path": "/tmp/optimized.cu"},
+            {"backend": "geak_v3", "status": "completed", "attempt_id": "geak_v3-1", "optimized_path": "/tmp/optimized.cu"},
             {"backend": "claude", "status": "failed", "attempt_id": "claude-1", "optimized_path": ""},
         ],
     )
@@ -345,13 +345,13 @@ def test_top_takeaways_highlight_highest_gpu_pct_missed(tmp_path: Path) -> None:
         tmp_path,
         "sid1",
         "k001",
-        backends=[{"backend": "geak", "status": "failed", "attempt_id": "geak-1", "optimized_path": ""}],
+        backends=[{"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1", "optimized_path": ""}],
     )
     _write_backend_results(
         tmp_path,
         "sid1",
         "k002",
-        backends=[{"backend": "geak", "status": "failed", "attempt_id": "geak-1", "optimized_path": ""}],
+        backends=[{"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1", "optimized_path": ""}],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     joined = " ".join(out["top_takeaways"])
@@ -454,10 +454,10 @@ def test_produced_artifact_excludes_stdout_log_path(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak",
+                "backend": "geak_v3",
                 "status": "failed",
                 "attempt_id": "g1",
-                "optimized_path": "/workspace/optimized/geak-78bd_stdout.log",
+                "optimized_path": "/workspace/optimized/geak_v3-78bd_stdout.log",
                 "returncode": 1,
                 "elapsed_s": 213.5,
             }
@@ -482,7 +482,7 @@ def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak",
+                "backend": "geak_v3",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/v1.cu",
@@ -545,7 +545,7 @@ def test_backend_ladder_classifies_preprocess_failed(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak",
+                "backend": "geak_v3",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/g1_stdout.log",
@@ -588,7 +588,7 @@ def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
         "k001",
         attempts=[
             {
-                "backend": "geak",
+                "backend": "geak_v3",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/g1_stdout.log",
@@ -664,7 +664,7 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak",
+                "backend": "geak_v3",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/g1_stdout.log",

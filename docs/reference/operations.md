@@ -1,13 +1,13 @@
 ---
 myst:
     html_meta:
-        "description": "Operations guide for self-hosted Hyperloom. Covers Kubernetes sizing, USER_DATA_PATH backup, auth-proxy supervision, observability, disaster recovery, and capacity planning."
-        "keywords": "Hyperloom, self-hosting, operations, Kubernetes, USER_DATA_PATH, backup, auth-proxy, observability, disaster recovery, AMD GPU, ROCm, capacity planning"
+        "description": "Operations guide for self-hosted Hyperloom. Covers Kubernetes sizing, USER_DATA_PATH backup, LLM gateway credential checks, observability, disaster recovery, and capacity planning."
+        "keywords": "Hyperloom, self-hosting, operations, Kubernetes, USER_DATA_PATH, backup, LLM gateway, observability, disaster recovery, AMD GPU, ROCm, capacity planning"
 ---
 # Hyperloom self-hosting and operations guide
 
 This topic covers Kubernetes sizing, `USER_DATA_PATH` backup and
-retention, the auth-proxy supervisor, log/metrics surface, and a
+retention, LLM gateway credential checks, log/metrics surface, and a
 disaster-recovery runbook.
 
 ```{note}
@@ -39,11 +39,11 @@ GEAK / out-of-box (OOB) workers. The Coordinator pod itself is small.
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
 | Kernel-agent + Ray head            | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
-| Ray worker (GEAK / OOB attempt)    | 8 cores   | 32 GiB    | 1 × MI300X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
-| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
+| Ray worker (GEAK / OOB attempt)    | 8 cores   | 32 GiB    | 1 × MI300X / MI308X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
+| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI308X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
 
-Minimum viable node: one AMD GPU (MI300X / MI325X / MI355X) with
+Minimum viable node: one AMD GPU (MI300X / MI308X / MI325X / MI355X) with
 ≥ 256 GiB system RAM, 32 cores, and 500 GB local fast disk for the
 session dir + GEAK build artifacts.
 
@@ -108,8 +108,8 @@ Notes:
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network
   storage (NFS, WekaFS) works but adds latency to the per-tick state.json reads.
   (`RWO` = ReadWriteOnce, a persistent volume (PV) access mode.)
-* The auth-proxy binds on `127.0.0.1:4002` inside the pod — no Service
-  / NetworkPolicy required.
+* LLM calls go directly to the configured upstream gateway; no in-pod
+  auth-proxy Service or NetworkPolicy is required.
 
 ### Lifecycle
 
@@ -118,7 +118,7 @@ The following table describes the key lifecycle events for a Hyperloom session.
 | Phase           | Trigger                                            | Action                                                  |
 |-----------------|----------------------------------------------------|---------------------------------------------------------|
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
-| Heartbeat       | Every 60 s                                         | Coordinator writes `state.json.tmp` → atomic rename inside `$SESSION_DIR`. |
+| Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state-*.json` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
 | Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume` / `--resume-from`; reads `manifest.json` + `state.json`. |
 
@@ -137,7 +137,7 @@ Back up the following artifacts from each session.
 | Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
 | `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
 | Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                |
-| Robustness findings                     | `$USER_DATA_PATH/agents/robustness/findings/*.jsonl`              | 30 days minimum; longer if your incident process needs it.                                               |
+| Robustness findings                     | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`      | 30 days minimum; longer if your incident process needs it.                                               |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |
 | Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/runs/<session_id>/{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                                  |
 
@@ -157,26 +157,24 @@ find "$USER_DATA_PATH" -mindepth 2 -maxdepth 2 -type d -name '20??????T??????Z' 
 
 ---
 
-## Auth-proxy supervision
+## LLM gateway credential checks
 
-The OOB auth-proxy (`127.0.0.1:4002`) is a single Python child of the
-kernel-agent. If it dies (OOM, port conflict, stale tcp state),
-every subsequent `claude` / `codex` CLI call returns HTTP 401.
+Hyperloom no longer runs a local auth-proxy. Claude, Codex, GEAK, and OOB
+workers call the configured upstream gateway directly using the aliases
+generated by preflight and the kernel-agent installer.
 
-`kernel-agent/scripts/ensure_auth_proxy.sh` is idempotent and safe to
-run from a sidecar / liveness probe:
+Operational checks:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
+test -n "${SAFE_API_KEY:-${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}}"
+test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
-It TCP-probes `:4002`, then HTTP-probes using `curl`. If the port is
-open but the probe times out (stuck proxy), it kills the existing
-`auth_proxy.py` process and relaunches. If `:4002` is healthy, it
-noops.
-
-Recommended liveness probe: every 60 s, exit non-zero if
-`curl --max-time 2 http://127.0.0.1:4002/healthz` fails.
+If `~/.claude/config.json` still points at `127.0.0.1:4002`, treat it as
+a stale pre-0.8 config and re-run install/preflight. Also clear any stale
+`GEAK_BASE_URL` / `OOB_BASE_URL` / `OPENAI_BASE_URL` env overrides yourself;
+explicit endpoint overrides are preserved by design.
 
 ---
 
@@ -189,8 +187,8 @@ is JSONL-on-disk + (optional) downstream collectors.
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
 | Per-tick Coordinator state     | `$SESSION_DIR/state.json`                                                        | JSON, snapshot  |
 | Session breakdown (final)      | `$SESSION_DIR/session_breakdown.json`                                            | JSON, snapshot  |
-| Robustness findings            | `$USER_DATA_PATH/agents/robustness/findings/<session>.jsonl`                     | JSONL, append   |
-| Critic verdicts                | `$USER_DATA_PATH/critic-session-memory/<session>/emit-*.json`                    | JSON per call   |
+| Robustness findings            | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`                     | JSONL, append   |
+| Critic verdicts                | `$SESSION_DIR/critic-workdir/<turn>/emit.json` (memory in `$SESSION_DIR/critic-session-memory/`) | JSON per call   |
 | Kernel-opt attempts            | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl`        | JSONL, append   |
 | Inference server logs          | `$SESSION_DIR/runs/<action>/<task>/server.log`                                  | text            |
 
@@ -217,6 +215,18 @@ ingest it whole on session end.
 4. Robustness writes a fresh `findings/<session>.jsonl` segment; old
    segments remain.
 
+> To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
+> that exited abnormally — without re-running the optimization loop — use the
+> dedicated subcommand instead of `--resume`:
+> ```bash
+> inference_optimizer recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+> ```
+> `--force` re-runs even when the session already looks complete;
+> `--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
+> generations (use only when the live emitter never ran, or it duplicates
+> generations). `--resume` = keep optimizing; `recover-session` = rebuild the
+> breakdown artifact.
+
 ### Scenario B: PV lost or corrupted
 
 1. The session is unrecoverable. Restart from scratch with a fresh
@@ -224,12 +234,15 @@ ingest it whole on session end.
 2. KB is unaffected if `HYPERLOOM_LOCAL_KB_ROOT` lives on a different
    volume (recommended). The next run gets the same local recipe store.
 
-### Scenario C: auth-proxy stuck
+### Scenario C: Gateway 401 after a stale config
 
-1. Liveness probe should already have caught this.
-2. Manual: `bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"`.
-3. If 401s persist, rotate `SAFE_API_KEY` (rare — the key is
-   long-lived) and re-run.
+1. Confirm the pod has a current key and base URL (`SAFE_API_KEY` /
+   `OPENAI_BASE_URL`, or split Anthropic/OpenAI credentials).
+2. Re-run `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`
+   and then without `--check-only` if it reports missing aliases.
+3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
+   gateway, not `127.0.0.1:4002`. Clear stale `GEAK_BASE_URL`, `OOB_BASE_URL`,
+   or `OPENAI_BASE_URL` overrides that still point at the removed proxy.
 
 ### Scenario D: Local KB store corrupted
 
@@ -274,7 +287,7 @@ Before going to production with self-hosted Hyperloom, ensure:
   storage with daily backup.
 - `SAFE_API_KEY` rotation runbook (key is long-lived; rotation
   requires only re-export + `install.sh` re-run).
-- Liveness probe for auth-proxy on `127.0.0.1:4002`.
+- LLM gateway credential and endpoint check in the session startup probe.
 - Daily ship of `session_breakdown.json` to long-term storage.
 - Weekly prune of `USER_DATA_PATH` for completed sessions
   > 14 days old.

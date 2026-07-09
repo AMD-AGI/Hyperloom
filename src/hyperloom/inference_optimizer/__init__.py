@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Inference Optimizer v0.6 — single-mode 4-agent runtime.
+"""Inference Optimizer — single-mode 4-agent runtime.
 
 Roles:
 

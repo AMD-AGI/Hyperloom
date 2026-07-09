@@ -116,12 +116,15 @@ def test_build_grid_two_arms_per_conc():
     )
     assert len(grid) == 6
     names = [v.name for v in grid]
+    # CONC-major with arms interleaved: each conc emits an adjacent
+    # baseline/optimized pair, so a budget-truncated run leaves complete A/B
+    # pairs. With no anchor the ladder order is preserved.
     assert names == [
         "baseline_conc1",
-        "baseline_conc4",
-        "baseline_conc16",
         "optimized_conc1",
+        "baseline_conc4",
         "optimized_conc4",
+        "baseline_conc16",
         "optimized_conc16",
     ]
     baseline = next(v for v in grid if v.name == "baseline_conc4")
@@ -144,6 +147,50 @@ def test_build_grid_two_arms_per_conc():
         "NUM_PROMPTS": "80",
         "RUN_EVAL": "false",
     }
+
+
+def test_build_grid_anchor_conc_runs_first():
+    """The operating-point CONC emits its complete A/B pair before any other."""
+    grid = _build_grid(
+        concs=[1, 4, 16, 64],
+        isl=1024,
+        osl=1024,
+        num_prompts_factor=5,
+        optimized_args="--x",
+        optimized_envs={},
+        anchor_conc=64,
+    )
+    names = [v.name for v in grid]
+    assert names[:2] == ["baseline_conc64", "optimized_conc64"]
+    # Remaining concs keep their requested order, arms still interleaved.
+    assert names[2:] == [
+        "baseline_conc1",
+        "optimized_conc1",
+        "baseline_conc4",
+        "optimized_conc4",
+        "baseline_conc16",
+        "optimized_conc16",
+    ]
+
+
+def test_build_grid_anchor_absent_is_noop():
+    """An anchor not present in the ladder (or <=0) leaves the order untouched."""
+    for anchor in (0, 999):
+        grid = _build_grid(
+            concs=[1, 8],
+            isl=512,
+            osl=512,
+            num_prompts_factor=5,
+            optimized_args="--x",
+            optimized_envs={},
+            anchor_conc=anchor,
+        )
+        assert [v.name for v in grid] == [
+            "baseline_conc1",
+            "optimized_conc1",
+            "baseline_conc8",
+            "optimized_conc8",
+        ]
 
 
 def test_build_grid_disables_eval_by_default(monkeypatch):
