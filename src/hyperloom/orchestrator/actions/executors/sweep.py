@@ -261,10 +261,10 @@ class SweepExecutor:
                 ``workspace``.
         """
         params = ctx.task.params or {}
-        # PerfSkills reuse path: when the KERNEL_AGENT phase was delegated to
-        # PerfSkills, sweep the optimized server via PerfSkills' own bench_e2e.sh
+        # GEAK reuse path: when the KERNEL_AGENT phase was delegated to
+        # GEAK, sweep the optimized server via GEAK's own bench_e2e.sh
         # + the already-built overlay (no overlay reconstruction).
-        ps_result = params.get("perfskills_result") or {}
+        ps_result = params.get("geak_result") or {}
         if ps_result.get("bench_script") and ps_result.get("status") == "ok":
             extra = getattr(ctx, "extra", None) or {}
             output_root = Path(
@@ -272,8 +272,8 @@ class SweepExecutor:
                 or extra.get("workspace")
                 or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
             )
-            from ._perfskills_sweep import sweep_via_perfskills
-            return await sweep_via_perfskills(
+            from ._geak_sweep import sweep_via_geak
+            return await sweep_via_geak(
                 result=ps_result,
                 conc_values=list(params.get("conc_values") or self.default_conc_values),
                 isl_osl_configs=list(

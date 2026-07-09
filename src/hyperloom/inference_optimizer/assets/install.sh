@@ -12,7 +12,7 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) into the pod-local open-source repo tree,
 #      pinned to MAGPIE_REF
-#      (a commit SHA, mirrors the GEAK_REF pin in kernel-agent)
+#      (a commit SHA, mirrors the GEAK_V3_REF pin in kernel-agent)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
 #       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when MAGPIE_REF
 #       is pinned to an upstream-atomic commit)
@@ -134,7 +134,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # post-refactor SHA: the upstream code is already atomic, so the in-place
 # patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
-# (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
+# (mirrors GEAK_V3_REF in kernel-agent/scripts/install.sh).
 # Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
 # diffusion benchmark framework (#51); the previous pin
 # (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
@@ -157,15 +157,6 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
-# Opt-in PerfSkills/GEAK-e2e optimizer install (forwarded to the chained
-# kernel-agent installer). Default off: the runtime default optimizer is
-# native, so native-only users skip the extra GEAK-e2e checkout + pip. Enable
-# with --with-perfskills or INSTALL_PERFSKILLS=1 when you intend to run
-# with KERNEL_OPT_BACKEND_ORDER=perfskills.
-case "${INSTALL_PERFSKILLS:-0}" in
-  1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
-  *) INSTALL_PERFSKILLS=0 ;;
-esac
 
 usage() {
   cat <<'EOF'
@@ -188,10 +179,6 @@ Installs:
 Options:
   --check-only           Verify only, do not install
   --dry-run              Print actions without running them
-  --with-perfskills      Also install the PerfSkills/GEAK-e2e optimizer
-                         (forwarded to the kernel-agent installer; only
-                         needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
-                         Equivalent to INSTALL_PERFSKILLS=1.
   --skip-kernel-agent    Skip the chained kernel-agent installer
   -h, --help             Show this help
 
@@ -217,7 +204,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    --with-perfskills) INSTALL_PERFSKILLS=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
@@ -1141,9 +1127,6 @@ chain_kernel_agent() {
   log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
   export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_PATH HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-  # Forward the PerfSkills opt-in so --with-perfskills / INSTALL_PERFSKILLS=1
-  # at this canonical entrypoint reaches kernel-agent's ensure_perfskills gate.
-  export INSTALL_PERFSKILLS
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
   [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
   # Forward the optional internal extension path when provided; unset =>

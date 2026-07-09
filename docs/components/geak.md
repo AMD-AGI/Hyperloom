@@ -133,7 +133,7 @@ GEAK is wired in as a kernel-rewrite backend of the kernel agent:
 
 - The orchestrator's `src/hyperloom/orchestrator/kernel/request_handlers.py`
   (`_backend_order()`) selects the backend ladder, defaulting to
-  `forge,geak,claude,codex,cursor` (`cursor` is key-gated), and dispatches one
+  `forge,geak_v3,claude,codex,cursor` (`cursor` is key-gated), and dispatches one
   backend per child. `kernel_optimization.choose_backends()` mirrors the same
   default when a subprocess runs without an explicit `--backends`.
 - `src/hyperloom/agents/kernel/tools/kernel_optimization.py` builds the GEAK

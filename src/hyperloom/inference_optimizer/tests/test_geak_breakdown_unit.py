@@ -1,11 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit coverage for the PerfSkills/GEAK-e2e breakdown collector and the
+"""Unit coverage for the GEAK e2e breakdown collector and the
 sweep ``benchmark_report.json`` writer.
 
-These exercise the ``KERNEL_OPT_BACKEND_ORDER=perfskills`` paths in isolation:
+These exercise the ``KERNEL_OPT_BACKEND_ORDER=geak`` paths in isolation:
 
-* :func:`collect_perfskills` — the not-engaged short-circuit, the
+* :func:`collect_geak` — the not-engaged short-circuit, the
   engaged-but-missing-result fallback, the full success mapping (including the
   ``accepted_kernels`` shape guard and the path-relativization warning branch).
 * :func:`_write_benchmark_report` — the happy path plus the best-effort
@@ -20,43 +20,43 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import collectors
-from hyperloom.inference_optimizer.breakdown.collectors import collect_perfskills
-from hyperloom.orchestrator.actions.executors._perfskills_sweep import (
+from hyperloom.inference_optimizer.breakdown.collectors import collect_geak
+from hyperloom.orchestrator.actions.executors._geak_sweep import (
     _pareto_front,
     _parse_isl_osl,
     _read_json,
     _serving_gpus,
     _write_benchmark_report,
-    sweep_via_perfskills,
+    sweep_via_geak,
 )
 
 
-def test_collect_perfskills_not_engaged_returns_empty(tmp_path: Path) -> None:
+def test_collect_geak_not_engaged_returns_empty(tmp_path: Path) -> None:
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "native"}, warnings)
+    out = collect_geak(tmp_path, {"kernel_optimizer": "native"}, warnings)
     assert out == {}
     assert warnings == []
 
 
-def test_collect_perfskills_native_with_empty_result_default(tmp_path: Path) -> None:
-    # Regression: SharedState defaults perfskills_result to ``{}``. An empty dict
+def test_collect_geak_native_with_empty_result_default(tmp_path: Path) -> None:
+    # Regression: SharedState defaults geak_result to ``{}``. An empty dict
     # must NOT be treated as engaged, or every native session emits a spurious
-    # perfskills section.
-    state = {"kernel_optimizer": "native", "perfskills_result": {}}
-    out = collect_perfskills(tmp_path, state, [])
+    # geak section.
+    state = {"kernel_optimizer": "native", "geak_result": {}}
+    out = collect_geak(tmp_path, state, [])
     assert out == {}
 
 
-def test_collect_perfskills_empty_result_no_flag(tmp_path: Path) -> None:
+def test_collect_geak_empty_result_no_flag(tmp_path: Path) -> None:
     # Empty result + no/blank optimizer flag → not engaged.
-    out = collect_perfskills(tmp_path, {"perfskills_result": {}}, [])
+    out = collect_geak(tmp_path, {"geak_result": {}}, [])
     assert out == {}
 
 
-def test_collect_perfskills_engaged_without_result(tmp_path: Path) -> None:
-    # No on-disk perfskills/ tree → nothing to reconstruct → legacy ``missing``.
+def test_collect_geak_engaged_without_result(tmp_path: Path) -> None:
+    # No on-disk geak/ tree → nothing to reconstruct → legacy ``missing``.
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, warnings)
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, warnings)
     assert out["engaged"] is True
     assert out["status"] == "missing"
     assert out["error_class"] == "no_result"
@@ -64,14 +64,14 @@ def test_collect_perfskills_engaged_without_result(tmp_path: Path) -> None:
     assert "recovered_from_disk" not in out
 
 
-def test_collect_perfskills_reconstructs_from_disk_when_result_missing(
+def test_collect_geak_reconstructs_from_disk_when_result_missing(
     tmp_path: Path,
 ) -> None:
-    # Reproduce the incident: perfskills was engaged and the runner produced an
-    # on-disk working tree, but ``perfskills_result`` never reached state (an
+    # Reproduce the incident: geak was engaged and the runner produced an
+    # on-disk working tree, but ``geak_result`` never reached state (an
     # external kill before the tick-boundary save, then resume past KERNEL).
     # The collector must reconstruct the run from disk instead of a bare miss.
-    pf = tmp_path / "perfskills"
+    pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(
         json.dumps(
@@ -118,7 +118,7 @@ def test_collect_perfskills_reconstructs_from_disk_when_result_missing(
     )
 
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, warnings)
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, warnings)
 
     assert out["engaged"] is True
     assert out["status"] == "no_result_recovered_from_disk"
@@ -128,7 +128,7 @@ def test_collect_perfskills_reconstructs_from_disk_when_result_missing(
     assert out["handoff"]["framework"] == "vllm"
     assert out["handoff"]["workload"] == {"isl": 1024, "osl": 1024, "conc": 64}
     # exp_root is relativized under the session dir.
-    assert out["exp_root"] == "perfskills/e2e_Qwen-Qwen3-0.6B_20260629T174250Z"
+    assert out["exp_root"] == "geak/e2e_Qwen-Qwen3-0.6B_20260629T174250Z"
     # Stages the runner reached are surfaced for forensics.
     for stage in ("handoff", "baseline", "kernels", "opbench", "strategy",
                   "kernel_journey"):
@@ -137,19 +137,19 @@ def test_collect_perfskills_reconstructs_from_disk_when_result_missing(
     # Per-kernel attribution is backfilled from the surviving journey.
     assert out["accepted_kernels_source"] == "kernel_journey_backfill"
     assert [k["kernel_id"] for k in out["accepted_kernels"]] == ["k002"]
-    assert out["accepted_kernels"][0]["backend"] == "geak_v4"
+    assert out["accepted_kernels"][0]["backend"] == "geak"
     assert out["kernels_optimized"] == 1
     assert out["last_artifact_ts"] is not None
 
 
-def test_collect_perfskills_reconstruct_surfaces_opbench_logs_and_cause(
+def test_collect_geak_reconstruct_surfaces_opbench_logs_and_cause(
     tmp_path: Path,
 ) -> None:
     # The incident shape: the e2e ran the op-bench bake-off (no editable winner
     # > 1.0x) and was then killed before flushing a result/journey. The
     # reconstruction must surface the op-bench verdicts (WHY no win), the runner
     # log tails (the lost stdout/stderr proxy), and classify the cause.
-    pf = tmp_path / "perfskills"
+    pf = tmp_path / "geak"
     exp = pf / "e2e_run"
     (exp / "baseline").mkdir(parents=True)
     task = exp / "kernels" / "rocm_unquantized_gemm_decode_family_task"
@@ -173,7 +173,7 @@ def test_collect_perfskills_reconstruct_surfaces_opbench_logs_and_cause(
         "OPBENCH winner=hipblaslt speedup=1.0x editable=False\n", encoding="utf-8"
     )
 
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, [])
 
     assert out["status"] == "no_result_recovered_from_disk"
     assert out["opbench_results"][0]["winner_backend"] == "hipblaslt"
@@ -185,50 +185,50 @@ def test_collect_perfskills_reconstruct_surfaces_opbench_logs_and_cause(
     assert out["likely_cause"] == "ran_no_deployable_winner"
 
 
-def test_collect_perfskills_reconstruct_cause_killed_before_flush(tmp_path: Path) -> None:
+def test_collect_geak_reconstruct_cause_killed_before_flush(tmp_path: Path) -> None:
     # Stages reached (baseline/kernels) but neither a journey nor a result.json
     # nor any op-bench verdict landed → the in-flight result died with the
     # process (SIGKILL / budget / hang).
-    pf = tmp_path / "perfskills"
+    pf = tmp_path / "geak"
     exp = pf / "e2e_run"
     (exp / "baseline").mkdir(parents=True)
     (exp / "kernels" / "paged_attention_task").mkdir(parents=True)
     (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
 
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, [])
 
     assert out["status"] == "no_result_recovered_from_disk"
     assert out["opbench_results"] == []
     assert out["likely_cause"] == "killed_before_flush"
 
 
-def test_collect_perfskills_reconstruct_cause_runner_reported_failure(tmp_path: Path) -> None:
+def test_collect_geak_reconstruct_cause_runner_reported_failure(tmp_path: Path) -> None:
     # A non-ok result.json was flushed (the runner itself reported the failure):
     # the cause is the reported failure, not a silent kill.
-    pf = tmp_path / "perfskills"
+    pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
     (pf / "result.json").write_text(
         json.dumps({"status": "error", "error_class": "timeout"}), encoding="utf-8"
     )
 
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, [])
 
     assert out["status"] == "no_result_recovered_from_disk"
     assert out["flushed_result_status"] == "error"
     assert out["likely_cause"] == "runner_reported_failure"
 
 
-def test_collect_perfskills_reconstruct_handoff_only(tmp_path: Path) -> None:
+def test_collect_geak_reconstruct_handoff_only(tmp_path: Path) -> None:
     # Only the handoff landed (runner killed before writing any e2e output):
     # still recoverable — proves engagement + handoff without an e2e exp_root.
-    pf = tmp_path / "perfskills"
+    pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(
         json.dumps({"framework": "sglang", "workload": {"conc": 32}}),
         encoding="utf-8",
     )
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, [])
     assert out["status"] == "no_result_recovered_from_disk"
     assert out["recovered_from_disk"] is True
     assert out["stages_reached"] == ["handoff"]
@@ -236,20 +236,20 @@ def test_collect_perfskills_reconstruct_handoff_only(tmp_path: Path) -> None:
     assert out["accepted_kernels"] == []
 
 
-def test_collect_perfskills_empty_dir_falls_back_to_missing(tmp_path: Path) -> None:
-    # An empty perfskills/ dir carries no evidence → legacy ``missing`` section.
-    (tmp_path / "perfskills").mkdir()
-    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+def test_collect_geak_empty_dir_falls_back_to_missing(tmp_path: Path) -> None:
+    # An empty geak/ dir carries no evidence → legacy ``missing`` section.
+    (tmp_path / "geak").mkdir()
+    out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, [])
     assert out["status"] == "missing"
     assert "recovered_from_disk" not in out
 
 
-def test_collect_perfskills_full_success_maps_fields(tmp_path: Path) -> None:
-    eval_dir = tmp_path / "runs" / "perfskills" / "eval"
+def test_collect_geak_full_success_maps_fields(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "runs" / "geak" / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "ok",
             "baseline_throughput_tok_s": 100.0,
             "final_throughput_tok_s": 300.0,
@@ -269,7 +269,7 @@ def test_collect_perfskills_full_success_maps_fields(tmp_path: Path) -> None:
         },
     }
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, state, warnings)
+    out = collect_geak(tmp_path, state, warnings)
 
     assert out["engaged"] is True
     assert out["status"] == "ok"
@@ -282,7 +282,7 @@ def test_collect_perfskills_full_success_maps_fields(tmp_path: Path) -> None:
     assert out["accepted_config"] == {"tp": 8, "conc": 64}
     assert out["validated_regimes"] == [{"isl": 8192, "osl": 1024, "conc": 64}]
     # eval_dir lives under the session dir, so it is relativized.
-    assert out["eval_dir"] == "runs/perfskills/eval"
+    assert out["eval_dir"] == "runs/geak/eval"
 
 
 def _write_kernel_journey(eval_dir: Path) -> Path:
@@ -325,15 +325,15 @@ def _write_kernel_journey(eval_dir: Path) -> Path:
     return path
 
 
-def test_collect_perfskills_backfills_accepted_kernels_from_journey(tmp_path: Path) -> None:
+def test_collect_geak_backfills_accepted_kernels_from_journey(tmp_path: Path) -> None:
     # result.json shipped the aggregate win but an empty accepted_kernels (a
     # recovered/intermediate flush). The sibling kernel_journey.json holds the
     # integrated KEEP kernel, so the collector must back-fill it.
-    eval_dir = tmp_path / "perfskills" / "eval"
+    eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "ok",
             "baseline_throughput_tok_s": 461.314,
             "final_throughput_tok_s": 535.352,
@@ -344,99 +344,99 @@ def test_collect_perfskills_backfills_accepted_kernels_from_journey(tmp_path: Pa
         },
     }
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, state, warnings)
+    out = collect_geak(tmp_path, state, warnings)
 
     assert out["kernels_optimized"] == 1
     assert out["accepted_kernels_source"] == "kernel_journey_backfill"
     only = out["accepted_kernels"][0]
     assert only["kernel_id"] == "fused_moe_kernel_gptq_awq"
     assert only["decision"] == "KEEP"
-    # The GEAK-e2e GEAK is relabeled to the distinct geak_v4 variant.
-    assert only["backend"] == "geak_v4"
+    # The GEAK e2e optimizer's own kernel backend is kept verbatim as ``geak``.
+    assert only["backend"] == "geak"
     assert only["e2e_gain_pct"] == 16.049
     assert only["micro_speedup"] == 1.5902
     assert only["source"] == "kernel_journey_backfill"
 
 
-def test_collect_perfskills_backfill_via_explicit_journey_path(tmp_path: Path) -> None:
+def test_collect_geak_backfill_via_explicit_journey_path(tmp_path: Path) -> None:
     # kernel_journey_path takes precedence over deriving it from eval_dir.
-    eval_dir = tmp_path / "perfskills" / "eval"
+    eval_dir = tmp_path / "geak" / "eval"
     kj_path = _write_kernel_journey(eval_dir)
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "ok",
             "throughput_speedup": 1.16,
             "accepted_kernels": [],
             "kernel_journey_path": str(kj_path),
         },
     }
-    out = collect_perfskills(tmp_path, state, [])
+    out = collect_geak(tmp_path, state, [])
     assert out["kernels_optimized"] == 1
     assert out["accepted_kernels_source"] == "kernel_journey_backfill"
 
 
-def test_collect_perfskills_does_not_overwrite_populated_kernels(tmp_path: Path) -> None:
+def test_collect_geak_does_not_overwrite_populated_kernels(tmp_path: Path) -> None:
     # A producer-populated accepted_kernels list must be preserved verbatim and
     # marked as sourced from the result, never replaced by the journey.
-    eval_dir = tmp_path / "perfskills" / "eval"
+    eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "ok",
             "throughput_speedup": 1.16,
             "accepted_kernels": ["rmsnorm"],
             "eval_dir": str(eval_dir),
         },
     }
-    out = collect_perfskills(tmp_path, state, [])
+    out = collect_geak(tmp_path, state, [])
     assert out["accepted_kernels"] == ["rmsnorm"]
     assert out["accepted_kernels_source"] == "result"
     assert out["kernels_optimized"] == 1
 
 
-def test_collect_perfskills_no_backfill_on_failure(tmp_path: Path) -> None:
+def test_collect_geak_no_backfill_on_failure(tmp_path: Path) -> None:
     # A non-ok run must not back-fill (the e2e never landed a real win).
-    eval_dir = tmp_path / "perfskills" / "eval"
+    eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "error",
             "error_class": "timeout",
             "accepted_kernels": [],
             "eval_dir": str(eval_dir),
         },
     }
-    out = collect_perfskills(tmp_path, state, [])
+    out = collect_geak(tmp_path, state, [])
     assert out["accepted_kernels"] == []
     assert out["accepted_kernels_source"] is None
     assert out["kernels_optimized"] == 0
 
 
-def test_collect_perfskills_backfill_missing_journey_is_noop(tmp_path: Path) -> None:
+def test_collect_geak_backfill_missing_journey_is_noop(tmp_path: Path) -> None:
     # ok run but no kernel_journey.json on disk → empty list, no crash.
-    eval_dir = tmp_path / "perfskills" / "eval"
+    eval_dir = tmp_path / "geak" / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "ok",
             "throughput_speedup": 1.16,
             "accepted_kernels": [],
             "eval_dir": str(eval_dir),
         },
     }
-    out = collect_perfskills(tmp_path, state, [])
+    out = collect_geak(tmp_path, state, [])
     assert out["accepted_kernels"] == []
     assert out["accepted_kernels_source"] is None
 
 
-def test_collect_perfskills_speedup_only_gain_and_bad_kernels(tmp_path: Path) -> None:
+def test_collect_geak_speedup_only_gain_and_bad_kernels(tmp_path: Path) -> None:
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {
+        "kernel_optimizer": "geak",
+        "geak_result": {
             "status": "ok",
             "throughput_speedup": 1.5,
             # Non-list accepted_kernels must be coerced + warned.
@@ -444,30 +444,30 @@ def test_collect_perfskills_speedup_only_gain_and_bad_kernels(tmp_path: Path) ->
         },
     }
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, state, warnings)
+    out = collect_geak(tmp_path, state, warnings)
     # No baseline/final, so gain derives from the speedup.
     assert out["gain_pct"] == 50.0
     assert out["accepted_kernels"] == []
     assert any("accepted_kernels" in w for w in warnings)
 
 
-def test_collect_perfskills_relativize_failure_warns(tmp_path: Path, monkeypatch) -> None:
+def test_collect_geak_relativize_failure_warns(tmp_path: Path, monkeypatch) -> None:
     # Force the relativization helper to raise so the best-effort except branch
     # records a warning instead of swallowing it silently.
     def _boom(_path, _session_dir):
         raise OSError("relativize boom")
 
-    # tree-reform.MD P2.2: collect_perfskills moved to the ``perfskills``
+    # tree-reform.MD P2.2: collect_geak moved to the ``geak``
     # submodule, which binds ``_rel`` from ``collectors._common``; patch it there.
-    monkeypatch.setattr(collectors.perfskills, "_rel", _boom)
+    monkeypatch.setattr(collectors.geak, "_rel", _boom)
 
     eval_dir = tmp_path / "runs" / "eval"
     state = {
-        "kernel_optimizer": "perfskills",
-        "perfskills_result": {"status": "ok", "eval_dir": str(eval_dir)},
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "ok", "eval_dir": str(eval_dir)},
     }
     warnings: list[str] = []
-    out = collect_perfskills(tmp_path, state, warnings)
+    out = collect_geak(tmp_path, state, warnings)
     # Falls back to the absolute path and records the reason.
     assert out["eval_dir"] == str(eval_dir)
     assert any("failed to relativize path" in w for w in warnings)
@@ -488,7 +488,7 @@ def test_write_benchmark_report_happy_path(tmp_path: Path) -> None:
     report = json.loads((tmp_path / "benchmark_report.json").read_text(encoding="utf-8"))
     assert report["success"] is True
     assert report["output_throughput_tok_s"] == 300.0
-    assert report["source"] == "perfskills"
+    assert report["source"] == "geak"
     assert "error" not in report
 
 
@@ -536,18 +536,18 @@ def test_read_json_roundtrip_and_missing(tmp_path: Path) -> None:
     assert _read_json(tmp_path / "nope.json") == {}
 
 
-def test_schema_has_perfskills_contract() -> None:
-    # The exporter emits a top-level ``perfskills`` section, so the wire schema
+def test_schema_has_geak_contract() -> None:
+    # The exporter emits a top-level ``geak`` section, so the wire schema
     # must declare it (contract + TypedDict), else readers have no shape to rely on.
     from hyperloom.inference_optimizer.breakdown import schema
 
-    assert hasattr(schema, "Perfskills")
-    assert "perfskills" in schema.SessionBreakdown.__annotations__
+    assert hasattr(schema, "Geak")
+    assert "geak" in schema.SessionBreakdown.__annotations__
     # ``from __future__ import annotations`` stores the type as a string ref.
-    assert "Perfskills" in str(schema.SessionBreakdown.__annotations__["perfskills"])
+    assert "Geak" in str(schema.SessionBreakdown.__annotations__["geak"])
     # A few representative fields must be part of the declared shape.
     for field in ("engaged", "status", "error_class", "throughput_speedup", "accepted_kernels"):
-        assert field in schema.Perfskills.__annotations__
+        assert field in schema.Geak.__annotations__
 
 
 def test_pareto_front_drops_dominated_points() -> None:
@@ -566,7 +566,7 @@ def test_pareto_front_drops_dominated_points() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sweep_via_perfskills_reuses_script_and_records_variants(
+async def test_sweep_via_geak_reuses_script_and_records_variants(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -604,7 +604,7 @@ PY
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("TP", "2")
 
-    result = await sweep_via_perfskills(
+    result = await sweep_via_geak(
         result={
             "status": "ok",
             "bench_script": str(bench),
@@ -629,7 +629,7 @@ PY
 
     assert result["status"] == "succeeded"
     assert result["grid_size"] == 2
-    assert result["source"] == "perfskills"
+    assert result["source"] == "geak"
     assert result["best_for_each_conc"]["1"]["output_throughput"] == 321.0
     assert result["sweep_grid"][1]["status"] == "failed"
     assert result["sweep_grid"][1]["error"] == "no throughput"
@@ -658,12 +658,12 @@ PY
         .read_text(encoding="utf-8")
     )
     assert fail_report["success"] is False
-    assert fail_report["source"] == "perfskills"
+    assert fail_report["source"] == "geak"
 
 
 @pytest.mark.asyncio
-async def test_sweep_via_perfskills_requires_existing_bench_script(tmp_path: Path) -> None:
-    result = await sweep_via_perfskills(
+async def test_sweep_via_geak_requires_existing_bench_script(tmp_path: Path) -> None:
+    result = await sweep_via_geak(
         result={"status": "ok", "bench_script": str(tmp_path / "missing.sh")},
         conc_values=[1],
         isl_osl_configs=["8:8"],

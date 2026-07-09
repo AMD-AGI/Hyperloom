@@ -1,5 +1,5 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
-"""Regression tests for crash-safe PerfSkills handback recovery."""
+"""Regression tests for crash-safe GEAK handback recovery."""
 
 from __future__ import annotations
 
@@ -42,29 +42,36 @@ class _TaskRegistry:
 
 
 @pytest.mark.asyncio
-async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
+async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A validated result written before a coordinator crash must be recovered."""
-    perfskills_dir = tmp_path / "perfskills"
-    perfskills_dir.mkdir()
+    """A result written before a coordinator crash must be RECOVERED on resume.
+
+    Rebench-first: recovery records the win as an UNVALIDATED candidate (into
+    ``geak_result`` + ``geak_pending``) and enqueues the main-flow
+    rebench — it does NOT promote the self-reported value into current_best /
+    the gain ledger. The headline is only written once the rebench validates it.
+    """
+    geak_dir = tmp_path / "geak"
+    geak_dir.mkdir()
     result = {
         "status": "ok",
         "throughput_speedup": 1.16,
         "final_throughput_tok_s": 116.0,
         "ttft_ms": 10.0,
         "tpot_ms": 2.0,
-        "eval_dir": str(perfskills_dir / "final"),
-        "report_path": str(perfskills_dir / "final" / "architect_report.md"),
-        "bench_script": str(perfskills_dir / "final" / "bench_e2e.sh"),
+        "eval_dir": str(geak_dir / "final"),
+        "report_path": str(geak_dir / "final" / "architect_report.md"),
+        "bench_script": str(geak_dir / "final" / "bench_e2e.sh"),
         "accepted_config": {"flags": "--max-num-batched-tokens 16384", "env": "E=1"},
         "accepted_kernels": ["fused_moe_kernel_gptq_awq"],
     }
-    (perfskills_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
 
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
+    coord.tasks = _TaskRegistry()
     coord.shared_state = SharedState(
         baseline_tput=100.0,
         current_best={"action": "baseline", "tput": 100.0},
@@ -74,7 +81,7 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
         osl=1024,
         conc=64,
     )
-    coord.phase_kernel._record_perfskills_kernel_journey = lambda _result: None
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
 
     def _runner_should_not_be_needed(_name: str) -> Path:
         raise RuntimeError("runner should not be resolved when result.json exists")
@@ -84,54 +91,62 @@ async def test_perfskills_kernel_phase_recovers_existing_ok_result_on_resume(
         _runner_should_not_be_needed,
     )
 
-    await coord._run_perfskills_kernel_phase(from_phase="KERNEL")
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
-    assert coord.shared_state.perfskills_result["status"] == "ok"
-    assert coord.shared_state.current_best["action"] == "perfskills_e2e"
-    assert coord.shared_state.current_best["tput"] == 116.0
-    assert coord.shared_state.cumulative_gain == pytest.approx(16.0)
-    assert coord.shared_state.optimization_stack[0]["action"] == "perfskills_e2e"
+    # The result.json is recovered into state, but as an UNVALIDATED candidate.
+    assert coord.shared_state.geak_result["status"] == "ok"
+    assert coord.shared_state.geak_pending["status"] == "awaiting_rebench"
+    assert coord.shared_state.geak_pending["self_reported_tput"] == 116.0
+    # No premature headline: current_best / gain / stack are untouched.
+    assert coord.shared_state.current_best["action"] == "baseline"
+    assert coord.shared_state.cumulative_gain == pytest.approx(0.0)
+    assert not any(
+        e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack
+    )
     assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 
-    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert saved["perfskills_result"]["status"] == "ok"
-    assert saved["cumulative_gain"] == pytest.approx(16.0)
+    # The main-flow rebench was enqueued to validate the recovered candidate.
+    rebench = [t for t in coord.tasks.created if (t.params or {}).get("geak_fallback")]
+    assert rebench, "recovery must enqueue a geak main-flow rebench"
 
-    coord.tasks = _TaskRegistry()
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["geak_result"]["status"] == "ok"
+    assert saved["geak_pending"]["status"] == "awaiting_rebench"
+
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
 
     assert task.kind == "sweep"
-    assert task.params["perfskills_result"]["status"] == "ok"
-    assert task.params["perfskills_result"]["bench_script"].endswith("bench_e2e.sh")
+    assert task.params["geak_result"]["status"] == "ok"
+    assert task.params["geak_result"]["bench_script"].endswith("bench_e2e.sh")
 
 
 @pytest.mark.asyncio
-async def test_perfskills_kernel_phase_does_not_reuse_already_promoted_result(
+async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A new cycle must rerun PerfSkills, not promote a stale prior-cycle result.
+    """A new cycle must rerun GEAK, not promote a stale prior-cycle result.
 
-    ``perfskills/`` is a fixed path, so a prior cycle's ``result.json`` survives
+    ``geak/`` is a fixed path, so a prior cycle's ``result.json`` survives
     into the next KERNEL entry. When state already recorded that win the recovery
     short-circuit must NOT fire, otherwise every later cycle silently reuses the
     first cycle's result.
     """
-    perfskills_dir = tmp_path / "perfskills"
-    perfskills_dir.mkdir()
+    geak_dir = tmp_path / "geak"
+    geak_dir.mkdir()
     result = {
         "status": "ok",
         "final_throughput_tok_s": 116.0,
-        "bench_script": str(perfskills_dir / "bench_e2e.sh"),
+        "bench_script": str(geak_dir / "bench_e2e.sh"),
         "accepted_config": {"flags": "", "env": ""},
     }
-    (perfskills_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
 
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(
         baseline_tput=100.0,
-        current_best={"action": "perfskills_e2e", "tput": 116.0},
+        current_best={"action": "geak_e2e", "tput": 116.0},
         model_path="/models/kimi",
         gpu_type="mi300x",
         isl=8192,
@@ -140,9 +155,9 @@ async def test_perfskills_kernel_phase_does_not_reuse_already_promoted_result(
     )
     # State already carries the prior cycle's promoted win.
     coord.shared_state.optimization_stack = [
-        {"action": "perfskills_e2e", "variant_name": "perfskills_e2e", "tput": 116.0},
+        {"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 116.0},
     ]
-    coord.shared_state.perfskills_result = dict(result)
+    coord.shared_state.geak_result = dict(result)
 
     resolved: list[str] = []
 
@@ -155,19 +170,19 @@ async def test_perfskills_kernel_phase_does_not_reuse_already_promoted_result(
         _runner_resolved,
     )
 
-    await coord._run_perfskills_kernel_phase(from_phase="EXPLORE")
+    await coord._run_geak_kernel_phase(from_phase="EXPLORE")
 
     # The recovery short-circuit must NOT have fired; the normal path resolves
     # the runner (and here aborts via the injected error).
-    assert resolved, "new cycle must re-run PerfSkills, not reuse stale result.json"
+    assert resolved, "new cycle must re-run GEAK, not reuse stale result.json"
 
 
 @pytest.mark.asyncio
-async def test_perfskills_handoff_preserves_serving_fidelity_knobs(
+async def test_geak_handoff_preserves_serving_fidelity_knobs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PerfSkills must baseline the same engine Hyperloom measured.
+    """GEAK must baseline the same engine Hyperloom measured.
 
     A missing max-model-len or GPU memory-utilization handoff lets GEAK/e2e
     launch a subtly different vLLM server than the Hyperloom baseline, which
@@ -189,7 +204,7 @@ async def test_perfskills_handoff_preserves_serving_fidelity_knobs(
         conc=64,
         max_model_len=2248,
     )
-    coord.phase_kernel._record_perfskills_kernel_journey = lambda _result: None
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("TP", "8")
@@ -203,10 +218,10 @@ async def test_perfskills_handoff_preserves_serving_fidelity_knobs(
         _runner_resolved,
     )
 
-    await coord._run_perfskills_kernel_phase(from_phase="KERNEL")
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads(
-        (tmp_path / "perfskills" / "handoff.json").read_text(encoding="utf-8")
+        (tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8")
     )
     assert handoff["max_model_len"] == 2248
     assert handoff["mem_fraction"] == pytest.approx(0.9)

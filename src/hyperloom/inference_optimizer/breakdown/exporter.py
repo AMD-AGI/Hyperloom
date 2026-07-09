@@ -342,14 +342,14 @@ def build(
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
     sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
-    # PerfSkills/GEAK-e2e KERNEL-phase section. Empty {} on native sessions
+    # GEAK e2e KERNEL-phase section. Empty {} on native sessions
     # (the optimizer was never engaged), so the dashboard hides it and historic
     # breakdowns stay byte-for-byte identical.
-    perfskills = _pick(
-        "perfskills",
+    geak = _pick(
+        "geak",
         _safe_collect(
-            "perfskills",
-            lambda: collectors.collect_perfskills(sd, state, warnings),
+            "geak",
+            lambda: collectors.collect_geak(sd, state, warnings),
             warnings,
             default={},
         ),
@@ -567,9 +567,9 @@ def build(
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
         "sweep": sweep,
-        # PerfSkills/GEAK-e2e KERNEL section (additive, optional); empty {} →
+        # GEAK e2e KERNEL section (additive, optional); empty {} →
         # dashboard hides it on native sessions.
-        "perfskills": perfskills,
+        "geak": geak,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         "attribution": attribution,
