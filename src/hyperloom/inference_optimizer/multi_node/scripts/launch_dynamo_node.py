@@ -230,12 +230,14 @@ def _resolve_pod_ip(env: dict[str, str]) -> str:
         if ip and not ip.startswith("127."):
             return ip
     except OSError:
+        # Interface probe failed; try the next method below.
         pass
     try:
         ip = socket.gethostbyname(socket.gethostname())
         if ip and not ip.startswith("127."):
             return ip
     except OSError:
+        # Interface probe failed; fall back to localhost below.
         pass
     return "127.0.0.1"
 
@@ -407,6 +409,7 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path, env: dict[str
             if log_file.is_file():
                 tail = log_file.read_text(errors="replace")[-4000:]
         except OSError:
+            # Log tail is diagnostic only; ignore read errors.
             pass
         raise RuntimeError(f"server pid={pid} exited within 0.5s: {exc}; log tail:\n{tail}") from exc
     return pid
@@ -463,6 +466,7 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):
+            # Server not ready yet; retry after the sleep below.
             pass
         if pid is not None and pid > 0:
             try:
@@ -471,6 +475,7 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
                 _log(f"server pid={pid} died during health wait")
                 return False
             except OSError:
+                # Liveness check failed unexpectedly; keep polling.
                 pass
         time.sleep(5)
     return False
@@ -587,6 +592,7 @@ def main() -> int:
             try:
                 summary["log_tail"] = log_file.read_text(errors="replace")[-2000:]
             except OSError:
+                # Log tail is diagnostic only; ignore read errors.
                 pass
 
     print(json.dumps(summary, indent=2))

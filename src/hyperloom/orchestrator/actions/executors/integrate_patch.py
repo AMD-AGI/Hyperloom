@@ -229,6 +229,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
+        # Logging is best-effort; a filesystem error must not fail the action.
         pass
     log_path = log_dir / "enablement_setup.log"
     env = dict(os.environ)
@@ -254,6 +255,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
                 with open(log_path, "a", encoding="utf-8") as fh:
                     fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
             except OSError:
+                # Logging is best-effort; a filesystem error must not fail the action.
                 pass
             if proc.returncode == 0:
                 applied.append(cmd)

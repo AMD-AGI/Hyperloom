@@ -162,6 +162,7 @@ class _Stub:
         try:
             candidate["_audit"] = v
         except Exception:
+            # Test double may reject attribute assignment; ignore.
             pass
         return v
 
