@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""#722 — TraceLens self-heal at the trace_analyze use-site.
+"""TraceLens self-heal at the trace_analyze use-site.
 
 The optimizer's ``trace_analyze`` subprocess reads ``TRACELENS_ROOT`` long
 after install time. When the pod-local checkout vanishes mid-run (a

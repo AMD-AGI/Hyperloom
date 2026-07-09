@@ -113,7 +113,7 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertEqual(skip, "")
 
     def test_flydsl_default_wekafs_root_is_reusable(self) -> None:
-        # Default WekaFS FlyDSL checkout reaches GEAK (PR #668 contract).
+        # Default WekaFS FlyDSL checkout reaches GEAK.
         cand = self._flydsl_candidate(
             "/wekafs/yunkai/flydsl/kernels/moe_gemm_2stage.py",
         )

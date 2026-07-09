@@ -893,7 +893,7 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
     assert attr["method"] == "missing"
 
 
-# A1.0a: framework surfaces in source_breakdown + phase_breakdown
+# framework surfaces in source_breakdown + phase_breakdown
 # Regression: framework KEEPs used to fall into the legacy ``other`` bucket
 # and disappear from ``source_breakdown``; these tests pin the new behaviour.
 def test_attribution_framework_surfaces_in_source_breakdown(
@@ -1055,7 +1055,7 @@ def test_attribution_framework_agent_phase_fallback_when_no_phase_history(
     assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
 
 
-# A1.0d: gemm_tuning surfaces in source_breakdown + phase_breakdown
+# gemm_tuning surfaces in source_breakdown + phase_breakdown
 # Regression: gemm_tuning KEEPs used to fall into ``"other"`` and disappear
 # from per-source totals (same shape of bug as framework).
 def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
@@ -1133,7 +1133,7 @@ def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
     assert sb["gemm_tuning_pct_of_total"] == 0.0
 
 
-# A1.0e: replay_warm_recipe surfaces in source_breakdown
+# replay_warm_recipe surfaces in source_breakdown
 # Regression: replay_warm_recipe KEEPs used to fall into ``"other"`` (which is
 # never emitted), so a pure warm-recipe-replay session showed a validated_total
 # with no per-source split to back it. It now gets its own headline row.
@@ -1492,7 +1492,7 @@ def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
     assert by_domain["llm_direct"] == pytest.approx(3.0)
 
 
-# A1.0c: capability_summary.specialist.by_specialist per-domain split
+# capability_summary.specialist.by_specialist per-domain split
 def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -2258,7 +2258,7 @@ def test_roofline_progress_failure_streak_passes_through(tmp_path: Path) -> None
     assert rl["roofline_failure_streak"] == 3
 
 
-# A1.3: roofline + roofline_progress coexist (post name-clash fix)
+# roofline + roofline_progress coexist (post name-clash fix)
 # Regression: two collectors were both registered as ``collect_roofline`` and
 # the markdown-report list silently evaluated to empty; both surfaces now coexist.
 def test_roofline_and_roofline_progress_coexist_independently(
@@ -2331,7 +2331,7 @@ def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
     assert len(bd["roofline_progress"]["trajectory"]) == 2
 
 
-# A1.4: optimization_stack passthrough (raw KEEP ledger)
+# optimization_stack passthrough (raw KEEP ledger)
 # Mirrors ``state.optimization_stack[]`` to the sbd top level so downstream
 # tooling reads full per-entry evidence without round-tripping to state.json.
 def test_optimization_stack_empty_when_state_has_no_stack(tmp_path: Path) -> None:

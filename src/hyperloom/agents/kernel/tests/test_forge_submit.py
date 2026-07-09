@@ -35,7 +35,7 @@ def test_parse_backends_still_rejects_unknown():
 
 
 def test_parse_backends_tolerates_stringified_list():
-    # Hyperloom#601: an upstream dispatch slip can hand the repr() of a Python
+ # an upstream dispatch slip can hand the repr() of a Python
     # list to --backends ("['geak']") instead of a bare name. parse_backends
     # must recover the inner token rather than rejecting a valid backend.
     assert ko.parse_backends("['geak']") == ["geak"]

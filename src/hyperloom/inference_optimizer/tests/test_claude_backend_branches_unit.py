@@ -205,7 +205,7 @@ async def test_run_timeout():
         await b.run("hi")
 
 
-# ---- run(): idle timeout tolerates a slow-but-live stream (issue #679) -----
+# ---- run(): idle timeout tolerates a slow-but-live stream -----
 async def test_run_idle_timeout_allows_slow_but_live_stream():
     """A model that keeps streaming (gaps < idle budget) must NOT be killed,
     even when the TOTAL turn wall-clock exceeds ``call_timeout_s``."""
