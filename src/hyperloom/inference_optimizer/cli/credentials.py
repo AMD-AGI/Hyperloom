@@ -222,6 +222,27 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
         path = path[: -len("/v1")]
     return urlunparse(parsed._replace(path=path))
 
+
+def _is_stale_proxy_url(value: str | None) -> bool:
+    """Return true for the retired local llm-proxy endpoint.
+
+    The old installer wrote ``127.0.0.1:4002`` as a local proxy default. Modern
+    operator tunnels may also be loopback URLs, so only that legacy port is
+    treated as stale and force-rewritten by preflight.
+    """
+    if not value:
+        return False
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(value).strip())
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return False
+    try:
+        return parsed.port == 4002
+    except ValueError:
+        return False
+
+
 def _resolve_llm_endpoints() -> tuple[str, str]:
     """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
 
