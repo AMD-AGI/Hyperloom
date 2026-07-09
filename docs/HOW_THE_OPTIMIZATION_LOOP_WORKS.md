@@ -95,7 +95,7 @@ for archived reporting only. New sessions write the merged
 After each KEEP, the runtime revalidates the full stack end to end so
 the reported cumulative gain is not just a sum of per-round deltas.
 
-## KERNEL
+## KERNEL_AGENT
 
 KERNEL_AGENT phase is the bridge to kernel-agent work. Orchestration may send
 kernel requests, but the Coordinator owns the request handlers and safety

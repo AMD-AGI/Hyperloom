@@ -37,8 +37,9 @@ your override.
 + USER_DATA_PATH=/wekafs/hyperloom/sessions/me
 ```
 
-Same for `WORKSPACE_PATH` — the kernel-agent ignores it (with a
-warning); rename to `USER_DATA_PATH`.
+`WORKSPACE_PATH` is retired for optimizer state — rename to
+`USER_DATA_PATH`. A few legacy tools still read it as a fallback (critic
+static assets, TraceLens workspace discovery).
 
 ### Recommended: review `--model-class` if you relied on live classification
 
@@ -57,9 +58,9 @@ inference_optimizer optimize \
     --max-hours 2.0
 ```
 
-Supported `--model-class` values (non-exhaustive; see
-`src/hyperloom/inference_optimizer/SKILL.md` §"Model classes"): `dense`, `moe`,
-`moe_mla`, `moe_mla_nsa`, `mxfp4_moe`, `hybrid_attention`.
+Supported `--model-class` values (see
+`src/hyperloom/inference_optimizer/SKILL.md` §"Model classes"): `dense`,
+`moe_mla`, `moe_swa`, `moe_mla_nsa`.
 
 If `--model-class` is omitted and inference cannot determine the family, the
 Coordinator falls back to a generic dense prior — likely sub-optimal for MoE /

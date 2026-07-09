@@ -174,9 +174,10 @@ The installer is idempotent and re-installs only what's missing.
 
 ---
 
-## TraceLens CLI not found
+## TraceLens root or CLI check fails
 
-**Symptom.** `tracelens_analysis` returns `CLI not found` or
+**Symptom.** `trace_analyze` returns `TraceLens root not found`,
+`incomplete (not a git checkout)`, or
 `TraceLens_generate_perf_report_pytorch_inference: command not found`.
 
 **Cause.** TraceLens-internal isn't installed, or the legacy
@@ -276,7 +277,7 @@ specifics.
 ## Resume fails: "manifest.json not found"
 
 **Symptom.** `inference_optimizer optimize --resume` exits with
-`manifest.json missing` or `state.json missing`.
+`manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause.** `USER_DATA_PATH` points at a different directory than the
 original session, or the session never reached the point of writing

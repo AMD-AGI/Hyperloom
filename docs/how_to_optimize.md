@@ -80,8 +80,9 @@ Requirements:
 2. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
-See the [README](https://github.com/AMD-AGI/Hyperloom/blob/main/README.md) for
-the full prompt field reference (every field maps to a CLI flag).
+See [`src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md)
+Step 2 (or [Configuration reference](CONFIGURATION_REFERENCE.md)) for the full
+prompt field reference (every field maps to a CLI flag).
 
 ### 4. Monitor the run
 

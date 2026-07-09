@@ -1,8 +1,8 @@
 # Configuration Reference
 
-Every environment variable read by the Hyperloom runtime, grouped by
-purpose. This page is the *exhaustive* reference; the root README,
-`.env.template`, and each agent SKILL file are *convenience excerpts*.
+Operator-facing environment variables read by the Hyperloom runtime, grouped
+by purpose. The root README, `.env.template`, and each agent SKILL file are
+convenience excerpts.
 
 Variables marked **required** must be set (via shell or `$REPO_ROOT/.env`)
 or the CLI will exit fast at startup. Variables marked **optional** have
@@ -19,6 +19,8 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `SAFE_API_KEY`         | conditional | —    | AMD primus-safe LLM gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments may instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased). |
 | `OPENAI_BASE_URL`      | conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments may provide provider-specific base URLs instead. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`. |
+| `ANTHROPIC_BASE_URL`   | no           | derived from `OPENAI_BASE_URL` | Claude-side base URL for split-gateway deployments. |
+| `ANTHROPIC_AUTH_TOKEN` | no           | inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments. |
 | `CURSOR_API_KEY`       | no       | unset   | Cursor SDK key (prefix `crsr_...`) for the OOB `cursor` kernel-opt backend. **Never inherited from `SAFE_API_KEY`.** When unset, Hyperloom auto-drops `cursor` from the default kernel-opt ladder.       |
 | `CURSOR_DEFAULT_MODEL` | no       | `claude-opus-4-7` | Override the default Cursor model id.                                                                                                                                                          |
 | `CLAUDE_MODEL`         | no       | `claude-opus-4-7` | Claude model id for OOB Claude attempts.                                                                                                                                                       |
@@ -38,9 +40,9 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `REPO_ROOT`                               | yes (local mode)     | `$(pwd)` when invoked from the repo root                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts.                                                                                                                     |
-| `OOB_SRC`                                 | yes for OOB backends | —                                                                  | Path to the `OOB/` subdirectory inside the KernelForge clone.                                                                                                                        |
-| `INFERENCEX_PATH`                         | yes for baseline / target analysis | —                                                    | Path to the SemiAnalysisAI/InferenceX repo.                                                                                                                                          |
+| `REPO_ROOT`                               | no (recommended)     | `$(pwd)`                                                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                             |
+| `OOB_SRC`                                 | conditional          | set by `local_setup.sh`                                            | Path to the `OOB/` subdirectory inside the KernelForge clone. Required before running the OOB (claude / codex / cursor) kernel-opt backends; normally set automatically by `local_setup.sh` / `install.sh`. |
+| `INFERENCEX_PATH`                         | conditional          | auto-cloned by preflight                                           | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. Preflight clones it when unset; only required if that auto-clone fails.                              |
 | `TRACELENS_ROOT`                          | no (installer auto-clones) | `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the pod-local open-source checkout root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `USER_DATA_PATH`                          | no                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
 | `HYPERLOOM_ROOT`                          | no                   | `$HYPERLOOM_RUNTIME_DIR/source-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the pod-local open-source root (`HYPERLOOM_OPEN_SOURCE_ROOT`, default `/opt/hyperloom/open-source-repos`), not this path. |
@@ -58,6 +60,8 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | Variable           | Required | Default | Description                                                                                                  |
 |--------------------|----------|---------|--------------------------------------------------------------------------------------------------------------|
 | `OOB_API_KEY`      | no       | inherits `SAFE_API_KEY` | API key forwarded to OOB / Ray runtime (preflight, kernel-agent tools). |
+| `OOB_BASE_URL`     | no       | inherits resolved OpenAI-compatible gateway | OOB backend endpoint override. |
+| `LLM_API_BASE`     | no       | inherits resolved OpenAI-compatible gateway | Generic LLM endpoint alias for OOB/GEAK-compatible tools. |
 
 ---
 
@@ -139,8 +143,6 @@ comparing gains with normal sessions.
 | `CRITIC_AGENT_ROOT`                   | derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | unset                  | Set to `1` to forcibly disable the LLM RCA engine even when credentials are present.                                                 |
-| `ROBUSTNESS_AGENT_ENABLE_HARD_ACTIONS`| unset                  | M4 milestone gate for scheduling-police hard actions (`prune_branch`, `kill_task`, ...). Default keeps them disabled.                |
-| `LLM_MODEL`                           | `claude-opus-4-7`      | RCA model name for robustness-agent.                                                                                                 |
 
 ---
 
@@ -198,7 +200,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component` — per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / oob / …), each with the same
   convenience totals.
-* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / …).
+* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE).
 * `attribution` — `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess

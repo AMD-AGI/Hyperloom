@@ -2,6 +2,11 @@
 
 The optional quantization prelude (`inference_optimizer optimize --quantize ...`, backed by the `quantization_agent` sub-agent) drives [AMD Quark](https://quark.docs.amd.com/) to produce a quantized model before the optimization loop runs. You only need Quark if you use this path; the rest of Hyperloom works without it.
 
+- **Enable gate.** The prelude only runs when `HYPERLOOM_QUANTIZE_ENABLED` is truthy (`1`/`true`/`yes`/`on`). Without it, `--quantize` is skipped (a `QUANTIZATION_SKIPPED:` marker is printed) and the run continues on the un-quantized model:
+
+  ```bash
+  export HYPERLOOM_QUANTIZE_ENABLED=1
+  ```
 - **Dependency.** `quantization_agent` requires an AMD Quark checkout **at runtime**. It does not bundle Quark or implement quantization itself — it invokes Quark's published skills (`quark-torch-ptq` → `quark-torch-result-validator` → `quark-torch-llm-eval`) end-to-end.
 - **Obtaining Quark.** Quark is published on PyPI (`pip install amd-quark`). However, the current external release does **not** ship the `.claude/skills/quark-torch-*` skill-invocation entry points that the agent drives, so **today you must use the internal Quark repository** checkout. Switch to the public package once it bundles those skills.
 - **Pointing at a local checkout.** The agent resolves the Quark root in this order:

@@ -55,8 +55,9 @@ Compatibility rules:
 * All values are JSON-serialisable (no dataclasses, enums, or
   Python-specific types in the wire shape).
 
-The `exporter_version` field carries the producing Hyperloom version
-(e.g. `"0.8.0"`) for incident triage and per-version filtering.
+The `exporter_version` field carries the breakdown exporter version
+(e.g. `"session-breakdown-1.0.0"`), independent of the Hyperloom package
+version, for incident triage and per-version filtering.
 
 ---
 
@@ -66,7 +67,7 @@ The `exporter_version` field carries the producing Hyperloom version
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
-  "exporter_version": "0.8.0",
+  "exporter_version": "session-breakdown-1.0.0",
 
   "session":            { /* §3  SessionMeta */ },
   "workload":           { /* §4  Workload */ },
@@ -85,16 +86,26 @@ The `exporter_version` field carries the producing Hyperloom version
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "attribution":        { /* §16 Gain attribution per stack entry */ },
 
-  "action_timeline":    [ /* additive native timeline rows */ ],
-  "specialist_runs":    [ /* additive specialist subprocess summaries */ ],
-  "kb_provenance":      { /* additive KB/gbrain provenance */ },
-  "gemm_tuning":        { /* additive GEMM-tuning summary */ },
-  "kernel_optimization_summary": { /* additive kernel summary */ },
-  "conc_sweep_summary": { /* additive concurrency-sweep summary */ },
-  "decision_journal":   { /* additive KEEP/REVERT decision rollup */ },
-  "model_info":         { /* additive model metadata */ },
-  "phase_segments":     [ /* additive phase timing segments */ ],
-  "roofline":           { /* additive roofline sidecar summary */ },
+  // Additive fields (all optional; gate on schema_version major).
+  "session_meta":       { /* extended session metadata */ },
+  "model_info":         { /* model metadata */ },
+  "phase_segments":     [ /* phase timing segments */ ],
+  "action_timeline":    [ /* native timeline rows */ ],
+  "optimization_stack": [ /* accepted stack entries */ ],
+  "perfskills":         { /* perfskills sweep summary */ },
+  "kb_provenance":      { /* KB / gbrain provenance */ },
+  "specialist_runs":    [ /* specialist subprocess summaries */ ],
+  "gemm_tuning":        { /* GEMM-tuning summary */ },
+  "kernel_roofline":    { /* kernel roofline summary */ },
+  "kernel_optimization_summary": { /* kernel summary */ },
+  "conc_sweep_summary": { /* concurrency-sweep summary */ },
+  "roofline":           [ /* per-snapshot roofline list */ ],
+  "roofline_progress":  { /* RooflineProgress dashboard curve */ },
+  "decision_trace":     { /* per-task decision ledger + token_rollup */ },
+  "token_usage":        { /* token spend rollup */ },
+  "langfuse":           { /* Langfuse push receipt */ },
+  "kernel_journey":     { /* kernel-agent journey */ },
+  "versions":           { /* component versions */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
   "source_files":       { /* §17 SourceFiles — raw artefact paths */ }
@@ -306,7 +317,7 @@ investigation than the breakdown summarises.
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
-  "exporter_version": "0.8.0",
+  "exporter_version": "session-breakdown-1.0.0",
 
   "session": {
     "session_id": "sess-20260517-1130",
@@ -326,7 +337,7 @@ investigation than the breakdown summarises.
   },
 
   "workload": {
-    "framework": "sglang",
+    "framework_name": "sglang",
     "framework_version": "0.5.11",
     "model_name": "GLM-5-FP8",
     "model_path": "/wekafs/models/GLM-5-FP8",

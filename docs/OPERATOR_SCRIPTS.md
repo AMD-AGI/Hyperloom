@@ -141,17 +141,20 @@ the full event log. Exit code 2 if the DB is missing.
 
 ```json
 {
-  "delegated:kernel_optimization:succeeded": 7,
-  "delegated:tracelens_analysis:succeeded": 1,
-  "kernel_request:kernel_optimization": 7,
-  "kernel_request:tracelens_analysis": 1,
-  "kernel_response:kernel_optimization:KEEP": 3,
-  "kernel_response:kernel_optimization:NEEDS_REVIEW": 4,
+  "delegated:kernel_opt:succeeded": 7,
+  "kernel_request:trace_analyze": 1,
+  "kernel_request:run_optimization": 7,
+  "kernel_response:trace_analyze_done:ok": 1,
+  "kernel_response:run_optimization_done:ok": 7,
   "proposal:explore": 12,
   "proposal:specialist": 4,
   "proposal:kernel_opt": 5
 }
 ```
+
+Keys are built from live event fields: `delegated:{task.kind}:{state}`,
+`kernel_request:{kind}`, `kernel_response:{kind}_done:{status}`, and
+`proposal:{action_name}`.
 
 A long run with healthy progress has roughly proportional
 `proposal:*` and `delegated:*:succeeded` counts. A stuck run typically

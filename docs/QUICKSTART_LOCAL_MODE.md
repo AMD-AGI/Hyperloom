@@ -110,16 +110,16 @@ Optimize inference for this workload:
 - ISL: 1024
 - OSL: 1024
 - Goal: improve throughput by at least 10%
-- Budget: 2.0 hours   # example; raise for long optimization runs
+- Budget: 24 hours
 
 Before launch, run exactly:
 ```bash
 source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
-bash src/hyperloom/inference_optimizer/assets/install.sh
-source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 ```
 ````
+
+> The workload values above are example values from the prompt template, not CLI defaults. When a field is omitted, the CLI defaults are TP=1, CONC=8, ISL=256, OSL=256, and `--max-hours` 2.0. Run the install step from the Note above before the first launch.
 
 The fields you commonly edit:
 
@@ -127,7 +127,7 @@ The fields you commonly edit:
 |---|---|---|---|
 | `Model` | `--model` | Path to your model. | required |
 | `Framework` | `--framework` | `sglang` or `vllm` (do not mix within one session). | `sglang` |
-| `GPU` | `--gpu-type` | e.g. `MI300X`, `MI325X`, `MI355X`. | auto-detect |
+| `GPU` | `--gpu-type` | `MI300X`, `MI308X`, `MI325X`, or `MI355X`. | auto-detect |
 | `Goal` | `--target-gain` | Optional stop condition, such as a target throughput gain. | unset |
 | `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
 

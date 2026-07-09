@@ -30,6 +30,8 @@ image is supplied.
 |-----------|--------|-------|
 | SGLang (ROCm) | Supported | Default framework |
 | vLLM (ROCm) | Supported | Do not mix frameworks within one session |
+| Atom (ROCm) | Supported | Single-node only (multi-node rejected by the IR-8 guard) |
+| xDiT (diffusion) | Supported | Diffusion pipeline; throughput reported in img/s, no serving server |
 
 ## Container images
 
