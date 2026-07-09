@@ -315,7 +315,7 @@ async def test_rearm_ignores_non_enablement(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
-    """A patch that clears gap #1 and reveals gap #2 is STACKED, not reverted."""
+    """A patch that clears one gap and reveals a new gap is STACKED, not reverted."""
     fake = _enqueue_self(enablement_dispatched=True, enablement_stall_streak=2)
     new_gap_log = (
         "ValueError: Following weights were not initialized from checkpoint: "

@@ -50,7 +50,7 @@ def _integrate_entry(
 
 
 # ---------------------------------------------------------------------------
-# G1 empty_patch_kept
+# empty_patch_kept
 # ---------------------------------------------------------------------------
 
 
@@ -89,7 +89,7 @@ def test_empty_patch_kept_silent_when_patch_size_unknown():
 
 
 # ---------------------------------------------------------------------------
-# G2 decision_threshold_violated
+# decision_threshold_violated
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +123,7 @@ def test_decision_threshold_violated_silent_above_threshold():
 
 
 # ---------------------------------------------------------------------------
-# G3 kernel_dispatch_bypassed
+# kernel_dispatch_bypassed
 # ---------------------------------------------------------------------------
 
 
@@ -190,7 +190,7 @@ def test_dispatch_bypassed_silent_on_meaningful_gain_without_evidence():
 
 
 # ---------------------------------------------------------------------------
-# G4 kernel_negative_delta_kept
+# kernel_negative_delta_kept
 # ---------------------------------------------------------------------------
 
 
@@ -243,7 +243,7 @@ def test_negative_delta_silent_when_no_kernels_optimized():
 
 
 # ---------------------------------------------------------------------------
-# G5 ci_metrics_baseline_zero
+# ci_metrics_baseline_zero
 # ---------------------------------------------------------------------------
 
 
@@ -310,7 +310,7 @@ def test_baseline_zero_silent_when_baseline_present():
 
 
 # ---------------------------------------------------------------------------
-# G6 ci_metrics_schema_drift
+# ci_metrics_schema_drift
 # ---------------------------------------------------------------------------
 
 
@@ -377,7 +377,7 @@ def test_schema_drift_silent_on_canonical_schema():
 
 
 # ---------------------------------------------------------------------------
-# G7 oob_no_harness
+# oob_no_harness
 # ---------------------------------------------------------------------------
 
 

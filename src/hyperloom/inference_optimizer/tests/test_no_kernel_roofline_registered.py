@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Blocker #1 regression — ``--no-kernel`` boot must still register the analysis executors."""
+"""``--no-kernel`` boot must still register the analysis executors."""
 
 from __future__ import annotations
 

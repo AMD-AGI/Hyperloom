@@ -227,7 +227,7 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
 
 
 def test_open_source_root_defaults_to_opt_hyperloom_not_tmp(monkeypatch):
-    # #722: default must be the non-ephemeral pod-internal dir and must NOT
+ # default must be the non-ephemeral pod-internal dir and must NOT
     # follow TMPDIR/tmp (a tmp-reaper wiping /tmp mid-run broke trace_analyze).
     monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
     monkeypatch.setenv("TMPDIR", "/tmp/should-be-ignored")
