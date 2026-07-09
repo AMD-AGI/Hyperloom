@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Subprocess JSON bridge primitives (tree-reform.MD §7 — canonical ``subprocess_bridge``).
+"""Subprocess JSON bridge primitives (canonical ``subprocess_bridge``).
 
 Single home for the "read a request JSON file / emit a response JSON to
 stdout and optionally a file / raise a typed adapter error" idiom shared by
@@ -17,7 +17,7 @@ Coordinator or the SKILL harness) over a subprocess JSON bridge:
   ``_emit_json`` and ``_read_json``-shaped helpers stay local).
 
 Zero first-party imports (stdlib only) so any package may depend on it
-without creating an import cycle (see ``tree-reform.MD`` §7 "防环规则").
+without creating an import cycle (anti-cycle rule: no first-party imports).
 
 Sites intentionally NOT delegated here (kept local by design):
 
@@ -29,8 +29,8 @@ Sites intentionally NOT delegated here (kept local by design):
   the ``mkdir`` into the shared implementation would silently change their
   behaviour, and dropping it from framework's copy would change *its*
   behaviour (its CLI is invoked with ``--out`` paths under a fresh work dir
-  that may not exist yet). Per ``tree-reform-lessons.MD`` §2.1, this
-  divergence is real and is left in place rather than force-merged.
+  that may not exist yet). This divergence is real and is left in place
+  rather than force-merged.
 * ``agents/framework/runtime/cli._load_request`` / ``_read_json_request`` —
   these parse a JSON request file like :func:`read_json` but additionally
   enforce "file must exist" / "must decode" / "top-level must be an object"

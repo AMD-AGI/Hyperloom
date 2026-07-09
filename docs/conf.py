@@ -10,11 +10,13 @@
 import os
 import sys
 
-# robustness_agent and framework_agent use a src/ layout.
-# inference_optimizer lives at the repo root and needs no extra path entry.
+# -- Path setup --------------------------------------------------------------
+# After the src-layout tree-reform the whole ``hyperloom`` distribution lives
+# under a single ``src/`` namespace. Add repo root and ``src`` for autodoc.
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(_repo_root, "robustness-agent", "src"))
-sys.path.insert(0, os.path.join(_repo_root, "framework-agent", "src"))
+for _path in (_repo_root, os.path.join(_repo_root, "src")):
+    if os.path.isdir(_path):
+        sys.path.insert(0, _path)
 
 """
 html_theme is usually unchanged (rocm_docs_theme).
@@ -22,11 +24,8 @@ flavor defines the site header display, select the flavor for the corresponding 
 flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
 """
 
-# Dynamically extract component version
-#with open("../anc/version.txt", encoding="utf-8") as f:
-#    version_full = f.read().strip()
-    # Only get the major and minor
-version_number = "0.1.0"
+# Keep in sync with pyproject.toml [project].version.
+version_number = "0.8.0"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
@@ -60,6 +59,17 @@ version = version_number
 release = version_number
 
 external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
+
+exclude_patterns = [
+    "_build",
+    "_templates",
+]
+
+suppress_warnings = [
+    # Autosummary-generated API pages contain toctrees; external-toc warns even
+    # though those pages are generated implementation details.
+    "etoc.toctree",
+]
 
 """
 Doxygen Settings

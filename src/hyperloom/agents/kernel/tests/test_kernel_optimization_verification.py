@@ -284,7 +284,7 @@ def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 
     return {
         "status": "completed",
         "attempt_id": "geak-aaa",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(artifact),
         "backend_paths": {
             "geak_final_report": str(final),
@@ -373,7 +373,7 @@ def _geak_partial_attempt(
     return {
         "status": "partial",
         "attempt_id": "geak-partial",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(artifact),
         "backend_paths": {
             "geak_final_report": str(final),
@@ -385,7 +385,7 @@ def _geak_partial_attempt(
 
 
 def test_geak_partial_with_verified_round_correctness_keeps(tmp_path):
-    """#735-followup: a SIGTERM'd GEAK run (status=incremental_after_round_1) whose
+    """A SIGTERM'd GEAK run (status=incremental_after_round_1) whose
     round_evaluation shows correctness.success=True + a verified speedup must be
     trusted and routed to KEEP — not discarded as NEEDS_REVIEW (which never reaches
     integrate/E2E). This is the exact DeepSeek-R1 2.6x case."""
@@ -520,7 +520,7 @@ def test_cli_correctness_override(tmp_path):
 
 
 def test_speedup_just_above_gate_keeps(tmp_path):
-    """A 1.07x speedup clears the 1.05x KEEP gate (issue #442: was rejected by the old higher gate)."""
+    """A 1.07x speedup clears the 1.05x KEEP gate and is not rejected by the old higher gate."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
         _args(correctness_passed=True, micro_speedup=1.07, e2e_gain_pct=0.5, accuracy_passed=True),
@@ -635,7 +635,7 @@ def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak0",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(patch),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch),
@@ -679,7 +679,7 @@ def test_build_verification_recovers_py_from_worktree(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak0",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(patch),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch),
@@ -736,7 +736,7 @@ def test_build_verification_records_multi_file_artifact_bundle(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak0",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(patch),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch),
@@ -904,7 +904,7 @@ def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-deadbeef",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(log_path),
         "backend_paths": {},
     }
@@ -973,7 +973,7 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-cafebabe",
-        "backend": "geak",
+        "backend": "geak_v3",
         "optimized_path": str(log_path),
         "backend_paths": {
             "geak_per_task_best_patch": str(patch_path),
@@ -1028,7 +1028,7 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-asm",
-        "backend": "geak",
+        "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(patch_path)},
     }
 
@@ -1064,7 +1064,7 @@ def test_patch_with_absolute_path_header_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil", "backend": "geak",
+        "status": "completed", "attempt_id": "geak-evil", "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
@@ -1088,7 +1088,7 @@ def test_patch_with_parent_traversal_header_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak",
+        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
@@ -1108,7 +1108,7 @@ def test_patch_targeting_other_basename_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-other", "backend": "geak",
+        "status": "completed", "attempt_id": "geak-other", "backend": "geak_v3",
         "backend_paths": {"geak_per_task_best_patch": str(other)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
@@ -1337,7 +1337,7 @@ def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
     assert res is None
 
 
-# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
+# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names.
 
 
 def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path):
@@ -1687,9 +1687,9 @@ def test_build_prompt_strips_base64_images_from_tracelens_context(tmp_path):
     assert "P2: rmsnorm tuning" in prompt
 
 
-# PR-A §4: TraceLens hypothesis block in build_prompt
+# TraceLens hypothesis block in build_prompt.
 def test_build_hypothesis_block_returns_empty_when_no_prose_fields():
-    """Candidates lacking prose fields → no-op block (prompt byte-identical to pre-PR)."""
+    """Candidates lacking prose fields → no-op block."""
     block = ko._build_hypothesis_block(
         {"name": "kernel_no_prose", "source_type": "triton"},
     )
@@ -1775,7 +1775,7 @@ def test_build_hypothesis_block_renders_when_only_identification_present():
 
 
 def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pitems():
-    """Q2: multi-entry ``task_group.all_pitem_prose`` renders every P-item with a ``### P{rank}`` header, rank-sorted."""
+    """Multi-entry ``task_group.all_pitem_prose`` renders every P-item with a ``### P{rank}`` header, rank-sorted."""
     candidate = {
         "name": "aiter::rms_norm",
         # Primary's flat prose intentionally divergent so the test confirms the renderer reads from all_pitem_prose.
@@ -1879,9 +1879,9 @@ def test_build_prompt_includes_hypothesis_block_when_prose_present():
     assert "20.00 ms" in prompt
 
 
-# PR-B §2: benchmark-cases block in build_prompt
+# Benchmark-cases block in build_prompt.
 def test_build_benchmark_cases_block_returns_empty_without_task_group():
-    """Legacy dispatch (no task_group) → byte-identical output to PR-A."""
+    """Legacy dispatch (no task_group) emits no benchmark-cases block."""
     block = ko._build_benchmark_cases_block(
         {"name": "rms_norm", "source_type": "triton"},
     )
@@ -1994,7 +1994,7 @@ def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
     assert "## Benchmark cases" not in prompt
 
 
-# PR-B §3: bound-keyed optimization priority block in build_prompt
+# Bound-keyed optimization priority block in build_prompt.
 def test_build_priority_block_empty_when_no_bound_info():
     block = ko._build_priority_block({"name": "kernel_agent", "source_type": "triton"})
     assert block == ""
