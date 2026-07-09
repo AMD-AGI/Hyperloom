@@ -20,6 +20,10 @@ import sys
 from pathlib import Path
 
 from .. import framework_registry
+from hyperloom.orchestrator.roles.agent_role import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+)
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 
@@ -583,8 +587,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--max-ticks", type=int, default=None, help="Hard tick cap (None = unlimited; mostly for tests)")
     opt.add_argument("--tick-interval-sec", type=float, default=0.0, help="Sleep between ticks (0 = no sleep)")
-    opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
-    opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL))
+    opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL))
     opt.add_argument(
         "--allow-mm-text-fallback",
         action=argparse.BooleanOptionalAction,
