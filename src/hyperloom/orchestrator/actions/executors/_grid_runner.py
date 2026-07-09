@@ -35,8 +35,8 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 
-# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
-# re-exported here so the module namespace + monkeypatch surface is intact.
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from ._grid_base import (
     variant_fingerprint as variant_fingerprint,
     _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
@@ -565,6 +565,15 @@ def _build_variant_yaml(
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
+    # the relaunched server imports the overlay's kernels (same mechanism as the
+    # geak sweep's OVERLAY_PYTHONPATH). Inert for env/flag variants where
+    # ``overlay_pythonpath`` is unset. getattr-guarded so non-GridVariant callers
+    # (or older payloads) never break.
+    _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+    if _overlay:
+        _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+        envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
 
     # PATH guard: the xdit/scriptable wrapper needs BOTH `/venv/bin` (for the
     # `xdit` console script) and `/opt/rocm/bin` (for `hipcc`, required by

@@ -144,16 +144,16 @@ def test_c4_gbrain_prs_tested_roundtrip():
         },
     ]
 
-    # Step 1: Simulate gbrain attrs (stored as JSON string by ingest)
+    # Simulate gbrain attrs (stored as JSON string by ingest).
     stored_json = json.dumps(prs_data)
 
-    # Step 2: Read-side deserialization (gbrain_remote_client._json_list)
+    # Read-side deserialization (gbrain_remote_client._json_list).
     decoded = _json_list(stored_json)
     assert len(decoded) == 2
     assert decoded[0]["outcome"] == "REVERT"
     assert decoded[1]["outcome"] == "KEEP"
 
-    # Step 3: Build recipe as if from gbrain remote (body.prs_tested populated)
+    # Build recipe as if from gbrain remote (body.prs_tested populated).
     recipe = {
         "canonical_id": "inference:llama3.3-70b:mi300x:sglang:llm:llamaforcausallm:0.5.11:fp8",
         "best_config": {"extra_server_args": "--tp 8"},
@@ -161,7 +161,7 @@ def test_c4_gbrain_prs_tested_roundtrip():
         "prs_tested": decoded,
     }
 
-    # Step 4: cortex_t0 extracts patches and blocklist
+    # cortex_t0 extracts patches and blocklist.
     ctx = {}
     _extract_patches_from_prs_tested(ctx, recipe, ["LlamaForCausalLM"])
 
@@ -350,7 +350,7 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
     """Integration: REVERT from gbrain blocks patch at executor apply phase."""
     import subprocess
 
-    # Step 1: Simulate gbrain page data (REVERT stored as JSON string)
+    # Simulate gbrain page data (REVERT stored as JSON string).
     gbrain_prs = json.dumps([{
         "outcome": "REVERT",
         "patch_file": "vllm/fp8.py",
@@ -366,10 +366,10 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
         "applicable_arch": ["LlamaForCausalLM"],
     }])
 
-    # Step 2: gbrain_remote_client decodes
+    # gbrain_remote_client decodes.
     decoded_prs = _json_list(gbrain_prs)
 
-    # Step 3: cortex_t0 extracts
+    # cortex_t0 extracts.
     recipe = {
         "canonical_id": "test:llama:mi300x:sglang:llm:llamaforcausallm:0.5.11:fp8",
         "best_config": {},
@@ -381,13 +381,13 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
     patches = ctx["recommended_replay"]["patches"]
     blocked = ctx["blocked_patches"]
 
-    # Step 4: Coordinator would pass these to task params
+    # Coordinator would pass these to task params.
     params = {
         "patches": patches,
         "blocked_patches": blocked,
     }
 
-    # Step 5: Executor _apply_warm_patches filters
+    # Executor _apply_warm_patches filters.
     from hyperloom.orchestrator.actions.executors.baseline import (
         _apply_warm_patches,
     )

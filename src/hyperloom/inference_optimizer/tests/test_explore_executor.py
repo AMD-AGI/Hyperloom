@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M3 — ExploreExecutor + explore_search ledger tests (KB_design §3.4 §M3)."""
+"""ExploreExecutor and explore_search ledger tests."""
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ def test_canonical_fingerprint_distinguishes_envs():
 
 
 def test_canonical_fingerprint_matches_variant_fingerprint():
-    """Identity with v0.6 ``variant_fingerprint`` (lossless migration)."""
+    """Identity with legacy ``variant_fingerprint`` is preserved during migration."""
     args = "--attention-backend aiter"
     envs = {"VLLM_ROCM_USE_AITER": "1"}
     assert canonical_fingerprint(args, envs) == variant_fingerprint(args, envs)
@@ -852,7 +852,7 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     sub_agent_runner,
     tmp_path,
 ):
-    """KB_design §3.4 §4.4: an unstable stack rebench evicts the KEEP'd variant (KEEP_UNSTABLE → REVERT)."""
+    """An unstable stack rebench evicts the KEEP'd variant (KEEP_UNSTABLE → REVERT)."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1107,7 +1107,7 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     res = await sub.run_task(task)
-    # Empty grid returns a "failed" result, not a crash (KB_design §3.4 §7).
+    # Empty grid returns a "failed" result, not a crash.
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
 
