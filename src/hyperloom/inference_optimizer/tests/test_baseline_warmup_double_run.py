@@ -753,7 +753,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     """The Magpie *parent* subprocess cwd is anchored to the stable task
     output_dir (never the default ``/tmp``) as defence-in-depth. (The actual
-    #523 cuda-graph fix is the local-InferenceX mirror — see
+ #523 cuda-graph fix is the local-InferenceX mirror — see
     ``test_baseline_points_magpie_at_local_inferencex`` — because Magpie
     re-roots the server via ``cd <inferencex>``.)"""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
@@ -1164,7 +1164,7 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     assert not (pid_dir / "vllm_8888.json").exists()
 
 
-# -- #522: _classify_subprocess_error unit tests ----------------------------
+# -- _classify_subprocess_error unit tests ----------------------------
 
 from hyperloom.orchestrator.actions.executors.baseline import (
     _classify_subprocess_error,

@@ -919,7 +919,7 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
     assert result["skip_reason"] == "no_baseline_tput"
 
 
-# Bug #12: record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
+# record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
 def test_record_conc_sweep_writes_last_conc_sweep():
     s = SharedState()
     assert s.last_conc_sweep == {}
