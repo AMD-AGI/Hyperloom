@@ -70,7 +70,7 @@ def test_metadata_expected_gain_pct_must_be_pair():
 
 
 def test_metadata_no_allowed_modes_field():
-    """v0.6 dropped allowed_modes (single full mode — ADR-34)."""
+    """allowed_modes is no longer accepted because full mode is the only supported mode."""
     payload = _good_payload()
     payload["allowed_modes"] = ["quick"]  # extra fields silently ignored
     meta = ActionMetadata.from_yaml_dict(payload, expected_name="baseline")
@@ -115,7 +115,7 @@ def test_registry_baseline_metadata(registry):
 
 
 def test_registry_by_family(registry):
-    """report belongs to family=shallow per DESIGN §16.1, not prep."""
+    """report belongs to family=shallow, not prep."""
     prep = {a.name for a in registry.by_family("prep")}
     assert {"baseline", "target_analysis"}.issubset(prep)
     analysis = {a.name for a in registry.by_family("analysis")}

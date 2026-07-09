@@ -36,8 +36,8 @@ from ..trace.parse_usage import (
     parse_oob_json_usage,
 )
 
-# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
-# re-exported here so the module namespace + monkeypatch surface is intact.
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from ._kernel_decisions import (
     _HONEST_E2E_UMBRELLA_ENV as _HONEST_E2E_UMBRELLA_ENV,
     _TRUEY as _TRUEY,

@@ -42,7 +42,7 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
-# Step 4 — pr_states broadens PR-state coverage (open + merged/closed -> "all")
+# pr_states broadens PR-state coverage (open + merged/closed -> "all")
 def test_pr_states_defaults_to_open() -> None:
     req = _minimal_request()
     assert req.pr_states == ("open",)
@@ -544,5 +544,5 @@ def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) 
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
     # Key contract: PR:10 keeps its positive overlap (1) despite containing
-    # ``moe``, proving anti is fully gated on the gap-side trigger.
+ # ``moe``, proving anti is fully gated on the gap-side trigger.
     assert refs == ["PR:11", "PR:10", "PR:12"]

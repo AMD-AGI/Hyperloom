@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Canonical UTC ISO-8601 timestamp helper (tree-reform.MD §7 — ``_time``).
+"""Canonical UTC ISO-8601 timestamp helper (``_time``).
 
 Relocated from ``hyperloom.orchestrator._time`` (P2.1); that re-export shim
 was removed in P2.7 once all callers were updated to import directly from
