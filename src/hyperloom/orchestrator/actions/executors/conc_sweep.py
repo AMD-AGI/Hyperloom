@@ -18,15 +18,11 @@ which would be stale if pinned at enqueue time.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from ...kernel.conc_sweep import run_conc_sweep
 from ...state.shared_state import SharedState
-
-
-log = logging.getLogger(__name__)
 
 
 class ConcSweepExecutor:
