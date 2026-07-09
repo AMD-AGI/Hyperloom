@@ -375,6 +375,7 @@ def materialize_config_with_envs(
         "OSL",
         "MAX_MODEL_LEN",
         "TP",
+        "PORT",
     ):
         val = os.environ.get(env_key, "").strip()
         if val:
