@@ -2214,6 +2214,7 @@ def _extract_py_path(test_command: str) -> str | None:
             if part.endswith(".py"):
                 return part
     except ValueError:
+        # No matching path part; return None below.
         pass
     return None
 

@@ -1373,6 +1373,7 @@ def maybe_generate_harness(
             try:
                 log_fn(f"[harness_gen] {msg}")
             except Exception:
+                # Logging callback errors are non-fatal.
                 pass
 
     benchmark_path = _Path(benchmark_file)
