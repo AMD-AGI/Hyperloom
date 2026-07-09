@@ -160,3 +160,55 @@ async def test_perfskills_kernel_phase_does_not_reuse_already_promoted_result(
     # The recovery short-circuit must NOT have fired; the normal path resolves
     # the runner (and here aborts via the injected error).
     assert resolved, "new cycle must re-run PerfSkills, not reuse stale result.json"
+
+
+@pytest.mark.asyncio
+async def test_perfskills_handoff_preserves_serving_fidelity_knobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PerfSkills must baseline the same engine Hyperloom measured.
+
+    A missing max-model-len or GPU memory-utilization handoff lets GEAK/e2e
+    launch a subtly different vLLM server than the Hyperloom baseline, which
+    turns kernel wins into non-reproducible E2E deltas.
+    """
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={
+            "action": "baseline",
+            "tput": 100.0,
+            "extra_server_args": "--no-enable-prefix-caching",
+        },
+        model_path="/models/gpt-oss-120b",
+        gpu_type="mi355x",
+        isl=1024,
+        osl=1024,
+        conc=64,
+        max_model_len=2248,
+    )
+    coord.phase_kernel._record_perfskills_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("GPU_MEMORY_UTILIZATION", "0.9")
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_perfskills_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads(
+        (tmp_path / "perfskills" / "handoff.json").read_text(encoding="utf-8")
+    )
+    assert handoff["max_model_len"] == 2248
+    assert handoff["mem_fraction"] == pytest.approx(0.9)
+    assert handoff["accepted_flags"] == "--no-enable-prefix-caching"
+    assert handoff["raw_baseline_tput"] == 100.0
