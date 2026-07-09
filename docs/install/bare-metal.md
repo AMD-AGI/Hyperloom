@@ -46,6 +46,8 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-xxxxx
 ```
 
+The installer and its chained runtime installers accept either the single-gateway pair or a split setup as long as at least one base URL and one API key are present.
+
 > To change the artifact directory (default `/workspace/hyperloom`), `export USER_DATA_PATH=...` in your shell before running the installer, or pass `--user-data-path`. The bare-metal installer reads `USER_DATA_PATH` from the shell environment, **not** from `.env` (only LLM credentials are read from `.env`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
 
 ## 3. Run the bare-metal installer
