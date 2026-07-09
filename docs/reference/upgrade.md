@@ -7,11 +7,11 @@ myst:
 # Upgrade Hyperloom version
 
 Per-version migration steps. This page is a companion to
-[`CHANGELOG.md`](../CHANGELOG.md): the changelog answers *what
+[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md): the changelog answers *what
 changed*, this page answers *what you have to do about it*.
 
-If you are starting fresh, skip this page and follow the root
-[`README.md`](../README.md) quickstart.
+If you are starting fresh, skip this page and follow the
+[quickstart](../install/quickstart.md).
 
 ---
 
@@ -47,8 +47,8 @@ your override.
 + USER_DATA_PATH=/wekafs/hyperloom/sessions/me
 ```
 
-Same for `WORKSPACE_PATH` — the kernel-agent ignores it (with a
-warning); rename to `USER_DATA_PATH`.
+Same for `WORKSPACE_PATH` — it is legacy-only and still used in narrow
+fallbacks, but new launchers should rename it to `USER_DATA_PATH`.
 
 ### Recommended: review `--model-class` if you relied on live classification
 
@@ -67,7 +67,7 @@ inference_optimizer optimize \
     --max-hours 2.0
 ```
 
-Supported `--model-class` values (non-exhaustive; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/SKILL.md)): `dense`, `moe`,
+Supported `--model-class` values (non-exhaustive; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)): `dense`, `moe`,
 `moe_mla`, `moe_mla_nsa`, `mxfp4_moe`, `hybrid_attention`.
 
 If `--model-class` is omitted and inference cannot determine the family, the
@@ -96,7 +96,7 @@ Earlier launchers may have waited for the Coordinator to emit a
 # launcher.sh
 - inference_optimizer optimize ... # expects setup as first action
 + . "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh"
-+ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
++ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 + inference_optimizer optimize ...
@@ -104,10 +104,10 @@ Earlier launchers may have waited for the Coordinator to emit a
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
 
-The default kernel-opt ladder is now `forge,geak`. Out-of-box (OOB) backends (`claude`,
-`codex`, `cursor`) run only when explicitly listed in `KERNEL_OPT_BACKEND_ORDER`
-and `cursor` still requires `$CURSOR_API_KEY`. If you had a custom order
-hard-coded (for example, `claude,geak`), confirm it is still intentional.
+The default kernel-opt ladder is now `forge,geak,claude,codex,cursor`; `cursor`
+is dropped from the auto-derived default when `$CURSOR_API_KEY` is unset. If you
+had a custom order hard-coded (for example, `claude,geak`), confirm it is still
+intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
@@ -130,12 +130,14 @@ handler as `trace_report_path` and forwarded to the lifecycle as
 `$SESSION_DIR/kernel-agent/runs/<session_id>/tracelens/analysis.md`).
 The `--compat-report-path` argument was removed.
 
-### Optional: enable PMC roofline
+### Roofline is now on by default (no PMC env toggle)
 
-New in 0.6: `HYPERLOOM_ENABLE_PMC_ROOFLINE=1` layers Magpie performance monitoring counter (PMC)
-roofline analysis on top of TraceLens. Useful for compute-bound
-workloads; adds ~3 minutes per profile call. See
-[Environment variables](../reference/environment-variables.md) §7.
+There is no `HYPERLOOM_ENABLE_PMC_ROOFLINE` environment variable. Roofline
+analysis (the composite `profile` + `trace_analyze` + `analysis.md` path) is
+controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
+`--no-enable-roofline` for a profile-only run, or set
+`INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0` for the same effect. See
+[Environment variables](environment-variables.md).
 
 ### Optional: opt into the Cursor backend
 
@@ -150,7 +152,7 @@ unchanged (silently dropped).
 depending on the aggregation path. The `v3.0` file is additive and
 wire-compatible for `v2` consumers that tolerate unknown fields. Consumers must
 not gate on exact string equality; accept the v2/v3 family as described in
-[`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
+[`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
 ---
 
@@ -164,7 +166,7 @@ training-mode build:
   accepted by `install.sh`. Use the `_inference` variant.
 * Training and MLPerf-training skills have been removed from this
   repo. There is no in-place migration; switch to the inference flow
-  documented in the root [`README.md`](../README.md).
+  documented in the [quickstart](../install/quickstart.md).
 
 ---
 
@@ -173,9 +175,9 @@ training-mode build:
 For any minor or patch upgrade:
 
 1. Pull the new Hyperloom revision into `$REPO_ROOT`.
-2. Re-run `bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"`. The
+2. Re-run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
-   refreshes the auth-proxy, and regenerates `kernel-agent.env.sh`.
+   refreshes generated LLM gateway aliases, and regenerates `kernel-agent.env.sh`.
 3. Re-source the env file:
    ```bash
    . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
@@ -193,8 +195,8 @@ Your local KB and historical sessions are preserved.
 
 Use these resources for related reference information:
 
-* [`CHANGELOG.md`](../CHANGELOG.md) — Full per-release notes.
-* [Hyperloom authentication and credentials](../reference/authentication.md) — Credential and path env reference.
-* [Environment variables](../reference/environment-variables.md) — Every
+* [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md) — Full per-release notes.
+* [Hyperloom authentication and credentials](authentication.md) — Credential and path env reference.
+* [Environment variables](environment-variables.md) — Every
   environment variable read by the runtime.
-* [Hyperloom self-hosting and operations guide](../reference/operations.md) — Self-host runbook.
+* [Hyperloom self-hosting and operations guide](operations.md) — Self-host runbook.

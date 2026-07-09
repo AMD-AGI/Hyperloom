@@ -43,6 +43,30 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     stack_changed = bool(f.get("stack_changed_after_validation"))
     extra_args = f.get("extra_server_args") or ""
     action_path = f.get("action_path") or []
+    gain_provenance = str(f.get("cumulative_gain_provenance") or "")
+    revalidation_pending = bool(f.get("revalidation_pending"))
+    # A GEAK(GEAK) e2e candidate that self-reported a win but was NOT
+    # confirmed by a main-flow rebench: it is deliberately excluded from the
+    # headline (current_best / action_path / validated gain). Surface it as an
+    # audit-only note + warning so the report neither hides it nor lets its
+    # self-reported number masquerade as a validated headline gain.
+    geak_pending = f.get("geak_pending") if isinstance(f.get("geak_pending"), dict) else {}
+    pending_awaiting = geak_pending.get("status") == "awaiting_rebench"
+    # The gain is PROVISIONAL (not same-harness-validated) when its provenance
+    # says so, or a revalidation is pending and no positive validated number
+    # exists yet. In that case we must NOT present the (zeroed/absent) validated
+    # figure as authoritative — that reads like "the optimization did nothing".
+    # Show the provisional number, clearly labelled, plus a credibility warning.
+    is_provisional = ("provisional" in gain_provenance) or (
+        revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
+    )
+    # A pending GEAK candidate with no positive validated gain yet means the
+    # headline is genuinely unvalidated — suppress the "Validated cumulative gain:
+    # +0.00%" line (which reads like the optimization did nothing) and let the
+    # audit note below carry the (self-reported, not-yet-confirmed) number.
+    headline_unvalidated = pending_awaiting and not (
+        isinstance(gain_v, (int, float)) and gain_v > 0
+    )
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -62,19 +86,50 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             # improvement shows as a negative delta; annotate to avoid misreads.
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
-    if gain_v is not None:
-        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
-        decisions.append(
-            Decision(
-                kind="kept" if (gain_v or 0) > 0 else "attempted",
-                subject="final",
-                metric_pct=float(gain_v),
-                rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
+    if is_provisional:
+        if gain_round is not None:
+            facts.append(
+                f"Provisional cumulative gain: {fmt_pct(gain_round, plus=True)} "
+                "— PENDING same-harness revalidation, NOT yet validated."
             )
+        warnings.append(
+            "Reported gain is PROVISIONAL and cross-harness "
+            f"(provenance={gain_provenance or 'unknown'}): the numerator was "
+            "measured by the delegated optimizer's harness and the denominator "
+            "is the orchestrator baseline. A same-harness full-stack rebench is "
+            "pending; the validated gain will replace this number once it lands."
         )
-    if gain_round is not None:
+    else:
+        if gain_v is not None and not headline_unvalidated:
+            facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
+            decisions.append(
+                Decision(
+                    kind="kept" if (gain_v or 0) > 0 else "attempted",
+                    subject="final",
+                    metric_pct=float(gain_v),
+                    rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
+                )
+            )
+        if gain_round is not None and not headline_unvalidated:
+            facts.append(
+                f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
+            )
+    if geak_pending and geak_pending.get("status") == "awaiting_rebench":
+        self_gain = geak_pending.get("self_reported_gain_pct")
+        self_gain_str = (
+            fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+        )
         facts.append(
-            f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
+            f"GEAK candidate (self-reported {self_gain_str}) is AWAITING a "
+            "main-flow rebench — excluded from the headline gain and final stack "
+            "until a measured rebench validates it."
+        )
+        warnings.append(
+            "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been "
+            "confirmed by a same-harness main-flow rebench, so it is intentionally "
+            "kept out of current_best / action_path / the validated gain. Its "
+            "self-reported number is audit-only and must not be presented as the "
+            "headline result."
         )
     if action_path:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
@@ -87,7 +142,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "cumulative_gain_pct_validated may be stale relative to the "
             "current best."
         )
-    if gain_v is None and (final_tput or base_tput):
+    if gain_v is None and not is_provisional and (final_tput or base_tput):
         warnings.append(
             "cumulative_gain_pct_validated is null while baseline/final "
             "throughput are set — validate_stack never ran or the snapshot "
@@ -100,6 +155,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("throughput_unit", f.get("throughput_unit") or None),
             ("cumulative_gain_pct_validated", gain_v),
             ("cumulative_gain_pct_per_round_sum", gain_round),
+            ("cumulative_gain_provenance", gain_provenance or None),
+            ("revalidation_pending", revalidation_pending or None),
+            ("geak_pending", geak_pending or None),
             ("validated_at_stack_len", val_stack_len),
             ("validated_ts", val_ts),
             ("stack_changed_after_validation", stack_changed),

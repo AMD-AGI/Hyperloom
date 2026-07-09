@@ -14,8 +14,8 @@ from hyperloom.inference_optimizer.session import session_paths
 def test_ext_trace_path_blank_component_falls_back_to_unknown(tmp_path):
     p = session_paths.ext_trace_path(tmp_path, "", 42)
     assert p.name == "unknown-42.jsonl"
-    p2 = session_paths.ext_trace_path(tmp_path, "geak", 7)
-    assert p2.name == "geak-7.jsonl"
+    p2 = session_paths.ext_trace_path(tmp_path, "geak_v3", 7)
+    assert p2.name == "geak_v3-7.jsonl"
 
 
 def test_allocate_turn_workdir_creates_and_prunes(tmp_path):

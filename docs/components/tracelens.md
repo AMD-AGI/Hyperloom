@@ -55,7 +55,7 @@ python -m pytest tests/ -v
 ```
 
 ```{note}
-Hyperloom resolves the public checkout using `TRACELENS_ROOT`. `local_setup.sh`
+Hyperloom resolves the public checkout via `TRACELENS_ROOT`. `src/hyperloom/inference_optimizer/assets/local_setup.sh`
 can clone or update the checkout and write it into `local-setup.env.sh`; the
 runtime installation is performed by `src/hyperloom/inference_optimizer/assets/install.sh`,
 which chains into `src/hyperloom/agents/kernel/scripts/install.sh` and editable-installs the
@@ -106,12 +106,19 @@ For the full CLI reference and module deep-dives, see the
 
 ## Role in Hyperloom
 
-The orchestration runtime enters TraceLens through the kernel request path:
-`src/hyperloom/orchestrator/kernel/request_handlers.py` dispatches
-`trace_analyze` requests as subprocesses that run
-`src/hyperloom/agents/kernel/tools/tracelens_analysis.py` (and the skill runner when needed).
-The composite roofline executor first profiles the workload with Magpie, then
-hands the trace to that `trace_analyze` path.
+The orchestration runtime enters TraceLens through two paths:
+
+- The kernel request path:
+  `src/hyperloom/orchestrator/kernel/request_handlers.py` dispatches
+  `trace_analyze` requests as subprocesses that run
+  `src/hyperloom/agents/kernel/tools/tracelens_analysis.py`. That script itself
+  imports and calls `run_tracelens_skill` (the skill runner) internally under
+  the agent route — the runner is not a separate subprocess dispatched by the
+  orchestrator.
+- The composite roofline action: `RooflineExecutor`
+  (`src/hyperloom/orchestrator/actions/executors/roofline.py`) is an atomic
+  `profile` + `trace_analyze` pipeline that first profiles the workload with
+  Magpie, then calls `trace_analyze_handler()` directly on the trace.
 
 Before profiling, Hyperloom can patch the active vLLM/SGLang server tree with
 TraceLens-specific runtime flags through
