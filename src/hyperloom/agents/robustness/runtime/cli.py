@@ -173,6 +173,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         try:
             config.nodes = max(1, int(options["nodes"]))
         except (TypeError, ValueError):
+            # Invalid --nodes value; keep the existing default.
             pass
     # Opt out of the default inference-server health probe (heartbeat tests /
     # sandboxes auditing health out-of-band) without reconfiguring targets.
