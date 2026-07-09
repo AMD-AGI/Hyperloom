@@ -9,9 +9,7 @@
 
 ## Layout
 
-tree-reform.MD P2.5 promoted this skill from a sibling `framework-agent/`
-checkout into the `hyperloom` src-layout distribution (module
-`framework_agent` → `hyperloom.agents.framework`):
+This skill lives in the `hyperloom` src-layout distribution:
 
 ```
 src/hyperloom/agents/framework/     # hyperloom.agents.framework
@@ -57,7 +55,7 @@ invokes. Don't use `phase-discover` outside that context.
 ## FRAMEWORK_AGENT phase (`fa phase-discover`)
 
 Reads `--request <json>` and writes `--out <json|->` (envelope style
-mirrors `critic-agent/runtime/cli.py`):
+mirrors `hyperloom.agents.critic.runtime.cli`):
 
 ```bash
 # Discover a batch of PR candidates for the current run's gaps.

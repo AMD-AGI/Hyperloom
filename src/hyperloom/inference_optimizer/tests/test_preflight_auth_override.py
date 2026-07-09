@@ -2,8 +2,8 @@
 
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
-Pins the post-auth-proxy contract: legacy ``127.0.0.1:4002`` URLs and stale key
-aliases are rewritten to be consistent with ``OPENAI_BASE_URL`` / ``SAFE_API_KEY``.
+Pins the direct-gateway contract: base URLs are resolved for split/single
+entrypoints and key aliases are fanned out from ``SAFE_API_KEY``.
 """
 
 from __future__ import annotations
@@ -60,7 +60,15 @@ def stub_install_steps(monkeypatch, tmp_path):
 
 @pytest.fixture
 def clean_url_env(monkeypatch):
-    """Strip the URL env vars so each test starts from a known state."""
+    """Strip URL env vars and fully restore os.environ afterwards.
+
+    ``_preflight`` writes alias vars (OOB_API_KEY/GEAK_*/…) directly into
+    ``os.environ``; monkeypatch cannot roll those back, so snapshot and
+    restore the whole environ to stop cross-test leakage.
+    """
+    import os
+
+    snapshot = dict(os.environ)
     for var in (
         "ANTHROPIC_BASE_URL",
         "OPENAI_BASE_URL",
@@ -78,7 +86,11 @@ def clean_url_env(monkeypatch):
         "INFERENCEX_PATH",
     ):
         monkeypatch.delenv(var, raising=False)
-    return monkeypatch
+    try:
+        yield monkeypatch
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
 
 
 def test_derive_anthropic_base_url_strips_openai_v1_suffix():
@@ -88,7 +100,7 @@ def test_derive_anthropic_base_url_strips_openai_v1_suffix():
     )
 
 
-def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
+def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     monkeypatch,
     tmp_path,
     clean_url_env,
@@ -100,13 +112,9 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "OPENAI_BASE_URL",
         "https://gateway.example/api/v1/llm-proxy/v1",
     )
-    # A stale 127.0.0.1:4002 ANTHROPIC_BASE_URL is treated as unset and
-    # re-derived from OPENAI_BASE_URL (the only stale-URL force-rewrite path).
-    monkeypatch.setenv(
-        "ANTHROPIC_BASE_URL",
-        "http://127.0.0.1:4002/api/v1/llm-proxy",
-    )
- # Key aliases start unset so SAFE_API_KEY fills them (gap-fill semantics).
+    # ANTHROPIC_BASE_URL unset -> re-derived from OPENAI_BASE_URL.
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    # Key aliases start unset so SAFE_API_KEY fills them (gap-fill semantics).
     for name in (
         "OPENAI_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -117,13 +125,14 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "AMD_LLM_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Base-url aliases start unset -> default to the resolved gateway.
     for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
-        monkeypatch.setenv(name, "http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+        monkeypatch.delenv(name, raising=False)
 
     config_dir = tmp_path / ".claude"
     config_dir.mkdir()
     (config_dir / "config.json").write_text(
-        '{"primaryApiKey":"old-key","customApiUrl":"http://127.0.0.1:4002/v1"}',
+        '{"primaryApiKey":"old-key","customApiUrl":"https://old.example/v1"}',
         encoding="utf-8",
     )
 
@@ -149,7 +158,6 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         assert cli.os.environ[name] == resolved[1]
 
     config_text = (config_dir / "config.json").read_text(encoding="utf-8")
-    assert "127.0.0.1:4002" not in config_text
     assert '"primaryApiKey": "new-safe-key"' in config_text
     assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
 
@@ -535,6 +543,9 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
 def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
     """Opt-out lets a non-AMD orchestration model pass when in catalog."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    # Pin a probe URL so the stubbed catalog probe runs without relying on a
+    # base-URL leaked from other tests (clean_url_env now restores os.environ).
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -552,6 +563,7 @@ def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsy
 def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys):
     """Under opt-out a catalog miss errors with no silent opus-4-6 fallback."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -599,6 +611,7 @@ def test_validate_claude_model_optout_off_still_hard_gates(monkeypatch, capsys):
 
 
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -706,6 +719,7 @@ def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monke
 
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):
     """Catalog has 4-6 only → arg rewritten with a WARN."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
@@ -723,6 +737,7 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
 
 def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     """Catalog missing both 4-7 and 4-6 → sys.exit(2)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",

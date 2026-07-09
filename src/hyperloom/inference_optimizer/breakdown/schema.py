@@ -32,7 +32,7 @@ class Recovery(TypedDict, total=False):
 
     Surfaces the recovery-relevant signals SharedState already tracks so the
     breakdown records WHEN a run was interrupted and continued — the exact
-    context behind gaps like an empty ``perfskills_result`` (a tick's in-memory
+    context behind gaps like an empty ``geak_result`` (a tick's in-memory
     result lost to an external kill before the tick-boundary ``state.save``,
     then a resume). Without this the breakdown shows only the symptom; here it
     shows the run did not proceed monotonically.
@@ -995,32 +995,32 @@ class Sweep(TypedDict, total=False):
     config_path: str | None
 
 
-class Perfskills(TypedDict, total=False):
-    """PerfSkills/GEAK-e2e KERNEL-phase section (``KERNEL_OPT_BACKEND_ORDER=perfskills``).
+class Geak(TypedDict, total=False):
+    """GEAK e2e KERNEL-phase section (``KERNEL_OPT_BACKEND_ORDER=geak``).
 
-    Emitted only when the KERNEL_AGENT phase was delegated to the PerfSkills e2e
+    Emitted only when the KERNEL_AGENT phase was delegated to the GEAK e2e
     optimizer; ``{}`` (section omitted) on native sessions. Mirrors the
-    normalized ``result.json`` recorded in ``state.perfskills_result`` plus the
-    budget-cap audit. See ``collectors.collect_perfskills``.
+    normalized ``result.json`` recorded in ``state.geak_result`` plus the
+    budget-cap audit. See ``collectors.collect_geak``.
 
     Attributes:
-        engaged (bool): True when PerfSkills owned the KERNEL_AGENT phase.
+        engaged (bool): True when GEAK owned the KERNEL_AGENT phase.
         status (str): ``ok`` / ``no_gain`` / ``error`` / ``timeout`` /
             ``skipped`` / ``missing`` / ``no_result_recovered_from_disk`` /
             ``unknown``. ``no_result_recovered_from_disk`` is emitted when
-            ``perfskills_result`` was never committed to state (e.g. an external
+            ``geak_result`` was never committed to state (e.g. an external
             kill before the tick-boundary ``state.save``, then a resume past
             KERNEL) but the run was reconstructed from the on-disk
-            ``perfskills/`` working tree.
+            ``geak/`` working tree.
         error_class (str | None): Normalized failure class (None on success),
             e.g. ``timeout`` / ``insufficient_budget`` / ``no_result_json`` /
             ``runner_crashed`` / ``workflow_parse_error``.
         error (str | None): Human-readable failure detail.
         returncode (int | None): Runner subprocess exit code.
-        baseline_throughput_tok_s (float | None): PerfSkills baseline tok/s.
-        final_throughput_tok_s (float | None): PerfSkills final tok/s.
+        baseline_throughput_tok_s (float | None): GEAK baseline tok/s.
+        final_throughput_tok_s (float | None): GEAK final tok/s.
         throughput_speedup (float | None): final / baseline.
-        gain_pct (float | None): Percent gain over the PerfSkills baseline.
+        gain_pct (float | None): Percent gain over the GEAK baseline.
         metric_basis (str | None): Measurement basis (aggregate output tok/s).
         bench_client (str | None): ``inferencex`` / ``native``.
         ttft_mean_ms (float | None): Median TTFT (ms).
@@ -1043,7 +1043,7 @@ class Perfskills(TypedDict, total=False):
         runner_timeout_s (int | None): Budget-capped runner timeout.
         kill_timeout_s (int | None): Hard subprocess kill timeout.
         recovered_from_disk (bool): True when the section was reconstructed from
-            the on-disk ``perfskills/`` tree because no result reached state.
+            the on-disk ``geak/`` tree because no result reached state.
         handoff (dict[str, Any] | None): Recovered handoff summary (model /
             framework / workload / accepted_flags) proving HL handed off.
         exp_root (str | None): Relative path to the recovered e2e ``exp_root``.
@@ -2195,10 +2195,10 @@ class SessionBreakdown(TypedDict, total=False):
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
-    # PerfSkills/GEAK-e2e KERNEL-phase section (KERNEL_OPT_BACKEND_ORDER=perfskills).
+    # GEAK e2e KERNEL-phase section (KERNEL_OPT_BACKEND_ORDER=geak).
     # Additive + optional: ``{}`` (omitted) on native sessions, so v1/v2 readers
     # that don't know it simply ignore it and historic breakdowns are unchanged.
-    perfskills: Perfskills
+    geak: Geak
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution

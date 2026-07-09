@@ -93,7 +93,7 @@ breakdown = build("/workspace/hyperloom")
 out_path = write_breakdown_json("/workspace/hyperloom")
 ```
 
-### CLI / offline (`scripts/dump_session_breakdown.py`)
+### CLI / offline (`hyperloom.inference_optimizer.tools.dump_session_breakdown`)
 
 ```bash
 # Live session in this sandbox

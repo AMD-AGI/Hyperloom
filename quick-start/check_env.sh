@@ -15,7 +15,7 @@ fi
 model=$(echo $response | jq ".data[0].id")
 
 if [ -z "$model" ]; then
-    echo "Error when checking llm gateway with the response: " ${response} 
+    echo "Error when checking llm gateway with the response: " ${response}
     echo " Please check your SAFE_API_KEY"
     exit 1
 fi
