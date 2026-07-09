@@ -12,11 +12,12 @@ class rather than M1 :mod:`local_health`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
-from ..state_store import DetectorStateView
+if TYPE_CHECKING:
+    from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
