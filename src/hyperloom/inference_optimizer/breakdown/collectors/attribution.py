@@ -83,12 +83,12 @@ def _action_family(action: str) -> str:
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     if s == "gemm_tuning":
         return "gemm_tuning"
-    # PerfSkills/GEAK-e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
-    # from generic ``kernel`` (which is split across geak/oob/forge adopt
+    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
+    # from generic ``kernel`` (which is split across geak_v3/oob/forge adopt
     # entries) so its gain gets a dedicated row instead of vanishing into
     # ``other`` or being mis-credited to a backend.
-    if s == "perfskills_e2e":
-        return "perfskills"
+    if s == "geak_e2e":
+        return "geak"
     return "other"
 
 
@@ -223,8 +223,8 @@ def collect_attribution(
         "replay_warm_recipe": 0.0,
         # GEMM_TUNING family, kept apart from ``kernel`` (deterministic tuner vs rewrite).
         "gemm_tuning": 0.0,
-        # PerfSkills/GEAK-e2e family: whole-pipeline KERNEL-phase optimizer.
-        "perfskills": 0.0,
+        # GEAK e2e family: whole-pipeline KERNEL-phase optimizer.
+        "geak": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -277,7 +277,8 @@ def collect_attribution(
         "gain_per_stack_entry": entries,
         "method": method,
         "source_breakdown": {
-            "geak_pct_of_total": round(geak_total, 2),
+            # Per-kernel GEAK backend (legacy single-kernel loop, now ``geak_v3``).
+            "geak_v3_pct_of_total": round(geak_total, 2),
             "oob_pct_of_total": round(oob_total, 2),
             "forge_pct_of_total": round(forge_total, 2),
             # primary row.
@@ -291,8 +292,9 @@ def collect_attribution(
             "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
-            # PerfSkills/GEAK-e2e row; always emitted (0.0 when native/no e2e win).
-            "perfskills_pct_of_total": round(family_totals.get("perfskills", 0.0), 2),
+            # GEAK e2e row (whole-pipeline optimizer, now the canonical ``geak``);
+            # always emitted (0.0 when native/no e2e win).
+            "geak_pct_of_total": round(family_totals.get("geak", 0.0), 2),
             # Legacy rows, kept so archived-session reports reconcile (0.0 on current sessions).
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total": round(family_totals.get("params", 0.0), 2),
