@@ -544,7 +544,7 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     resumed run reads as if it proceeded monotonically. This folds those
     signals into the §1 ``session.recovery`` block so a reader can see the run
     was interrupted and continued (the context behind gaps like an empty
-    ``perfskills_result`` lost to a kill before the tick-boundary save). Pure /
+    ``geak_result`` lost to a kill before the tick-boundary save). Pure /
     best-effort: unparseable fields are skipped, never raised.
 
     Args:
@@ -679,7 +679,7 @@ def collect_session(
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history so a resumed run is not read as
-        # a clean monotonic one (context behind e.g. an empty perfskills_result).
+        # a clean monotonic one (context behind e.g. an empty geak_result).
         "recovery": _collect_recovery(state),
     }
 
@@ -1143,6 +1143,22 @@ def collect_final(
         "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
+        # Provenance/basis of the recorded gain so the renderer can tell a
+        # same-harness-validated number from a cross-harness PROVISIONAL one
+        # (e.g. a geak e2e win pending its same-harness rebench). Empty on
+        # native/legacy sessions (renders as validated, unchanged).
+        "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),
+        "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
+        # A GEAK(GEAK) e2e candidate whose self-reported win has NOT yet
+        # been confirmed by a main-flow rebench. Present => the renderer surfaces
+        # it as an audit-only note and EXCLUDES it from the headline gain (the
+        # candidate is intentionally absent from current_best / action_path until
+        # a measured rebench validates it). Empty on native/validated sessions.
+        "geak_pending": (
+            dict(state.get("geak_pending") or {})
+            if isinstance(state.get("geak_pending"), dict)
+            else {}
+        ),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation": stack_len > val_stack_len > 0,

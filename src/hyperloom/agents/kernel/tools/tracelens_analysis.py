@@ -3773,9 +3773,12 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # forge then GEAK; append cursor only when CURSOR_API_KEY is provisioned.
+    # forge then the per-kernel GEAK backend (geak_v3); append cursor only when
+    # CURSOR_API_KEY is provisioned. Uses ``geak_v3`` (not ``geak``) because the
+    # per-kernel ladder token was renamed when the e2e optimizer took over ``geak``;
+    # parse_backends/choose_backends reject bare ``geak`` on the per-kernel path.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
-    return ["forge", "geak", "claude", "codex"] + cursor_tail
+    return ["forge", "geak_v3", "claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
