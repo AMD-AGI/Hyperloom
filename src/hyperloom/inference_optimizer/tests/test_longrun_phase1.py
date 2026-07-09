@@ -287,7 +287,6 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.orchestrator.policy.gate import PolicyGate
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     sd = make_session_dir()
     st = SharedState(session_id="t", phase=ps.PHASE_EXPLORE, macro_cycle=2)
@@ -307,10 +306,6 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=st,
-    )
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action": {"name": "specialist", "params": {}}},
     )
     # Must not raise phase_incompatible: current phase is EXPLORE.
     gate._validate_phase_action(

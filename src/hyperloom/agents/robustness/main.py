@@ -65,6 +65,7 @@ async def _run_reactor_mode(config: Config) -> None:
         try:
             loop.add_signal_handler(sig, _shutdown, sig)
         except NotImplementedError:
+            # Signal handlers are unavailable on this platform/loop; skip them.
             pass
 
     log.info(
@@ -90,6 +91,7 @@ async def _run_reactor_mode(config: Config) -> None:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=config.standalone_tick_interval_s)
             except asyncio.TimeoutError:
+                # Tick interval elapsed with no stop request; loop again.
                 pass
     finally:
         await bundle.aclose()

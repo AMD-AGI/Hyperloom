@@ -20,11 +20,10 @@ if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
 
 import optimize_submit  # noqa: E402
-from optimize_submit import SafeOptimizeClient  # noqa: E402
 
 
-def _make_client() -> SafeOptimizeClient:
-    return SafeOptimizeClient(
+def _make_client() -> optimize_submit.SafeOptimizeClient:
+    return optimize_submit.SafeOptimizeClient(
         base_url="https://fake.test",
         token="tok",
         register_workspace="ws-reg",
