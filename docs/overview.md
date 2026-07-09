@@ -13,6 +13,14 @@ iteratively rewriting code to maximize throughput on AMD GPUs.
 
 ## The optimization loop
 
+![Hyperloom optimization loop: classify the model, measure a baseline, profile the GPU, and build the action stack, then run the scored DFS loop — pop the highest-scored action, execute and benchmark it, re-score and push new candidates — until scores converge, then sweep and report.](figs/optimization_loop.png)
+
+*Hyperloom classifies the model, measures a baseline, profiles the GPU, and
+builds a stack of candidate actions. It then runs a scored depth-first loop —
+pop the highest-scored action, execute and benchmark it, then re-score and push
+new candidates — until the remaining candidates no longer promise a gain, at
+which point it runs a final sweep and writes the report.*
+
 1. **Workload understanding & profiling** — submit your workload; the agent
    profiles it with TraceLens (trace collection via Magpie), capturing
    bottlenecks and roofline targets.
