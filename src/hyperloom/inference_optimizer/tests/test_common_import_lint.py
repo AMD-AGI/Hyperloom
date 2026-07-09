@@ -32,9 +32,6 @@ _FORBIDDEN_TOP_LEVEL = frozenset(
     }
 )
 
-# Third-party packages ``common`` is explicitly allowed to depend on.
-_ALLOWED_THIRD_PARTY = frozenset({"httpx"})
-
 
 def _common_py_files() -> list[Path]:
     root = Path(hyperloom.common.__file__).resolve().parent
