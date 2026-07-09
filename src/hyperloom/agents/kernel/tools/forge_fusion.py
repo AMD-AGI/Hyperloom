@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,30 @@ from typing import Any
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
+
+
+def _inject_author_gateway_env() -> None:
+    """Seed the ``claude`` author subprocess's gateway auth from the OpenAI-proxy env.
+
+    forge-fusion's ``author`` stage drives the ``claude`` CLI, which authenticates
+    via ``ANTHROPIC_*``. Hyperloom's session env (sourced from ``.env``) only carries
+    ``OPENAI_BASE_URL`` / ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so
+    derive the ``ANTHROPIC_*`` equivalents here (the old ``forge_submit`` backend did
+    the same) — otherwise the author has no gateway auth when only ``.env`` is sourced.
+    Only fills what is absent; explicit operator values always win.
+    """
+    openai_base = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
+    if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
+        # ``.../api/v1/llm-proxy/v1`` -> ``.../api/v1/llm-proxy`` (claude appends /v1).
+        os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
+    token = str(
+        os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    ).strip()
+    if token:
+        os.environ.setdefault("ANTHROPIC_API_KEY", token)
+        os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
+    # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
+    os.environ.setdefault("IS_SANDBOX", "1")
 
 
 def _truthy(val: Any) -> bool:
@@ -183,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
         }, sort_keys=True), flush=True)
         return 2
 
+    _inject_author_gateway_env()
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.stdout:
         sys.stdout.write(proc.stdout)
