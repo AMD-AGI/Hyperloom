@@ -38,7 +38,7 @@ def conn(tmp_path):
 
 
 # ==========================================================================
-# R6 — TaskRegistry.reclaim_expired_running (watchdog)
+# TaskRegistry.reclaim_expired_running (watchdog)
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_reclaim_expired_running_orphan(conn):
@@ -102,7 +102,7 @@ async def test_reclaim_respects_lease_window(conn):
 
 
 # ==========================================================================
-# R6 — cycle-boundary soft restart
+# cycle-boundary soft restart
 # ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):

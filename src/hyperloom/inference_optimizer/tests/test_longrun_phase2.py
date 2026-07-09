@@ -55,7 +55,7 @@ def _plateaued_explore_state(
 
 
 # ==========================================================================
-# R3 — plateau → actionable
+# plateau → actionable
 # ==========================================================================
 def test_explore_plateau_is_actionable_in_cyclic(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
@@ -86,7 +86,7 @@ def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
 
 
 # ==========================================================================
-# R3 — Coordinator stamps the bottleneck-switch handoff
+# Coordinator stamps the bottleneck-switch handoff
 # ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
@@ -139,7 +139,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
 
 
 # ==========================================================================
-# R3 — redirect advisory block
+# redirect advisory block
 # ==========================================================================
 def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
     c = cyclic_coordinator
@@ -255,7 +255,7 @@ def test_acceptance_threshold_advisory_empty_when_cyclic_off(
 
 
 # ==========================================================================
-# R3 — drift clears the pending switch
+# drift clears the pending switch
 # ==========================================================================
 def test_switch_clears_on_bottleneck_drift():
     st = SharedState(session_id="t")
@@ -278,7 +278,7 @@ def test_mark_switch_falls_back_to_live_top_bottleneck():
 
 
 # ==========================================================================
-# R3 — rejected/tested fingerprints bucketed per cycle (no re-explore)
+# rejected/tested fingerprints bucketed per cycle (no re-explore)
 # ==========================================================================
 def test_tested_and_rejected_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)

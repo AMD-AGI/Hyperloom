@@ -18,7 +18,7 @@ for d in (str(TOOLS_DIR), str(BACKENDS_DIR)):
 
 import ray_runtime  # noqa: E402
 
-# Minimum soft RLIMIT_NOFILE the raylet needs to stay up (issue #433).
+# Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
 
 

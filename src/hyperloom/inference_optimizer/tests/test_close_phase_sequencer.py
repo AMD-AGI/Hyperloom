@@ -336,7 +336,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     # nothing and records "skipped" (best-effort; never blocks close).
     assert by_step["artifact_package"]["status"] == "skipped"
     assert by_step["fact_finalize"]["status"] == "done"
-    # ndjson_drain retired with the v1 cortex_kb_client; stub-emits "skipped".
+ # ndjson_drain retired with the v1 cortex_kb_client; stub-emits "skipped".
     assert by_step["ndjson_drain"]["status"] == "skipped"
     assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
