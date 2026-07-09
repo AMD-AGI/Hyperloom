@@ -2,7 +2,7 @@
 
 """Pin the Orchestration system prompt's specialist / integrate_patch visibility.
 
-Regression: a v0.8 run emitted 0 ``kind='specialist'`` tasks because the
+Regression: a run emitted 0 ``kind='specialist'`` tasks because the
 prompt catalogue rendered no entry for the synthetic ``specialist`` action.
 PR-A1 added the yaml/md + emit hints + enabled/phase entries pinned here.
 """
@@ -62,7 +62,7 @@ def test_specialist_yaml_loads_into_registry(registry: ActionRegistry) -> None:
     assert meta.family == "creative"
     assert "research_lane" in meta.requires_lanes
     assert "emit_intent" in meta.allowed_tools
-    # PR-A1: specialists may write source patches into their worktree
+    # Specialists may write source patches into their worktree.
     for tool in ("Edit", "Write", "MultiEdit"):
         assert tool in meta.allowed_tools, (
             f"specialist must advertise write tool {tool!r} so the per-domain "
@@ -93,7 +93,7 @@ def test_no_kernel_enabled_actions_contains_specialist_and_integrate_patch() -> 
 def test_integrate_patch_allowed_in_explore_phase() -> None:
     allowed = PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE]
     assert "integrate_patch" in allowed
-    # ``specialist`` is there from v0.8 M5 (anchors the EXPLORE specialist-informed contract).
+    # ``specialist`` anchors the EXPLORE specialist-informed contract.
     assert "specialist" in allowed
 
 

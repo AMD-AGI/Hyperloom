@@ -37,7 +37,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     Guarantees a reader never observes a half-written file: either the old
     contents or the complete new contents, never a truncated/partial one.
 
-    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.io.atomic_write_text`.
+    Delegates to :func:`hyperloom.common.io.atomic_write_text`.
 
     Args:
         path: Destination file path.

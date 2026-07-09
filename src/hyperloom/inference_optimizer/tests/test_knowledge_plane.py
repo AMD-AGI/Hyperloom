@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.6 / M4 — KnowledgePlane integration tests (KB_gaps/Gap-02)."""
+"""KnowledgePlane integration tests."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class _StubPRClient:
 
 # 1. KnowledgePlane.pr_feed_warm_all_domains
 def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
-    """KB_gaps/Gap-02 — every known specialist domain appears in the result map."""
+    """Every known specialist domain appears in the result map."""
     from hyperloom.orchestrator.knowledge.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
@@ -86,7 +86,7 @@ def test_pr_feed_warm_all_domains_stashes_warnings():
 
 
 def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
-    """A failure on one domain must NOT abort the rest of the batch (KB_design §3.14 R-03)."""
+    """A failure on one domain must NOT abort the rest of the batch (R-03)."""
     from hyperloom.orchestrator.knowledge.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
@@ -558,7 +558,7 @@ def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
     assert out["warm_start_recipe_source"] == "cortex"
 
 
-# 4. KB_gaps/Gap-16 — CLI flag plumbing reaches _bootstrap_knowledge_plane
+# CLI flag plumbing reaches _bootstrap_knowledge_plane.
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""
     from hyperloom.inference_optimizer.cli import _build_parser
@@ -568,7 +568,7 @@ def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
 
 
 def test_cli_pr_monitor_flags_have_expected_dest_and_defaults():
-    """KB_gaps/Gap-16 — PR-monitor flags land under the dest names the bootstrap reads."""
+    """PR-monitor flags land under the dest names the bootstrap reads."""
     args = _parse_optimize_args([])
     # dest is ``degraded_pr`` (store_true, default False).
     assert args.degraded_pr is False
@@ -612,7 +612,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     tmp_path: Path,
     monkeypatch,
 ):
-    """KB_gaps/Gap-16 — argparse ``args`` values propagate into the KnowledgePlane."""
+    """Argparse ``args`` values propagate into the KnowledgePlane."""
     from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
