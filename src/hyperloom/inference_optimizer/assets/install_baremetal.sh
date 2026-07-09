@@ -832,8 +832,10 @@ main() {
     die "expected ${local_env} after local_setup.sh but it is missing"
   fi
 
-  # Phase 4: runtime install (core scope — no --with-geak; Langfuse stays
-  # off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env).
+  # Phase 4: runtime install. The GEAK e2e optimizer is always installed
+  # (whether it runs is chosen per-session via KERNEL_OPT_BACKEND_ORDER);
+  # Langfuse stays off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the
+  # environment/.env.
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)

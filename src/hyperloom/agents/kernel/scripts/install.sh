@@ -319,31 +319,19 @@ case "${SKIP_RAY_START:-0}" in
   1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
   *) SKIP_RAY_START=0 ;;
 esac
-# The GEAK e2e whole-pipeline optimizer is OPT-IN: it is only used at runtime
-# when a session sets ``KERNEL_OPT_BACKEND_ORDER=geak``. The default runtime
-# optimizer is ``native``, so installing the second GEAK e2e checkout (extra clone + network
-# + claude-agent-sdk pip) unconditionally would tax every native-only user. Gate
-# it behind ``--with-geak`` / ``INSTALL_GEAK=1``; default off.
-case "${INSTALL_GEAK:-0}" in
-  1|true|TRUE|yes|YES|on|ON) INSTALL_GEAK=1 ;;
-  *) INSTALL_GEAK=0 ;;
-esac
-
 usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
 Always installs:
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
-  Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
-  and LLM gateway env/auth (claude/codex CLIs talk to the gateway
-  directly).
+  Node.js/npm, GEAK CLI/config, the GEAK e2e whole-pipeline optimizer,
+  OOB + claude/codex CLI auth, and LLM gateway env/auth (claude/codex
+  CLIs talk to the gateway directly).
 
 Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
-  --with-geak        Also install the GEAK e2e whole-pipeline optimizer checkout
-                     (only needed for KERNEL_OPT_BACKEND_ORDER=geak runs).
   --skip-model-load  Skip the final GEAK RAG model/index build step.
   -h, --help         Show this help
 
@@ -355,8 +343,6 @@ Environment (optional):
                                         sandboxes where BGE-large embedding takes ~1.5h.
   KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
                                         Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
-  INSTALL_GEAK=1                        Install the GEAK e2e whole-pipeline optimizer checkout (default 0).
-                                        Equivalent to --with-geak. Default native users skip it.
 EOF
 }
 
@@ -364,7 +350,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    --with-geak) INSTALL_GEAK=1 ;;
     --skip-model-load) KERNEL_AGENT_SKIP_MODEL_LOAD_VAL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
@@ -1672,14 +1657,10 @@ main() {
 
   # Always install the per-kernel GEAK backend; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak_v3
-  # The GEAK e2e whole-pipeline optimizer is opt-in (see INSTALL_GEAK /
-  # --with-geak): the default runtime optimizer is native, so native-only users
-  # skip the extra e2e clone + claude-agent-sdk pip.
-  if [ "$INSTALL_GEAK" -eq 1 ]; then
-    ensure_geak
-  else
-    log "skipping GEAK e2e optimizer install (default native; pass --with-geak or INSTALL_GEAK=1 to enable)"
-  fi
+  # The GEAK e2e whole-pipeline optimizer is installed by default; opt out with
+  # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
+  # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
+  ensure_geak
   ensure_rag_index
   ensure_oob
   write_env_file
