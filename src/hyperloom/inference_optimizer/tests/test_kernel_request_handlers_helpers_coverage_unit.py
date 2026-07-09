@@ -62,7 +62,7 @@ def test_gemm_tuning_workspace_timestamp_fallback(tmp_path: Path) -> None:
 # -- _optimization_budget_minutes / wrapper timeout -----------------------
 def test_optimization_budget_geak(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
-    assert krh._optimization_budget_minutes({"backends": "geak", "geak_budget_min": 20}) == 20.0
+    assert krh._optimization_budget_minutes({"backends": "geak_v3", "geak_budget_min": 20}) == 20.0
 
 
 def test_optimization_budget_oob(monkeypatch) -> None:
@@ -88,7 +88,7 @@ def test_backend_order_explicit_payload(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     # explicit order honoured as-is, including cursor without an api key
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    assert krh._backend_order({"backend_order": "GEAK,Cursor,unknown"}) == ["geak", "cursor"]
+    assert krh._backend_order({"backend_order": "GEAK_V3,Cursor,unknown"}) == ["geak_v3", "cursor"]
 
 
 def test_backend_order_env_alias(monkeypatch) -> None:
@@ -103,41 +103,41 @@ def test_backend_order_default_drops_cursor_without_key(monkeypatch) -> None:
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     out = krh._backend_order({})
     assert "cursor" not in out
-    assert "geak" in out
+    assert "geak_v3" in out
 
 
-def test_backend_order_drops_perfskills_from_per_kernel_ladder(monkeypatch) -> None:
-    # perfskills is a phase-level delegate, never a per-kernel backend.
+def test_backend_order_drops_geak_from_per_kernel_ladder(monkeypatch) -> None:
+    # geak (the e2e delegate) is a phase-level delegate, never a per-kernel backend.
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    assert krh._backend_order({"backend_order": "perfskills,geak"}) == ["geak"]
-    assert krh._backend_order({"backend_order": "perfskills"}) == []
+    assert krh._backend_order({"backend_order": "geak,geak_v3"}) == ["geak_v3"]
+    assert krh._backend_order({"backend_order": "geak"}) == []
 
 
-# -- perfskills_selected ---------------------------------------------------
-def test_perfskills_selected_from_env_order(monkeypatch) -> None:
+# -- geak_selected ---------------------------------------------------------
+def test_geak_selected_from_env_order(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "perfskills")
-    assert krh.perfskills_selected() is True
-
-
-def test_perfskills_selected_owns_phase_when_mixed(monkeypatch) -> None:
-    # When perfskills appears anywhere in the order it owns the phase.
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak,PerfSkills")
-    assert krh.perfskills_selected() is True
-
-
-def test_perfskills_selected_false_for_native_order(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    assert krh.perfskills_selected() is False
-    assert krh.perfskills_selected({"backend_order": "geak,claude"}) is False
-
-
-def test_perfskills_selected_payload_overrides_env(monkeypatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
-    assert krh.perfskills_selected({"backend_order": "perfskills"}) is True
+    assert krh.geak_selected() is True
+
+
+def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
+    # When geak (the e2e delegate) appears anywhere in the order it owns the phase.
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak_v3,GEAK")
+    assert krh.geak_selected() is True
+
+
+def test_geak_selected_false_for_native_order(monkeypatch) -> None:
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    assert krh.geak_selected() is False
+    assert krh.geak_selected({"backend_order": "geak_v3,claude"}) is False
+
+
+def test_geak_selected_payload_overrides_env(monkeypatch) -> None:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak_v3")
+    assert krh.geak_selected({"backend_order": "geak"}) is True
 
 
 # -- _artifact_paths_from_payload -----------------------------------------
