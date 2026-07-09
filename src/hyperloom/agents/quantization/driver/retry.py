@@ -51,15 +51,13 @@ from .runner import RunOneAttemptFn, run_one_attempt
 _COUNTER_FILE = "requantize_attempts.txt"
 
 # Canonical Quark checkout used when neither the ``quark_root`` kwarg nor the
-# ``$QUARK_ROOT`` env var is set. Until the Quark team ships a public package
-# that bundles ``.claude/skills/quark-torch-*`` (and a version-matched
-# ``amd-quark`` wheel), agents resolve the repo from this local checkout.
-DEFAULT_QUARK_ROOT = "/wekafs/hyperloom/Quark"
+# ``$QUARK_ROOT`` env var is set. Agents resolve the repo from this local
+# checkout when nothing more specific is provided.
+DEFAULT_QUARK_ROOT = "/primus/hyperloom/Quark"
 
-# Upstream git URL for the Quark repo. Left empty on purpose: fill this in once
-# the Quark repo is open-sourced so installers can clone it when the default
-# checkout is absent.
-DEFAULT_QUARK_GIT_URL = ""
+# Upstream git URL for the Quark repo. Installers clone it here when the
+# default checkout is absent.
+DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
 
 
 @dataclass(frozen=True)
