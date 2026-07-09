@@ -121,6 +121,7 @@ def _iter_sse_objects(raw: str):
         try:
             yield json.loads(text)
         except json.JSONDecodeError:
+            # Skip malformed JSON lines in the stream.
             pass
         return
     for block in re.split(r"\r?\n\r?\n", raw):

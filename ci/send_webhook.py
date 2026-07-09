@@ -310,7 +310,7 @@ def _build_payload(
             perf_ok = int(os.environ.get("PERF_PUBLISH_OK") or 0)
             perf_total = int(os.environ.get("PERF_PUBLISH_TOTAL") or 0)
         except ValueError:
-            perf_ok = perf_total = 0
+            perf_total = 0
         if perf_total > 0:
             failed = perf_total - perf_ok
             tail = f"perf-leaderboard publish: **{perf_ok}/{perf_total}** sent" + (

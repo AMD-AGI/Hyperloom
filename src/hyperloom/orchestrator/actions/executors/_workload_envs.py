@@ -186,6 +186,7 @@ def _visible_gpu_count() -> int:
         if count > 0:
             return count
     except Exception:
+        # GPU count probe failed; fall through to the next method.
         pass
     if shutil.which("rocm-smi"):
         try:

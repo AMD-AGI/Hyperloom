@@ -543,6 +543,7 @@ def run_oob_over_ssh(
         try:
             full_stdout = Path(log_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
+            # Log file unreadable; leave the captured stdout as-is.
             pass
     parsed["stdout"] = full_stdout
     return parsed

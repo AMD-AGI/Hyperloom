@@ -8,8 +8,6 @@ shard path fallback, and the ``_runs_actions`` import-failure fallback.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from hyperloom.inference_optimizer.session import session_paths
 
 
