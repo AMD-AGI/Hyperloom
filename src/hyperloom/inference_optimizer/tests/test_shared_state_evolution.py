@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.10 — SharedState evolution / migration tests (KB_design §3.10, Inv-10.1/10.2/10.3)."""
+"""SharedState evolution and migration tests (Inv-10.1/10.2/10.3)."""
 
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ from hyperloom.orchestrator.state.shared_state import (
 
 # 1. schema_version surface
 def test_fresh_session_has_latest_schema_version():
-    """KB_design §3.10 §5.1 — fresh SharedState carries the current schema version."""
+    """Fresh SharedState carries the current schema version."""
     s = SharedState()
     assert s.schema_version == LATEST_STATE_SCHEMA_VERSION
     assert LATEST_STATE_SCHEMA_VERSION >= 2
 
 
 def test_save_writes_schema_version_to_state_json(tmp_path):
-    """KB_design §3.10 §9 — top-level ``schema_version=2`` visible in a fresh state.json."""
+    """Top-level ``schema_version=2`` visible in a fresh state.json."""
     sd = tmp_path / "session"
     sd.mkdir()
     s = SharedState()
@@ -37,7 +37,7 @@ def test_save_writes_schema_version_to_state_json(tmp_path):
 
 
 def test_v06_state_without_schema_version_is_migrated(tmp_path):
-    """KB_design §3.10 §5.1 — a v0.6 state.json with no ``schema_version`` is bumped to the v0.8 default."""
+    """A v0.6 state.json with no ``schema_version`` is bumped to the current default."""
     sd = tmp_path / "session"
     sd.mkdir()
     legacy = {
@@ -79,7 +79,7 @@ _FACT_LAYER_PAYLOAD: dict = {
 
 
 def test_fact_layer_fields_survive_v06_resume(tmp_path):
-    """Inv-10.1 — fact-layer fields are bit-equal across the v0.6 → v0.8 migration."""
+    """Fact-layer fields are bit-equal across the v0.6 → current migration."""
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -134,7 +134,7 @@ def test_migration_is_idempotent(tmp_path):
 
 
 def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
-    """A v0.8 payload (schema_version == LATEST) skips the migration log line."""
+    """A current-schema payload (schema_version == LATEST) skips the migration log line."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
@@ -150,7 +150,7 @@ def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
 
 # 4. Migration log content
 def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
-    """A v0.6 payload with action_scores logs the §3.9 drop + migrated schema_version."""
+    """A v0.6 payload with action_scores logs the scoreboard drop + migrated schema_version."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
         "session_id": "legacy",
@@ -168,7 +168,7 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
 
 # 5. Strict / lenient migration mode
 def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
-    """KB_design §3.10 §5.3 — lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
+    """Lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", "lenient")
     # Drop ``baseline_tput`` from the known field set to force the "raw has it, filtered doesn't" branch.
     real_fields = SharedState.__dataclass_fields__
@@ -186,7 +186,7 @@ def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
 
 
 def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
-    """KB_design §3.10 §5.3 — strict mode raises ValueError when a fact-layer field would be lost."""
+    """Strict mode raises ValueError when a fact-layer field would be lost."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
@@ -201,7 +201,7 @@ def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
 
 # 6. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
-    """KB_design §3.10 §5.3 — ``--reset-state`` renames state.json so the next load starts blank."""
+    """``--reset-state`` renames state.json so the next load starts blank."""
     from hyperloom.inference_optimizer.cli import _reset_state_file
 
     sd = tmp_path / "session"
@@ -293,7 +293,7 @@ def test_cli_exposes_reset_state_flag():
 
 # 8. Inv-10.2 — CORE_STATE_FIELDS blocks LLM update_state phase change
 def test_core_state_fields_contains_v08_new_additions():
-    """KB_design §3.10 §6.2 — the v0.8 §4.1 new fields are locked in CORE_STATE_FIELDS."""
+    """The new fields are locked in CORE_STATE_FIELDS."""
     from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 
     must_be_locked = {
@@ -318,7 +318,7 @@ def test_core_state_fields_contains_v08_new_additions():
 
 
 def test_policy_blocks_llm_phase_write():
-    """KB_design §3.10 §9 — LLM ``update_state`` setting ``phase=KERNEL`` is denied."""
+    """LLM ``update_state`` setting ``phase=KERNEL`` is denied."""
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
@@ -341,7 +341,7 @@ def test_policy_blocks_llm_phase_write():
 
 
 def test_policy_blocks_llm_schema_version_write():
-    """KB_design §3.10 §5.1 — an LLM cannot rewrite the ``schema_version`` migration breadcrumb."""
+    """An LLM cannot rewrite the ``schema_version`` migration breadcrumb."""
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
@@ -364,7 +364,7 @@ def test_policy_blocks_llm_schema_version_write():
 
 
 def test_policy_blocks_llm_optimization_stack_write():
-    """KB_design §3.10 §6.2 — an LLM update_state with ``optimization_stack`` is denied (Coordinator-only)."""
+    """An LLM update_state with ``optimization_stack`` is denied (Coordinator-only)."""
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
@@ -386,9 +386,9 @@ def test_policy_blocks_llm_optimization_stack_write():
         gate.validate_intent("orchestration", intent)
 
 
-# 9. KB_gaps/Gap-14 — search ledgers locked under CORE_STATE_FIELDS
+# Search ledgers locked under CORE_STATE_FIELDS.
 def test_search_ledgers_in_core_state_fields():
-    """KB_design §3.10 §6.2 — the ``explore_search`` ledger is locked as CORE (KB_gaps/Gap-14)."""
+    """The ``explore_search`` ledger is locked as CORE."""
     from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 
     assert "explore_search" in CORE_STATE_FIELDS, (

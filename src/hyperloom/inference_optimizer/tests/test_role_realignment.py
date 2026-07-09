@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.3 — Role realignment / phase-aware prompts tests."""
+"""Role realignment and phase-aware prompts tests."""
 
 from __future__ import annotations
 
@@ -158,7 +158,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     assert "elapsed_sec=120" in out
     # 60 min × 60s × 0.5 = 1800s cap; elapsed 120s → 1680s remaining.
     assert "remaining_sec=1680" in out
-    # Gap-10: EXPLORE allowlist carries explore + specialist + recover only.
+    # EXPLORE allowlist carries explore + specialist + recover only.
     assert "explore" in out and "specialist" in out
 
 

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Environment-variable readers (tree-reform.MD §7 — canonical ``env_*``).
+"""Environment-variable readers (canonical ``env_*``).
 
 Project-standard boolean token vocabulary (``1/true/yes/on`` → ``True``,
 case-insensitive) plus int/str/float readers with safe fallbacks. Stdlib-only

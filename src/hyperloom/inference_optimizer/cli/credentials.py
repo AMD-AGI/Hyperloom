@@ -29,11 +29,8 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 
-# Critic-agent skill root resolution. Env wins; else the in-tree
-# ``src/hyperloom/agents/critic/`` package (tree-reform.MD P2.5: critic-agent
-# was promoted from the sibling ``critic-agent/`` checkout into the
-# ``hyperloom`` src-layout namespace; the CLI module is now package-qualified
-# as ``hyperloom.agents.critic.runtime.cli`` instead of bare ``runtime.cli``).
+# Critic-agent skill root resolution. Env wins; else use the in-tree
+# ``src/hyperloom/agents/critic/`` package and its package-qualified CLI module.
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 def _resolve_critic_agent_root() -> Path | None:
@@ -92,10 +89,7 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         sys.exit(2)
 
 # Robustness-agent runtime location resolution; mirrors critic-agent helpers
-# above. tree-reform.MD P2.5: robustness-agent was promoted from a sibling
-# ``robustness-agent/`` checkout into the in-tree
-# ``src/hyperloom/agents/robustness/`` package (module ``robustness_agent``
-# -> package-qualified ``hyperloom.agents.robustness``).
+# above and uses the in-tree ``src/hyperloom/agents/robustness/`` package.
 _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 def _resolve_robustness_agent_root() -> Path | None:

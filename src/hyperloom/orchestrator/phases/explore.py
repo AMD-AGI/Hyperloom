@@ -839,7 +839,7 @@ class ExplorePhase(PhaseHandler):
         # Knowledge-domain tags drive multi-anchor prompt assembly; a single ``domain`` is the legacy single-tag alias.
         tags = normalize_dispatch_tags(params)
 
-        # PR feed (Gap-02 ↔ Gap-01 contract): fetch + merge the warm cache per domain when the plane is wired; failures fall back to empty.
+        # PR feed: fetch + merge the warm cache per domain when the plane is wired; failures fall back to empty.
         if plane is not None and "pr_feed" not in params:
             pr_domains = [domain] if domain else list(tags)
             merged_prs: list[dict[str, Any]] = []

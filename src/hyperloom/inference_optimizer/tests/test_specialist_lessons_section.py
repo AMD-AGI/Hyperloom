@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""``§ 5b. RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests.
+"""``RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests.
 
 Locks the reader → prompt-render path for ``kind=lesson`` KB writes: the
 warmer populates the task param, ``build_specialist_prompts`` renders the
@@ -233,7 +233,7 @@ def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
     assert recipe_idx < lessons_idx < pitfalls_idx < pr_idx
 
 
-# § 5c pitfalls section — symmetric mirror of § 5b lessons
+# Pitfalls section mirrors lessons.
 def test_section_pitfalls_empty_falls_back_to_placeholder():
     rows = _section_pitfalls(_make_inp())
     text = "\n".join(rows)
