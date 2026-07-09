@@ -305,5 +305,8 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
         session_dir=tmp_path,
     )
     assert "my-pr-monitor.example" in constructed_urls[-1]
-    assert plane.pr_feed_window_days == 14
+    # NOTE: the slimmed KnowledgePlane no longer stores pr_feed_window_days
+    # (the pre-warmed PR feed was removed in favour of on-demand MCP queries);
+    # the --pr-feed-window-days flag is still parsed for backward-compat but is
+    # not plumbed onto the plane. Only the MCP URL round-trips.
     assert plane.pr_monitor_mcp_url == "https://my-pr-monitor.example/mcp/"

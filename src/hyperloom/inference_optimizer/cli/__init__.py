@@ -143,6 +143,7 @@ from .credentials import (
     _resolve_robustness_agent_root as _resolve_robustness_agent_root,
     _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
     _GEAK_BASE_URL_RE as _GEAK_BASE_URL_RE,
+    _is_stale_proxy_url as _is_stale_proxy_url,
     _sync_geak_config_base_url as _sync_geak_config_base_url,
     _derive_anthropic_base_url as _derive_anthropic_base_url,
     _resolve_llm_endpoints as _resolve_llm_endpoints,

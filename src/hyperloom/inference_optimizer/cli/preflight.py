@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import (  # noqa: F401 - re-exported for callers/tests
+    _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
     _sync_geak_config_base_url,
@@ -777,6 +778,16 @@ def _preflight(
             for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
+                    # A genuine operator override is preserved, but a leftover
+                    # install-time 127.0.0.1:4002 proxy is unreachable and must
+                    # be force-rewritten to the gateway.
+                    if _is_stale_proxy_url(current):
+                        os.environ[alias] = gateway_url
+                        print(
+                            f"Preflight: {alias} {current} -> {gateway_url} "
+                            "(stale install-time proxy; force-rewritten to gateway)"
+                        )
+                        continue
                     print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
                     continue
                 if os.environ.get(alias) != gateway_url:

@@ -165,6 +165,31 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
+# A leftover install-time reverse-proxy that some environments bake in
+# (``127.0.0.1:4002``). It is never reachable at runtime, so unlike a genuine
+# operator tunnel it must be force-rewritten to the gateway rather than
+# preserved as an "operator override".
+_STALE_PROXY_URL_RE = re.compile(r"^https?://127\.0\.0\.1:4002(?:[/:?#]|$)")
+
+
+def _is_stale_proxy_url(url: str | None) -> bool:
+    """Return ``True`` for a leftover ``127.0.0.1:4002`` install-time proxy URL.
+
+    Only the legacy ``4002`` reverse-proxy is treated as stale; a genuine
+    operator reverse tunnel on another port (e.g. ``18444``) or any external
+    gateway is *not* stale and must be preserved.
+
+    Args:
+        url (str | None): The candidate base URL (may be empty or ``None``).
+
+    Returns:
+        bool: ``True`` only for the legacy ``127.0.0.1:4002`` proxy.
+    """
+    if not url:
+        return False
+    return _STALE_PROXY_URL_RE.match(url.strip()) is not None
+
+
 # Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
 # written by kernel-agent/scripts/install.sh, but tolerant of any indent).
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
