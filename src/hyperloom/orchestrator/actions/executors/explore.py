@@ -1073,7 +1073,8 @@ class ExploreExecutor:
                     # fresh cold boot (legacy). cleanup=false keeps it hot for the
                     # warm stack-rebench round below. ``soft_deadline_sec`` is the
                     # overtime kill, anchored on the WARM measure time when
-                    # warm-decision is active (stack-rebench omits it, Q4).
+                    # warm-decision is active; round-2 stack-rebench inherits the
+                    # same ``decision_deadline_sec`` (Issue 1 fix).
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
@@ -1305,8 +1306,11 @@ class ExploreExecutor:
                             # Round 2: same config as round 1. When eligible,
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
-                            # comparable; otherwise a fresh cold boot. No
-                            # ``soft_deadline_sec`` is applied for the rebench.
+                            # comparable; otherwise a fresh cold boot.
+                            # ``soft_deadline_sec=decision_deadline_sec`` applies
+                            # (Issue 1 fix: warm client-only rounds must be
+                            # bounded by the overtime-kill ratio, just like the
+                            # decision round).
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,

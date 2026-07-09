@@ -1203,7 +1203,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "``confidence: low`` and ``provenance: "
                     + "domain_focus_default`` in the proposal. Use the "
                     + "``residual_questions`` field to record what RecipeKB, "
-                    + "research, or PR query a future round should pre-warm.",
+                    + "research, or ``mcp__pr_monitor__*`` query a future round should pursue.",
                     "",
                     "If the *Winning techniques* block is generic enough "
                     + "that no proposal is safer than a coin-flip, you may "
@@ -1791,7 +1791,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
             "entries. You are a curator, not a brainstormer: rank candidates "
             "by expected gain x your confidence, drop everything that "
-            "contradicts ``kb_subgraph`` / ``pr_feed`` evidence already in "
+            "contradicts ``kb_subgraph`` / ``pr_evidence`` already in "
             f"your prompt, and only emit the surviving top {inp.max_proposals}. "
             "Fewer is better than padding."
         ),
