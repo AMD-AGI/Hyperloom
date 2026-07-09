@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""sglang ``--moe-runner-backend`` injection tests (issue #512).
+"""sglang ``--moe-runner-backend`` injection tests.
 
 MoE models served by sglang on MI300X/MI355X (aiter) route through aiter's CK
 2-stage fused-MoE kernel by default (``--moe-runner-backend auto``); its

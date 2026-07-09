@@ -53,7 +53,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
-    # A usable checkout needs .git (#722/PR#789 completeness gate); a bare dir
+    # A usable checkout needs .git (completeness gate); a bare dir
     # is now treated as an incomplete override and fails fast.
     (tracelens_root / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
@@ -390,7 +390,7 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
 
 
-# Regression #194: steady-state window must follow the TraceLens magpie skill formulas (max_iters/delay_iters), not the old placeholders.
+# steady-state window must follow the TraceLens magpie skill formulas (max_iters/delay_iters), not the old placeholders.
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
     """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
@@ -2139,7 +2139,7 @@ async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, mon
     assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
-# T4 — TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
+# TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
 
 
 @pytest.mark.asyncio
@@ -2236,7 +2236,7 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
     assert res["trace_health_warnings"] == []
 
 
-# T5 — trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
+# trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
 
 
 def test_record_trace_analyze_persists_trace_health_warnings(session_dir):

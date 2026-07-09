@@ -148,7 +148,7 @@ def test_should_reloop_respects_max_cycles(monkeypatch):
 
 
 # ==========================================================================
-# R2 — per-cycle budget window
+# per-cycle budget window
 # ==========================================================================
 def test_per_cycle_budget_shrinks_phase_window():
     now = 1_000_000.0
@@ -196,7 +196,7 @@ def test_budget_minutes_ignores_cycle_window_for_short_run():
 
 
 # ==========================================================================
-# R1 — Coordinator loopback application
+# Coordinator loopback application
 # ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
@@ -281,7 +281,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
 
 
 # ==========================================================================
-# R1 — PolicyGate re-entry after loopback is not falsely denied
+# PolicyGate re-entry after loopback is not falsely denied
 # ==========================================================================
 def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
