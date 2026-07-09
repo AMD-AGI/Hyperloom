@@ -457,8 +457,8 @@ def test_collect_geak_relativize_failure_warns(tmp_path: Path, monkeypatch) -> N
     def _boom(_path, _session_dir):
         raise OSError("relativize boom")
 
-    # tree-reform.MD P2.2: collect_geak moved to the ``geak``
-    # submodule, which binds ``_rel`` from ``collectors._common``; patch it there.
+    # collect_geak lives in the ``geak`` submodule, which binds
+    # ``_rel`` from ``collectors._common``; patch it there.
     monkeypatch.setattr(collectors.geak, "_rel", _boom)
 
     eval_dir = tmp_path / "runs" / "eval"

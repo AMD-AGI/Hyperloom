@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""N36 — low-quality steady-state chunk auto-recovery (DSR1-0528 10k/1k case).
+"""low-quality steady-state chunk auto-recovery (DSR1-0528 10k/1k case).
 
 ``_check_selected_chunk_has_gpu_events_quality`` emits ``steady_state_chunk_low_quality`` (N26 retry allowlist) when busy ratio is below threshold AND a meaningfully-better alternate exists; threshold via ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` (default 0.05).
 """

@@ -184,7 +184,7 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         )
 
 
-# PR-C: hot-kernel report gate (reproduces log1 session 164910Z bug)
+# Hot-kernel report gate.
 def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
     coord.shared_state.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",

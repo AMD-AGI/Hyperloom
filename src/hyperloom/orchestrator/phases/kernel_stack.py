@@ -398,7 +398,7 @@ class KernelStackPhase(PhaseHandler):
         """
         from ..actions.executors.baseline import BaselineExecutor
         # Lazy (re-)import so tests can monkeypatch it on the source module even
-        # though it is also imported at module top (tree-reform.MD: keep lazy).
+        # though it is also imported at module top.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,

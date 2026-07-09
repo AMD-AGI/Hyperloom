@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_subprocess_kill.kill_my_spawned_server`` and the BaselineExecutor integration (``bugs.md`` §B).
+"""Tests for ``_subprocess_kill.kill_my_spawned_server`` and the BaselineExecutor integration.
 
 Covers the no-op / already-exited cases, the same-session-group refusal guard,
-SIGTERM→grace→SIGKILL ordering, and grandchild reaping (the bugs.md §B leak).
+SIGTERM→grace→SIGKILL ordering, and grandchild reaping.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
 
 
 def test_kill_my_spawned_server_reaps_grandchildren():
-    """bugs.md §B: a child that spawns a grandchild leaves no surviving descendant after the helper returns."""
+    """A child that spawns a grandchild leaves no surviving descendant after the helper returns."""
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -300,7 +300,7 @@ def test_server_log_shows_death_detects_marker(tmp_path):
 
 
 def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
-    """#524: the vLLM v1 engine-core bootstrap tail must read as dead. The
+    """The vLLM v1 engine-core bootstrap tail must read as dead. The
     ``RuntimeError: Engine core initialization failed`` line and the
     ``Failed core proc(s)`` anchor both trip the watchdog."""
     log_path = tmp_path / "server.log"
@@ -351,7 +351,7 @@ def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
-    """#524: the excerpt helper returns the engine/worker-init root-cause line
+    """The excerpt helper returns the engine/worker-init root-cause line
     (with a little context) so the failure classifier can put the real server
     fault in the operator-facing ``error`` field; a healthy / missing log
     returns ``None``."""

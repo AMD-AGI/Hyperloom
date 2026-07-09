@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Step 1 — FRAMEWORK candidate artifacts + outcome classification."""
+"""FRAMEWORK candidate artifacts and outcome classification tests."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def test_write_decision_json_never_raises_on_bad_session_dir(tmp_path: Path):
     assert out is None
 
 
-# write_semantic_audit (G9 — co-located with decision.json)
+# write_semantic_audit co-located with decision.json.
 def test_write_semantic_audit_co_located(tmp_path: Path):
     verdict = {
         "candidate_id": "ROCm/vllm#42",
