@@ -1372,13 +1372,14 @@ class ExplorePhase(PhaseHandler):
                 ``patches_written`` and proposal metadata.
         """
         patches = done_payload.get("patches_written") or []
-        if not isinstance(patches, list) or not patches:
-            return
+        if not isinstance(patches, list):
+            patches = []
         sid = str(task.task_id or "").strip()
         if not sid:
             return
         # Resolve patches_written against worktree + workspace; submit only when >=1 real file exists.
         from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
+        from ..loop.coordinator import _resolvable_artifacts_from_done
 
         resolve_bases: list[Path] = []
         if self.session_dir is not None:
@@ -1392,16 +1393,22 @@ class ExplorePhase(PhaseHandler):
                 cands.append(base / raw)
             if any(c.is_file() for c in cands):
                 existing_patches.append(str(p))
-        if not existing_patches:
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "specialist_patch_autosubmit_skipped_no_files",
-                    "specialist_task_id": sid,
-                    "claimed": [str(x) for x in patches][:8],
-                },
-            )
+        # A non-diff tuned artifact (``artifacts_written`` with a real source
+        # file) is also a routable deliverable: integrate_patch installs it
+        # (backup + gate + REVERT). Route it exactly like a patch. Shared
+        # routable-signal with the empty-outcome bridge (no FRAMEWORK livelock).
+        routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
+        if not existing_patches and not routable_artifacts:
+            if patches:
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "specialist_patch_autosubmit_skipped_no_files",
+                        "specialist_task_id": sid,
+                        "claimed": [str(x) for x in patches][:8],
+                    },
+                )
             return
         # Already ruled on by the Critic (e.g. after resume) — nothing to do.
         try:

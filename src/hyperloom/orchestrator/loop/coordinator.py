@@ -150,6 +150,55 @@ def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str
     return "\n".join(parts).strip()
 
 
+def _resolvable_artifacts_from_done(
+    done_payload: dict[str, Any] | None,
+    resolve_bases: list[Path],
+) -> list[dict[str, Any]]:
+    """Return ``artifacts_written`` entries whose ``source`` file exists on disk.
+
+    A FRAMEWORK/EXPLORE specialist may deliver a non-diff tuned artifact (e.g.
+    an autotuned aiter ``tuned_fmoe`` CSV) via ``artifacts_written`` instead of
+    a source patch. Such a deliverable is a first-class result: it flows through
+    the ``integrate_patch`` artifact-install channel (backup + install + bench +
+    accuracy gate + REVERT). This is the SHARED routable-signal used by BOTH the
+    autosubmit bridge (``_maybe_autosubmit_specialist_patches``) and the
+    empty-outcome bridge (``_record_framework_agent_authoring_empty_outcome``)
+    so they agree exactly: an artifact is routable only when its ``source``
+    resolves to a real file under the specialist worktree/workspace. Keeping the
+    bridges on one signal prevents the FRAMEWORK livelock (skip-stamp without a
+    following integrate_patch).
+
+    Args:
+        done_payload: The specialist ``specialist_done`` payload (unwrapped).
+        resolve_bases: Dirs to resolve a relative ``source`` against (typically
+            ``[<spec>/worktree, <spec>]``).
+
+    Returns:
+        list[dict]: ``artifacts_written`` entries with a valid ``source``/
+            ``target`` and an existing source file (possibly empty).
+    """
+    if not isinstance(done_payload, dict):
+        return []
+    arts = done_payload.get("artifacts_written")
+    if not isinstance(arts, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in arts:
+        if not isinstance(entry, dict):
+            continue
+        src = str(entry.get("source") or "").strip()
+        tgt = str(entry.get("target") or "").strip()
+        if not src or not tgt:
+            continue
+        raw = Path(src)
+        cands = [raw] if raw.is_absolute() else []
+        for base in resolve_bases:
+            cands.append(base / raw)
+        if any(c.is_file() for c in cands):
+            out.append(entry)
+    return out
+
+
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
 ) -> dict[str, str]:

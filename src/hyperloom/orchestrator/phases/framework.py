@@ -3355,6 +3355,27 @@ class FrameworkPhase(PhaseHandler):
         # authored_empty row here.
         if _framework_config_levers_from_done(inner):
             return
+        # Relaxed FRAMEWORK rule (parity with autosubmit): a non-diff tuned
+        # artifact deliverable (``artifacts_written`` with a real source file) is
+        # a FULL result — autosubmit routes it to integrate_patch, which owns the
+        # terminal row. Use the SAME routable-signal as autosubmit so we never
+        # skip-stamp a deliverable that autosubmit will NOT route (livelock).
+        try:
+            from ..loop.coordinator import _resolvable_artifacts_from_done
+            from hyperloom.inference_optimizer.session.session_paths import (
+                runs_dir as _runs_dir,
+            )
+            from pathlib import Path as _Path
+
+            _sid_arts = str(getattr(task, "task_id", "") or "")
+            if self.session_dir is not None and _sid_arts:
+                _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
+                if _resolvable_artifacts_from_done(
+                    inner, [_spec_root / "worktree", _spec_root]
+                ):
+                    return
+        except Exception:  # noqa: BLE001 — defensive; fall through to stamp
+            log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
             return

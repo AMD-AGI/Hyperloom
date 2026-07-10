@@ -1086,3 +1086,89 @@ def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
     params = stub.tasks.created[-1]["params"]
     assert "cross_framework" not in params
     assert "CROSS-FRAMEWORK PORT" not in (params.get("notes") or "")
+
+
+def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
+    """A specialist that returns NO source patch and NO config lever but a
+    non-diff tuned artifact (``artifacts_written`` with a real source file) is a
+    FULL result: autosubmit routes it to ``integrate_patch`` (which installs the
+    artifact + runs the gate), so the empty-outcome bridge must NOT stamp an
+    authored_empty row for it (regression: aiter#4130 tuned FMOE CSV dropped)."""
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    stub = _Stub(tmp_path, authoring=True)
+    sid = "spec-art"
+    spec_root = runs_dir(tmp_path, "specialist", sid)
+    art_dir = spec_root / "worktree" / "artifacts"
+    art_dir.mkdir(parents=True, exist_ok=True)
+    (art_dir / "tuned_fmoe.csv").write_text("cu_num,token\n304,16\n", encoding="utf-8")
+
+    task = SimpleNamespace(
+        task_id=sid,
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/4130",
+            "framework_batch_id": "b1",
+            "framework_audit": {"semantic_status": "not_present"},
+        },
+    )
+    done_payload = {
+        "empty": True,
+        "patches_written": [],
+        "proposal_set": [],
+        "artifacts_written": [
+            {
+                "source": "artifacts/tuned_fmoe.csv",
+                "target": "configs/model_configs/qwen3_tuned_fmoe.csv",
+                "kind": "aiter_tuned_fmoe_csv",
+            }
+        ],
+        "summary": "autotuned cu_num=304 fp8 fmoe rows",
+    }
+
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload=done_payload,
+    )
+    assert stub.shared_state.framework_agent_phase_progress == []
+
+
+def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
+    """``artifacts_written`` present but the source file does NOT exist:
+    autosubmit cannot route it to ``integrate_patch``, so the empty-outcome
+    bridge MUST still stamp a terminal row (else the FRAMEWORK pump livelocks
+    re-dispatching the candidate). Guards the shared routable-signal."""
+    stub = _Stub(tmp_path, authoring=True)
+    task = SimpleNamespace(
+        task_id="spec-art-missing",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/9999",
+            "framework_batch_id": "b1",
+            "framework_audit": {"semantic_status": "not_present"},
+        },
+    )
+    done_payload = {
+        "empty": True,
+        "patches_written": [],
+        "proposal_set": [],
+        "artifacts_written": [
+            {
+                "source": "artifacts/missing.csv",
+                "target": "configs/model_configs/x.csv",
+                "kind": "aiter_tuned_fmoe_csv",
+            }
+        ],
+        "summary": "claimed artifact but no file on disk",
+    }
+
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload=done_payload,
+    )
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["kept"] is False
