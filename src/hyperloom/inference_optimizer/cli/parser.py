@@ -933,7 +933,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # PR Monitor REST + MCP
     # --pr-monitor-url overrides the in-cluster default (port-forward when outside the primus-cortex namespace);
-    # --degraded-pr makes pr_feed_warm a no-op and strips mcp__pr_monitor__* from the specialist whitelist.
+    # --degraded-pr strips mcp__pr_monitor__* from the specialist whitelist.
     opt.add_argument(
         "--pr-monitor-url",
         dest="pr_monitor_url",
@@ -959,10 +959,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Disable the PR Monitor integration entirely. "
-        "pr_feed_warm returns empty; the specialist tool "
-        "whitelist drops mcp__pr_monitor__* tools. Short-circuits "
-        "the IR-3 PR Monitor probe; IR-3 sets this automatically "
-        "when PR Monitor is unreachable (soft degrade).",
+        "The specialist tool whitelist drops mcp__pr_monitor__* tools. "
+        "Short-circuits the IR-3 PR Monitor probe; IR-3 sets this "
+        "automatically when PR Monitor is unreachable (soft degrade).",
     )
     opt.add_argument(
         "--pr-feed-window-days",
