@@ -16,34 +16,57 @@ The installer runs: base preflight → optional SGLang/vLLM framework install �
 
 ## 1. Get the code
 
+For a full source checkout:
+
 ```bash
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 ```
 
-## 2. Configure `.env`
+For a standalone/customer install, copy only `install_baremetal.sh` onto the
+host. If the sibling installer scripts are not present, it automatically enters
+wheel mode, downloads the Hyperloom release wheel with `gh`, installs it into
+`$PYTHON`, and runs the packaged installer assets from site-packages:
 
-Copy the template and fill in your LLM credentials — this is the only thing you configure by hand:
+```bash
+gh auth login
+./install_baremetal.sh --install-framework sglang
+```
+
+Set `HYPERLOOM_WHEEL=/path/to/hyperloom_inference_optimizer-0.8.0-py3-none-any.whl`
+to use a pre-downloaded wheel and skip `gh`.
+
+In wheel mode, the installer prints the installed `SKILL.md` path from
+site-packages. Copy that printed `@.../SKILL.md` line into Cursor Chat when
+launching an optimization; you do not need to locate it manually.
+
+## 2. Configure LLM Credentials
+
+Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/OOB/kernel-agent configuration needs them later.
+
+```bash
+# Single gateway (default)
+export SAFE_API_KEY=ak-your-safe-apikey
+export OPENAI_BASE_URL=https://your-openai-compatible-gateway.example.com/v1
+```
+
+Or use a split provider setup with separate Anthropic-compatible and OpenAI-compatible entrypoints:
+
+```bash
+export ANTHROPIC_BASE_URL=https://api.anthropic.com
+export ANTHROPIC_API_KEY=sk-ant-xxxxx
+export CLAUDE_MODEL=claude-opus-4-7
+
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=sk-xxxxx
+export CODEX_MODEL=gpt-4.1
+
+export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+```
+
+If you are running from a full source checkout, you can alternatively copy the template and fill in the same values:
 
 ```bash
 cp .env.template .env
-```
-
-Edit `.env` and pick one of the two setups:
-
-- **Single gateway (default)** — fill in the two ready-to-use lines:
-
-```text
-SAFE_API_KEY=ak-your-safe-apikey
-OPENAI_BASE_URL=https://your-openai-compatible-gateway.example.com/v1
-```
-
-- **Split (native OpenAI / Anthropic)** — uncomment the matching lines in the template, fill them in, and point `OPENAI_BASE_URL` at the GPT-side endpoint:
-
-```text
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_API_KEY=sk-ant-xxxxx
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=sk-xxxxx
 ```
 
 The installer and its chained runtime installers accept either the single-gateway pair or a split setup as long as at least one base URL and one API key are present.
@@ -52,11 +75,17 @@ The installer and its chained runtime installers accept either the single-gatewa
 
 ## 3. Run the bare-metal installer
 
+Use the installer path that matches how you obtained it:
+
 ```bash
+# Full source checkout
 src/hyperloom/inference_optimizer/assets/install_baremetal.sh
+
+# Standalone/customer install
+./install_baremetal.sh
 ```
 
-The script reads credentials from `.env` automatically. Common options and environment overrides:
+The script resolves credentials from flags, shell environment, and `.env` when present. Common options and environment overrides:
 
 | Option / environment variable | Description |
 |-------------------------------|-------------|
@@ -72,31 +101,17 @@ The script reads credentials from `.env` automatically. Common options and envir
 | `AITER_REF=v0.1.14.post1` | Override the AITER source tag. By default, `rocm700` selects `v0.1.14.post1`; `rocm720` selects `v0.1.16.post3`. |
 | `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` | Skip the install-time GEAK RAG index build. Useful for smoke tests or hosts where model/index build is flaky. |
 | `KERNEL_AGENT_RAG_INDEX_STRICT=1` | Fail the install if the GEAK RAG index build fails. By default the installer warns and continues. |
+| `HYPERLOOM_INSTALL_SOURCE=wheel` | Force standalone wheel mode even when running from a source checkout. |
+| `HYPERLOOM_WHEEL=/path/to/file.whl` | Install Hyperloom from a local wheel or reachable URL instead of downloading with `gh`. |
+| `HYPERLOOM_WHEEL_REPO=AMD-AGI/Hyperloom` | GitHub repo used for `gh release download` in wheel mode. |
+| `HYPERLOOM_WHEEL_TAG=v0.8` | Release tag used for `gh release download` in wheel mode. |
+| `HYPERLOOM_WHEEL_PATTERN=hyperloom_inference_optimizer-*.whl` | Release asset pattern used for `gh release download` in wheel mode. |
 
 > Run `--dry-run` first to preview the actions. The framework layer only installs packages + dependencies + a ROCm check — it does **not** patch framework source.
 
-### ROCm 7.0 user-space on an older compatible host driver
+## 4. Launch with the printed environment
 
-If the host driver cannot be restarted or upgraded but supports ROCm 7.0 user-space, install ROCm 7.0 user-space libraries side by side and point the installer at them. This path requires Python 3.10 because the installer uses the AMD `amd-sglang[rocm700]` wheel; non-3.10 Python would take the source-install path and is rejected to avoid pulling mismatched ROCm 7.2 Triton.
-
-```bash
-export PYTHON=/opt/hyperloom/venv-rocm70/bin/python
-export ROCM_PATH=/opt/rocm-7.0.2
-export HIP_PATH=/opt/rocm-7.0.2
-export PATH=/opt/rocm-7.0.2/bin:$PATH
-export LD_LIBRARY_PATH=/opt/rocm-7.0.2/lib:$LD_LIBRARY_PATH
-export SGLANG_ROCM_PYPI_VERSION=7.0.0
-export SGLANG_ROCM_EXTRA=rocm700
-
-src/hyperloom/inference_optimizer/assets/install_baremetal.sh \
-  --install-framework sglang
-```
-
-The `rocm700` SGLang stack uses `triton 3.5.x`, so the installer chooses an older compatible AITER tag unless `AITER_REF` is set explicitly.
-
-## 4. Load the environment and launch
-
-When the install finishes, the script writes a single combined env file and prints its **actual path**. Copy and run the `source ...` command printed by the installer before launching:
+When the install finishes, the script writes a single combined env file and prints the exact `source ...` command to run. Copy that printed command into your current shell before launching:
 
 ```bash
 source '<path printed by install_baremetal.sh>'
@@ -104,7 +119,7 @@ source '<path printed by install_baremetal.sh>'
 
 The default location is usually `/workspace/hyperloom/runtime/hyperloom.env.sh`, but use the printed path if you exported a custom `USER_DATA_PATH` or passed `--user-data-path`.
 
-Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Run a Hyperloom optimization](../how-to/optimize.md).
+Then open the indicated workspace in Cursor, paste the prompt the installer prints into Cursor Chat, and fill in your workload. The workload fields map to the same CLI flags as Local Mode — see [Run a Hyperloom optimization](../how-to/optimize.md).
 
 ## Troubleshooting
 
