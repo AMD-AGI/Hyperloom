@@ -119,8 +119,8 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
-`kernel-agent/scripts/install.sh` clones
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`; when unset,
+`src/hyperloom/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
 an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
@@ -320,15 +320,15 @@ after Step 1). `install.sh` and the CLI's `_preflight()` read them from
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd)"   # repo root containing kernel-agent/ + src/hyperloom/inference_optimizer/ + .env
+export REPO_ROOT="$(pwd)"   # repo root containing src/hyperloom/agents/kernel/ + src/hyperloom/inference_optimizer/ + .env
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
-first, then chains to `kernel-agent/scripts/install.sh` for the kernel
-optimization environment. `kernel-agent/scripts/install.sh` remains valid for
+first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
+optimization environment. `src/hyperloom/agents/kernel/scripts/install.sh` remains valid for
 standalone kernel-agent debugging, but should not be the main entrypoint for a
 full inference optimizer session.
 
@@ -347,8 +347,8 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-Chained from `kernel-agent/scripts/install.sh` (single chain at the end
-of `src/hyperloom/inference_optimizer/install.sh`):
+Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
+of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
@@ -375,10 +375,10 @@ does not consume these.
 
 | Prompt field | Env name | Consumer |
 |---|---|---|
-| `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
+| `OOB_SRC: <path>` | `$OOB_SRC` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_oob` |
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
-| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (public) |
-| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal; only when set) |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (public) |
+| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
@@ -520,7 +520,7 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
+export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens

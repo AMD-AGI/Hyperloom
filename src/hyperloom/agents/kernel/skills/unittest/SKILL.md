@@ -96,7 +96,7 @@ For each candidate test file, check:
 Run static validation on promising candidates:
 
 ```bash
-python3 "$REPO_ROOT/kernel-agent/skills/unittest/validate_harness.py" "$CANDIDATE" --static
+python3 "$REPO_ROOT/src/hyperloom/agents/kernel/skills/unittest/validate_harness.py" "$CANDIDATE" --static
 ```
 
 If a candidate passes static validation, go to **Phase 3** (validation).

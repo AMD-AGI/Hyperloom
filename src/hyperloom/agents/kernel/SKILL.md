@@ -55,7 +55,7 @@ correct env-wins semantics.
 
 ```bash
 export REPO_ROOT="$(pwd)"   # hyperloom repo root that owns .env (or `cd` there)
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
 # install.sh writes the pod-local env at $HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh
 # (= $USER_DATA_PATH/runtime/kernel-agent.env.sh by default).
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
@@ -131,7 +131,7 @@ Use `--check-only` to verify the current environment without installing,
 and `--dry-run` to print planned actions:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
 ### Step 2 — Start Ray with all visible GPUs
@@ -195,7 +195,7 @@ Inputs:
 Run:
 
 ```bash
-python "$REPO_ROOT/kernel-agent/tools/tracelens_analysis.py" \
+python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/tracelens_analysis.py" \
   --trace-input "$TRACE_INPUT" \
   --session-id "$SESSION_ID" \
   --model-name "$MODEL_NAME" \
@@ -228,7 +228,7 @@ Inputs:
 Run:
 
 ```bash
-python "$REPO_ROOT/kernel-agent/tools/kernel_optimization.py" \
+python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/kernel_optimization.py" \
   --session-id "$SESSION_ID" \
   --kernel-id "$KERNEL_ID" \
   ${BACKENDS:+--backends "$BACKENDS"} \

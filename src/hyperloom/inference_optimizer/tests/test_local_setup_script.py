@@ -21,6 +21,8 @@ PREFLIGHT_KB = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets
 _DEFAULT_USER_DATA_PATH = "/workspace/hyperloom"
 # Substring of the loud fallback notice each script prints to stderr.
 _FALLBACK_WARNING = "USER_DATA_PATH not set"
+_CANONICAL_KERNEL_AGENT_ROOT = "src/hyperloom/agents/kernel"
+_CANONICAL_KERNEL_AGENT_INSTALL = f"{_CANONICAL_KERNEL_AGENT_ROOT}/scripts/install.sh"
 
 # Strip these host-leaked env vars so each test runs hermetically.
 _HOST_LEAK_VARS = (
@@ -51,6 +53,25 @@ def _clean_base_env() -> dict[str, str]:
     for var in _HOST_LEAK_VARS:
         run_env.pop(var, None)
     return run_env
+
+
+def test_skill_guidance_uses_in_tree_kernel_agent_paths() -> None:
+    """Agent-facing launch docs must not recreate the retired sibling checkout path."""
+    skill_files = sorted(REPO_ROOT.rglob("SKILL.md"))
+    assert skill_files
+
+    offenders: list[str] = []
+    for path in skill_files:
+        text = path.read_text(encoding="utf-8")
+        if "$REPO_ROOT/kernel-agent" in text or "kernel-agent/scripts/install.sh" in text:
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+
+    assert not offenders, "stale kernel-agent path guidance in: " + ", ".join(offenders)
+
+    inference_skill = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "SKILL.md"
+    kernel_skill = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "SKILL.md"
+    assert _CANONICAL_KERNEL_AGENT_INSTALL in inference_skill.read_text(encoding="utf-8")
+    assert _CANONICAL_KERNEL_AGENT_INSTALL in kernel_skill.read_text(encoding="utf-8")
 
 
 def _run_local_setup(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
