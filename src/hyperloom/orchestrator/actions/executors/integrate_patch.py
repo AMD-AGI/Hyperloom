@@ -890,8 +890,11 @@ class _ArtifactSpec:
             workspace / worktree (sandbox-validated).
         target: Absolute install path inside an allowlisted framework root
             (sandbox-validated; no escape).
-        rel_target: The framework-relative target as authored by the
-            specialist (for reporting).
+        rel_target: The framework-relative target, normalized to the matched
+            allowlisted root via ``_resolve_artifact_target`` (an author's
+            absolute target is converted to this relative form). Used for
+            reporting AND as the framework-relative key for the durable KEEP
+            source snapshot.
         kind: Free-form artifact kind label (e.g. ``config_json``).
         description: Free-form human description.
     """
@@ -903,27 +906,43 @@ class _ArtifactSpec:
     description: str = ""
 
 
-def _resolve_artifact_target(rel_target: str) -> Path | None:
-    """Resolve a framework-relative artifact target to an absolute path.
+def _resolve_artifact_target(rel_target: str) -> tuple[Path, str] | None:
+    """Resolve an artifact target (framework-relative, or absolute) to a path.
 
-    Picks the allowlisted framework root whose tree already contains the
-    target's parent directory (so a ``vllm/...`` config lands under the vllm
-    root); else the first existing root. The resolved path must stay within
-    the chosen root (no ``..`` escape).
+    A relative target picks the allowlisted framework root whose tree already
+    contains the target's parent directory (so a ``vllm/...`` config lands under
+    the vllm root); else the first existing root. An absolute target is accepted
+    ONLY when it resolves strictly inside an allowlisted root. Either way the
+    resolved path must stay within the chosen root (no ``..`` escape).
 
     Args:
-        rel_target: The framework-relative install path authored by the
-            specialist.
+        rel_target: The install path authored by the specialist (framework-
+            relative, or an absolute path inside an allowlisted root).
 
     Returns:
-        The absolute target path, or ``None`` when nothing resolves safely.
+        A ``(absolute_target, framework_relative_target)`` tuple, or ``None``
+        when nothing resolves safely. ``framework_relative_target`` is the path
+        relative to the matched root (POSIX). Callers MUST persist THIS as the
+        artifact ``rel_target`` so the durable KEEP source snapshot captures the
+        installed file even when the author used an absolute path.
     """
     rel = (rel_target or "").strip()
-    if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+    if not rel or ".." in Path(rel).parts:
         return None
     roots = [Path(r).resolve() for r in resolve_source_file_allowlist()]
     roots = [r for r in roots if r.is_dir()]
     if not roots:
+        return None
+    # An absolute target is accepted ONLY when it resolves strictly inside an
+    # allowlisted framework root (e.g. a site-packages framework install a
+    # specialist referenced by full path). Same containment guarantee as the
+    # relative case; ".." was already rejected above. ``_is_within`` IS a
+    # guarded ``relative_to``, so the ``relative_to`` below cannot raise.
+    if Path(rel).is_absolute():
+        cand = Path(rel).resolve()
+        for root in roots:
+            if _is_within(cand, root):
+                return cand, cand.relative_to(root).as_posix()
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:
@@ -931,12 +950,12 @@ def _resolve_artifact_target(rel_target: str) -> Path | None:
         if not _is_within(cand, root):
             continue
         if cand.parent.is_dir():
-            return cand
+            return cand, cand.relative_to(root).as_posix()
     # Fall back to the first root that keeps the path contained.
     for root in roots:
         cand = (root / rel).resolve()
         if _is_within(cand, root):
-            return cand
+            return cand, cand.relative_to(root).as_posix()
     return None
 
 
@@ -999,15 +1018,16 @@ def _resolve_artifact_specs(
         if not any(_is_within(src_resolved, root) for root in allowed_roots):
             errors.append({"artifact": src_rel, "error": "source_outside_workspace"})
             continue
-        target = _resolve_artifact_target(tgt_rel)
-        if target is None:
+        resolved = _resolve_artifact_target(tgt_rel)
+        if resolved is None:
             errors.append({"artifact": tgt_rel, "error": "target_unresolved_or_escapes_root"})
             continue
+        target, rel_norm = resolved
         specs.append(
             _ArtifactSpec(
                 source=src_resolved,
                 target=target,
-                rel_target=tgt_rel,
+                rel_target=rel_norm,
                 kind=str(entry.get("kind") or "").strip(),
                 description=str(entry.get("description") or "").strip(),
             )

@@ -150,6 +150,100 @@ def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str
     return "\n".join(parts).strip()
 
 
+def _resolvable_artifacts_from_done(
+    done_payload: dict[str, Any] | None,
+    resolve_bases: list[Path],
+) -> list[dict[str, Any]]:
+    """Return ``artifacts_written`` entries whose ``source`` file exists on disk.
+
+    A FRAMEWORK/EXPLORE specialist may deliver a non-diff tuned artifact (e.g.
+    an autotuned aiter ``tuned_fmoe`` CSV) via ``artifacts_written`` instead of
+    a source patch. Such a deliverable is a first-class result: it flows through
+    the ``integrate_patch`` artifact-install channel (backup + install + bench +
+    accuracy gate + REVERT). This is the SHARED routable-signal used by BOTH the
+    autosubmit bridge (``_maybe_autosubmit_specialist_patches``) and the
+    empty-outcome bridge (``_record_framework_agent_authoring_empty_outcome``)
+    so they share one rule: an artifact is routable only when its ``source``
+    resolves to a real file inside the specialist worktree/workspace. (Each
+    bridge passes its own already-unwrapped ``specialist_done`` view — outer for
+    autosubmit, ``payload``-unwrapped for empty-outcome — so agreement holds as
+    long as ``specialist_done`` is not double-wrapped, the same assumption the
+    ``patches_written`` / config-lever routing already relies on.) Keeping the
+    bridges on one signal prevents the FRAMEWORK livelock (skip-stamp without a
+    following integrate_patch).
+
+    Source containment: every ``source`` — relative (resolved under
+    ``resolve_bases``) or absolute — is accepted ONLY when it resolves to a real
+    file inside one of ``resolve_bases``. This matches integrate_patch's sandbox
+    so the signal never routes a deliverable integrate_patch would reject as
+    ``source_outside_workspace`` (incl. a relative ``..`` that escapes the
+    sandbox yet still resolves to an existing file).
+
+    Target scope (intentional trade-off): this pure signal validates the
+    ``source`` only; it does NOT re-resolve ``target`` against the framework
+    allowlist (that would couple a testable pure function to on-disk framework
+    roots). A malformed / out-of-allowlist ``target`` is therefore still routed
+    and rejected downstream by integrate_patch as a terminal ``no_patches`` row
+    (no livelock — the FRAMEWORK pump still advances), rather than skip-stamped
+    as ``authored_empty`` here.
+
+    Args:
+        done_payload: The specialist ``specialist_done`` payload (unwrapped).
+        resolve_bases: Dirs to resolve a relative ``source`` against (typically
+            ``[<spec>/worktree, <spec>]``).
+
+    Returns:
+        list[dict]: ``artifacts_written`` entries with a valid ``source``/
+            ``target`` and an existing source file (possibly empty).
+    """
+    if not isinstance(done_payload, dict):
+        return []
+    arts = done_payload.get("artifacts_written")
+    if not isinstance(arts, list):
+        return []
+    out: list[dict[str, Any]] = []
+    # Sandbox bases are invariant across entries — resolve once.
+    bases_resolved = [base.resolve() for base in resolve_bases]
+    for entry in arts:
+        if not isinstance(entry, dict):
+            continue
+        src = str(entry.get("source") or "").strip()
+        tgt = str(entry.get("target") or "").strip()
+        if not src or not tgt:
+            continue
+        raw = Path(src)
+        # Candidate paths: an absolute ``source`` is checked as-is; a relative
+        # ``source`` is resolved under each base. In BOTH cases the resolved
+        # path must be a real file that stays inside a base — the SAME
+        # containment integrate_patch's ``_resolve_artifact_specs`` enforces,
+        # rejecting ``source_outside_workspace`` AND ``..`` escapes (a relative
+        # ``../../x`` that ``is_file()`` alone would otherwise mis-route).
+        # NOTE: unlike integrate_patch (which resolves against the FIRST existing
+        # base then validates), we scan ALL bases and take the first that yields
+        # a contained real file. Because ``worktree`` is nested under
+        # ``workspace`` the outcomes match, and this direction is fail-safe: it
+        # is never stricter than integrate_patch's accept, so a genuinely
+        # installable artifact is never dropped (at worst a benign extra routing
+        # round).
+        cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
+        for cand in cands:
+            resolved = cand.resolve()
+            if not resolved.is_file():
+                continue
+            contained = False
+            for base in bases_resolved:
+                try:
+                    resolved.relative_to(base)
+                except ValueError:
+                    continue
+                contained = True
+                break
+            if contained:
+                out.append(entry)
+                break
+    return out
+
+
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
 ) -> dict[str, str]:

@@ -3332,19 +3332,22 @@ class FrameworkPhase(PhaseHandler):
             return
         payload = done_payload if isinstance(done_payload, dict) else {}
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
-        # The downstream integrate_patch (and thus the authored-outcome bridge
-        # that owns the terminal row) is created by
-        # ``_maybe_autosubmit_specialist_patches``, which fires IFF
-        # ``patches_written`` (post safety-vetting) is non-empty. So this
-        # empty-outcome bridge MUST use the SAME signal: if ``patches_written``
-        # is non-empty an integrate_patch will follow and owns the row — do
-        # nothing here. If it is empty we must stamp the terminal row, REGARDLESS
-        # of ``proposal_set``. The dangerous case this guards: a specialist
-        # authors a patch (proposal_set non-empty) that safety-vetting then
-        # DROPS as unusable (missing_target / forbidden_fields), emptying
-        # ``patches_written``. Autosubmit then creates no integrate_patch, so
-        # without stamping here the candidate has no terminal row and the
-        # FRAMEWORK pump re-dispatches it forever (gap-5 livelock).
+        # A downstream integrate_patch (owned by the authored-outcome bridge
+        # that writes the terminal row) is created by
+        # ``_maybe_autosubmit_specialist_patches`` when the deliverable is
+        # routable: ``patches_written`` (post safety-vetting) non-empty, OR a
+        # config-lever deliverable, OR a non-diff tuned artifact. This empty-
+        # outcome bridge MUST mirror EACH of those signals so it never skip-
+        # stamps a deliverable autosubmit will route (double terminal row) nor
+        # stamps nothing for one autosubmit will NOT route (livelock). The three
+        # guards below (patches / config levers / artifacts) are that mirror. If
+        # none hold we stamp the terminal row here, REGARDLESS of
+        # ``proposal_set`` — the dangerous case being a specialist that authors a
+        # patch (proposal_set non-empty) which safety-vetting then DROPS as
+        # unusable (missing_target / forbidden_fields), emptying
+        # ``patches_written``: autosubmit creates no integrate_patch, so without
+        # stamping here the candidate has no terminal row and the FRAMEWORK pump
+        # re-dispatches it forever (gap-5 livelock).
         patches = inner.get("patches_written") or []
         if isinstance(patches, list) and patches:
             return
@@ -3355,6 +3358,27 @@ class FrameworkPhase(PhaseHandler):
         # authored_empty row here.
         if _framework_config_levers_from_done(inner):
             return
+        # Relaxed FRAMEWORK rule (parity with autosubmit): a non-diff tuned
+        # artifact deliverable (``artifacts_written`` with a real source file) is
+        # a FULL result — autosubmit routes it to integrate_patch, which owns the
+        # terminal row. Use the SAME routable-signal as autosubmit so we never
+        # skip-stamp a deliverable that autosubmit will NOT route (livelock).
+        try:
+            from ..loop.coordinator import _resolvable_artifacts_from_done
+            from hyperloom.inference_optimizer.session.session_paths import (
+                runs_dir as _runs_dir,
+            )
+            from pathlib import Path as _Path
+
+            _sid_arts = str(getattr(task, "task_id", "") or "")
+            if self.session_dir is not None and _sid_arts:
+                _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
+                if _resolvable_artifacts_from_done(
+                    inner, [_spec_root / "worktree", _spec_root]
+                ):
+                    return
+        except Exception:  # noqa: BLE001 — defensive; fall through to stamp
+            log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
             return
