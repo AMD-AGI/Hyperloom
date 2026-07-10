@@ -238,12 +238,8 @@ def _bootstrap_knowledge_plane(
     Returns:
         KnowledgePlane: The wired KnowledgePlane facade.
     """
-    from hyperloom.orchestrator.knowledge.knowledge_plane import (
-        KnowledgePlane,
-        load_domain_repos,
-    )
+    from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
     from hyperloom.orchestrator.knowledge.pr_monitor import (
-        DEFAULT_PR_FEED_WINDOW_DAYS,
         DEFAULT_PR_MONITOR_MCP_URL,
         PRMonitorClient,
     )
@@ -251,7 +247,6 @@ def _bootstrap_knowledge_plane(
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
     pr_mcp_url = (getattr(args, "pr_monitor_mcp_url", None) or "").strip() or DEFAULT_PR_MONITOR_MCP_URL
-    window_days = int(getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS) or DEFAULT_PR_FEED_WINDOW_DAYS)
 
     pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
     if not pr_enabled:
@@ -260,8 +255,8 @@ def _bootstrap_knowledge_plane(
         print(f"PR Monitor       : DISABLED ({reason})")
         pr_reachable = False
     else:
-        status_text = f"REST {pr_client.base_url} (window={window_days}d)"
-        print(f"PR Monitor       : REST {pr_client.base_url} (window={window_days}d, mcp={pr_mcp_url})")
+        status_text = f"MCP {pr_mcp_url}"
+        print(f"PR Monitor       : {pr_mcp_url}")
         pr_reachable = True
 
     # One-shot status marker so breakdown.warnings can surface pr_monitor:*
@@ -277,10 +272,8 @@ def _bootstrap_knowledge_plane(
                 json.dumps(
                     {
                         "enabled": bool(pr_enabled),
-                        "url": (pr_client.base_url if pr_enabled else ""),
                         "reachable": bool(pr_reachable),
                         "mcp_url": pr_mcp_url if pr_enabled else "",
-                        "window_days": int(window_days),
                         "status_text": status_text,
                     },
                     sort_keys=True,
@@ -304,11 +297,8 @@ def _bootstrap_knowledge_plane(
     else:
         print("Specialist KB MCP: DISABLED (no GBRAIN_* / HYPERLOOM_SPECIALIST_KB_MCP_URL)")
 
-    # Local-kb design: KB reads go via RecipeKB, not a Cortex KB client.
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
-        domain_repos=load_domain_repos(),
-        pr_feed_window_days=window_days,
         pr_monitor_mcp_url=pr_mcp_url,
         cortex_kb_mcp_url=kb_mcp_url,
         cortex_kb_mcp_headers=kb_mcp_headers,

@@ -190,6 +190,163 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
     return str(wt), str(wt / rel), base_commit
 
 
+def _pkg_toplevel(source_file: str) -> str:
+    """Return the topmost importable package directory containing ``source_file``.
+
+    Ascends while an ``__init__.py`` is present and returns the *last* directory
+    that still has one — i.e. the root package directory itself (e.g. ``vllm/``
+    for ``.../dist-packages/vllm/model_executor/models/deepseek_v2.py``), NOT its
+    parent. Its parent is the directory you would add to ``sys.path``; use
+    :func:`_pkg_sys_path_root` for that.
+
+    Falls back to the parent directory of ``source_file`` when the file is not
+    part of a package (no ``__init__.py`` beside it).
+    """
+    parent = Path(source_file).resolve().parent
+    if not (parent / "__init__.py").exists():
+        # Not inside a package — the file's own directory is the top level.
+        return str(parent)
+    top = parent
+    while (top.parent / "__init__.py").exists():
+        top = top.parent
+    return str(top)
+
+
+def _pkg_sys_path_root(source_file: str) -> str:
+    """Return the directory to place on ``sys.path`` / ``PYTHONPATH``.
+
+    This is the parent of the topmost importable package (so ``import <pkg>``
+    resolves), or ``source_file``'s own directory when it is not part of a
+    package.
+    """
+    top = Path(_pkg_toplevel(source_file))
+    parent = Path(source_file).resolve().parent
+    if str(top) == str(parent) and not (parent / "__init__.py").exists():
+        # Non-package file: its own directory is already the import root.
+        return str(parent)
+    return str(top.parent)
+
+
+def _prepare_worktree_nogit(
+    source_file: str,
+    kernel_repo: str,
+    output_dir: Path,
+    branch: str,  # noqa: ARG001  (kept for API symmetry with _prepare_worktree)
+) -> tuple[str, str, str] | None:
+    """Ephemeral git-scaffold scratch worktree for non-git source trees (scheme A).
+
+    When ``source_file`` lives outside any git repository (e.g. a pip-installed
+    package under ``/usr/local/lib/python3.12/dist-packages/``), this function:
+
+    1. Determines the scratch layout root (== the PYTHONPATH root): the explicit
+       ``kernel_repo`` when provided, otherwise the *parent* of the single
+       top-level package containing ``source_file`` (so ``import <pkg>`` still
+       resolves from the scratch copy).
+    2. Copies only what is needed to ``output_dir/worktree`` — the whole tree
+       for an explicit ``kernel_repo``, but for a pip-installed package only that
+       one top-level package subtree (e.g. ``vllm/``), NEVER the entire
+       ``dist-packages``/``site-packages`` directory (which would copy every
+       installed package — torch, vllm, ... — 5-15 GB per submit, risking
+       ENOSPC). Ignores ``.git``, ``__pycache__``, ``*.egg-info``, ``build/``,
+       ``dist/`` to keep the copy small and fast.
+    3. ``git init`` + sets ``user.name``/``user.email`` + ``git add -A`` +
+       initial commit so Forge's ``IterationLoop`` (which uses ``git
+       commit``/``reset --hard``) can manage its iterative keep/revert loop.
+    4. Returns ``(scratch_dir, scratch_kernel_file, base_commit)`` with the same
+       signature as :func:`_prepare_worktree`.
+
+    The caller's driver adapter prepends ``WORKTREE`` to ``PYTHONPATH`` so the
+    scratch copy shadows the dist-packages install at import time (pure-Python
+    only; editable-finder installs are excluded — those are handled by
+    :func:`_prepare_inplace`).
+
+    Returns ``None`` on any error (e.g. ``shutil.copytree`` failure).
+
+    .. note::
+        This path is intentionally **not** used for editable-finder packages.
+        Those are detected by :func:`_needs_inplace` before this function is
+        ever called.
+    """
+    src_abs = Path(source_file).resolve()
+
+    # The scratch layout root == the directory placed on PYTHONPATH, so that
+    # ``import <pkg>`` resolves the scratch copy. When kernel_repo is given
+    # explicitly we honour it (the caller pointed us at a specific tree);
+    # otherwise we derive the single top-level package's parent — NOT the whole
+    # dist-packages/site-packages dir, which would drag in every installed
+    # package (torch, vllm, ...) and can be 5-15 GB per submit (ENOSPC risk).
+    if kernel_repo:
+        layout_root = Path(kernel_repo).resolve()
+        copy_subtrees: list[Path] | None = None  # copy the whole repo
+    else:
+        layout_root = Path(_pkg_sys_path_root(source_file))
+        pkg_top = Path(_pkg_toplevel(source_file))
+        # Copy only the top-level package subtree (e.g. vllm/), unless the file
+        # is not part of a package (pkg_top == layout_root) — then copy just it.
+        copy_subtrees = None if str(pkg_top) == str(layout_root) else [pkg_top]
+
+    try:
+        rel = src_abs.relative_to(layout_root)
+    except ValueError:
+        # source_file not inside layout_root — fallback: use its parent dir and
+        # copy only that directory's contents.
+        layout_root = src_abs.parent
+        rel = Path(src_abs.name)
+        copy_subtrees = None
+
+    scratch_dir = output_dir / "worktree"
+    # Clean any leftover scratch from a previous (failed) attempt.
+    if scratch_dir.exists():
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    def _ignore(directory: str, names: list[str]) -> list[str]:
+        ignored: list[str] = []
+        for n in names:
+            if n in (".git", "__pycache__", "build", "dist") or n.endswith(".egg-info"):
+                ignored.append(n)
+        return ignored
+
+    try:
+        if copy_subtrees is None:
+            # Whole layout_root (explicit kernel_repo, or a non-package file's dir).
+            shutil.copytree(str(layout_root), str(scratch_dir), ignore=_ignore)
+        else:
+            # Only the named top-level package(s), preserving their path relative
+            # to layout_root so ``import <pkg>`` still resolves from scratch_dir.
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            for sub in copy_subtrees:
+                dest = scratch_dir / sub.relative_to(layout_root)
+                shutil.copytree(str(sub), str(dest), ignore=_ignore)
+    except OSError as exc:
+        log.warning("forge: non-git scratch copy failed (root=%s): %s", layout_root, exc)
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        return None
+
+    # Bootstrap a real git repo so IterationLoop's commit/revert machinery works.
+    for cmd in [
+        ["git", "-C", str(scratch_dir), "init"],
+        ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
+        ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
+        ["git", "-C", str(scratch_dir), "add", "-A"],
+        ["git", "-C", str(scratch_dir), "commit", "-q", "-m", "forge: scratch baseline"],
+    ]:
+        proc = _run(cmd, timeout=120)
+        if proc.returncode != 0:
+            log.warning("forge: non-git scaffold git init step failed: %s -> %s",
+                        cmd, proc.stderr.strip() or proc.stdout.strip())
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+            return None
+
+    base_commit_proc = _run(["git", "-C", str(scratch_dir), "rev-parse", "HEAD"], timeout=30)
+    if base_commit_proc.returncode != 0:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        return None
+    base_commit = base_commit_proc.stdout.strip()
+    scratch_kernel = str(scratch_dir / rel)
+    log.info("forge: non-git scratch worktree ready at %s (kernel=%s)", scratch_dir, scratch_kernel)
+    return str(scratch_dir), scratch_kernel, base_commit
+
+
 def _editable_roots() -> list[str]:
     """Collect filesystem roots of PEP 660 editable-finder installs.
 
@@ -1783,6 +1940,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     # those, edit in place on a temp branch and hard-restore afterward (Option 1).
     inplace = _needs_inplace(repo)
     restore_info: dict | None = None
+    nogit_scratch = False
     if inplace:
         prep = _prepare_inplace(source_file, repo, branch)
         if prep is None:
@@ -1793,8 +1951,18 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     else:
         wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
         if wt_info is None:
-            return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
-                               "not tracked; skipping (live repo untouched)", time.time() - started, skipped=True)
+            # Non-git source (e.g. pip-installed dist-packages): scaffold an
+            # ephemeral scratch worktree with git init so IterationLoop can run
+            # its commit/revert cycle normally.  Disable with FORGE_DISABLE_NOGIT=1.
+            if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+                return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
+                                   "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                                   time.time() - started, skipped=True)
+            wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+            if wt_info is None:
+                return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
+                                   "not tracked; skipping (live repo untouched)", time.time() - started, skipped=True)
+            nogit_scratch = True
         workspace, worktree_kernel, base_commit = wt_info
 
     try:
@@ -1955,6 +2123,11 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     finally:
         if inplace:
             _restore_inplace(restore_info)
+        elif nogit_scratch:
+            # Scratch worktree has no associated branch in any live repo; just
+            # delete the whole directory.  _remove_worktree would call
+            # `git worktree remove` on a non-existent remote repo -> no-op.
+            shutil.rmtree(workspace, ignore_errors=True)
         else:
             _remove_worktree(kernel_repo, source_file, workspace, branch)
 

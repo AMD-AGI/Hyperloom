@@ -20,7 +20,6 @@ def _args(**over):
         pr_monitor_enabled=True,
         pr_monitor_url=None,
         pr_monitor_mcp_url=None,
-        pr_feed_window_days=None,
     )
     base.update(over)
     return argparse.Namespace(**base)
