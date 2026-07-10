@@ -738,9 +738,12 @@ resolve_credentials() {
   local has_url=0 has_key=0
 
   if [ ! -f "$DOTENV" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    [ -f "$ENV_TEMPLATE" ] || die "no .env and no .env.template at ${ENV_TEMPLATE}"
-    cp "$ENV_TEMPLATE" "$DOTENV"; chmod 600 "$DOTENV" 2>/dev/null || true
-    log "created ${DOTENV} from .env.template"
+    if [ -f "$ENV_TEMPLATE" ]; then
+      cp "$ENV_TEMPLATE" "$DOTENV"; chmod 600 "$DOTENV" 2>/dev/null || true
+      log "created ${DOTENV} from .env.template"
+    else
+      warn "no .env and no .env.template at ${ENV_TEMPLATE}; expecting LLM credentials from flags or shell env"
+    fi
   fi
 
   # .env fallbacks (used only for values missing from flags / process env).

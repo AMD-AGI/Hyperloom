@@ -20,30 +20,30 @@ The installer runs: base preflight → optional SGLang/vLLM framework install �
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 ```
 
-## 2. Configure `.env`
+## 2. Configure LLM Credentials
 
-Copy the template and fill in your LLM credentials — this is the only thing you configure by hand:
+Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/OOB/kernel-agent configuration needs them later.
+
+```bash
+# Single gateway (default)
+export SAFE_API_KEY=ak-your-safe-apikey
+export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
+```
+
+Or use a split provider setup:
+
+```bash
+export ANTHROPIC_BASE_URL=https://api.anthropic.com
+export ANTHROPIC_API_KEY=sk-ant-xxxxx
+# and/or
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=sk-xxxxx
+```
+
+If you are running from a full source checkout, you can alternatively copy the template and fill in the same values:
 
 ```bash
 cp .env.template .env
-```
-
-Edit `.env` and pick one of the two setups:
-
-- **Single gateway (default)** — fill in the two ready-to-use lines:
-
-```text
-SAFE_API_KEY=ak-your-safe-apikey
-OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
-```
-
-- **Split (native OpenAI / Anthropic)** — uncomment the matching lines in the template, fill them in, and point `OPENAI_BASE_URL` at the GPT-side endpoint:
-
-```text
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_API_KEY=sk-ant-xxxxx
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=sk-xxxxx
 ```
 
 The installer and its chained runtime installers accept either the single-gateway pair or a split setup as long as at least one base URL and one API key are present.
