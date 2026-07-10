@@ -9,6 +9,7 @@
 #
 # Phase 0  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
 # Phase 1  framework       — optional bare-metal SGLang/vLLM install
+# Phase 1b ROCm hotfix    — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 2  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
 # Phase 3  dep checkouts   — src/hyperloom/inference_optimizer/assets/local_setup.sh
@@ -59,6 +60,8 @@ HYPERLOOM_WHEEL="${HYPERLOOM_WHEEL:-}"
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
 HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
 HYPERLOOM_WHEEL_PATTERN="${HYPERLOOM_WHEEL_PATTERN:-hyperloom_inference_optimizer-*.whl}"
+ROCM_PROFILER_HOTFIX_DONOR_IMAGE="${ROCM_PROFILER_HOTFIX_DONOR_IMAGE:-rocm/vllm-dev:base_custom_rocclr_profiler_hotfix_old_torch_20260428}"
+ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 
 DEFAULT_OPENAI_BASE_URL="https://global.primus-safe.amd.com/api/v1/llm-proxy/v1"
 SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
@@ -70,8 +73,9 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/compatibility.md (SGLang v0.5.12,
 # ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
 # v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
-# is the nearest published ROCm 7.2 wheel. AITER_REF pins ROCm/aiter to a
-# released tag so source builds are reproducible (override to track another ref).
+# is the nearest published ROCm 7.2 wheel. AITER_REF can pin ROCm/aiter to a
+# released tag; when unset, the installer selects the newest tag compatible
+# with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-v0.5.12}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
@@ -84,13 +88,7 @@ if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
 fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
-if [ -z "$_AITER_REF_WAS_SET" ]; then
-  case "$SGLANG_ROCM_EXTRA" in
-    rocm700) AITER_REF="v0.1.14.post1" ;;
-    *)       AITER_REF="v0.1.16.post3" ;;
-  esac
-fi
-AITER_REF="${AITER_REF:-v0.1.16.post3}"
+AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
@@ -417,6 +415,7 @@ PY
     log "torch: ${tv} (hip=${thip}) ROCm OK"
     check_torch_rocm_shared_libs "$py" || rc=1
     check_rocm_toolchain_alignment "$thip" || rc=1
+    check_torch_triton_alignment "$py" || rc=1
   fi
 
   local any_fw=0 fw
@@ -481,19 +480,36 @@ except metadata.PackageNotFoundError:
 PY
 }
 
-# Ensure the ROCm Triton version required by AITER's gluon kernels is present.
-ensure_rocm_triton_for_sglang() {
-  local py="$1" current=""
+torch_required_triton_version() {
+  local py="$1"
+  "$py" <<'PY'
+import importlib.metadata as metadata
+import re
+
+try:
+    requirements = metadata.requires("torch") or []
+except metadata.PackageNotFoundError:
+    raise SystemExit(0)
+
+for requirement in requirements:
+    if not requirement.lower().startswith("triton"):
+        continue
+    match = re.search(r"==\s*([^;\s]+)", requirement)
+    if match:
+        print(match.group(1))
+        break
+PY
+}
+
+check_torch_triton_alignment() {
+  local py="$1" required current
+  required="$(torch_required_triton_version "$py" 2>/dev/null || true)"
+  [ -n "$required" ] || return 0
   current="$(installed_dist_version "$py" triton 2>/dev/null || true)"
-  case "$current" in
-    3.6.0+rocm7.2.0.gitba5c1517)
-      log "ROCm Triton ${current} already installed"
-      return 0
-      ;;
-  esac
-  log "installing ROCm Triton 3.6.0 for SGLang/AITER"
-  "$py" -m pip install --force-reinstall --no-cache-dir \
-    "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/triton-3.6.0%2Brocm7.2.0.gitba5c1517-cp312-cp312-linux_x86_64.whl"
+  if [ "$current" != "$required" ]; then
+    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing SGLang"
+    return 1
+  fi
 }
 
 # Create a temporary constraint file that prevents pip from swapping ROCm torch
@@ -508,6 +524,7 @@ write_rocm_torch_constraints() {
 import torch
 raise SystemExit(0 if getattr(torch.version, "hip", None) else 1)
 PY
+  check_torch_triton_alignment "$py" || die "installed triton does not match torch; refusing to install framework with inconsistent ROCm dependencies"
   printf 'torch==%s\n' "$torch_version" > "$file"
   if installed_dist_version "$py" triton >/dev/null 2>&1; then
     printf 'triton==%s\n' "$(installed_dist_version "$py" triton)" >> "$file"
@@ -537,11 +554,72 @@ install_sglang_from_source() {
   if [ -f "${sglang_root}/python/pyproject_other.toml" ]; then
     cp "${sglang_root}/python/pyproject_other.toml" "${sglang_root}/python/pyproject.toml"
   fi
-  ensure_rocm_triton_for_sglang "$py"
   constraint_file="$(mktemp)"
   write_rocm_torch_constraints "$py" "$constraint_file"
-  "$py" -m pip install --constraint "$constraint_file" -e "${sglang_root}/python[all_hip]"
+  "$py" -m pip install --constraint "$constraint_file" -e "${sglang_root}/python[srt_hip]"
   rm -f "$constraint_file"
+}
+
+checkout_aiter_ref() {
+  local aiter_root="$1" ref="$2"
+  git -C "$aiter_root" checkout "$ref"
+  git -C "$aiter_root" submodule sync
+  git -C "$aiter_root" submodule update --init --recursive
+}
+
+ensure_aiter_checkout() {
+  local aiter_root="$1"
+  mkdir -p "$(dirname "$aiter_root")"
+  if [ ! -d "${aiter_root}/.git" ]; then
+    git clone "$AITER_REPO" "$aiter_root"
+  fi
+  git -C "$aiter_root" fetch --all --tags --prune
+}
+
+list_aiter_tags_newest_first() {
+  local aiter_root="$1"
+  git -C "$aiter_root" tag -l 'v*' | sort -V -r
+}
+
+install_aiter_ref_with_constraints() {
+  local py="$1" aiter_root="$2" ref="$3" constraint_file="$4"
+  checkout_aiter_ref "$aiter_root" "$ref"
+  "$py" -m pip install --constraint "$constraint_file" \
+    --config-settings editable_mode=compat -e "$aiter_root" || return 1
+  "$py" -c "import aiter" >/dev/null
+}
+
+install_compatible_aiter() {
+  local py="$1" aiter_root="$2" constraint_file ref tried=0
+  constraint_file="$(mktemp)"
+  write_rocm_torch_constraints "$py" "$constraint_file"
+
+  ensure_aiter_checkout "$aiter_root"
+  if [ -n "$AITER_REF" ]; then
+    log "installing AITER ${AITER_REF} with existing torch/triton constraints"
+    install_aiter_ref_with_constraints "$py" "$aiter_root" "$AITER_REF" "$constraint_file" \
+      || { rm -f "$constraint_file"; die "AITER ${AITER_REF} installed or imported unsuccessfully with the current torch/triton constraints"; }
+    rm -f "$constraint_file"
+    return 0
+  fi
+
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    tried=$((tried + 1))
+    log "trying AITER ${ref} with existing torch/triton constraints"
+    if install_aiter_ref_with_constraints "$py" "$aiter_root" "$ref" "$constraint_file"; then
+      AITER_REF="$ref"
+      export AITER_REF
+      rm -f "$constraint_file"
+      log "selected AITER_REF=${AITER_REF}"
+      return 0
+    fi
+    warn "AITER ${ref} did not install/import with current torch/triton; trying older tag"
+  done < <(list_aiter_tags_newest_first "$aiter_root")
+
+  rm -f "$constraint_file"
+  [ "$tried" -gt 0 ] || die "no AITER tags found in ${AITER_REPO}"
+  die "no AITER tag installed and imported successfully with the current torch/triton constraints"
 }
 
 # Install the AMD SGLang wheel only when its dependency set matches this Python.
@@ -572,7 +650,11 @@ PY
   log "Phase 1: installing SGLang ROCm framework layer"
   log "framework python: ${py}"
   log "AITER_ROOT=${aiter_root}"
-  log "AITER_REF=${AITER_REF}"
+  if [ -n "$AITER_REF" ]; then
+    log "AITER_REF=${AITER_REF}"
+  else
+    log "AITER_REF=auto (newest tag compatible with installed torch/triton)"
+  fi
   log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
   log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
 
@@ -582,7 +664,13 @@ PY
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
     _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
-    _py_has "$py" aiter && log "aiter import OK" || warn "aiter missing (check-only; would clone/install ${AITER_REPO}@${AITER_REF})"
+    if _py_has "$py" aiter; then
+      log "aiter import OK"
+    elif [ -n "$AITER_REF" ]; then
+      warn "aiter missing (check-only; would clone/install ${AITER_REPO}@${AITER_REF})"
+    else
+      warn "aiter missing (check-only; would auto-select newest compatible tag from ${AITER_REPO})"
+    fi
     _py_has "$py" sgl_kernel && log "sgl_kernel import OK" || warn "sgl_kernel missing (check-only; installed by amd-sglang)"
     return 0
   fi
@@ -592,8 +680,13 @@ PY
       log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
     else
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
+      log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
     fi
-    log "would clone/update ${AITER_REPO}@${AITER_REF} at ${aiter_root} and install it with editable_mode=compat"
+    if [ -n "$AITER_REF" ]; then
+      log "would clone/update ${AITER_REPO}@${AITER_REF} at ${aiter_root} and install it with current torch/triton constraints"
+    else
+      log "would auto-select the newest compatible AITER tag from ${AITER_REPO} and install it with current torch/triton constraints"
+    fi
     return 0
   fi
 
@@ -609,16 +702,7 @@ PY
   fi
 
   if ! _py_has "$py" aiter; then
-    mkdir -p "$(dirname "$aiter_root")"
-    if [ ! -d "${aiter_root}/.git" ]; then
-      git clone --recursive --branch "$AITER_REF" "$AITER_REPO" "$aiter_root"
-    else
-      git -C "$aiter_root" fetch --all --tags --prune
-      git -C "$aiter_root" checkout "$AITER_REF"
-      git -C "$aiter_root" submodule sync
-      git -C "$aiter_root" submodule update --init --recursive
-    fi
-    "$py" -m pip install --config-settings editable_mode=compat -e "$aiter_root"
+    install_compatible_aiter "$py" "$aiter_root"
   else
     log "aiter already importable; skipping AITER source install"
   fi
@@ -795,6 +879,223 @@ install_requested_framework() {
     sglang) install_sglang_framework ;;
     vllm) install_vllm_framework ;;
   esac
+}
+
+rocm_profiler_hotfix_applied() {
+  local target_dir="$1" hip_lib="$2" tracer_lib="$3"
+  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || true)")" = "$hip_lib" ] \
+    && [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || true)")" = "$tracer_lib" ]
+}
+
+rocm_profiler_hotfix_compatible() {
+  local py hip framework_versions
+  py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
+  hip="$("$py" - <<'PY' 2>/dev/null || true
+try:
+    import torch
+    print(getattr(torch.version, "hip", None) or "")
+except Exception:
+    pass
+PY
+)"
+  case "$hip" in
+    7.2*) log "torch.version.hip=${hip}; ROCm profiler hotfix is eligible" ;;
+    "") warn "torch ROCm runtime not importable; skipping ROCm profiler hotfix" ; return 1 ;;
+    *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
+  esac
+
+  framework_versions="$("$py" - <<'PY' 2>/dev/null || true
+import importlib
+
+found = []
+for name in ("sglang", "vllm"):
+    try:
+        module = importlib.import_module(name)
+    except Exception:
+        continue
+    found.append(f"{name}={getattr(module, '__version__', 'unknown')}")
+print(" ".join(found))
+PY
+)"
+  [ -n "$framework_versions" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
+  log "framework imports: ${framework_versions}"
+}
+
+select_rocm_profiler_hotfix_runtime() {
+  if command -v docker >/dev/null 2>&1; then
+    echo docker
+  elif command -v podman >/dev/null 2>&1; then
+    echo podman
+  else
+    return 1
+  fi
+}
+
+extract_rocm_profiler_hotfix_libs() {
+  local runtime="$1" image="$2" tmp_dir cid="" donor_paths hip_path tracer_path
+  tmp_dir="$(mktemp -d)"
+  donor_paths="$("$runtime" run --rm --entrypoint /bin/sh "$image" -c '
+hip="$(find /opt -type f -name "libamdhip64.so.*" ! -name "libamdhip64.so" ! -name "libamdhip64.so.7" 2>/dev/null | sort | tail -n 1)"
+tracer="$(find /opt -type f -name "libroctracer64.so.*" ! -name "libroctracer64.so" ! -name "libroctracer64.so.4" 2>/dev/null | sort | tail -n 1)"
+[ -n "$hip" ] && [ -n "$tracer" ] || exit 1
+printf "%s\n%s\n" "$hip" "$tracer"
+' 2>/dev/null)" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  hip_path="$(printf '%s\n' "$donor_paths" | sed -n '1p')"
+  tracer_path="$(printf '%s\n' "$donor_paths" | sed -n '2p')"
+  case "$(basename "$hip_path")" in
+    libamdhip64.so.7.*) ;;
+    *) rm -rf "$tmp_dir"; warn "donor HIP runtime has unexpected ABI: ${hip_path}"; return 1 ;;
+  esac
+  case "$(basename "$tracer_path")" in
+    libroctracer64.so.4.*) ;;
+    *) rm -rf "$tmp_dir"; warn "donor roctracer has unexpected ABI: ${tracer_path}"; return 1 ;;
+  esac
+  if ! cid="$("$runtime" create "$image")"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  if ! "$runtime" cp "${cid}:${hip_path}" "$tmp_dir/"; then
+    "$runtime" rm "$cid" >/dev/null 2>&1 || true
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  if ! "$runtime" cp "${cid}:${tracer_path}" "$tmp_dir/"; then
+    "$runtime" rm "$cid" >/dev/null 2>&1 || true
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  "$runtime" rm "$cid" >/dev/null 2>&1 || true
+  printf '%s\n' "$tmp_dir"
+}
+
+backup_rocm_profiler_hotfix_targets() {
+  local target_dir="$1" backup_dir="$2" path real
+  install -d "$backup_dir"
+  for path in \
+    "${target_dir}/libamdhip64.so" \
+    "${target_dir}/libamdhip64.so.7" \
+    "${target_dir}/libroctracer64.so" \
+    "${target_dir}/libroctracer64.so.4"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    cp -a "$path" "$backup_dir"/
+    real="$(readlink -f "$path" 2>/dev/null || true)"
+    if [ -n "$real" ] && [ -e "$real" ]; then
+      cp -a "$real" "$backup_dir"/
+    fi
+  done
+}
+
+install_rocm_profiler_hotfix_libs() {
+  local source_dir="$1" target_dir="$2" hip_lib="$3" tracer_lib="$4"
+  install -m 0644 "${source_dir}/${hip_lib}" "${target_dir}/${hip_lib}" || return 1
+  install -m 0644 "${source_dir}/${tracer_lib}" "${target_dir}/${tracer_lib}" || return 1
+  ln -sfnT "$hip_lib" "${target_dir}/libamdhip64.so.7" || return 1
+  ln -sfnT libamdhip64.so.7 "${target_dir}/libamdhip64.so" || return 1
+  ln -sfnT "$tracer_lib" "${target_dir}/libroctracer64.so.4" || return 1
+  ln -sfnT libroctracer64.so.4 "${target_dir}/libroctracer64.so" || return 1
+}
+
+rollback_rocm_profiler_hotfix_targets() {
+  local backup_dir="$1" target_dir="$2"
+  [ -d "$backup_dir" ] || return 1
+  if compgen -G "${backup_dir}/libamdhip64.so*" >/dev/null; then
+    cp -a "${backup_dir}"/libamdhip64.so* "$target_dir"/ || return 1
+  fi
+  if compgen -G "${backup_dir}/libroctracer64.so*" >/dev/null; then
+    cp -a "${backup_dir}"/libroctracer64.so* "$target_dir"/ || return 1
+  fi
+  return 0
+}
+
+verify_rocm_profiler_hotfix() {
+  local target_dir="$1" hip_lib="$2" tracer_lib="$3" py
+  log "verifying ROCm profiler hotfix links"
+  ls -l "${target_dir}/libamdhip64.so" "${target_dir}/libamdhip64.so.7" \
+        "${target_dir}/libroctracer64.so" "${target_dir}/libroctracer64.so.4" || return 1
+  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so")")" = "$hip_lib" ] \
+    || { warn "libamdhip64.so does not point to ${hip_lib}"; return 1; }
+  [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so")")" = "$tracer_lib" ] \
+    || { warn "libroctracer64.so does not point to ${tracer_lib}"; return 1; }
+
+  py="$(resolve_python)" || return 1
+  "$py" - "$target_dir" <<'PY'
+import ctypes
+import os
+import sys
+
+target_dir = sys.argv[1]
+for name in ("libamdhip64.so", "libroctracer64.so"):
+    path = os.path.join(target_dir, name)
+    print(f"{path} -> {os.path.realpath(path)}")
+    ctypes.CDLL(path)
+    print(f"loaded: {path}")
+
+import torch
+
+hip = getattr(torch.version, "hip", None)
+print(f"torch.version.hip={hip}")
+if not hip:
+    raise SystemExit("torch.version.hip is empty after ROCm profiler hotfix")
+PY
+}
+
+apply_rocm_profiler_hotfix() {
+  local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
+  local donor_image="${ROCM_PROFILER_HOTFIX_DONOR_IMAGE}"
+  local runtime extract_dir backup_dir hip_lib tracer_lib
+
+  log "Phase 1b: applying ROCm profiler hotfix"
+  log "ROCM_PROFILER_HOTFIX_DONOR_IMAGE=${donor_image}"
+
+  [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
+  rocm_profiler_hotfix_compatible || return 0
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    log "check-only: ROCm profiler hotfix donor image will not be inspected"
+    log "current libamdhip64.so -> $(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || echo missing)"
+    log "current libroctracer64.so -> $(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || echo missing)"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would discover HIP runtime and roctracer hotfix libraries in ${donor_image}"
+    log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
+    log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
+    return 0
+  fi
+
+  runtime="$(select_rocm_profiler_hotfix_runtime)" \
+    || { warn "docker or podman not found; skipping ROCm profiler hotfix"; return 0; }
+  log "extracting ROCm profiler hotfix libraries with ${runtime}"
+  extract_dir="$(extract_rocm_profiler_hotfix_libs "$runtime" "$donor_image")" \
+    || { warn "could not extract ROCm profiler hotfix libraries from ${donor_image}; skipping"; return 0; }
+  hip_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libamdhip64.so.*' | sort | tail -n 1)")"
+  tracer_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libroctracer64.so.*' | sort | tail -n 1)")"
+  if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then
+    log "ROCm profiler hotfix already applied (${hip_lib}, ${tracer_lib})"
+    verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib" || warn "existing ROCm profiler hotfix verification reported issues"
+    rm -rf "$extract_dir"
+    return 0
+  fi
+  backup_dir="${target_dir}/.profiler_hotfix_backup_$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_rocm_profiler_hotfix_targets "$target_dir" "$backup_dir"
+  log "backed up current ROCm profiler libraries to ${backup_dir}"
+  if ! install_rocm_profiler_hotfix_libs "$extract_dir" "$target_dir" "$hip_lib" "$tracer_lib" \
+     || ! verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib"; then
+    warn "ROCm profiler hotfix failed; attempting rollback from ${backup_dir}"
+    if rollback_rocm_profiler_hotfix_targets "$backup_dir" "$target_dir"; then
+      warn "rollback succeeded; continuing without ROCm profiler hotfix"
+      rm -rf "$extract_dir"
+      return 0
+    fi
+    rm -rf "$extract_dir"
+    die "ROCm profiler hotfix failed and rollback did not complete"
+  fi
+  rm -rf "$extract_dir"
+  log "ROCm profiler hotfix applied"
 }
 
 read_dotenv_var() {
@@ -992,8 +1293,13 @@ EOF
 
 main() {
   bootstrap_wheel_install
-  [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
-  [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
+  if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
+    [ -f "$LOCAL_SETUP_SH" ] || warn "local_setup.sh not present locally (dry-run; wheel assets would be used after install)"
+    [ -f "$INSTALL_SH" ] || warn "install.sh not present locally (dry-run; wheel assets would be used after install)"
+  else
+    [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
+    [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
+  fi
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
@@ -1035,6 +1341,7 @@ main() {
   fi
 
   install_requested_framework
+  apply_rocm_profiler_hotfix
   if [ "$INSTALL_FRAMEWORK" != "none" ] && [ "$SKIP_BASE_CHECK" -eq 0 ]; then
     base_preflight
   fi

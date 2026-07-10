@@ -49,14 +49,18 @@ export SAFE_API_KEY=ak-your-safe-apikey
 export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
 ```
 
-Or use a split provider setup:
+Or use a split provider setup with separate Anthropic-compatible and OpenAI-compatible entrypoints:
 
 ```bash
 export ANTHROPIC_BASE_URL=https://api.anthropic.com
 export ANTHROPIC_API_KEY=sk-ant-xxxxx
-# and/or
+export CLAUDE_MODEL=claude-opus-4-7
+
 export OPENAI_BASE_URL=https://api.openai.com/v1
 export OPENAI_API_KEY=sk-xxxxx
+export CODEX_MODEL=gpt-4.1
+
+export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
 ```
 
 If you are running from a full source checkout, you can alternatively copy the template and fill in the same values:
@@ -71,11 +75,17 @@ The installer and its chained runtime installers accept either the single-gatewa
 
 ## 3. Run the bare-metal installer
 
+Use the installer path that matches how you obtained it:
+
 ```bash
+# Full source checkout
 src/hyperloom/inference_optimizer/assets/install_baremetal.sh
+
+# Standalone/customer install
+./install_baremetal.sh
 ```
 
-The script reads credentials from `.env` automatically. Common options and environment overrides:
+The script resolves credentials from flags, shell environment, and `.env` when present. Common options and environment overrides:
 
 | Option / environment variable | Description |
 |-------------------------------|-------------|
@@ -99,28 +109,9 @@ The script reads credentials from `.env` automatically. Common options and envir
 
 > Run `--dry-run` first to preview the actions. The framework layer only installs packages + dependencies + a ROCm check — it does **not** patch framework source.
 
-### ROCm 7.0 user-space on an older compatible host driver
+## 4. Launch with the printed environment
 
-If the host driver cannot be restarted or upgraded but supports ROCm 7.0 user-space, install ROCm 7.0 user-space libraries side by side and point the installer at them. This path requires Python 3.10 because the installer uses the AMD `amd-sglang[rocm700]` wheel; non-3.10 Python would take the source-install path and is rejected to avoid pulling mismatched ROCm 7.2 Triton.
-
-```bash
-export PYTHON=/opt/hyperloom/venv-rocm70/bin/python
-export ROCM_PATH=/opt/rocm-7.0.2
-export HIP_PATH=/opt/rocm-7.0.2
-export PATH=/opt/rocm-7.0.2/bin:$PATH
-export LD_LIBRARY_PATH=/opt/rocm-7.0.2/lib:$LD_LIBRARY_PATH
-export SGLANG_ROCM_PYPI_VERSION=7.0.0
-export SGLANG_ROCM_EXTRA=rocm700
-
-src/hyperloom/inference_optimizer/assets/install_baremetal.sh \
-  --install-framework sglang
-```
-
-The `rocm700` SGLang stack uses `triton 3.5.x`, so the installer chooses an older compatible AITER tag unless `AITER_REF` is set explicitly.
-
-## 4. Load the environment and launch
-
-When the install finishes, the script writes a single combined env file and prints its **actual path**. Copy and run the `source ...` command printed by the installer before launching:
+When the install finishes, the script writes a single combined env file and prints the exact `source ...` command to run. Copy that printed command into your current shell before launching:
 
 ```bash
 source '<path printed by install_baremetal.sh>'
@@ -128,7 +119,7 @@ source '<path printed by install_baremetal.sh>'
 
 The default location is usually `/workspace/hyperloom/runtime/hyperloom.env.sh`, but use the printed path if you exported a custom `USER_DATA_PATH` or passed `--user-data-path`.
 
-Then open this repo as the workspace in Cursor, paste the prompt the script prints into Cursor Chat, and fill in your workload (referencing `@src/hyperloom/inference_optimizer/SKILL.md`). The workload fields map to the same CLI flags as Local Mode — see [Run a Hyperloom optimization](../how-to/optimize.md).
+Then open the indicated workspace in Cursor, paste the prompt the installer prints into Cursor Chat, and fill in your workload. The workload fields map to the same CLI flags as Local Mode — see [Run a Hyperloom optimization](../how-to/optimize.md).
 
 ## Troubleshooting
 
