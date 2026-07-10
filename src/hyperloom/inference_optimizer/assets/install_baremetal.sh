@@ -934,9 +934,9 @@ download_rocm_profiler_hotfix_libs() {
     warn "gh is not authenticated; cannot download ROCm profiler hotfix asset"
     return 1
   }
-  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
+  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}" >&2
   if ! gh release download "$HYPERLOOM_WHEEL_TAG" -R "$HYPERLOOM_WHEEL_REPO" \
-    -p "$ROCM_PROFILER_HOTFIX_ASSET" -D "$tmp_dir"; then
+    -p "$ROCM_PROFILER_HOTFIX_ASSET" -D "$tmp_dir" >&2; then
     rm -rf "$tmp_dir"
     warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
     return 1
