@@ -16,9 +16,24 @@ The installer runs: base preflight → optional SGLang/vLLM framework install �
 
 ## 1. Get the code
 
+For a full source checkout:
+
 ```bash
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 ```
+
+For a standalone/customer install, copy only `install_baremetal.sh` onto the
+host. If the sibling installer scripts are not present, it automatically enters
+wheel mode, downloads the Hyperloom release wheel with `gh`, installs it into
+`$PYTHON`, and runs the packaged installer assets from site-packages:
+
+```bash
+gh auth login
+./install_baremetal.sh --install-framework sglang
+```
+
+Set `HYPERLOOM_WHEEL=/path/to/hyperloom_inference_optimizer-0.8.0-py3-none-any.whl`
+to use a pre-downloaded wheel and skip `gh`.
 
 ## 2. Configure LLM Credentials
 
@@ -72,6 +87,11 @@ The script reads credentials from `.env` automatically. Common options and envir
 | `AITER_REF=v0.1.14.post1` | Override the AITER source tag. By default, `rocm700` selects `v0.1.14.post1`; `rocm720` selects `v0.1.16.post3`. |
 | `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` | Skip the install-time GEAK RAG index build. Useful for smoke tests or hosts where model/index build is flaky. |
 | `KERNEL_AGENT_RAG_INDEX_STRICT=1` | Fail the install if the GEAK RAG index build fails. By default the installer warns and continues. |
+| `HYPERLOOM_INSTALL_SOURCE=wheel` | Force standalone wheel mode even when running from a source checkout. |
+| `HYPERLOOM_WHEEL=/path/to/file.whl` | Install Hyperloom from a local wheel or reachable URL instead of downloading with `gh`. |
+| `HYPERLOOM_WHEEL_REPO=AMD-AGI/Hyperloom` | GitHub repo used for `gh release download` in wheel mode. |
+| `HYPERLOOM_WHEEL_TAG=v0.8` | Release tag used for `gh release download` in wheel mode. |
+| `HYPERLOOM_WHEEL_PATTERN=hyperloom_inference_optimizer-*.whl` | Release asset pattern used for `gh release download` in wheel mode. |
 
 > Run `--dry-run` first to preview the actions. The framework layer only installs packages + dependencies + a ROCm check — it does **not** patch framework source.
 

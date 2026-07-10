@@ -26,12 +26,38 @@
 set -euo pipefail
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_REPO_ROOT_WAS_SET="${REPO_ROOT+x}"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 
 LOCAL_SETUP_SH="${_script_dir}/local_setup.sh"
 INSTALL_SH="${_script_dir}/install.sh"
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
-DOTENV="${REPO_ROOT}/.env"
+DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
+
+# Install source: "checkout" (default, use in-tree scripts + editable install)
+# or "wheel" (fetch the released hyperloom wheel and drive the packaged
+# assets — the standalone/customer path where this script is the only file on
+# disk). Auto-detected as "wheel" when the sibling scripts are absent.
+HYPERLOOM_INSTALL_SOURCE="${HYPERLOOM_INSTALL_SOURCE:-}"
+if [ -z "$HYPERLOOM_INSTALL_SOURCE" ]; then
+  if [ -f "$LOCAL_SETUP_SH" ] && [ -f "$INSTALL_SH" ]; then
+    HYPERLOOM_INSTALL_SOURCE="checkout"
+  else
+    HYPERLOOM_INSTALL_SOURCE="wheel"
+  fi
+fi
+if [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ] && [ -z "$_REPO_ROOT_WAS_SET" ]; then
+  REPO_ROOT="$(pwd)"
+  ENV_TEMPLATE="${REPO_ROOT}/.env.template"
+  DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
+fi
+# Released wheel source. HYPERLOOM_WHEEL takes a local .whl path or a reachable
+# URL and skips gh; otherwise the wheel is pulled from a private GitHub release
+# via gh (reuses the host's auth). Repo/tag/pattern are overridable.
+HYPERLOOM_WHEEL="${HYPERLOOM_WHEEL:-}"
+HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
+HYPERLOOM_WHEEL_PATTERN="${HYPERLOOM_WHEEL_PATTERN:-hyperloom_inference_optimizer-*.whl}"
 
 DEFAULT_OPENAI_BASE_URL="https://global.primus-safe.amd.com/api/v1/llm-proxy/v1"
 SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
@@ -116,7 +142,9 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT.
+VLLM_VENV_ROOT, HYPERLOOM_INSTALL_SOURCE, HYPERLOOM_WHEEL,
+HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG, HYPERLOOM_WHEEL_PATTERN,
+HYPERLOOM_ENV_FILE.
 EOF
 }
 
@@ -182,6 +210,72 @@ resolve_python() {
 # Import-probe a module. `import importlib.util` (not `import importlib`): a bare
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
+
+bootstrap_wheel_install() {
+  [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ] || return 0
+  local py wheel_ref="" wheel_dir="" wheel_file=""
+  py="$(resolve_python)" || die "no usable Python found to install the hyperloom wheel (set PYTHON)."
+  log "install source: wheel (standalone mode)"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install hyperloom wheel from ${HYPERLOOM_WHEEL:-gh ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} (${HYPERLOOM_WHEEL_PATTERN})}"
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
+    _py_has "$py" hyperloom.inference_optimizer \
+      && log "hyperloom.inference_optimizer import OK" \
+      || warn "hyperloom.inference_optimizer missing (check-only; would install the released wheel)"
+  else
+    if [ -n "$HYPERLOOM_WHEEL" ]; then
+      if [ -f "$HYPERLOOM_WHEEL" ]; then
+        wheel_ref="file://$(cd "$(dirname "$HYPERLOOM_WHEEL")" && pwd)/$(basename "$HYPERLOOM_WHEEL")"
+      else
+        wheel_ref="$HYPERLOOM_WHEEL"
+      fi
+      log "using operator-supplied wheel: ${HYPERLOOM_WHEEL}"
+    else
+      command -v gh >/dev/null 2>&1 \
+        || die "gh CLI not found; needed to download the ${HYPERLOOM_WHEEL_REPO} release wheel. Install gh + 'gh auth login', or set HYPERLOOM_WHEEL to a local .whl / reachable URL."
+      gh auth status >/dev/null 2>&1 \
+        || die "gh is not authenticated; run 'gh auth login' (needs read access to ${HYPERLOOM_WHEEL_REPO}), or set HYPERLOOM_WHEEL to a local .whl / reachable URL."
+      wheel_dir="$(mktemp -d)"
+      log "downloading ${HYPERLOOM_WHEEL_PATTERN} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} via gh"
+      gh release download "$HYPERLOOM_WHEEL_TAG" -R "$HYPERLOOM_WHEEL_REPO" \
+        -p "$HYPERLOOM_WHEEL_PATTERN" -D "$wheel_dir" \
+        || { rm -rf "$wheel_dir"; die "gh release download failed for ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} (${HYPERLOOM_WHEEL_PATTERN})"; }
+      wheel_file="$(ls -1 "$wheel_dir"/*.whl 2>/dev/null | head -1)"
+      [ -n "$wheel_file" ] || { rm -rf "$wheel_dir"; die "no wheel matching ${HYPERLOOM_WHEEL_PATTERN} in the ${HYPERLOOM_WHEEL_TAG} release"; }
+      wheel_ref="file://${wheel_file}"
+    fi
+    log "installing hyperloom wheel into ${py}"
+    "$py" -m pip install --quiet "$wheel_ref" \
+      || { [ -n "$wheel_dir" ] && rm -rf "$wheel_dir"; die "pip install of the hyperloom wheel failed"; }
+    [ -n "$wheel_dir" ] && rm -rf "$wheel_dir"
+  fi
+
+  # Re-point installer paths at the packaged assets. In dry-run we may not have
+  # installed the wheel yet, so keep the planned path check informational.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    local assets_dir
+    assets_dir="$("$py" - <<'PY' 2>/dev/null || true
+import pathlib
+try:
+    import hyperloom.inference_optimizer as m
+    print(pathlib.Path(m.__file__).resolve().parent / "assets")
+except Exception:
+    pass
+PY
+)"
+    [ -n "$assets_dir" ] && [ -d "$assets_dir" ] \
+      || die "cannot locate packaged assets after wheel install (hyperloom.inference_optimizer not importable)."
+    LOCAL_SETUP_SH="${assets_dir}/local_setup.sh"
+    INSTALL_SH="${assets_dir}/install.sh"
+    [ -f "${assets_dir}/.env.template" ] && ENV_TEMPLATE="${assets_dir}/.env.template"
+    if ! grep -q 'HYPERLOOM_INSTALL_SOURCE' "$INSTALL_SH" 2>/dev/null; then
+      die "installed wheel does not contain standalone-aware install.sh; use a Hyperloom wheel built with bare-metal wheel-mode support."
+    fi
+    log "packaged assets dir: ${assets_dir}"
+  fi
+  export REPO_ROOT HYPERLOOM_INSTALL_SOURCE
+}
 
 python_venv_root() {
   local py="$1" bin_dir venv_dir
@@ -825,6 +919,12 @@ write_combined_env() {
     [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
     [ -n "${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-}" ] && printf 'export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=%q\n' "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX"
     [ -n "${KERNEL_AGENT_RAG_INDEX_STRICT:-}" ] && printf 'export KERNEL_AGENT_RAG_INDEX_STRICT=%q\n' "$KERNEL_AGENT_RAG_INDEX_STRICT"
+    [ -n "${HYPERLOOM_INSTALL_SOURCE:-}" ] && printf 'export HYPERLOOM_INSTALL_SOURCE=%q\n' "$HYPERLOOM_INSTALL_SOURCE"
+    [ -n "${HYPERLOOM_WHEEL:-}" ] && printf 'export HYPERLOOM_WHEEL=%q\n' "$HYPERLOOM_WHEEL"
+    [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && printf 'export HYPERLOOM_WHEEL_REPO=%q\n' "$HYPERLOOM_WHEEL_REPO"
+    [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && printf 'export HYPERLOOM_WHEEL_TAG=%q\n' "$HYPERLOOM_WHEEL_TAG"
+    [ -n "${HYPERLOOM_WHEEL_PATTERN:-}" ] && printf 'export HYPERLOOM_WHEEL_PATTERN=%q\n' "$HYPERLOOM_WHEEL_PATTERN"
+    [ -n "${HYPERLOOM_ENV_FILE:-}" ] && printf 'export HYPERLOOM_ENV_FILE=%q\n' "$HYPERLOOM_ENV_FILE"
     printf '[ -f %q ] && . %q\n' "$local_env" "$local_env"
     printf '[ -f %q ] && . %q\n' "$ka_env" "$ka_env"
     if [ -n "${VIRTUAL_ENV:-}" ]; then
@@ -887,6 +987,7 @@ EOF
 }
 
 main() {
+  bootstrap_wheel_install
   [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
   [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
   case "$FRAMEWORK_ENV" in
