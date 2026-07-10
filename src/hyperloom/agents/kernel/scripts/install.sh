@@ -36,8 +36,9 @@ done
 # effect only when the corresponding env var is unset.
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
-# (this script lives at kernel-agent/scripts/install.sh, so its parent's
-# parent is the repo root). Operator-provided read-only inputs
+# (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so
+# KERNEL_AGENT_ROOT is one level up and REPO_ROOT is five levels up).
+# Operator-provided read-only inputs
 # (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, OOB_SRC, HYPERLOOM_BUNDLE,
 # GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) may stay outside USER_DATA_PATH.
 # The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
@@ -47,7 +48,7 @@ done
 # USER_DATA_PATH-rooted defaults). If your launcher exported these,
 # either rename to USER_DATA_PATH or simply drop them.
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
@@ -203,7 +204,7 @@ GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 # the OOB source from the forge path instead of requiring a separate OOB path
 # to be injected by the caller (the legacy DEFAULT_OOB_PATH env). An explicit
 # OOB_SRC is still honoured as an operator override. Honour the same forge-root
-# aliases as the forge backend (kernel-agent/tools/backends/forge_submit.py),
+# aliases as the forge backend (src/hyperloom/agents/kernel/tools/backends/forge_submit.py),
 # and fall back to the legacy bundle layout only when no forge path is provided.
 _forge_root="${FORGE_PATH:-${KERNEL_FORGE_ROOT:-${KERNEL_FORGE_PATH:-}}}"
 if [ -n "${_forge_root}" ]; then
@@ -923,7 +924,7 @@ ensure_tracelens() {
       # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
       # Keep this temp-clone+pin+atomic-rename in lockstep with the twin
       # implementations: src/hyperloom/inference_optimizer/assets/local_setup.sh
-      # (clone_or_update "atomic") and kernel-agent/tools/tracelens_analysis.py
+      # (clone_or_update "atomic") and src/hyperloom/agents/kernel/tools/tracelens_analysis.py
       # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
       _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
@@ -1084,7 +1085,7 @@ ensure_geak_v3() {
     # Patch GEAK's bundled prompt YAML to remove the misleading
     # ``task_runner.py performance`` example that causes sub-agent
     # LLMs to burn budget on ``find /`` for a non-existent script.
-    # Idempotent and fail-soft — see kernel-agent/tools/geak_prompt_patcher.py
+    # Idempotent and fail-soft — see src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py
     # for the full rationale. Always best-effort; only blocking when
     # the operator explicitly opts in via HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED=1.
     _geak_patcher="${KERNEL_AGENT_ROOT}/tools/geak_prompt_patcher.py"
@@ -1493,7 +1494,7 @@ write_env_file() {
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup inference_optimizer optimize →
-    # kernel-agent/tools/tracelens_analysis.py inherit the writable
+    # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
@@ -1511,7 +1512,7 @@ write_env_file() {
       echo "export PYTHONPATH='${HYPERLOOM_ROOT}/geak/src:${PYTHONPATH:-}'"
     fi
     # e2e optimizer ("geak") checkout + runner (GEAK_ROOT / GEAK_E2E_RUNNER),
-    # consumed by kernel-agent/tools/backends/geak_runner.py.
+    # consumed by src/hyperloom/agents/kernel/tools/backends/geak_runner.py.
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"

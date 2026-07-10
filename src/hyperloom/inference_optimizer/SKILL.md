@@ -118,7 +118,7 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`$HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens`; when unset,
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`; when unset,
 `src/hyperloom/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
