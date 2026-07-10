@@ -1646,6 +1646,7 @@ class KernelPhase(PhaseHandler):
         entry = {
             "action": "fusion",
             "variant_name": "forge_fusion",
+            "backend": "forge",
             "engine": "forge_fusion",
             "provenance": "forge_fusion",
             "source": "kernel_entry_auto",
@@ -1671,6 +1672,7 @@ class KernelPhase(PhaseHandler):
             )
         self.shared_state.current_best = {
             "action": "fusion",
+            "backend": "forge",
             "engine": "forge_fusion",
             "tput": new_tput,
             "variant_name": "forge_fusion",

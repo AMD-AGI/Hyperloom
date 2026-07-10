@@ -442,6 +442,8 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_fusion({}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
+        assert result["backend"] == "forge"
+        assert result["engine"] == "forge_fusion"
         assert result["micro_decision"] == "already_active"
         assert result["kept"] is False
         assert result["requires_e2e_validation"] is False

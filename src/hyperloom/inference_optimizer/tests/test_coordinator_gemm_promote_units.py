@@ -196,11 +196,15 @@ class TestPromoteFusionIntegrateKeep:
         stack = coord.shared_state.optimization_stack
         assert len(stack) == 1
         assert stack[0]["action"] == "fusion"
+        assert stack[0]["backend"] == "forge"
+        assert stack[0]["engine"] == "forge_fusion"
         assert stack[0]["patch_path"] == "/tmp/fusion.patch"
         assert stack[0]["extra_envs"]["SGLANG_USE_AITER"] == "1"
         assert stack[0]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
         assert stack[0]["kernel_speedup"] == 3.05
         assert coord.shared_state.current_best["action"] == "fusion"
+        assert coord.shared_state.current_best["backend"] == "forge"
+        assert coord.shared_state.current_best["engine"] == "forge_fusion"
         assert coord.shared_state.current_best["tput"] == 180.0
         assert coord.shared_state.cumulative_gain_validated == 80.0
         assert coord.shared_state.cumulative_gain_validated_stack_len == 1

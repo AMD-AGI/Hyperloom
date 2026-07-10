@@ -2490,6 +2490,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     if active_fusion_flags:
         return {
             "status": "complete",
+            "backend": "forge",
             "engine": "forge_fusion",
             "micro_decision": "already_active",
             "decision": "REVERT",
@@ -2505,7 +2506,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     if not _forge_fusion_available():
         return {
-            "status": "failed", "engine": "forge_fusion",
+            "status": "failed", "backend": "forge", "engine": "forge_fusion",
             "error_class": "forge_fusion_not_found",
             "error": ("forge-fusion CLI not found. Install via "
                       "'pip install -e <KernelForge>/src/forge_fusion'."),
@@ -2515,13 +2516,13 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     model_path = str(
         payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
     if not model_path:
-        return {"status": "failed", "engine": "forge_fusion",
+        return {"status": "failed", "backend": "forge", "engine": "forge_fusion",
                 "error_class": "model_path_missing", "error": "model_path is required",
                 "decision": "REVERT", "kept": False}
 
     trace_path = _resolve_fusion_decode_trace(state, payload)
     if not trace_path:
-        return {"status": "skipped", "engine": "forge_fusion",
+        return {"status": "skipped", "backend": "forge", "engine": "forge_fusion",
                 "error_class": "decode_trace_missing",
                 "error": ("no decode trace available for fusion discovery "
                           "(state.last_profile_trace empty; run profile/roofline first)"),
@@ -2561,11 +2562,12 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {"status": "failed", "engine": "forge_fusion",
+        result = {"status": "failed", "backend": "forge", "engine": "forge_fusion",
                   "error_class": "subprocess_timeout",
                   "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
                   "decision": "REVERT", "kept": False}
 
+    result.setdefault("backend", "forge")
     result.setdefault("engine", "forge_fusion")
     result.setdefault("workspace", str(workspace))
     result.setdefault("framework", framework)
