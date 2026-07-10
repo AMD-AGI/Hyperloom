@@ -105,7 +105,12 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         name="hunyuan_image3",
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_HUNYUAN_IMAGE3_ARGS",
-        repo_url="https://github.com/Tencent-Hunyuan/HunyuanImage-3.0.git",
+        # No framework-agent source repo: HunyuanImage-3.0 is a model we run
+        # as-is, not a framework whose source the perf-PR agent scouts/patches
+        # (unlike xdit). Kept out of framework_agent's _FRAMEWORK_TO_REPO_URL,
+        # so repo_url stays None to satisfy the registry<->repo_map consistency
+        # guard (test_registry_urls_match_repo_map skips None entries).
+        repo_url=None,
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
