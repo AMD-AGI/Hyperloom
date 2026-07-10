@@ -419,17 +419,32 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
 
-    @pytest.mark.asyncio
-    async def test_run_forge_fusion_skips_when_current_best_has_fusion_flags(self, tmp_path, monkeypatch):
+    def test_forge_fusion_skip_guard_ignores_warm_replay_fusion_flags(self):
         state = SharedState(
-            framework="sglang",
-            model_path="/models/zaya",
             current_best={
                 "action": "warm_replay",
+                "engine": "",
                 "extra_envs": {
                     "SGLANG_USE_AITER": "1",
                     "ZAYA_FUSED_QK": "1",
                     "ZAYA_FUSED_RESIDUAL": "1",
+                },
+            },
+        )
+
+        assert krh._active_forge_fusion_env_flags(state) == {}
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_skips_when_current_best_is_forge_fusion(self, tmp_path, monkeypatch):
+        state = SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            current_best={
+                "action": "fusion",
+                "engine": "forge_fusion",
+                "extra_envs": {
+                    "ZAYA_FUSED_CCA_NORMALIZE_QK": "1",
+                    "ZAYA_FUSED_CCA_GROUPED_QK_MEANS": "1",
                 },
             },
         )
@@ -448,8 +463,8 @@ class TestForgeGemmHelperCoverage:
         assert result["kept"] is False
         assert result["requires_e2e_validation"] is False
         assert result["active_env_flags"] == {
-            "ZAYA_FUSED_QK": "1",
-            "ZAYA_FUSED_RESIDUAL": "1",
+            "ZAYA_FUSED_CCA_NORMALIZE_QK": "1",
+            "ZAYA_FUSED_CCA_GROUPED_QK_MEANS": "1",
         }
 
     @pytest.mark.asyncio

@@ -2454,9 +2454,15 @@ def _resolve_fusion_decode_trace(state, payload: dict) -> str:
     return ""
 
 
-def _active_fusion_env_flags(state: Any) -> dict[str, str]:
-    """Return active model-level fusion flags already present in current_best."""
+def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
+    """Return active env flags only when forge-fusion itself is current_best."""
     current_best = getattr(state, "current_best", None) or {}
+    if not isinstance(current_best, dict):
+        return {}
+    if str(current_best.get("action") or "") != "fusion":
+        return {}
+    if str(current_best.get("engine") or "") != "forge_fusion":
+        return {}
     envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
     if not isinstance(envs, dict):
         return {}
@@ -2486,7 +2492,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     state = SharedState.load_or_init(session_dir)
 
-    active_fusion_flags = _active_fusion_env_flags(state)
+    active_fusion_flags = _active_forge_fusion_env_flags(state)
     if active_fusion_flags:
         return {
             "status": "complete",
@@ -2498,8 +2504,8 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "requires_e2e_validation": False,
             "active_env_flags": active_fusion_flags,
             "reason": (
-                "current_best already carries model-level fusion flags; "
-                "skip forge-fusion to avoid overlapping/double-fusing the same source path"
+                "current_best is already a forge-fusion KEEP; "
+                "skip forge-fusion to avoid rerunning the same adopted source patch"
             ),
             "source": "forge_fusion",
         }
