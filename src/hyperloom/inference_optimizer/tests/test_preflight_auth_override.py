@@ -673,10 +673,11 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
     assert seen["api_key"] == "safe-key"
 
 
-def test_validate_claude_model_split_entry_anthropic_no_catalog_proceeds(monkeypatch, capsys):
-    """Dual entry: Anthropic side has no /models route → proceed without probing
-    the OpenAI side. The OpenAI (gpt-*) catalog must never gate a Claude model,
-    so a missing Anthropic catalog is treated as unverifiable, not a failure."""
+def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch, capsys):
+    """Dual entry: Anthropic side returns 404/405 for /models (no catalog route)
+    → proceed without probing the OpenAI side. The 404 sentinel means "no
+    catalog endpoint", which is safe to pass; the OpenAI (gpt-*) catalog must
+    never gate a Claude model."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
@@ -689,9 +690,9 @@ def test_validate_claude_model_split_entry_anthropic_no_catalog_proceeds(monkeyp
     def _probe(**kw):
         url = kw.get("base_url", "")
         probed.append(url)
-        # Anthropic-compatible endpoint has no /models route.
+        # Anthropic-compatible endpoint has no /models route -> 404 sentinel.
         if "anthropic" in url or "deepseek" in url:
-            return None
+            return cli._CATALOG_NO_MODELS_ENDPOINT
         return {"gpt-5.4"}
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
@@ -702,7 +703,25 @@ def test_validate_claude_model_split_entry_anthropic_no_catalog_proceeds(monkeyp
     assert probed == ["https://api.deepseek.com/anthropic"]
     assert result is None
     assert args.claude_model == "claude-opus-4-7"
-    assert "cannot verify" in capsys.readouterr().out.lower()
+    assert "no /models route" in capsys.readouterr().out.lower()
+
+
+def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
+    """Dual entry: Anthropic catalog probe fails with auth/network (None, not the
+    404 sentinel) and no ALLOW_CUSTOM → refuse to start rather than silently pass."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
+
+    # None models a 401/403/network/5xx failure (unverifiable, not "no route").
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
+    args = _make_args(claude_model="claude-opus-4-7")
+    with pytest.raises(SystemExit) as exc:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc.value.code == 2
 
 
 def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monkeypatch, capsys):
@@ -834,6 +853,37 @@ def test_probe_llm_catalog_returns_none_when_all_attempts_fail(monkeypatch, caps
 def test_probe_llm_catalog_returns_none_for_empty_base_url(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: None)
     assert cli._probe_llm_catalog(base_url="", api_key="sk-test") is None
+
+
+def test_probe_llm_catalog_returns_sentinel_on_404_without_retry(monkeypatch):
+    """404 (no /models route) → return the no-catalog sentinel immediately, no retry."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    attempt: list[int] = [0]
+
+    def _get_404(url, **kwargs):
+        attempt[0] += 1
+        return _FakeResp(404, None)
+
+    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get_404)})
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    result = cli._probe_llm_catalog(base_url="https://api.deepseek.com/anthropic", api_key="sk-test")
+    assert result is cli._CATALOG_NO_MODELS_ENDPOINT
+    assert attempt[0] == 1  # no retries on a definitive 404
+
+
+def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
+    """401 is an auth failure, not "no route" → None (retries), never the sentinel."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    def _get_401(url, **kwargs):
+        return _FakeResp(401, None)
+
+    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get_401)})
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    result = cli._probe_llm_catalog(base_url="https://gateway/v1", api_key="bad-key")
+    assert result is None
 
 
 # _smoke_test_codex_model — WARN-only

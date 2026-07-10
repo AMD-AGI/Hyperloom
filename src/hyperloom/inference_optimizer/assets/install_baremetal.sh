@@ -219,9 +219,16 @@ bootstrap_wheel_install() {
   if [ "$DRY_RUN" -eq 1 ]; then
     log "would install hyperloom wheel from ${HYPERLOOM_WHEEL:-gh ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} (${HYPERLOOM_WHEEL_PATTERN})}"
   elif [ "$CHECK_ONLY" -eq 1 ]; then
-    _py_has "$py" hyperloom.inference_optimizer \
-      && log "hyperloom.inference_optimizer import OK" \
-      || warn "hyperloom.inference_optimizer missing (check-only; would install the released wheel)"
+    # Standalone check-only: if the wheel is not installed yet, report it and
+    # stop here. Do NOT try to locate site-packages assets (they do not exist
+    # on a first run), which would otherwise die with a non-zero exit.
+    if _py_has "$py" hyperloom.inference_optimizer; then
+      log "hyperloom.inference_optimizer import OK"
+    else
+      warn "hyperloom.inference_optimizer missing (check-only; would install the released wheel)"
+      export REPO_ROOT HYPERLOOM_INSTALL_SOURCE
+      return 0
+    fi
   else
     if [ -n "$HYPERLOOM_WHEEL" ]; then
       if [ -f "$HYPERLOOM_WHEEL" ]; then

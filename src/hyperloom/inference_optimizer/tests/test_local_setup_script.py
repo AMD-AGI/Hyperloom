@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "local_setup.sh"
 IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 KA_INSTALL = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "scripts" / "install.sh"
+BAREMETAL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install_baremetal.sh"
 PREFLIGHT_KB = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "preflight_kb.sh"
 
 # The default that all installers fall back to when USER_DATA_PATH is unset.
@@ -1245,3 +1246,45 @@ def test_io_install_magpie_patch_strict_default_with_benign_no_op_soft() -> None
     assert "Magpie atomic-write patch skipped" in text, "missing benign no-op warn"
     # Boolean-ish parsing helper replaces the brittle numeric -eq test.
     assert 'is_falsy "${PATCH_MAGPIE:-1}"' in text
+
+
+def test_baremetal_wheel_check_only_first_run_succeeds(tmp_path: Path) -> None:
+    # Standalone wheel mode: a first-run --check-only (wheel not installed yet)
+    # must report the missing package and exit 0, not die trying to locate
+    # site-packages assets that do not exist yet.
+    fake_py = tmp_path / "fakepython"
+    # Stub interpreter: make `import hyperloom.inference_optimizer` (and its
+    # importlib.util.find_spec probe) look unavailable, so bootstrap_wheel_install
+    # takes the "package missing" path.
+    fake_py.write_text(
+        "#!/usr/bin/env bash\n"
+        "exec /usr/bin/env python3 -c '\n"
+        "import sys, runpy\n"
+        "code = sys.argv[1] if len(sys.argv) > 1 else \"\"\n"
+        "code = code.replace(\"hyperloom.inference_optimizer\", \"hyperloom._absent_io_\")\n"
+        "exec(compile(code, \"<stub>\", \"exec\"))\n"
+        "' \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+
+    env = _clean_base_env()
+    env["HYPERLOOM_INSTALL_SOURCE"] = "wheel"
+    env["INFERENCE_OPTIMIZER_FORCE_PYTHON"] = "1"
+    env["PYTHON"] = str(fake_py)
+    env["USER_DATA_PATH"] = str(tmp_path / "udp")
+
+    result = subprocess.run(
+        ["bash", str(BAREMETAL), "--check-only", "--skip-base-check", "--yes"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "cannot locate packaged assets" not in combined
+    assert "hyperloom.inference_optimizer missing" in combined
