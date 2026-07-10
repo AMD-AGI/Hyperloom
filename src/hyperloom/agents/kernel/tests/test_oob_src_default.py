@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Guards for OOB source-path resolution in ``kernel-agent/scripts/install.sh``."""
+"""Guards for OOB source-path resolution in ``src/hyperloom/agents/kernel/scripts/install.sh``."""
 
 from __future__ import annotations
 
