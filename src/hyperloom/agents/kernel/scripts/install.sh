@@ -36,7 +36,7 @@ done
 # effect only when the corresponding env var is unset.
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
-# (this script lives at kernel-agent/scripts/install.sh, so its parent's
+# (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so its parent's
 # parent is the repo root). Operator-provided read-only inputs
 # (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, OOB_SRC, HYPERLOOM_BUNDLE,
 # GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) may stay outside USER_DATA_PATH.
@@ -165,7 +165,7 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 # Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
 # chore/subagent-docs-upstream-resource branch / PR #290). It carries the
-# GEMM tuning entrypoint used by kernel-agent/tools/gemm_tuning.py
+# GEMM tuning entrypoint used by src/hyperloom/agents/kernel/tools/gemm_tuning.py
 # (minisweagent.run.gemm_tuning) plus the upstreamed subagent docs/resources.
 # A tag is a permanent ref: it stays reachable regardless of how PR #290 is
 # merged to main (merge/squash/rebase) or whether the source branch is later
@@ -189,7 +189,7 @@ PERFSKILLS_E2E_RUNNER="${PERFSKILLS_E2E_RUNNER:-${PERFSKILLS_ROOT}/interface/run
 # the OOB source from the forge path instead of requiring a separate OOB path
 # to be injected by the caller (the legacy DEFAULT_OOB_PATH env). An explicit
 # OOB_SRC is still honoured as an operator override. Honour the same forge-root
-# aliases as the forge backend (kernel-agent/tools/backends/forge_submit.py),
+# aliases as the forge backend (src/hyperloom/agents/kernel/tools/backends/forge_submit.py),
 # and fall back to the legacy bundle layout only when no forge path is provided.
 _forge_root="${FORGE_PATH:-${KERNEL_FORGE_ROOT:-${KERNEL_FORGE_PATH:-}}}"
 if [ -n "${_forge_root}" ]; then
@@ -843,7 +843,7 @@ ensure_tracelens() {
       # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
       # Keep this temp-clone+pin+atomic-rename in lockstep with the twin
       # implementations: src/hyperloom/inference_optimizer/assets/local_setup.sh
-      # (clone_or_update "atomic") and kernel-agent/tools/tracelens_analysis.py
+      # (clone_or_update "atomic") and src/hyperloom/agents/kernel/tools/tracelens_analysis.py
       # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
       _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
@@ -996,7 +996,7 @@ ensure_geak() {
     # Patch GEAK's bundled prompt YAML to remove the misleading
     # ``task_runner.py performance`` example that causes sub-agent
     # LLMs to burn budget on ``find /`` for a non-existent script.
-    # Idempotent and fail-soft — see kernel-agent/tools/geak_prompt_patcher.py
+    # Idempotent and fail-soft — see src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py
     # for the full rationale. Always best-effort; only blocking when
     # the operator explicitly opts in via HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED=1.
     _geak_patcher="${KERNEL_AGENT_ROOT}/tools/geak_prompt_patcher.py"
@@ -1390,7 +1390,7 @@ write_env_file() {
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup inference_optimizer optimize →
-    # kernel-agent/tools/tracelens_analysis.py inherit the writable
+    # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then

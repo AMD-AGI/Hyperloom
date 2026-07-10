@@ -148,8 +148,8 @@ clone_or_update() {
   # renamed into place only after both succeed, so a concurrent reader never
   # sees a half-cloned/unpinned $dest (#722). Used for TraceLens, whose path is
   # read live by trace_analyze. Keep in lockstep with the twin implementations:
-  # kernel-agent/scripts/install.sh (ensure_tracelens) and
-  # kernel-agent/tools/tracelens_analysis.py (_ensure_tracelens_checkout).
+  # src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens) and
+  # src/hyperloom/agents/kernel/tools/tracelens_analysis.py (_ensure_tracelens_checkout).
   local mode="${5:-}"
 
   if [ -d "${dest}/.git" ]; then
@@ -159,7 +159,7 @@ clone_or_update() {
     fi
     if [ -n "$ref" ]; then
       # Realign to $ref via the shallow SHA-aware fetch used by
-      # kernel-agent/scripts/install.sh (ensure_tracelens): `fetch origin <ref>`
+      # src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens): `fetch origin <ref>`
       # + detached FETCH_HEAD checkout works for both a branch name and a raw
       # commit SHA on a real (shallow) GitHub remote, unlike `checkout <sha>`
       # which needs the object already present locally (#722 / PR#789).
@@ -174,7 +174,7 @@ clone_or_update() {
   if [ -e "$dest" ]; then
     # atomic mode targets the installer-MANAGED default checkout (TraceLens,
     # read live by trace_analyze): a dir without .git is a half-done/crashed
-    # clone, so drop it and rebuild, matching kernel-agent/scripts/install.sh
+    # clone, so drop it and rebuild, matching src/hyperloom/agents/kernel/scripts/install.sh
     # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout).
     # Non-atomic deps keep the fail-fast guard so an operator path is never
     # silently wiped (#722 / PR#789).
@@ -305,7 +305,7 @@ _normalized_tracelens_root_value() {
 # trailing-slash / symlinked spelling of the default must not read as override.
 # Empty input yields empty output; unresolvable paths fall back to the trimmed
 # literal so a not-yet-cloned default still compares correctly (#722 / PR#789).
-# Keep in lockstep with the twin helper in kernel-agent/scripts/install.sh.
+# Keep in lockstep with the twin helper in src/hyperloom/agents/kernel/scripts/install.sh.
 _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
@@ -326,7 +326,7 @@ resolve_tracelens() {
   # default. The default path — even when re-exported into env/.env or spelled
   # out via TRACELENS_DEFAULT_ROOT — stays installer-managed so a stale checkout
   # is still realigned to TRACELENS_REF, not silently adopted (#722 / PR#789).
-  # Matches the path-based override test in kernel-agent/scripts/install.sh and
+  # Matches the path-based override test in src/hyperloom/agents/kernel/scripts/install.sh and
   # the handler/tool.
   _default_root="$(_canonicalize_path "${_open_source_root}/TraceLens")"
   _norm_root="$(_canonicalize_path "$(_normalized_tracelens_root_value)")"

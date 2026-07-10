@@ -4696,7 +4696,7 @@ def run_command(
     return proc.returncode
 
 
-# Defaults kept in sync with kernel-agent/scripts/install.sh (TRACELENS_REPO /
+# Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 _TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
@@ -4759,7 +4759,7 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     rename into place so a partial clone is never observed.
 
     Keep this temp-clone+pin+atomic-rename in lockstep with the twin
-    implementations: kernel-agent/scripts/install.sh (ensure_tracelens) and
+    implementations: src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens) and
     src/hyperloom/inference_optimizer/assets/local_setup.sh (clone_or_update "atomic").
     """
     tl_root = Path(tl_root)
@@ -5796,7 +5796,7 @@ def main() -> int:
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
         help="TraceLens public checkout (TRACELENS_ROOT). Required: "
-        "kernel-agent/scripts/install.sh exports it from "
+        "src/hyperloom/agents/kernel/scripts/install.sh exports it from "
         "kernel-agent.env.sh; pass --tracelens-root only when "
         "running outside the installer-managed env.",
     )
@@ -6055,7 +6055,7 @@ def main() -> int:
             if not tl_root_arg:
                 raise SystemExit(
                     "TraceLens root not provided: set TRACELENS_ROOT in env "
-                    "(kernel-agent/scripts/install.sh writes it to "
+                    "(src/hyperloom/agents/kernel/scripts/install.sh writes it to "
                     "kernel-agent.env.sh) or pass --tracelens-root."
                 )
             tl_root = Path(tl_root_arg)

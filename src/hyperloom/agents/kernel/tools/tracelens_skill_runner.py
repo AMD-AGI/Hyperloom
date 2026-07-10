@@ -326,7 +326,9 @@ def _import_sdk() -> tuple[Any, Any]:
     try:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
-        raise RuntimeError("claude_agent_sdk not installed; run kernel-agent/scripts/install.sh first") from exc
+        raise RuntimeError(
+            "claude_agent_sdk not installed; run src/hyperloom/agents/kernel/scripts/install.sh first"
+        ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions

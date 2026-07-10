@@ -173,7 +173,7 @@ def _is_stale_proxy_url(url: str | None) -> bool:
     return _STALE_PROXY_HOSTPORT in str(url or "")
 
 # Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
-# written by kernel-agent/scripts/install.sh, but tolerant of any indent).
+# written by src/hyperloom/agents/kernel/scripts/install.sh, but tolerant of any indent).
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
 
 def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:

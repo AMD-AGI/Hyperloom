@@ -654,7 +654,7 @@ catch most of these, but self-checking first saves a retry cycle.
 python3 "$SKILL_DIR/validate_harness.py" "$HARNESS_PATH" --static
 ```
 
-where `$SKILL_DIR` is the absolute path to `kernel-agent/skills/unittest/`.
+where `$SKILL_DIR` is the absolute path to `src/hyperloom/agents/kernel/skills/unittest/`.
 
 If static check fails, read the errors, fix the harness, and retry.
 

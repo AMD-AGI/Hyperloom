@@ -18,7 +18,7 @@
 #       is pinned to an upstream-atomic commit)
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
-#   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
+#   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
 #      kernel-agent itself is the canonical owner of those — we just
 #      chain to it so users have a single entry point.
@@ -134,7 +134,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # post-refactor SHA: the upstream code is already atomic, so the in-place
 # patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
-# (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
+# (mirrors GEAK_REF in src/hyperloom/agents/kernel/scripts/install.sh).
 # Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
 # diffusion benchmark framework (#51); the previous pin
 # (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
@@ -177,7 +177,7 @@ Installs:
     environment / .env (opt-in live trace push; skipped otherwise)
   - Magpie (cloned under the pod-local open-source repo tree by default)
   - Detects/exports INFERENCEX_PATH
-  - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
+  - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
     optimize-time, candidate discovery via `fa phase-discover`) is provided
@@ -248,7 +248,7 @@ run() {
 }
 
 # Clone a dependency pinned to $ref into $dir, mirroring the GEAK pin in
-# kernel-agent/scripts/install.sh. `git clone --branch` only accepts
+# src/hyperloom/agents/kernel/scripts/install.sh. `git clone --branch` only accepts
 # tags/branches, not raw SHAs, so a 7-40 hex char ref triggers a shallow
 # fetch-checkout dance instead (GitHub serves shallow SHA fetches via
 # uploadpack.allowReachableSHA1InWant=true). DRY_RUN / CHECK_ONLY are honoured
@@ -306,7 +306,7 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors the gate in
-# kernel-agent/scripts/install.sh so users invoking the inference-optimizer
+# src/hyperloom/agents/kernel/scripts/install.sh so users invoking the inference-optimizer
 # installer directly (the canonical entrypoint) get the same fail-fast
 # behaviour as users running kernel-agent on its own. Without this, a
 # missing SAFE_API_KEY / OPENAI_BASE_URL slips past pip install, Magpie
@@ -424,7 +424,7 @@ resolve_python() {
 resolve_python
 log "PYTHON=${PYTHON}"
 # Export PYTHON + prepend its bin dir so the chained kernel-agent installer's
-# bare `python3 -m pip ...` calls (kernel-agent/scripts/install.sh) land in
+# bare `python3 -m pip ...` calls (src/hyperloom/agents/kernel/scripts/install.sh) land in
 # the same interpreter. Otherwise PATH-only resolution can split the
 # installation across two different pythons.
 export PYTHON

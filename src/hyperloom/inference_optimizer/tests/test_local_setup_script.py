@@ -57,21 +57,34 @@ def _clean_base_env() -> dict[str, str]:
 
 def test_skill_guidance_uses_in_tree_kernel_agent_paths() -> None:
     """Agent-facing launch docs must not recreate the retired sibling checkout path."""
-    skill_files = sorted(REPO_ROOT.rglob("SKILL.md"))
-    assert skill_files
+    guidance_files = set(REPO_ROOT.rglob("SKILL.md"))
+    guidance_files.update((REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "references").glob("*.md"))
+    guidance_files.update((REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets").glob("*.example"))
+    assert guidance_files
 
     offenders: list[str] = []
-    for path in skill_files:
+    stale_fragments = (
+        "$REPO_ROOT/" + "kernel-agent",
+        "${REPO_ROOT}/" + "kernel-agent",
+        "kernel-agent" + "/scripts/install.sh",
+        "kernel-agent" + "/tools/",
+        "kernel-agent" + "/skills/",
+    )
+    for path in sorted(guidance_files):
         text = path.read_text(encoding="utf-8")
-        if "$REPO_ROOT/kernel-agent" in text or "kernel-agent/scripts/install.sh" in text:
+        if any(fragment in text for fragment in stale_fragments):
             offenders.append(str(path.relative_to(REPO_ROOT)))
 
     assert not offenders, "stale kernel-agent path guidance in: " + ", ".join(offenders)
 
     inference_skill = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "SKILL.md"
     kernel_skill = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "SKILL.md"
+    setup_example = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "setup_env.sh.example"
     assert _CANONICAL_KERNEL_AGENT_INSTALL in inference_skill.read_text(encoding="utf-8")
     assert _CANONICAL_KERNEL_AGENT_INSTALL in kernel_skill.read_text(encoding="utf-8")
+    assert f'export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/{_CANONICAL_KERNEL_AGENT_ROOT}"' in setup_example.read_text(
+        encoding="utf-8"
+    )
 
 
 def _run_local_setup(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -347,7 +360,7 @@ def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path
 def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> None:
     # #722/PR#789: a MANAGED default checkout that exists but is NOT a git tree
     # (half-done/crashed clone, no .git) must be dropped and rebuilt+pinned via
-    # the atomic path, not abort. Mirrors kernel-agent/scripts/install.sh
+    # the atomic path, not abort. Mirrors src/hyperloom/agents/kernel/scripts/install.sh
     # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout);
     # previously clone_or_update die'd on "destination exists but is not a git
     # checkout" and local_setup.sh could not self-repair the default path.
