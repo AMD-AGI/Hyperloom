@@ -259,6 +259,8 @@ def default_baseline_config() -> Path:
         name = "baseline_vllm.yaml"
     elif fw == "xdit":
         name = "baseline_xdit.yaml"
+    elif fw == "hunyuan_image3":
+        name = "baseline_hunyuan_image3.yaml"
     else:
         name = "baseline_sglang.yaml"
     return asset_root() / "assets" / "configs" / name
