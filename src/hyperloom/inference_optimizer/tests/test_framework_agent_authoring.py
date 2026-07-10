@@ -1172,3 +1172,54 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
     assert len(rows) == 1
     assert rows[0]["status"] == "not_applicable"
     assert rows[0]["kept"] is False
+
+
+def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Path):
+    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file
+    OUTSIDE the specialist sandbox is NOT routable: autosubmit cannot route it
+    (integrate_patch would reject it as ``source_outside_workspace``), so the
+    empty-outcome bridge MUST stamp a terminal row. Guards the source-
+    containment tightening on the FRAMEWORK side (parity with autosubmit; not
+    just absolute sources)."""
+    import os
+
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    stub = _Stub(tmp_path, authoring=True)
+    sid = "spec-art-fw-escape"
+    worktree = runs_dir(tmp_path, "specialist", sid) / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "escape_fw.csv"
+    outside.write_text("x", encoding="utf-8")
+    rel_escape = os.path.relpath(outside, worktree)
+    task = SimpleNamespace(
+        task_id=sid,
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/8888",
+            "framework_batch_id": "b1",
+            "framework_audit": {"semantic_status": "not_present"},
+        },
+    )
+    done_payload = {
+        "empty": True,
+        "patches_written": [],
+        "proposal_set": [],
+        "artifacts_written": [
+            {
+                "source": rel_escape,
+                "target": "configs/model_configs/x.csv",
+                "kind": "aiter_tuned_fmoe_csv",
+            }
+        ],
+        "summary": "artifact exists but escapes sandbox via ..",
+    }
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload=done_payload,
+    )
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["kept"] is False

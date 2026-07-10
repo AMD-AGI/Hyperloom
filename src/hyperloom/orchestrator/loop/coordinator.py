@@ -163,16 +163,21 @@ def _resolvable_artifacts_from_done(
     accuracy gate + REVERT). This is the SHARED routable-signal used by BOTH the
     autosubmit bridge (``_maybe_autosubmit_specialist_patches``) and the
     empty-outcome bridge (``_record_framework_agent_authoring_empty_outcome``)
-    so they agree exactly: an artifact is routable only when its ``source``
-    resolves to a real file under the specialist worktree/workspace. Keeping the
+    so they share one rule: an artifact is routable only when its ``source``
+    resolves to a real file inside the specialist worktree/workspace. (Each
+    bridge passes its own already-unwrapped ``specialist_done`` view — outer for
+    autosubmit, ``payload``-unwrapped for empty-outcome — so agreement holds as
+    long as ``specialist_done`` is not double-wrapped, the same assumption the
+    ``patches_written`` / config-lever routing already relies on.) Keeping the
     bridges on one signal prevents the FRAMEWORK livelock (skip-stamp without a
     following integrate_patch).
 
-    Source containment: a relative ``source`` is resolved under
-    ``resolve_bases`` and an absolute ``source`` is accepted ONLY when it
-    resolves inside one of them — matching integrate_patch's sandbox so this
-    signal never routes a deliverable integrate_patch would reject as
-    ``source_outside_workspace``.
+    Source containment: every ``source`` — relative (resolved under
+    ``resolve_bases``) or absolute — is accepted ONLY when it resolves to a real
+    file inside one of ``resolve_bases``. This matches integrate_patch's sandbox
+    so the signal never routes a deliverable integrate_patch would reject as
+    ``source_outside_workspace`` (incl. a relative ``..`` that escapes the
+    sandbox yet still resolves to an existing file).
 
     Target scope (intentional trade-off): this pure signal validates the
     ``source`` only; it does NOT re-resolve ``target`` against the framework
@@ -205,27 +210,29 @@ def _resolvable_artifacts_from_done(
         if not src or not tgt:
             continue
         raw = Path(src)
-        cands: list[Path] = []
-        if raw.is_absolute():
-            # An absolute ``source`` is accepted ONLY when it resolves inside
-            # the specialist sandbox (worktree/workspace) — the SAME containment
-            # guarantee integrate_patch's ``_resolve_artifact_specs`` enforces
-            # (``source_outside_workspace``). Without this the autosubmit bridge
-            # would route a deliverable integrate_patch then rejects, burning a
-            # round on a guaranteed ``no_patches``.
-            resolved = raw.resolve()
-            for base in resolve_bases:
+        # Candidate paths: an absolute ``source`` is checked as-is; a relative
+        # ``source`` is resolved under each base. In BOTH cases the resolved
+        # path must be a real file that stays inside a base — the SAME
+        # containment integrate_patch's ``_resolve_artifact_specs`` enforces,
+        # rejecting ``source_outside_workspace`` AND ``..`` escapes (a relative
+        # ``../../x`` that ``is_file()`` alone would otherwise mis-route).
+        cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
+        bases_resolved = [base.resolve() for base in resolve_bases]
+        for cand in cands:
+            resolved = cand.resolve()
+            if not resolved.is_file():
+                continue
+            contained = False
+            for base in bases_resolved:
                 try:
-                    resolved.relative_to(base.resolve())
+                    resolved.relative_to(base)
                 except ValueError:
                     continue
-                cands.append(raw)
+                contained = True
                 break
-        else:
-            for base in resolve_bases:
-                cands.append(base / raw)
-        if any(c.is_file() for c in cands):
-            out.append(entry)
+            if contained:
+                out.append(entry)
+                break
     return out
 
 

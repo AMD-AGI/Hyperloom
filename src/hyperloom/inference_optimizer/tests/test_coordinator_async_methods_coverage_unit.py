@@ -492,6 +492,41 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(
     assert len(coord.state.pending_proposals) == n_before
 
 
+@pytest.mark.asyncio
+async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
+    coord: Coordinator,
+) -> None:
+    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via
+    ``..`` must NOT be routable, even though ``(base / source)`` resolves (the
+    OS follows ``..``) to a real file: integrate_patch rejects it as
+    ``source_outside_workspace``, so autosubmit must not route it. Full sandbox
+    parity for relative sources, not just absolute ones."""
+    import os
+
+    from hyperloom.orchestrator.state.task_registry import Task
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    sid = "spec-art-escape"
+    worktree = runs_dir(coord.session_dir, "specialist", sid) / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    outside = coord.session_dir / "escape.csv"
+    outside.write_text("x", encoding="utf-8")
+    rel_escape = os.path.relpath(outside, worktree)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka3")
+    n_before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": [],
+            "proposal_set": [],
+            "artifacts_written": [
+                {"source": rel_escape, "target": "configs/model_configs/x.csv", "kind": "k"}
+            ],
+        },
+    )
+    assert len(coord.state.pending_proposals) == n_before
+
+
 # -- _record_fact_per_task -------------------------------------------------
 def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
