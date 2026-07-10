@@ -33,6 +33,7 @@ LOCAL_SETUP_SH="${_script_dir}/local_setup.sh"
 INSTALL_SH="${_script_dir}/install.sh"
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
 DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
+HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 # Install source: "checkout" (default, use in-tree scripts + editable install)
 # or "wheel" (fetch the released hyperloom wheel and drive the packaged
@@ -268,11 +269,13 @@ PY
       || die "cannot locate packaged assets after wheel install (hyperloom.inference_optimizer not importable)."
     LOCAL_SETUP_SH="${assets_dir}/local_setup.sh"
     INSTALL_SH="${assets_dir}/install.sh"
+    HYPERLOOM_SKILL_PATH="$(cd "${assets_dir}/.." && pwd)/SKILL.md"
     [ -f "${assets_dir}/.env.template" ] && ENV_TEMPLATE="${assets_dir}/.env.template"
     if ! grep -q 'HYPERLOOM_INSTALL_SOURCE' "$INSTALL_SH" 2>/dev/null; then
       die "installed wheel does not contain standalone-aware install.sh; use a Hyperloom wheel built with bare-metal wheel-mode support."
     fi
     log "packaged assets dir: ${assets_dir}"
+    log "Hyperloom SKILL.md: ${HYPERLOOM_SKILL_PATH}"
   fi
   export REPO_ROOT HYPERLOOM_INSTALL_SOURCE
 }
@@ -925,6 +928,7 @@ write_combined_env() {
     [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && printf 'export HYPERLOOM_WHEEL_TAG=%q\n' "$HYPERLOOM_WHEEL_TAG"
     [ -n "${HYPERLOOM_WHEEL_PATTERN:-}" ] && printf 'export HYPERLOOM_WHEEL_PATTERN=%q\n' "$HYPERLOOM_WHEEL_PATTERN"
     [ -n "${HYPERLOOM_ENV_FILE:-}" ] && printf 'export HYPERLOOM_ENV_FILE=%q\n' "$HYPERLOOM_ENV_FILE"
+    [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && printf 'export HYPERLOOM_SKILL_PATH=%q\n' "$HYPERLOOM_SKILL_PATH"
     printf '[ -f %q ] && . %q\n' "$local_env" "$local_env"
     printf '[ -f %q ] && . %q\n' "$ka_env" "$ka_env"
     if [ -n "${VIRTUAL_ENV:-}" ]; then
@@ -962,7 +966,7 @@ Before launching, source the single combined env file:
 
 Then paste this into Cursor Chat and fill in your workload:
 
-@src/hyperloom/inference_optimizer/SKILL.md
+@${HYPERLOOM_SKILL_PATH}
 
 Optimize inference for this workload:
 - Model: /path/to/your/model

@@ -35,6 +35,10 @@ gh auth login
 Set `HYPERLOOM_WHEEL=/path/to/hyperloom_inference_optimizer-0.8.0-py3-none-any.whl`
 to use a pre-downloaded wheel and skip `gh`.
 
+In wheel mode, the installer prints the installed `SKILL.md` path from
+site-packages. Copy that printed `@.../SKILL.md` line into Cursor Chat when
+launching an optimization; you do not need to locate it manually.
+
 ## 2. Configure LLM Credentials
 
 Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/OOB/kernel-agent configuration needs them later.
