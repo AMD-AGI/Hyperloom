@@ -185,27 +185,6 @@ def test_skip_gemm_tuning_env(monkeypatch):
     assert Coordinator._skip_gemm_tuning() is False
 
 
-def test_pr_summary_to_dict_normalizes():
-    pr = SimpleNamespace(
-        repo="R",
-        number="3",
-        title="T",
-        url="U",
-        state="open",
-        labels=("x", "y"),
-        author="me",
-    )
-    d = Coordinator._pr_summary_to_dict(pr)
-    assert d == {
-        "repo": "R",
-        "number": 3,
-        "title": "T",
-        "url": "U",
-        "state": "open",
-        "labels": ["x", "y"],
-        "author": "me",
-    }
-
 
 def test_build_sweep_params_skill_defaults():
     """No recipe → SKILL defaults marker and list-shaped sweep params."""

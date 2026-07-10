@@ -1022,7 +1022,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_fan_out_specialist_wave": "phase_explore",
         "_maybe_auto_retry_specialist": "phase_explore",
         "_warm_specialist_params": "phase_explore",
-        "_pr_summary_to_dict": "phase_explore",
         "_refresh_gaps": "phase_explore",
         "_extract_gaps_from_baseline": "phase_explore",
         "_extract_gaps_from_attempts": "phase_explore",
