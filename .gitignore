@@ -33,6 +33,7 @@ inference_optimizer/runs/
 optimization_report.md
 bench.py
 ci/claw-integration.md
+src/hyperloom/framework-agent/kb/framework_optimization/lessons.jsonl
 
 # IDE / editor
 .idea/
@@ -76,19 +77,12 @@ CLAUDE.md
 # runtime) — keep only the small InferenceX daily set tracked in git.
 ci/candidates/*.json
 !ci/candidates/inferencex_daily_fixed.json
-GPU_optimization_plan.md
-GPU_optimization.md
-explore-opt-5-design.md
-hyperloom_features_zh.csv
-hyperloom_features.csv
-minimaxM3_opts.MD
-top_models.csv
-.coverage
-framework_enhance.MD
-reference_sessions
-advise_alter.MD
+
+# temp file
 code_functions_guidance
 tree-reform.MD
 tree-reform-lessons.MD
 code_functions_guidance_v2
 .gen_funcdocs.wf.js
+.gen_funcdocs_reboot.wf.js
+
