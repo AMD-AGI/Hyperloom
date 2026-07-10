@@ -74,7 +74,10 @@ class FrameworkPhase(PhaseHandler):
             if getattr(t, "kind", "") == "framework_agent":
                 return
         # Serialize one candidate at a time: skip while a candidate proposal
-        # awaits its Critic verdict (resolved on a later tick).
+        # awaits its Critic verdict (resolved on a later tick). Delivery of the
+        # proposal to the Critic is durable (re-presented from pending_proposals
+        # until decided — see Coordinator._augment_critic_inbox_with_pending), so
+        # the verdict reliably lands and this wait cannot wedge the phase.
         try:
             if any(
                 getattr(p, "action_name", "") == "framework_agent"
