@@ -1350,6 +1350,7 @@ main() {
 
   # Phase 3: dependency checkouts.
   local ls_args=()
+  ls_args+=(--no-next-steps)
   [ "$DRY_RUN" -eq 1 ] && ls_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && ls_args+=(--check-only)
   [ -n "$DEPS_ROOT_ARG" ] && ls_args+=(--deps-root "$DEPS_ROOT_ARG")

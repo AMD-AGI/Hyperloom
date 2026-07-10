@@ -901,10 +901,22 @@ def _validate_and_resolve_claude_model(
             or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         )
-        # (url, key) candidates in priority order; skip blanks and dedupe so a
-        # single-gateway deploy (same URL both sides) probes only once.
+        # The orchestration model is a Claude model, so its catalog must come
+        # from the Anthropic side only. In a split deploy the OpenAI catalog
+        # (gpt-*) would never carry a Claude id and must not gate it. Fall back
+        # to the OpenAI side ONLY for a single-gateway deploy where both sides
+        # resolve to the same endpoint.
+        candidates: list[tuple[str, str]] = []
+        if anthropic_url:
+            candidates.append((anthropic_url, anthropic_key))
+        if openai_url and openai_url == anthropic_url:
+            # single gateway: same URL serves both; OpenAI key is a valid retry
+            candidates.append((openai_url, openai_key))
+        elif openai_url and not anthropic_url:
+            # pure single-gateway with only OPENAI_BASE_URL configured
+            candidates.append((openai_url, openai_key))
         seen_urls: set[str] = set()
-        for cand_url, cand_key in ((anthropic_url, anthropic_key), (openai_url, openai_key)):
+        for cand_url, cand_key in candidates:
             if not cand_url or cand_url in seen_urls:
                 continue
             seen_urls.add(cand_url)
