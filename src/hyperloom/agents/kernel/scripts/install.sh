@@ -36,8 +36,9 @@ done
 # effect only when the corresponding env var is unset.
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
-# (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so its parent's
-# parent is the repo root). Operator-provided read-only inputs
+# (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so
+# KERNEL_AGENT_ROOT is one level up and REPO_ROOT is five levels up).
+# Operator-provided read-only inputs
 # (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, OOB_SRC, HYPERLOOM_BUNDLE,
 # GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) may stay outside USER_DATA_PATH.
 # The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
@@ -47,7 +48,7 @@ done
 # USER_DATA_PATH-rooted defaults). If your launcher exported these,
 # either rename to USER_DATA_PATH or simply drop them.
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset

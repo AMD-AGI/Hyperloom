@@ -785,6 +785,16 @@ def test_install_does_not_reference_default_path_when_set(script: Path, tmp_path
     assert _DEFAULT_USER_DATA_PATH not in combined, combined
 
 
+def test_ka_install_repo_root_fallback_tracks_src_layout() -> None:
+    """The standalone kernel-agent installer must find the repo root from its in-tree path."""
+    text = KA_INSTALL.read_text(encoding="utf-8")
+    assert 'KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"' in text
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"' in text
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"' not in text
+    assert (KA_INSTALL.parent / "..").resolve() == REPO_ROOT / _CANONICAL_KERNEL_AGENT_ROOT
+    assert (KA_INSTALL.parent / "../../../../..").resolve() == REPO_ROOT
+
+
 @pytest.mark.parametrize(
     "script",
     [IO_INSTALL, KA_INSTALL, SCRIPT, PREFLIGHT_KB],
