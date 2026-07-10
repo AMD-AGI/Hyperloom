@@ -21,6 +21,8 @@ PREFLIGHT_KB = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets
 _DEFAULT_USER_DATA_PATH = "/workspace/hyperloom"
 # Substring of the loud fallback notice each script prints to stderr.
 _FALLBACK_WARNING = "USER_DATA_PATH not set"
+_CANONICAL_KERNEL_AGENT_ROOT = "src/hyperloom/agents/kernel"
+_CANONICAL_KERNEL_AGENT_INSTALL = f"{_CANONICAL_KERNEL_AGENT_ROOT}/scripts/install.sh"
 
 # Strip these host-leaked env vars so each test runs hermetically.
 _HOST_LEAK_VARS = (
@@ -54,6 +56,38 @@ def _clean_base_env() -> dict[str, str]:
     for var in _HOST_LEAK_VARS:
         run_env.pop(var, None)
     return run_env
+
+
+def test_skill_guidance_uses_in_tree_kernel_agent_paths() -> None:
+    """Agent-facing launch docs must not recreate the retired sibling checkout path."""
+    guidance_files = set(REPO_ROOT.rglob("SKILL.md"))
+    guidance_files.update((REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "references").glob("*.md"))
+    guidance_files.update((REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets").glob("*.example"))
+    assert guidance_files
+
+    offenders: list[str] = []
+    stale_fragments = (
+        "$REPO_ROOT/" + "kernel-agent",
+        "${REPO_ROOT}/" + "kernel-agent",
+        "kernel-agent" + "/scripts/install.sh",
+        "kernel-agent" + "/tools/",
+        "kernel-agent" + "/skills/",
+    )
+    for path in sorted(guidance_files):
+        text = path.read_text(encoding="utf-8")
+        if any(fragment in text for fragment in stale_fragments):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+
+    assert not offenders, "stale kernel-agent path guidance in: " + ", ".join(offenders)
+
+    inference_skill = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "SKILL.md"
+    kernel_skill = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "SKILL.md"
+    setup_example = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "setup_env.sh.example"
+    assert _CANONICAL_KERNEL_AGENT_INSTALL in inference_skill.read_text(encoding="utf-8")
+    assert _CANONICAL_KERNEL_AGENT_INSTALL in kernel_skill.read_text(encoding="utf-8")
+    assert f'export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/{_CANONICAL_KERNEL_AGENT_ROOT}"' in setup_example.read_text(
+        encoding="utf-8"
+    )
 
 
 def _run_local_setup(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -331,7 +365,7 @@ def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path
 def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> None:
  # a MANAGED default checkout that exists but is NOT a git tree
     # (half-done/crashed clone, no .git) must be dropped and rebuilt+pinned via
-    # the atomic path, not abort. Mirrors kernel-agent/scripts/install.sh
+    # the atomic path, not abort. Mirrors src/hyperloom/agents/kernel/scripts/install.sh
     # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout);
     # previously clone_or_update die'd on "destination exists but is not a git
     # checkout" and local_setup.sh could not self-repair the default path.
@@ -754,6 +788,16 @@ def test_install_does_not_reference_default_path_when_set(script: Path, tmp_path
     assert result.returncode == 0, result.stderr + result.stdout
     combined = result.stdout + result.stderr
     assert _DEFAULT_USER_DATA_PATH not in combined, combined
+
+
+def test_ka_install_repo_root_fallback_tracks_src_layout() -> None:
+    """The standalone kernel-agent installer must find the repo root from its in-tree path."""
+    text = KA_INSTALL.read_text(encoding="utf-8")
+    assert 'KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"' in text
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"' in text
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"' not in text
+    assert (KA_INSTALL.parent / "..").resolve() == REPO_ROOT / _CANONICAL_KERNEL_AGENT_ROOT
+    assert (KA_INSTALL.parent / "../../../../..").resolve() == REPO_ROOT
 
 
 @pytest.mark.parametrize(

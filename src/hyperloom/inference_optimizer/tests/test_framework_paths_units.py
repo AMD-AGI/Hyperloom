@@ -360,7 +360,7 @@ class TestAtomPathPresentInAllThreeLocations:
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         text = ka_path.read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
-            "kernel-agent/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
+            "src/hyperloom/agents/kernel/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
             "is out of sync with src/hyperloom/orchestrator/kernel/"
             "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )

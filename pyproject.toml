@@ -286,7 +286,7 @@ omit = [
     # Robustness-agent standalone reactor CLI wrapper.
     "src/hyperloom/agents/robustness/main.py",
     # Stand-alone kernel-agent CLI tools (tree-reform.MD P2.5: promoted from
-    # the repo-root kernel-agent/tools/ into src/hyperloom/agents/kernel/tools/;
+    # the pre-src-layout repo-root kernel-agent tools into src/hyperloom/agents/kernel/tools/;
     # test_*.py were moved out to the sibling tests/ dir and are now covered
     # by the generic "*/tests/*" omit rule above, so that line is dropped).
     "src/hyperloom/agents/kernel/tools/kernel_optimization.py",

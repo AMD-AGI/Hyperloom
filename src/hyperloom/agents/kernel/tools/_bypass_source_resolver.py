@@ -12,7 +12,7 @@ actually dispatch a rewrite (it filters out candidates with no ``source_file``).
 
 This module is a compact, independent reimplementation of the op->source lookup.
 It **reads only the shared ground-truth data file**
-``kernel-agent/tools/data/op_to_source.json`` (also read by tracelens_analysis /
+``src/hyperloom/agents/kernel/tools/data/op_to_source.json`` (also read by tracelens_analysis /
 kernel_optimization / forge_submit) and never imports TraceLens or
 ``tracelens_analysis.py`` — mirroring how ``_bypass_classify`` reimplements the
 kernel taxonomy independently.
