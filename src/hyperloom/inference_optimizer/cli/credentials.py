@@ -60,13 +60,21 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             non-zero.
     """
     cmd = [sys.executable, "-m", "hyperloom.agents.critic.runtime.cli", "--help"]
+    # The probe cost is dominated by Python import time, which can spike on a
+    # loaded / shared pod (heavy transitive imports over a busy filesystem).
+    # Keep a safe default but allow operators to widen it via env so a slow-but-
+    # healthy runtime is not misdiagnosed as broken.
+    try:
+        _probe_timeout = float(os.environ.get("CRITIC_AGENT_PROBE_TIMEOUT_SEC", "90"))
+    except (TypeError, ValueError):
+        _probe_timeout = 90.0
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_probe_timeout,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
@@ -122,13 +130,20 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         SystemExit: With code 2 when the runtime cannot start or exits non-zero.
     """
     cmd = [sys.executable, "-m", "hyperloom.agents.robustness.runtime.cli", "--help"]
+    # See _validate_critic_agent_runtime: probe cost is import-bound and can
+    # spike on a loaded / shared pod. Widen the default and allow an env
+    # override so a slow-but-healthy runtime is not misdiagnosed as broken.
+    try:
+        _probe_timeout = float(os.environ.get("ROBUSTNESS_AGENT_PROBE_TIMEOUT_SEC", "90"))
+    except (TypeError, ValueError):
+        _probe_timeout = 90.0
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_probe_timeout,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(

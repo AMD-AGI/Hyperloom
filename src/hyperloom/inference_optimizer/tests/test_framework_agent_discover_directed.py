@@ -15,7 +15,7 @@ from hyperloom.orchestrator.loop.coordinator import (
     DEFAULT_FRAMEWORK_MAX_CANDIDATES,
     Coordinator,
 )
-from hyperloom.orchestrator.specialists.domains import get_domain
+from hyperloom.orchestrator.specialists.domains import PR_QUERY_REPOS
 
 
 class _StateStub:
@@ -74,14 +74,13 @@ def _call_discover(stub: _CoordinatorStub) -> bool:
     )
 
 
-def test_repo_urls_cover_pr_intel_set_with_frameworkimary():
-    """The repo set leads with the framework's own repo, includes every pr_intel_specialist repo, de-duplicated and order-preserving."""
+def test_repo_urls_cover_global_allowlist_with_framework_primary():
+    """The repo set leads with the framework's own repo, includes every PR_QUERY_REPOS entry, de-duplicated and order-preserving."""
     stub = _CoordinatorStub(Path("/tmp"))
     urls = stub._framework_agent_discover_repo_urls("sglang")
 
     assert urls[0] == _fa_client.repo_url_for_framework("sglang")
-    domain = get_domain("pr_intel_specialist")
-    for repo in domain.pr_repos:
+    for repo in PR_QUERY_REPOS:
         expected = f"https://github.com/{repo}.git"
         assert expected in urls or repo in "".join(urls)
     assert len(urls) == len(set(urls))

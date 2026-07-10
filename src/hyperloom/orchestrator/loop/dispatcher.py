@@ -190,6 +190,21 @@ class DispatcherCollaborator:
             await self.locks.reap_dead_holders()
         except Exception:  # noqa: BLE001
             log.exception("dispatcher: dead-holder lease reap failed")
+        # TTL-expiry self-heal (runs EVERY tick, complements reclaim_dead_running):
+        # covers tasks whose holder PID was recycled (undetectable as dead) or whose
+        # holder record is missing. The method is idempotent and skips lease_ttl_sec=0
+        # rows; running per-tick is safe. maintenance_watchdog (every 50 ticks) keeps
+        # running as a double-safety net.
+        try:
+            expired_tasks = await self.tasks.reclaim_expired_running(reason="pump_watchdog")
+            if expired_tasks:
+                log.warning(
+                    "dispatcher: reclaimed %d expired-running task(s): %s",
+                    len(expired_tasks),
+                    ", ".join(t[:12] for t in expired_tasks),
+                )
+        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+            log.exception("dispatcher: expired-running task reclaim failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
         # fast task can complete and be reaped (leaving ``inflight``) before its
@@ -311,17 +326,34 @@ class DispatcherCollaborator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
-                    # A framework-authoring specialist leases the whole machine
-                    # from ``framework_gpu_pool``; every other GPU specialist
-                    # leases from the carved ``gpu_specialist_pool``.
+                    # Whole-machine, time-shared lane vs serving-disjoint pool.
+                    # Framework-authoring AND bench-capable specialists lease the
+                    # whole machine from ``framework_gpu_pool`` (serialized with
+                    # serving via ``gpu_research_lane`` + ``benchmark_lane`` — the
+                    # server is torn down between rounds, so their cards are free
+                    # in the gap). Every other GPU specialist (non-bench probes)
+                    # leases from the carved serving-disjoint ``gpu_specialist_pool``.
+                    # See ``specialists.profile.uses_whole_machine_gpu_lane``.
+                    from ..specialists.profile import (
+                        uses_whole_machine_gpu_lane,
+                    )
+
+                    whole_machine_lane = uses_whole_machine_gpu_lane(params)
                     is_framework_authoring = bool(
                         params.get("framework_agent_authoring")
                     )
-                    if is_framework_authoring:
+                    if whole_machine_lane:
                         gpu_pool = self.framework_gpu_pool
-                        # Default to the whole machine; an explicit gpu_count
-                        # still wins (capped at pool capacity).
-                        default_gpu_count = gpu_pool.capacity or 1
+                        if is_framework_authoring:
+                            # Default to the whole machine; an explicit gpu_count
+                            # still wins (capped at pool capacity).
+                            default_gpu_count = gpu_pool.capacity or 1
+                        else:
+                            # Bench specialist: size to the serving TP it shards a
+                            # server across (the bench floor below still applies).
+                            default_gpu_count = (
+                                self._resolve_serving_tp() or gpu_pool.capacity or 1
+                            )
                     else:
                         gpu_pool = self.gpu_specialist_pool
                         # Default ``gpu_count`` to the serving TP; an explicit

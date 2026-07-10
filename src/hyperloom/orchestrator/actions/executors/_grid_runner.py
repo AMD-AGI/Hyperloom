@@ -769,6 +769,7 @@ def _run_magpie(
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
     preclean: bool = True,
+    server_already_ready: bool = False,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -777,6 +778,9 @@ def _run_magpie(
     land in the per-task workspace, not ``/workspace/``. ``soft_deadline_sec``
     is the Fix-E overtime cap: the tree is reaped and a sentinel
     ``OVERTIME_KILL_RETURNCODE`` returned instead of raising ``TimeoutExpired``.
+    ``server_already_ready`` is forwarded to :func:`run_with_session_kill` so
+    warm reuse rounds (client-only, no server boot) use the from-spawn soft clock
+    instead of the from-ready clock (which would never arm on an empty log).
 
     Args:
         magpie_python (str): Python interpreter used to launch Magpie.
@@ -788,6 +792,9 @@ def _run_magpie(
             defaults to ``output_dir``.
         soft_deadline_sec (float | None): Overtime soft deadline; reaps the tree
             and returns ``OVERTIME_KILL_RETURNCODE``.
+        preclean (bool): Whether to pre-clean stale servers before launch.
+        server_already_ready (bool): Pass ``True`` for warm reuse rounds so the
+            soft-deadline clock runs from process spawn, not the ready marker.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -849,6 +856,7 @@ def _run_magpie(
         timeout=timeout_sec,
         soft_deadline_sec=soft_deadline_sec,
         server_log_path=str(output_dir / "server.log"),
+        server_already_ready=server_already_ready,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -871,6 +879,7 @@ async def run_grid(
     server_lifecycle: dict[str, Any] | None = None,
     warmup_before_measure: bool | None = None,
     preclean_before_run: bool = True,
+    server_already_ready: bool = False,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -914,6 +923,12 @@ async def run_grid(
             ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``.
         preclean_before_run (bool): Whether to pre-clean stale servers before
             the measured Magpie launch. Reattach rounds must pass ``False``.
+        server_already_ready (bool): Pass ``True`` when the measured round
+            re-attaches to a server booted by a prior subprocess (warm reuse /
+            auto-warmup measure round). This bypasses the from-ready soft-deadline
+            anchor so the overtime soft-kill fires from spawn instead of waiting
+            for a ready marker that will never appear in the reuse round's own
+            server.log.
 
     Returns:
         list[VariantResult]: Per-variant results for every attempt, in order.
@@ -1324,6 +1339,7 @@ async def run_grid(
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
                 preclean=(False if auto_warmup else preclean_before_run),
+                server_already_ready=(server_already_ready or auto_warmup),
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks so the variant slot captures whatever

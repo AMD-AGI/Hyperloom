@@ -145,6 +145,46 @@ def _infer_scope(p: dict[str, Any]) -> str:
     return SCOPE_FREEFORM
 
 
+def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
+    """True when a GPU specialist should lease the *whole machine* (time-shared
+    with serving via ``gpu_research_lane``) rather than the serving-disjoint
+    ``gpu_specialist_pool``.
+
+    Two dispatch shapes take the whole-machine, time-shared lane:
+
+    * **framework-authoring** specialists (``framework_agent_authoring``) — the
+      long-standing behaviour: they lease the whole node from
+      ``framework_gpu_pool``.
+    * **bench-capable** specialists (``mode=patch`` & ``bench=true``,
+      i.e. :attr:`SpecialistProfile.reserves_benchmark_lane`) — they start a
+      real TP-sharded server on the full serving-TP cards and run a benchmark
+      loop, so they are already temporally mutually-exclusive with production
+      serving via ``gpu_research_lane`` + ``benchmark_lane``. Because the
+      serving process is torn down at the end of every explore/integrate round
+      (and its cards freed), a bench specialist can safely take the whole
+      machine in the gap between rounds. Critically, the serving-disjoint pool
+      is *empty* whenever serving occupies the whole node (``TP == #GPUs``), so
+      without this route bench specialists are structurally undispatchable on a
+      whole-machine-serving session.
+
+    Non-bench GPU probes (microbench / profiling, ``bench=false``) keep the
+    serving-disjoint pool: they are designed to run on cards physically disjoint
+    from serving.
+
+    Args:
+        params: The specialist dispatch params (carrying
+            ``framework_agent_authoring`` / ``mode`` / ``bench`` / ``scope`` /
+            ``lane``), or ``None``.
+
+    Returns:
+        ``True`` when the dispatch should draw from the whole-machine pool.
+    """
+    p = params or {}
+    if bool(p.get("framework_agent_authoring")):
+        return True
+    return resolve_specialist_profile(p).reserves_benchmark_lane
+
+
 def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfile:
     """Read ``scope`` / ``mode`` / ``bench`` / ``lane`` from dispatch params.
 
@@ -208,4 +248,5 @@ __all__ = [
     "SCOPE_VALUES",
     "SpecialistProfile",
     "resolve_specialist_profile",
+    "uses_whole_machine_gpu_lane",
 ]

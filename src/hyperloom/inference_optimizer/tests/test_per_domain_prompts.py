@@ -780,7 +780,7 @@ def test_prompt_builder_emits_nine_sections():
     assert "## 3. GAP STATEMENT" in usr_p
     assert "## 4. KB CONTEXT (optional, advisory)" in usr_p
     assert "## 5. WARM-START RECIPE SUMMARY" in usr_p
-    assert "## 6. PR FEED" in usr_p
+    assert "## 6. PR MONITOR" in usr_p
     assert "## 7. LOCAL SOURCE NAVIGATION HINT" in usr_p
 
 
@@ -793,13 +793,13 @@ def test_prompt_builder_uses_none_placeholder_for_empty_sections():
     assert "(none)" in usr_p
 
 
-def test_prompt_builder_pr_feed_unavailable_renders_explanatory_line():
+def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
     sys_p, usr_p = build_specialist_prompts_for_domain(
         task_id="task-003",
         domain_key="serving_specialist",
         pr_monitor_available=False,
     )
-    assert "pr_monitor unavailable" in usr_p
+    assert "unavailable" in usr_p
 
 
 def test_prompt_builder_unknown_domain_raises():

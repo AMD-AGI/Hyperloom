@@ -469,9 +469,6 @@ class _StubKnowledgePlane:
             raise self._raises
         return list(self._rows)
 
-    def pr_feed_warm(self, *, domain: str):
-        return [], []
-
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_merges_cortex_traverse_rows(coord):

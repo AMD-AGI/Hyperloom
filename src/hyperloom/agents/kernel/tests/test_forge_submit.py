@@ -171,8 +171,10 @@ def test_submit_rederives_aiter_cu_source_type(tmp_path, monkeypatch):
     assert "supports triton only" not in (res.get("stderr_tail") or "")
 
 
-def test_submit_skips_untracked_source(tmp_path):
-    """Untracked source files return a clean skip before any live-tree work."""
+def test_submit_skips_untracked_source(tmp_path, monkeypatch):
+    """Untracked source files return a clean skip before any live-tree work
+    when FORGE_DISABLE_NOGIT=1 is set (opt-out of the non-git fallback path)."""
+    monkeypatch.setenv("FORGE_DISABLE_NOGIT", "1")
     res = forge_submit.submit(
         source_file=str(tmp_path / "k.cpp"),
         prompt_file=tmp_path / "p.txt",
@@ -232,8 +234,11 @@ def test_autogen_templates_compile():
         compile(src, p, "exec")
 
 
-def test_submit_skips_without_harness_or_template(tmp_path):
-    """Empty test_command + non-git/unknown-op skips cleanly (rc=2), never crashes."""
+def test_submit_skips_without_harness_or_template(tmp_path, monkeypatch):
+    """Empty test_command + non-git/unknown-op skips cleanly (rc=2), never crashes.
+    Uses FORGE_DISABLE_NOGIT=1 to test the original skip path without triggering
+    the non-git scratch fallback (which would copytree from a large tmp_path)."""
+    monkeypatch.setenv("FORGE_DISABLE_NOGIT", "1")
     res = forge_submit.submit(
         source_file=str(tmp_path / "k.py"),
         prompt_file=tmp_path / "p.txt",
@@ -602,3 +607,243 @@ def test_sidecar_usage_roundtrips_through_parser(tmp_path):
     recovered = parse_forge_usage(marker)
     assert recovered["input_tokens"] == 7
     assert recovered["output_tokens"] == 11
+
+
+# ---------------------------------------------------------------------------
+# Non-git scratch worktree tests (_prepare_worktree_nogit + submit fallback)
+# ---------------------------------------------------------------------------
+
+def test_pkg_toplevel_at_package_boundary(tmp_path):
+    """_pkg_toplevel returns the top-level package dir (not its parent)."""
+    pkg = tmp_path / "mypkg" / "sub"
+    pkg.mkdir(parents=True)
+    (tmp_path / "mypkg" / "__init__.py").touch()
+    (pkg / "__init__.py").touch()
+    src_file = pkg / "module.py"
+    src_file.touch()
+    result = forge_submit._pkg_toplevel(str(src_file))
+    # Should be mypkg/ itself (the topmost dir that still has __init__.py),
+    # NOT tmp_path — so we copy only that package, not its siblings.
+    assert Path(result) == tmp_path / "mypkg"
+
+
+def test_pkg_toplevel_non_package(tmp_path):
+    """When source_file has no __init__.py in parent, falls back to parent dir."""
+    src = tmp_path / "module.py"
+    src.touch()
+    result = forge_submit._pkg_toplevel(str(src))
+    assert Path(result) == tmp_path
+
+
+def test_pkg_sys_path_root_is_parent_of_top_package(tmp_path):
+    """_pkg_sys_path_root returns the parent of the top-level package."""
+    pkg = tmp_path / "mypkg" / "sub"
+    pkg.mkdir(parents=True)
+    (tmp_path / "mypkg" / "__init__.py").touch()
+    (pkg / "__init__.py").touch()
+    src_file = pkg / "module.py"
+    src_file.touch()
+    # PYTHONPATH root must be tmp_path so ``import mypkg`` resolves.
+    assert Path(forge_submit._pkg_sys_path_root(str(src_file))) == tmp_path
+
+
+def test_pkg_sys_path_root_non_package(tmp_path):
+    """For a non-package file the sys.path root is its own directory."""
+    src = tmp_path / "module.py"
+    src.touch()
+    assert Path(forge_submit._pkg_sys_path_root(str(src))) == tmp_path
+
+
+def test_prepare_worktree_nogit_creates_git_repo(tmp_path):
+    """_prepare_worktree_nogit must produce a real git repo with the kernel file."""
+    # Create a minimal "installed package" structure (no .git)
+    pkg_dir = tmp_path / "src_pkg"
+    pkg_dir.mkdir()
+    kernel_file = pkg_dir / "kernel.py"
+    kernel_file.write_text("# original\n", encoding="utf-8")
+
+    out_dir = tmp_path / "forge_out"
+    out_dir.mkdir()
+
+    result = forge_submit._prepare_worktree_nogit(
+        str(kernel_file), "", out_dir, "forge/test/kernel"
+    )
+    if result is None:
+        pytest.skip("git not available or copytree failed")
+
+    scratch_dir, scratch_kernel, base_commit = result
+    scratch_dir_path = Path(scratch_dir)
+
+    # The scratch dir is a proper git repo
+    assert (scratch_dir_path / ".git").exists()
+    # The kernel file was copied in
+    assert Path(scratch_kernel).exists()
+    assert Path(scratch_kernel).read_text() == "# original\n"
+    # base_commit is a valid-looking SHA (40 hex chars)
+    assert len(base_commit) == 40
+    assert all(c in "0123456789abcdef" for c in base_commit)
+
+
+def test_prepare_worktree_nogit_uses_kernel_repo_when_provided(tmp_path):
+    """When kernel_repo is given it is used as the copy root."""
+    repo_root = tmp_path / "repo"
+    subpkg = repo_root / "mypkg"
+    subpkg.mkdir(parents=True)
+    kernel_file = subpkg / "kernel.py"
+    kernel_file.write_text("# kernel\n", encoding="utf-8")
+    (repo_root / "README.md").write_text("readme", encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    result = forge_submit._prepare_worktree_nogit(
+        str(kernel_file), str(repo_root), out_dir, "forge/test/kernel"
+    )
+    if result is None:
+        pytest.skip("git not available or copytree failed")
+
+    scratch_dir, scratch_kernel, _ = result
+    scratch_path = Path(scratch_dir)
+    # README was copied in from repo root
+    assert (scratch_path / "README.md").exists()
+    # kernel relative to repo_root is preserved
+    assert Path(scratch_kernel) == scratch_path / "mypkg" / "kernel.py"
+
+
+def test_prepare_worktree_nogit_copies_only_target_package(tmp_path):
+    """Without an explicit kernel_repo, only the target top-level package is
+    copied — NOT the whole dist-packages/site-packages dir with its siblings.
+
+    Regression: a naive walk-to-parent would set copy_root to the dist-packages
+    dir and shutil.copytree the entire tree (torch, vllm, ...) — 5-15 GB per
+    submit, risking ENOSPC.
+    """
+    # Simulate a dist-packages dir with two installed packages.
+    dist = tmp_path / "dist-packages"
+    target = dist / "vllm" / "model_executor" / "models"
+    target.mkdir(parents=True)
+    (dist / "vllm" / "__init__.py").touch()
+    (dist / "vllm" / "model_executor" / "__init__.py").touch()
+    (target / "__init__.py").touch()
+    kernel_file = target / "deepseek_v2.py"
+    kernel_file.write_text("# kernel\n", encoding="utf-8")
+
+    # A large sibling package that must NOT be copied.
+    sibling = dist / "torch"
+    sibling.mkdir()
+    (sibling / "__init__.py").touch()
+    (sibling / "big_blob.bin").write_bytes(b"x" * 4096)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    result = forge_submit._prepare_worktree_nogit(
+        str(kernel_file), "", out_dir, "forge/test/kernel"
+    )
+    if result is None:
+        pytest.skip("git not available or copytree failed")
+
+    scratch_dir, scratch_kernel, _ = result
+    scratch_path = Path(scratch_dir)
+
+    # scratch_dir is the PYTHONPATH root (== dist-packages equivalent), so the
+    # target package is nested under it and ``import vllm`` resolves.
+    assert Path(scratch_kernel) == (
+        scratch_path / "vllm" / "model_executor" / "models" / "deepseek_v2.py"
+    )
+    assert Path(scratch_kernel).read_text() == "# kernel\n"
+    # The sibling package must be absent — proving we did not copy dist-packages.
+    assert not (scratch_path / "torch").exists()
+
+
+def test_submit_nogit_fallback_does_not_skip(tmp_path, monkeypatch):
+    """submit() must not skip when source is non-git and FORGE_DISABLE_NOGIT is unset.
+
+    Monkeypatches _prepare_worktree → None (simulating non-git source) and
+    _run_loop_via_cli to avoid actually running any LLM or forge process.
+    """
+    monkeypatch.delenv("FORGE_DISABLE_NOGIT", raising=False)
+
+    # A plain (non-git) directory with a Python kernel file.
+    src_dir = tmp_path / "dist_pkg"
+    src_dir.mkdir()
+    kernel = src_dir / "kernel.py"
+    kernel.write_text("def f(): pass\n", encoding="utf-8")
+
+    out_dir = tmp_path / "forge_out"
+    out_dir.mkdir()
+
+    # _prepare_worktree always returns None (no git repo).
+    monkeypatch.setattr(forge_submit, "_prepare_worktree", lambda *a, **k: None)
+    # _needs_inplace always False so we don't hit the inplace path.
+    monkeypatch.setattr(forge_submit, "_needs_inplace", lambda *a, **k: False)
+
+    # _prepare_worktree_nogit returns a real-enough tuple so submit proceeds.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / ".git").mkdir()  # pretend it's a git repo
+
+    def _fake_nogit(src_file, kernel_repo, output_dir, branch):
+        return str(scratch), str(scratch / "kernel.py"), "abc123def456" + "0" * 28
+
+    monkeypatch.setattr(forge_submit, "_prepare_worktree_nogit", _fake_nogit)
+
+    # Stub the expensive parts so the test doesn't run real forge.
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_build_driver_adapter",
+                        lambda *a, **k: str(tmp_path / "driver.py"))
+    monkeypatch.setattr(forge_submit, "_autogen_forge_driver",
+                        lambda *a, **k: str(tmp_path / "driver.py"))
+    monkeypatch.setattr(forge_submit, "_baseline_correctness_ok", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(forge_submit, "_driver_is_compile_only", lambda *a, **k: False)
+    monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda *a, **k: "gfx942")
+    monkeypatch.setattr(forge_submit, "_shapes_from_candidate", lambda *a, **k: [])
+    monkeypatch.setattr(forge_submit, "_export_best_artifacts",
+                        lambda *a, **k: ("", []))
+    monkeypatch.setattr(forge_submit, "_write_report", lambda *a, **k: tmp_path / "r.md")
+    monkeypatch.setattr(forge_submit, "_forge_trace_from_sidecar", lambda *a, **k: (None, None))
+
+    # Fake _run_loop_via_cli: returns a successful but no-improvement result.
+    def _fake_loop(**kwargs):
+        return 10.0, 10.0, False, "forge: no improvement", None
+
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", _fake_loop)
+
+    # Write a dummy driver file so the path check doesn't error.
+    (tmp_path / "driver.py").write_text("", encoding="utf-8")
+    # Write a dummy kernel in scratch so _export_best_artifacts has something.
+    (scratch / "kernel.py").write_text("def f(): pass\n", encoding="utf-8")
+
+    result = forge_submit.submit(
+        source_file=str(kernel),
+        prompt_file=tmp_path / "prompt.md",
+        output_dir=out_dir,
+        test_command="echo ok",
+        source_type="triton",
+    )
+
+    # Must not be a skip; the nogit fallback should let the loop run.
+    assert result.get("skipped") is not True, f"Unexpected skip: {result}"
+
+
+def test_submit_nogit_skipped_when_flag_set(tmp_path, monkeypatch):
+    """FORGE_DISABLE_NOGIT=1 must restore the original skip-on-no-git behavior."""
+    monkeypatch.setenv("FORGE_DISABLE_NOGIT", "1")
+
+    src_dir = tmp_path / "dist_pkg"
+    src_dir.mkdir()
+    kernel = src_dir / "kernel.py"
+    kernel.write_text("def f(): pass\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(forge_submit, "_prepare_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(forge_submit, "_needs_inplace", lambda *a, **k: False)
+
+    result = forge_submit.submit(
+        source_file=str(kernel),
+        prompt_file=tmp_path / "prompt.md",
+        output_dir=out_dir,
+        source_type="triton",
+    )
+    assert result.get("skipped") is True

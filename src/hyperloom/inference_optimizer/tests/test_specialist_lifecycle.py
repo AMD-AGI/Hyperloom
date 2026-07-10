@@ -496,7 +496,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
                 "domain": "serving_specialist",
                 "gap_canonical_id": "gap.attention.fp8_kv",
                 "max_turns": 4,
-                "pr_feed": [],
             },
             idempotency_key="t-e2e-1",
             requires_lanes=tuple(),
