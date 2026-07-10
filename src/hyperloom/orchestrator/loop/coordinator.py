@@ -202,6 +202,8 @@ def _resolvable_artifacts_from_done(
     if not isinstance(arts, list):
         return []
     out: list[dict[str, Any]] = []
+    # Sandbox bases are invariant across entries — resolve once.
+    bases_resolved = [base.resolve() for base in resolve_bases]
     for entry in arts:
         if not isinstance(entry, dict):
             continue
@@ -216,8 +218,14 @@ def _resolvable_artifacts_from_done(
         # containment integrate_patch's ``_resolve_artifact_specs`` enforces,
         # rejecting ``source_outside_workspace`` AND ``..`` escapes (a relative
         # ``../../x`` that ``is_file()`` alone would otherwise mis-route).
+        # NOTE: unlike integrate_patch (which resolves against the FIRST existing
+        # base then validates), we scan ALL bases and take the first that yields
+        # a contained real file. Because ``worktree`` is nested under
+        # ``workspace`` the outcomes match, and this direction is fail-safe: it
+        # is never stricter than integrate_patch's accept, so a genuinely
+        # installable artifact is never dropped (at worst a benign extra routing
+        # round).
         cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
-        bases_resolved = [base.resolve() for base in resolve_bases]
         for cand in cands:
             resolved = cand.resolve()
             if not resolved.is_file():

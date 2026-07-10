@@ -527,6 +527,35 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     assert len(coord.state.pending_proposals) == n_before
 
 
+@pytest.mark.asyncio
+async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coordinator) -> None:
+    """A relative artifact ``source`` that climbs out of ``worktree`` via ``..``
+    but lands INSIDE the workspace (``<spec>``) is still contained, so it MUST
+    remain routable: the sandbox tightening must not reject a legitimate
+    ``../file`` source that resolves within an allowed base (guards the
+    fail-safe / not-too-strict direction)."""
+    from hyperloom.orchestrator.state.task_registry import Task
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    sid = "spec-art-parent"
+    spec_root = runs_dir(coord.session_dir, "specialist", sid)
+    (spec_root / "worktree").mkdir(parents=True, exist_ok=True)
+    (spec_root / "tuned.csv").write_text("cu_num\n304\n", encoding="utf-8")
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka4")
+    n_before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": [],
+            "proposal_set": [],
+            "artifacts_written": [
+                {"source": "../tuned.csv", "target": "configs/model_configs/x.csv", "kind": "k"}
+            ],
+        },
+    )
+    assert len(coord.state.pending_proposals) == n_before + 1
+
+
 # -- _record_fact_per_task -------------------------------------------------
 def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
