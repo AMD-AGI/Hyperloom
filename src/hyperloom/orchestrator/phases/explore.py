@@ -1513,6 +1513,13 @@ class ExplorePhase(PhaseHandler):
                 "proposal_msg_id": msg.msg_id,
                 "patch_name": patch_name,
                 "patches": [str(x) for x in patches][:8],
+                # Artifact-only deliverables route with empty ``patches``; record
+                # their install targets so the observation is not silently blank.
+                "artifacts_written": [
+                    str((a or {}).get("target") or "")
+                    for a in (done_payload.get("artifacts_written") or [])
+                    if isinstance(a, dict)
+                ][:8],
             },
         )
         try:

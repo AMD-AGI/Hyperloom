@@ -890,8 +890,11 @@ class _ArtifactSpec:
             workspace / worktree (sandbox-validated).
         target: Absolute install path inside an allowlisted framework root
             (sandbox-validated; no escape).
-        rel_target: The framework-relative target as authored by the
-            specialist (for reporting).
+        rel_target: The framework-relative target, normalized to the matched
+            allowlisted root via ``_resolve_artifact_target`` (an author's
+            absolute target is converted to this relative form). Used for
+            reporting AND as the framework-relative key for the durable KEEP
+            source snapshot.
         kind: Free-form artifact kind label (e.g. ``config_json``).
         description: Free-form human description.
     """

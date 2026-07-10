@@ -421,6 +421,77 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
     assert len(coord.state.pending_proposals) == n_before + 1
 
 
+@pytest.mark.asyncio
+async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator) -> None:
+    """A specialist with NO source patch but a non-diff tuned artifact
+    (``artifacts_written`` with a real file in its worktree) is a routable
+    deliverable: autosubmit must create an integrate_patch proposal so the
+    artifact-install channel runs (regression aiter#4130: the tuned FMOE CSV was
+    silently dropped because routing keyed only on ``patches_written``)."""
+    from hyperloom.orchestrator.state.task_registry import Task
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    sid = "spec-art-route"
+    art_dir = runs_dir(coord.session_dir, "specialist", sid) / "worktree" / "artifacts"
+    art_dir.mkdir(parents=True, exist_ok=True)
+    (art_dir / "tuned_fmoe.csv").write_text("cu_num,token\n304,16\n", encoding="utf-8")
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka1")
+    n_before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": [],
+            "proposal_set": [],
+            "artifacts_written": [
+                {
+                    "source": "artifacts/tuned_fmoe.csv",
+                    "target": "configs/model_configs/qwen3_tuned_fmoe.csv",
+                    "kind": "aiter_tuned_fmoe_csv",
+                }
+            ],
+        },
+    )
+    assert len(coord.state.pending_proposals) == n_before + 1
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(
+    coord: Coordinator, tmp_path
+) -> None:
+    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path
+    OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would
+    reject it as ``source_outside_workspace``, so autosubmit must not burn a
+    round creating a proposal for it (source-sandbox parity with
+    ``_resolve_artifact_specs``)."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    outside = tmp_path / "outside.csv"
+    outside.write_text("x", encoding="utf-8")
+    task = Task(
+        task_id="spec-art-outside",
+        kind="specialist",
+        state="running",
+        params={},
+        idempotency_key="ka2",
+    )
+    n_before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": [],
+            "proposal_set": [],
+            "artifacts_written": [
+                {
+                    "source": str(outside),
+                    "target": "configs/model_configs/x.csv",
+                    "kind": "k",
+                }
+            ],
+        },
+    )
+    assert len(coord.state.pending_proposals) == n_before
+
+
 # -- _record_fact_per_task -------------------------------------------------
 def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task

@@ -168,6 +168,20 @@ def _resolvable_artifacts_from_done(
     bridges on one signal prevents the FRAMEWORK livelock (skip-stamp without a
     following integrate_patch).
 
+    Source containment: a relative ``source`` is resolved under
+    ``resolve_bases`` and an absolute ``source`` is accepted ONLY when it
+    resolves inside one of them — matching integrate_patch's sandbox so this
+    signal never routes a deliverable integrate_patch would reject as
+    ``source_outside_workspace``.
+
+    Target scope (intentional trade-off): this pure signal validates the
+    ``source`` only; it does NOT re-resolve ``target`` against the framework
+    allowlist (that would couple a testable pure function to on-disk framework
+    roots). A malformed / out-of-allowlist ``target`` is therefore still routed
+    and rejected downstream by integrate_patch as a terminal ``no_patches`` row
+    (no livelock — the FRAMEWORK pump still advances), rather than skip-stamped
+    as ``authored_empty`` here.
+
     Args:
         done_payload: The specialist ``specialist_done`` payload (unwrapped).
         resolve_bases: Dirs to resolve a relative ``source`` against (typically
@@ -191,9 +205,25 @@ def _resolvable_artifacts_from_done(
         if not src or not tgt:
             continue
         raw = Path(src)
-        cands = [raw] if raw.is_absolute() else []
-        for base in resolve_bases:
-            cands.append(base / raw)
+        cands: list[Path] = []
+        if raw.is_absolute():
+            # An absolute ``source`` is accepted ONLY when it resolves inside
+            # the specialist sandbox (worktree/workspace) — the SAME containment
+            # guarantee integrate_patch's ``_resolve_artifact_specs`` enforces
+            # (``source_outside_workspace``). Without this the autosubmit bridge
+            # would route a deliverable integrate_patch then rejects, burning a
+            # round on a guaranteed ``no_patches``.
+            resolved = raw.resolve()
+            for base in resolve_bases:
+                try:
+                    resolved.relative_to(base.resolve())
+                except ValueError:
+                    continue
+                cands.append(raw)
+                break
+        else:
+            for base in resolve_bases:
+                cands.append(base / raw)
         if any(c.is_file() for c in cands):
             out.append(entry)
     return out
