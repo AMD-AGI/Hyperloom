@@ -18,6 +18,7 @@ import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.actions.executors.explore as explore_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.kernel import KernelPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -159,6 +160,50 @@ class TestPromoteGemmTuningKeep:
         coord._promote_gemm_tuning_keep(result)
         coord._promote_gemm_tuning_keep(result)
         assert len(coord.shared_state.optimization_stack) == 1
+
+
+class TestPromoteFusionIntegrateKeep:
+    def test_records_patch_envs_and_current_best(self, tmp_path):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            current_best={
+                "action": "replay_warm_recipe",
+                "tput": 120.0,
+                "extra_envs": {"SGLANG_USE_AITER": "1"},
+                "extra_server_args": "--moe-runner-backend aiter",
+            },
+        )
+
+        KernelPhase(coord)._promote_fusion_integrate_keep(
+            {
+                "patch": "/tmp/fusion.patch",
+                "source_file": "/repo/model.py",
+                "kernel_speedup": 3.05,
+                "best_pattern": "llm:fused_a+llm:fused_b",
+            },
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "new_tput": 180.0,
+                "gain_pct": 80.0,
+                "workspace": "/tmp/run",
+                "extra_server_args": "--moe-runner-backend aiter",
+            },
+            extra_envs={"SGLANG_USE_AITER": "1", "ZAYA_FUSED_HYBRID_RESIDUAL": "1"},
+        )
+
+        stack = coord.shared_state.optimization_stack
+        assert len(stack) == 1
+        assert stack[0]["action"] == "fusion"
+        assert stack[0]["patch_path"] == "/tmp/fusion.patch"
+        assert stack[0]["extra_envs"]["SGLANG_USE_AITER"] == "1"
+        assert stack[0]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
+        assert stack[0]["kernel_speedup"] == 3.05
+        assert coord.shared_state.current_best["action"] == "fusion"
+        assert coord.shared_state.current_best["tput"] == 180.0
+        assert coord.shared_state.cumulative_gain_validated == 80.0
+        assert coord.shared_state.cumulative_gain_validated_stack_len == 1
 
 
 class TestBf16DenseFallback:

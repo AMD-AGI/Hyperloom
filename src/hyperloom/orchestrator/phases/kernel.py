@@ -1540,35 +1540,59 @@ class KernelPhase(PhaseHandler):
         """
         import os
 
-        from ..kernel.request_handlers import integrate_handler
+        from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
 
         patch = str(result.get("patch") or "").strip()
         target_file = str(result.get("source_file") or result.get("target_file") or "").strip()
+        kernel_repo = str(result.get("kernel_repo") or "").strip()
         env_flags = result.get("env_flags") or {}
+        current_envs = {}
+        if isinstance(self.shared_state.current_best, dict):
+            current_envs = dict(self.shared_state.current_best.get("extra_envs") or {})
+        merged_envs = {**current_envs, **{str(k): str(v) for k, v in env_flags.items()}}
         if not patch or not target_file:
             log.info("KERNEL entry: fusion KEPT but missing patch/target_file; skip integrate")
             return
-        try:
-            integ = await integrate_handler(
-                {
-                    "task_id": "fusion_e2e",
-                    "kernel_id": "forge_fusion",
-                    "source": "forge_fusion",
-                    "patch_path": patch,
-                    "target_file": target_file,
-                    "kernel_repo": str(result.get("kernel_repo") or ""),
-                    "extra_envs": {str(k): str(v) for k, v in env_flags.items()},
-                    "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
-                },
-                session_dir=self.session_dir,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("KERNEL entry fusion integrate failed")
-            integ = {"status": "failed", "decision": "REVERT",
-                     "error_class": exc.__class__.__name__, "error": repr(exc)}
+        integ = None
+        snapshot_dir = str(result.get("snapshot_dir") or "").strip()
+        if not snapshot_dir and patch.endswith(".patch") and kernel_repo:
+            try:
+                snapshot_dir = await asyncio.to_thread(
+                    materialize_unified_patch_snapshot,
+                    patch_path=patch,
+                    repo_root=kernel_repo,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("KERNEL entry fusion snapshot materialization failed")
+                integ = {
+                    "status": "failed", "decision": "REVERT",
+                    "error_class": exc.__class__.__name__, "error": repr(exc),
+                    "patch_path": patch, "target_file": target_file,
+                }
+        if integ is None:
+            try:
+                integ = await integrate_handler(
+                    {
+                        "task_id": "fusion_e2e",
+                        "kernel_id": "forge_fusion",
+                        "source": "forge_fusion",
+                        "patch_path": patch,
+                        "target_file": target_file,
+                        "kernel_repo": kernel_repo,
+                        "snapshot_dir": snapshot_dir,
+                        "extra_envs": merged_envs,
+                        "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
+                    },
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("KERNEL entry fusion integrate failed")
+                integ = {"status": "failed", "decision": "REVERT",
+                         "error_class": exc.__class__.__name__, "error": repr(exc)}
         decision = str(integ.get("decision") or "").strip().upper() if isinstance(integ, dict) else "REVERT"
         gain = integ.get("gain_pct") if isinstance(integ, dict) else None
         log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
+        self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
         try:
             self.shared_state.last_fusion_integrate = integ
             self.shared_state.save(self.session_dir)
@@ -1589,6 +1613,79 @@ class KernelPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001
             log.exception("failed to post fusion_integrate_done bus message")
+
+    def _promote_fusion_integrate_keep(
+        self,
+        fusion_result: dict,
+        integrate_result: dict,
+        *,
+        extra_envs: dict[str, str] | None = None,
+    ) -> None:
+        """Promote a forge-fusion e2e KEEP into the main optimization stack."""
+        if not isinstance(fusion_result, dict) or not isinstance(integrate_result, dict):
+            return
+        if str(integrate_result.get("decision") or "").strip().upper() != "KEEP":
+            return
+        try:
+            new_tput = float(integrate_result.get("new_tput") or 0.0)
+            gain = float(integrate_result.get("gain_pct") or 0.0)
+        except (TypeError, ValueError):
+            return
+        if new_tput <= 0:
+            return
+
+        patch = str(fusion_result.get("patch") or integrate_result.get("patch_path") or "")
+        existing = {
+            str(item.get("patch_path") or "")
+            for item in (self.shared_state.optimization_stack or [])
+            if isinstance(item, dict) and item.get("action") == "fusion"
+        }
+        ts = datetime.now(timezone.utc).isoformat()
+        envs = dict(extra_envs or integrate_result.get("extra_envs") or fusion_result.get("env_flags") or {})
+        extra_args = str(integrate_result.get("extra_server_args") or "")
+        entry = {
+            "action": "fusion",
+            "variant_name": "forge_fusion",
+            "engine": "forge_fusion",
+            "provenance": "forge_fusion",
+            "source": "kernel_entry_auto",
+            "tput": new_tput,
+            "gain_pct": gain,
+            "workspace": integrate_result.get("workspace"),
+            "patch_path": patch,
+            "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
+            "extra_envs": envs,
+            "extra_server_args": extra_args,
+            "kernel_speedup": fusion_result.get("kernel_speedup"),
+            "best_pattern": fusion_result.get("best_pattern"),
+            "ts": ts,
+        }
+        if patch not in existing:
+            self.shared_state.optimization_stack.append(entry)
+            self.shared_state.append_stack_gain_entry(
+                action="fusion",
+                variant_name="forge_fusion",
+                new_tput=new_tput,
+                extra_server_args=extra_args,
+                ts=ts,
+            )
+        self.shared_state.current_best = {
+            "action": "fusion",
+            "engine": "forge_fusion",
+            "tput": new_tput,
+            "variant_name": "forge_fusion",
+            "workspace": integrate_result.get("workspace"),
+            "patch_path": patch,
+            "target_file": entry["target_file"],
+            "extra_envs": envs,
+            "extra_server_args": extra_args,
+        }
+        self.shared_state.cumulative_gain = gain
+        self.shared_state.cumulative_gain_validated = gain
+        self.shared_state.cumulative_gain_validated_ts = ts
+        self.shared_state.cumulative_gain_validated_stack_len = len(
+            self.shared_state.optimization_stack or []
+        )
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

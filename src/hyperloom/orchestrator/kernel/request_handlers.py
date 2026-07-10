@@ -1083,6 +1083,69 @@ def _maybe_apply_kernel_patch(
     )
 
 
+def materialize_unified_patch_snapshot(
+    *,
+    patch_path: str | Path,
+    repo_root: str | Path,
+    snapshot_dir: str | Path | None = None,
+) -> str:
+    """Materialize final file contents for apply_kernel_patch snapshot mode.
+
+    ``forge-fusion`` exports a normal unified diff. ``apply_kernel_patch`` can
+    apply such diffs only in snapshot mode, where the diff is a manifest and the
+    final bytes live under ``snapshot_dir``. This helper applies the diff to a
+    minimal throwaway mirror of the touched files and returns that mirror path.
+    """
+    patch = Path(patch_path).resolve()
+    root = Path(repo_root).resolve()
+    if not patch.is_file():
+        raise FileNotFoundError(f"patch_path does not exist: {patch}")
+    if not root.is_dir():
+        raise FileNotFoundError(f"kernel repo does not exist: {root}")
+
+    tool = _load_apply_tool()
+    descriptors = tool.parse_patch_manifest(
+        patch.read_text(encoding="utf-8", errors="replace")
+    )
+    if not descriptors:
+        raise ValueError(f"patch has no file operations: {patch}")
+
+    snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
+    if snap.exists():
+        shutil.rmtree(snap)
+    snap.mkdir(parents=True, exist_ok=True)
+
+    for desc in descriptors:
+        rel = Path(str(desc.get("path") or ""))
+        if not rel.parts or rel.is_absolute() or ".." in rel.parts:
+            raise ValueError(f"unsafe patch path: {rel}")
+        dst = snap / rel
+        base = subprocess.run(
+            ["git", "-C", str(root), "show", f"HEAD:{rel.as_posix()}"],
+            capture_output=True,
+            timeout=60,
+        )
+        if base.returncode == 0:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(base.stdout)
+
+    proc = subprocess.run(
+        ["git", "apply", "--unsafe-paths", str(patch)],
+        cwd=snap,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
+
+    for desc in descriptors:
+        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
+            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
+    return str(snap)
+
+
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     """Revert a previously applied kernel patch using its apply manifest.
 
@@ -2391,6 +2454,24 @@ def _resolve_fusion_decode_trace(state, payload: dict) -> str:
     return ""
 
 
+def _active_fusion_env_flags(state: Any) -> dict[str, str]:
+    """Return active model-level fusion flags already present in current_best."""
+    current_best = getattr(state, "current_best", None) or {}
+    envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
+    if not isinstance(envs, dict):
+        return {}
+    active: dict[str, str] = {}
+    for key, val in envs.items():
+        name = str(key)
+        value = str(val)
+        if "_FUSED" not in name.upper():
+            continue
+        if value.strip().lower() in ("", "0", "false", "no", "off", "none"):
+            continue
+        active[name] = value
+    return active
+
+
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
@@ -2404,6 +2485,23 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
+
+    active_fusion_flags = _active_fusion_env_flags(state)
+    if active_fusion_flags:
+        return {
+            "status": "complete",
+            "engine": "forge_fusion",
+            "micro_decision": "already_active",
+            "decision": "REVERT",
+            "kept": False,
+            "requires_e2e_validation": False,
+            "active_env_flags": active_fusion_flags,
+            "reason": (
+                "current_best already carries model-level fusion flags; "
+                "skip forge-fusion to avoid overlapping/double-fusing the same source path"
+            ),
+            "source": "forge_fusion",
+        }
 
     if not _forge_fusion_available():
         return {
@@ -5349,6 +5447,7 @@ async def integrate_handler(
         "report_path": bench_result.get("report_path"),
         "workspace": bench_result.get("workspace"),
         "extra_server_args": extra_args,
+        "extra_envs": dict(payload.get("extra_envs") or {}),
         "apply_result": apply_result,
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
