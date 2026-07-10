@@ -723,11 +723,19 @@ def _resume_safe_numeric(
 
 
 
+# Sentinel returned by _probe_llm_catalog when the gateway has no /models
+# route at all (HTTP 404/405). Distinct from None (auth/network/server error /
+# empty catalog), so the caller can safely proceed for an Anthropic-compatible
+# endpoint that simply does not expose a catalog, while still blocking on real
+# auth/network failures.
+_CATALOG_NO_MODELS_ENDPOINT: frozenset[str] = frozenset()
+
+
 def _probe_llm_catalog(
     *,
     base_url: str,
     api_key: str,
-) -> set[str] | None:
+) -> set[str] | frozenset[str] | None:
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
     TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
@@ -794,6 +802,15 @@ def _probe_llm_catalog(
             last_err = f"{type(exc).__name__}: {exc}"
             print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} failed: {last_err}")
             continue
+        if resp.status_code in (404, 405):
+            # The endpoint has no /models route at all (a native Anthropic /
+            # DeepSeek Anthropic API, etc.). This is not a transient/auth error,
+            # so stop retrying and signal "no catalog endpoint" distinctly.
+            print(
+                f"Preflight: catalog probe got HTTP {resp.status_code} for "
+                f"{probe_url}; endpoint exposes no /models route"
+            )
+            return _CATALOG_NO_MODELS_ENDPOINT
         if resp.status_code != 200:
             last_err = f"HTTP {resp.status_code}: {(resp.text or '')[:200]}"
             print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} got {last_err}")
@@ -874,7 +891,7 @@ def _validate_and_resolve_claude_model(
     # catalog (e.g. native api.anthropic.com without a LiteLLM /models route)
     # fall back to the OpenAI side. INFERENCE_OPTIMIZER_CATALOG_PROBE_URL
     # overrides the host outright (single probe, no fallback).
-    catalog_ids = None
+    catalog_ids: set[str] | frozenset[str] | None = None
     override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if override_url:
         api_key = (
@@ -901,10 +918,22 @@ def _validate_and_resolve_claude_model(
             or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
         )
-        # (url, key) candidates in priority order; skip blanks and dedupe so a
-        # single-gateway deploy (same URL both sides) probes only once.
+        # The orchestration model is a Claude model, so its catalog must come
+        # from the Anthropic side only. In a split deploy the OpenAI catalog
+        # (gpt-*) would never carry a Claude id and must not gate it. Fall back
+        # to the OpenAI side ONLY for a single-gateway deploy where both sides
+        # resolve to the same endpoint.
+        candidates: list[tuple[str, str]] = []
+        if anthropic_url:
+            candidates.append((anthropic_url, anthropic_key))
+        if openai_url and openai_url == anthropic_url:
+            # single gateway: same URL serves both; OpenAI key is a valid retry
+            candidates.append((openai_url, openai_key))
+        elif openai_url and not anthropic_url:
+            # pure single-gateway with only OPENAI_BASE_URL configured
+            candidates.append((openai_url, openai_key))
         seen_urls: set[str] = set()
-        for cand_url, cand_key in ((anthropic_url, anthropic_key), (openai_url, openai_key)):
+        for cand_url, cand_key in candidates:
             if not cand_url or cand_url in seen_urls:
                 continue
             seen_urls.add(cand_url)
@@ -912,9 +941,21 @@ def _validate_and_resolve_claude_model(
             if catalog_ids is not None:
                 break
 
+    if catalog_ids is _CATALOG_NO_MODELS_ENDPOINT:
+        # The gateway returned 404/405 for /models: it has no catalog route
+        # (native Anthropic API, DeepSeek Anthropic API, etc.). The model
+        # cannot be verified here and the OpenAI catalog must never gate a
+        # Claude id, so proceed rather than refuse.
+        print(
+            f"Preflight: WARNING — gateway has no /models route (HTTP 404/405); "
+            f"cannot verify --claude-model={chosen!r}. Proceeding."
+        )
+        return None
+
     if catalog_ids is None:
-        # #340: a custom-model deploy may sit behind a gateway without a
-        # /models route; don't hard-block — warn and trust the operator id.
+        # Distinct from the 404 case above: this is an auth (401/403), network,
+        # server (5xx), non-JSON, or empty-catalog failure — the catalog is
+        # genuinely unverifiable. Only proceed under the explicit opt-out.
         if allow_custom:
             print(
                 f"Preflight: WARNING — gateway catalog unreachable; cannot verify "

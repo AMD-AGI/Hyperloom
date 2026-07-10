@@ -284,10 +284,35 @@ GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-mem
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
+# Orchestration model; left empty when unset so runtime env is not polluted
+# and the CLI default applies.
+CLAUDE_MODEL_VAL="${CLAUDE_MODEL:-}"
+# Split-provider aware per-side credentials. Anthropic side keeps its own
+# base URL/key; OpenAI side keeps its own. Single-gateway deploys still fall
+# back to SAFE_API_KEY + OPENAI_BASE_URL so behavior is unchanged.
+_ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
+_ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${SAFE_API_KEY:-}}}"
+_OPENAI_BASE_URL_VAL="${OPENAI_BASE_URL:-}"
+_OPENAI_KEY_VAL="${OPENAI_API_KEY:-${SAFE_API_KEY:-}}"
+# Pick a key that matches a given endpoint: OpenAI URL -> OpenAI key,
+# Anthropic URL -> Anthropic key, otherwise the single-gateway SAFE fallback.
+_key_for_endpoint() {
+  local url="$1"
+  if [ -n "$_OPENAI_BASE_URL_VAL" ] && [ "$url" = "$_OPENAI_BASE_URL_VAL" ]; then
+    printf '%s' "$_OPENAI_KEY_VAL"; return 0
+  fi
+  if [ -n "$_ANTHROPIC_BASE_URL_VAL" ] && [ "$url" = "$_ANTHROPIC_BASE_URL_VAL" ]; then
+    printf '%s' "$_ANTHROPIC_KEY_VAL"; return 0
+  fi
+  printf '%s' "${SAFE_API_KEY:-${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}}"
+}
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
+# Pair the GEAK key to its endpoint so a split deploy never sends the wrong
+# provider's key. Explicit GEAK_API_KEY still wins.
+GEAK_API_KEY_VAL="${GEAK_API_KEY:-$(_key_for_endpoint "$GEAK_BASE_URL_VAL")}"
+[ -n "$GEAK_API_KEY_VAL" ] || GEAK_API_KEY_VAL="${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
 # LiteLLM provider-specific base_url normalisation:
 #   * openai/* models require the OpenAI-compatible base URL, which in our
 #     gateway includes the trailing /v1.  Preserve it.
@@ -299,8 +324,10 @@ case "${GEAK_MODEL_NAME_VAL}" in
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
 esac
-OOB_API_KEY_VAL="${OOB_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}}"
 OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
+# Pair the OOB key to its endpoint (same split-provider rule as GEAK).
+OOB_API_KEY_VAL="${OOB_API_KEY:-$(_key_for_endpoint "$OOB_BASE_URL_VAL")}"
+[ -n "$OOB_API_KEY_VAL" ] || OOB_API_KEY_VAL="${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}"
 # Cursor SDK key. Independent issuer (Cursor account, prefix `crsr_...`); never
 # inherit from SAFE_API_KEY / OOB_API_KEY because those address the AMD gateway.
 # Leave empty if the operator has not provisioned a Cursor key — the cursor
@@ -1453,13 +1480,20 @@ write_env_file() {
   if [ -z "${OOB_BASE_URL_VAL:-}" ]; then
     warn "OOB_BASE_URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
   fi
-  # Anthropic SDK appends /v1 itself, so strip a trailing /v1 from the
-  # OpenAI-style upstream URL when exporting ANTHROPIC_BASE_URL.
+  # Anthropic base URL: keep an explicit split-provider value as-is; only
+  # derive from the OpenAI-style upstream (strip trailing /v1, the Anthropic
+  # SDK re-appends it) when no Anthropic endpoint was configured.
   local _anthropic_url=""
-  if [ -n "${OOB_BASE_URL_VAL:-}" ]; then
+  if [ -n "${_ANTHROPIC_BASE_URL_VAL:-}" ]; then
+    _anthropic_url="${_ANTHROPIC_BASE_URL_VAL}"
+  elif [ -n "${OOB_BASE_URL_VAL:-}" ]; then
     _anthropic_url="${OOB_BASE_URL_VAL%/}"
     _anthropic_url="${_anthropic_url%/v1}"
   fi
+  # Per-side keys: a split deploy writes each provider its own key; a single
+  # gateway resolves both to the same OOB key so legacy behavior is preserved.
+  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-${OOB_API_KEY_VAL}}"
+  local _openai_key="${_OPENAI_KEY_VAL:-${OOB_API_KEY_VAL}}"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
@@ -1476,11 +1510,16 @@ write_env_file() {
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
     [ -n "${OOB_BASE_URL_VAL:-}" ] && echo "export OPENAI_BASE_URL='${OOB_BASE_URL_VAL}'"
+    # Anthropic-side and OpenAI-side keys are written independently so a split
+    # deploy (e.g. DeepSeek Anthropic API + native OpenAI) does not cross-send
+    # the wrong provider's key. Gateway aliases keep the single-gateway key.
+    [ -n "${_anthropic_key}" ] && {
+      echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
+      echo "export ANTHROPIC_AUTH_TOKEN='${_anthropic_key}'"
+    }
+    [ -n "${_openai_key}" ] && echo "export OPENAI_API_KEY='${_openai_key}'"
     [ -n "${OOB_API_KEY_VAL}" ] && {
       echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export ANTHROPIC_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export ANTHROPIC_AUTH_TOKEN='${OOB_API_KEY_VAL}'"
-      echo "export OPENAI_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export OOB_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export AMD_LLM_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export LLM_GATEWAY_KEY='${OOB_API_KEY_VAL}'"
@@ -1525,6 +1564,7 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
     [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
+    [ -n "${CLAUDE_MODEL_VAL}" ] && echo "export CLAUDE_MODEL='${CLAUDE_MODEL_VAL}'"
     [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
     [ -n "${HYPERLOOM_ROCPROF_COMPUTE_PATH:-}" ] && echo "export HYPERLOOM_ROCPROF_COMPUTE_PATH='${HYPERLOOM_ROCPROF_COMPUTE_PATH}'"
     # GEAK scoring / profiler / shape knobs. These are read by GEAK itself (the

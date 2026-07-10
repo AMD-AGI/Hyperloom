@@ -7,6 +7,7 @@ set -euo pipefail
 
 DRY_RUN=0
 CHECK_ONLY=0
+PRINT_NEXT_STEPS=1
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
@@ -45,16 +46,17 @@ usage() {
   cat <<'EOF'
 Usage: src/hyperloom/inference_optimizer/assets/local_setup.sh [options]
 
-Bootstraps Local Mode from only a Hyperloom checkout plus credentials.
-It clones missing dependency repos and writes a local env file. Runtime
-dependency checks and installation remain owned by the Cursor agent via
-src/hyperloom/inference_optimizer/SKILL.md when optimization starts.
+Bootstraps dependency checkouts and writes a local env file. Bare-metal
+installs normally call this script from install_baremetal.sh before chaining
+the runtime installer.
 
 Options:
   --dry-run             Print planned actions without cloning or writing
   --check-only          Verify existing dependency checkouts, do not write env
   --deps-root PATH      Directory for dependency checkouts
-  --session-dir PATH    Session directory; defaults to $USER_DATA_PATH or /workspace/hyperloom
+  --user-data-path PATH Writable artifact root; defaults to $USER_DATA_PATH or /workspace/hyperloom
+  --session-dir PATH    Alias for --user-data-path (backward compatible)
+  --no-next-steps       Do not print the standalone launch prompt
   -h, --help            Show this help
 
 Advanced env overrides:
@@ -77,14 +79,15 @@ while [ "$#" -gt 0 ]; do
       shift
       HYPERLOOM_DEPS_ROOT="${1:-}"
       ;;
-    --session-dir)
-      [ "$#" -ge 2 ] || { echo "[local-setup] ERROR: --session-dir requires PATH" >&2; exit 2; }
+    --user-data-path|--session-dir)
+      [ "$#" -ge 2 ] || { echo "[local-setup] ERROR: $1 requires PATH" >&2; exit 2; }
       shift
       USER_DATA_PATH="${1:-}"
       HYPERLOOM_RUNTIME_DIR="${USER_DATA_PATH}/runtime"
       # Deps root stays pod-local and does NOT follow --session-dir.
       LOCAL_SETUP_ENV="${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh"
       ;;
+    --no-next-steps) PRINT_NEXT_STEPS=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[local-setup] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -132,6 +135,24 @@ credential_status() {
     return 0
   fi
   warn "${name}: not set"
+}
+
+credential_is_set() {
+  local name="$1"
+  [ -n "${!name:-}" ] && return 0
+  [ -f "${REPO_ROOT}/.env" ] && grep -Eq "^[[:space:]]*(export[[:space:]]+)?${name}=" "${REPO_ROOT}/.env"
+}
+
+llm_credential_status() {
+  local has_url=0 has_key=0
+  { credential_is_set OPENAI_BASE_URL || credential_is_set ANTHROPIC_BASE_URL; } && has_url=1
+  { credential_is_set SAFE_API_KEY || credential_is_set OPENAI_API_KEY \
+    || credential_is_set ANTHROPIC_API_KEY || credential_is_set ANTHROPIC_AUTH_TOKEN; } && has_key=1
+  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
+    log "LLM credentials: usable base URL + key present"
+  else
+    warn "LLM credentials incomplete: need OPENAI_BASE_URL or ANTHROPIC_BASE_URL plus a matching API key"
+  fi
 }
 
 ensure_git_available() {
@@ -496,8 +517,7 @@ main() {
   log "REPO_ROOT=${REPO_ROOT}"
   log "USER_DATA_PATH=${USER_DATA_PATH}"
   log "HYPERLOOM_DEPS_ROOT=${HYPERLOOM_DEPS_ROOT}"
-  credential_status SAFE_API_KEY
-  credential_status OPENAI_BASE_URL
+  llm_credential_status
   credential_status CURSOR_API_KEY || true
 
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -510,7 +530,11 @@ main() {
   resolve_tracelens
   write_local_env
 
-  print_next_steps
+  if [ "$PRINT_NEXT_STEPS" -eq 1 ]; then
+    print_next_steps
+  else
+    log "local setup complete"
+  fi
 }
 
 main "$@"
