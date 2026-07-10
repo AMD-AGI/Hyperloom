@@ -904,12 +904,13 @@ class _ArtifactSpec:
 
 
 def _resolve_artifact_target(rel_target: str) -> Path | None:
-    """Resolve a framework-relative artifact target to an absolute path.
+    """Resolve an artifact target (framework-relative, or absolute) to a path.
 
-    Picks the allowlisted framework root whose tree already contains the
-    target's parent directory (so a ``vllm/...`` config lands under the vllm
-    root); else the first existing root. The resolved path must stay within
-    the chosen root (no ``..`` escape).
+    A relative target picks the allowlisted framework root whose tree already
+    contains the target's parent directory (so a ``vllm/...`` config lands under
+    the vllm root); else the first existing root. An absolute target is accepted
+    ONLY when it resolves strictly inside an allowlisted root. Either way the
+    resolved path must stay within the chosen root (no ``..`` escape).
 
     Args:
         rel_target: The framework-relative install path authored by the
@@ -919,11 +920,21 @@ def _resolve_artifact_target(rel_target: str) -> Path | None:
         The absolute target path, or ``None`` when nothing resolves safely.
     """
     rel = (rel_target or "").strip()
-    if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+    if not rel or ".." in Path(rel).parts:
         return None
     roots = [Path(r).resolve() for r in resolve_source_file_allowlist()]
     roots = [r for r in roots if r.is_dir()]
     if not roots:
+        return None
+    # An absolute target is accepted ONLY when it resolves strictly inside an
+    # allowlisted framework root (e.g. a site-packages framework install a
+    # specialist referenced by full path). Same containment guarantee as the
+    # relative case; ".." was already rejected above.
+    if Path(rel).is_absolute():
+        cand = Path(rel).resolve()
+        for root in roots:
+            if _is_within(cand, root):
+                return cand
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:

@@ -196,3 +196,43 @@ def test_apply_keeps_artifact_when_not_reverted(tmp_path):
     assert errors == []
     # On KEEP, _revert_artifacts is never called, so the install persists.
     assert target.read_text(encoding="utf-8") == "NEW"
+
+
+# ---- _resolve_artifact_target: absolute-within-allowlist (Option A) --------
+def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch):
+    """A specialist may author an ABSOLUTE target that points inside an
+    allowlisted framework root (e.g. the installed aiter package dir). It must
+    resolve (regression: absolute targets were rejected, dropping the tuned
+    artifact even after it was routed to integrate_patch)."""
+    fw = tmp_path / "aiter"
+    (fw / "configs" / "model_configs").mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    abs_target = str(fw / "configs" / "model_configs" / "tuned_fmoe.csv")
+    out = ip._resolve_artifact_target(abs_target)
+    assert out == (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve()
+
+
+def test_resolve_artifact_target_absolute_outside_allowlist_rejected(tmp_path, monkeypatch):
+    """An absolute target OUTSIDE every allowlisted root must stay rejected."""
+    fw = tmp_path / "aiter"
+    (fw / "configs").mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_artifact_target("/etc/passwd") is None
+
+
+def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
+    """Relative targets keep resolving under an allowlisted root."""
+    fw = tmp_path / "aiter"
+    (fw / "configs" / "model_configs").mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    out = ip._resolve_artifact_target("configs/model_configs/tuned_fmoe.csv")
+    assert out == (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve()
+
+
+def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeypatch):
+    """An absolute target containing ``..`` is rejected even if it would
+    normalise inside a root."""
+    fw = tmp_path / "aiter"
+    (fw / "configs").mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_artifact_target(str(fw / "configs" / ".." / ".." / "x.csv")) is None
