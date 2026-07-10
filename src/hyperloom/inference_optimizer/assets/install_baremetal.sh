@@ -60,8 +60,8 @@ HYPERLOOM_WHEEL="${HYPERLOOM_WHEEL:-}"
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
 HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
 HYPERLOOM_WHEEL_PATTERN="${HYPERLOOM_WHEEL_PATTERN:-hyperloom_inference_optimizer-*.whl}"
-ROCM_PROFILER_HOTFIX_DONOR_IMAGE="${ROCM_PROFILER_HOTFIX_DONOR_IMAGE:-rocm/vllm-dev:base_custom_rocclr_profiler_hotfix_old_torch_20260428}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
+ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
 DEFAULT_OPENAI_BASE_URL="https://global.primus-safe.amd.com/api/v1/llm-proxy/v1"
 SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
@@ -921,53 +921,38 @@ PY
   log "framework imports: ${framework_versions}"
 }
 
-select_rocm_profiler_hotfix_runtime() {
-  if command -v docker >/dev/null 2>&1; then
-    echo docker
-  elif command -v podman >/dev/null 2>&1; then
-    echo podman
-  else
-    return 1
-  fi
-}
-
-extract_rocm_profiler_hotfix_libs() {
-  local runtime="$1" image="$2" tmp_dir cid="" donor_paths hip_path tracer_path
+download_rocm_profiler_hotfix_libs() {
+  local tmp_dir archive
   tmp_dir="$(mktemp -d)"
-  donor_paths="$("$runtime" run --rm --entrypoint /bin/sh "$image" -c '
-hip="$(find /opt -type f -name "libamdhip64.so.*" ! -name "libamdhip64.so" ! -name "libamdhip64.so.7" 2>/dev/null | sort | tail -n 1)"
-tracer="$(find /opt -type f -name "libroctracer64.so.*" ! -name "libroctracer64.so" ! -name "libroctracer64.so.4" 2>/dev/null | sort | tail -n 1)"
-[ -n "$hip" ] && [ -n "$tracer" ] || exit 1
-printf "%s\n%s\n" "$hip" "$tracer"
-' 2>/dev/null)" || {
+  command -v gh >/dev/null 2>&1 || {
     rm -rf "$tmp_dir"
+    warn "gh CLI not found; cannot download ROCm profiler hotfix asset"
     return 1
   }
-  hip_path="$(printf '%s\n' "$donor_paths" | sed -n '1p')"
-  tracer_path="$(printf '%s\n' "$donor_paths" | sed -n '2p')"
-  case "$(basename "$hip_path")" in
-    libamdhip64.so.7.*) ;;
-    *) rm -rf "$tmp_dir"; warn "donor HIP runtime has unexpected ABI: ${hip_path}"; return 1 ;;
-  esac
-  case "$(basename "$tracer_path")" in
-    libroctracer64.so.4.*) ;;
-    *) rm -rf "$tmp_dir"; warn "donor roctracer has unexpected ABI: ${tracer_path}"; return 1 ;;
-  esac
-  if ! cid="$("$runtime" create "$image")"; then
+  gh auth status >/dev/null 2>&1 || {
     rm -rf "$tmp_dir"
+    warn "gh is not authenticated; cannot download ROCm profiler hotfix asset"
+    return 1
+  }
+  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
+  if ! gh release download "$HYPERLOOM_WHEEL_TAG" -R "$HYPERLOOM_WHEEL_REPO" \
+    -p "$ROCM_PROFILER_HOTFIX_ASSET" -D "$tmp_dir"; then
+    rm -rf "$tmp_dir"
+    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
     return 1
   fi
-  if ! "$runtime" cp "${cid}:${hip_path}" "$tmp_dir/"; then
-    "$runtime" rm "$cid" >/dev/null 2>&1 || true
+  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  if ! tar -xzf "$archive" -C "$tmp_dir"; then
     rm -rf "$tmp_dir"
+    warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"
     return 1
   fi
-  if ! "$runtime" cp "${cid}:${tracer_path}" "$tmp_dir/"; then
-    "$runtime" rm "$cid" >/dev/null 2>&1 || true
+  if ! find "$tmp_dir" -maxdepth 1 -type f -name 'libamdhip64.so.7.*' | grep -q . \
+     || ! find "$tmp_dir" -maxdepth 1 -type f -name 'libroctracer64.so.4.*' | grep -q .; then
     rm -rf "$tmp_dir"
+    warn "${ROCM_PROFILER_HOTFIX_ASSET} does not contain the expected ROCm hotfix libraries"
     return 1
   fi
-  "$runtime" rm "$cid" >/dev/null 2>&1 || true
   printf '%s\n' "$tmp_dir"
 }
 
@@ -1044,34 +1029,30 @@ PY
 
 apply_rocm_profiler_hotfix() {
   local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
-  local donor_image="${ROCM_PROFILER_HOTFIX_DONOR_IMAGE}"
-  local runtime extract_dir backup_dir hip_lib tracer_lib
+  local extract_dir backup_dir hip_lib tracer_lib
 
   log "Phase 1b: applying ROCm profiler hotfix"
-  log "ROCM_PROFILER_HOTFIX_DONOR_IMAGE=${donor_image}"
+  log "ROCM_PROFILER_HOTFIX_ASSET=${ROCM_PROFILER_HOTFIX_ASSET}"
 
   [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
   rocm_profiler_hotfix_compatible || return 0
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    log "check-only: ROCm profiler hotfix donor image will not be inspected"
+    log "check-only: ROCm profiler hotfix release asset will not be downloaded"
     log "current libamdhip64.so -> $(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || echo missing)"
     log "current libroctracer64.so -> $(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || echo missing)"
     return 0
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would discover HIP runtime and roctracer hotfix libraries in ${donor_image}"
+    log "would download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
     log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
     log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
     return 0
   fi
 
-  runtime="$(select_rocm_profiler_hotfix_runtime)" \
-    || { warn "docker or podman not found; skipping ROCm profiler hotfix"; return 0; }
-  log "extracting ROCm profiler hotfix libraries with ${runtime}"
-  extract_dir="$(extract_rocm_profiler_hotfix_libs "$runtime" "$donor_image")" \
-    || { warn "could not extract ROCm profiler hotfix libraries from ${donor_image}; skipping"; return 0; }
+  extract_dir="$(download_rocm_profiler_hotfix_libs)" \
+    || { warn "could not obtain ROCm profiler hotfix libraries; skipping"; return 0; }
   hip_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libamdhip64.so.*' | sort | tail -n 1)")"
   tracer_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libroctracer64.so.*' | sort | tail -n 1)")"
   if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then

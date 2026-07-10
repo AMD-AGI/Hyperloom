@@ -607,7 +607,7 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "SAFE_API_KEY: set" in result.stdout
+    assert "LLM credentials: usable base URL + key present" in result.stdout
     assert secret not in result.stdout
     assert secret not in result.stderr
     assert not (tmp_path / "session" / "runtime" / "local-setup.env.sh").exists()

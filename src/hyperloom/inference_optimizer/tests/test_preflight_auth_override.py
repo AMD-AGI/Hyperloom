@@ -673,10 +673,13 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
     assert seen["api_key"] == "safe-key"
 
 
-def test_validate_claude_model_falls_back_to_openai_when_anthropic_probe_fails(monkeypatch):
-    """Dual entry: Anthropic catalog unreachable (native API) → retry OpenAI URL."""
+def test_validate_claude_model_split_entry_anthropic_no_catalog_proceeds(monkeypatch, capsys):
+    """Dual entry: Anthropic side has no /models route → proceed without probing
+    the OpenAI side. The OpenAI (gpt-*) catalog must never gate a Claude model,
+    so a missing Anthropic catalog is treated as unverifiable, not a failure."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
@@ -686,17 +689,20 @@ def test_validate_claude_model_falls_back_to_openai_when_anthropic_probe_fails(m
     def _probe(**kw):
         url = kw.get("base_url", "")
         probed.append(url)
-        # Native Anthropic has no /models route -> None; OpenAI catalog works.
-        if "anthropic" in url:
+        # Anthropic-compatible endpoint has no /models route.
+        if "anthropic" in url or "deepseek" in url:
             return None
-        return {"claude-opus-4-7", "gpt-5.4"}
+        return {"gpt-5.4"}
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="claude-opus-4-7")
-    catalog = cli._validate_and_resolve_claude_model(args, None)
+    result = cli._validate_and_resolve_claude_model(args, None)
 
-    assert probed == ["https://api.anthropic.com", "https://api.openai.com/v1"]
-    assert "claude-opus-4-7" in catalog
+    # Only the Anthropic side is probed; OpenAI side is never consulted.
+    assert probed == ["https://api.deepseek.com/anthropic"]
+    assert result is None
+    assert args.claude_model == "claude-opus-4-7"
+    assert "cannot verify" in capsys.readouterr().out.lower()
 
 
 def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monkeypatch, capsys):
@@ -714,7 +720,7 @@ def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monke
     assert args.claude_model == "my-org/custom-claude"
     out = capsys.readouterr().out
     assert "WARNING" in out
-    assert "unreachable" in out
+    assert "cannot verify" in out.lower()
 
 
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):

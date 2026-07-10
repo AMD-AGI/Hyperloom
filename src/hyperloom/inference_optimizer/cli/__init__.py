@@ -875,6 +875,12 @@ def _validate_and_resolve_claude_model(
     # fall back to the OpenAI side. INFERENCE_OPTIMIZER_CATALOG_PROBE_URL
     # overrides the host outright (single probe, no fallback).
     catalog_ids = None
+    # True when a dedicated Anthropic-side endpoint is configured (split entry).
+    # A Claude catalog can only come from that side; if it has no /models route
+    # (e.g. native api.anthropic.com or DeepSeek's Anthropic API) we treat the
+    # model as "unverifiable" and pass, rather than borrowing the OpenAI (gpt-*)
+    # catalog to reject a Claude id.
+    anthropic_side_configured = False
     override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if override_url:
         api_key = (
@@ -908,6 +914,7 @@ def _validate_and_resolve_claude_model(
         # resolve to the same endpoint.
         candidates: list[tuple[str, str]] = []
         if anthropic_url:
+            anthropic_side_configured = anthropic_url != openai_url
             candidates.append((anthropic_url, anthropic_key))
         if openai_url and openai_url == anthropic_url:
             # single gateway: same URL serves both; OpenAI key is a valid retry
@@ -925,6 +932,16 @@ def _validate_and_resolve_claude_model(
                 break
 
     if catalog_ids is None:
+        # Split entry: the Anthropic side has no /models route (native
+        # Anthropic API, DeepSeek Anthropic API, etc.). The Claude model can't
+        # be verified there and the OpenAI catalog must not gate it, so treat it
+        # as unverifiable and proceed rather than refusing to start.
+        if anthropic_side_configured:
+            print(
+                f"Preflight: WARNING — Anthropic-side catalog has no /models route; "
+                f"cannot verify --claude-model={chosen!r}. Proceeding (split entry)."
+            )
+            return None
         # #340: a custom-model deploy may sit behind a gateway without a
         # /models route; don't hard-block — warn and trust the operator id.
         if allow_custom:
