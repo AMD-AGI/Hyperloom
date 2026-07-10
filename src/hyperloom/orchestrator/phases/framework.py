@@ -2052,7 +2052,7 @@ class FrameworkPhase(PhaseHandler):
         return "\n".join(lines)
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        """Repo URLs to query for the FRAMEWORK batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
+        """Repo URLs to query for the FRAMEWORK batch: framework's own repo + global PR_QUERY_REPOS allowlist, dedup preserving order.
 
         Args:
             framework: The framework name whose own repo seeds the query.
@@ -2061,6 +2061,7 @@ class FrameworkPhase(PhaseHandler):
             An order-preserving, deduped list of repo URLs to query.
         """
         from ..framework import client as _fa_client
+        from ..specialists.domains import PR_QUERY_REPOS
 
         urls: list[str] = []
 
@@ -2077,21 +2078,11 @@ class FrameworkPhase(PhaseHandler):
         # Primary: the framework's own repo.
         _add(_fa_client.repo_url_for_framework(framework))
 
-        # Cross-repo: the pr_intel_specialist repo set (owner/name -> URL).
-        try:
-            from ..specialists.domains import get_domain
-
-            domain = get_domain("pr_intel_specialist")
-            for repo in getattr(domain, "pr_repos", ()) or ():
-                repo = str(repo or "").strip()
-                if not repo:
-                    continue
-                if repo.startswith("http"):
-                    _add(repo)
-                elif "/" in repo:
-                    _add(f"https://github.com/{repo}.git")
-        except Exception:  # noqa: BLE001 — defensive
-            pass
+        # Global allowlist (owner/name -> URL).
+        for repo in PR_QUERY_REPOS:
+            repo = str(repo or "").strip()
+            if repo and "/" in repo:
+                _add(f"https://github.com/{repo}.git")
 
         if not urls:
             # Last-ditch: let phase_discover resolve from framework itself.
