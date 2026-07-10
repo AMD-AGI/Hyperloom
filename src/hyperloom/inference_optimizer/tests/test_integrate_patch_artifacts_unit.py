@@ -209,7 +209,10 @@ def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
     abs_target = str(fw / "configs" / "model_configs" / "tuned_fmoe.csv")
     out = ip._resolve_artifact_target(abs_target)
-    assert out == (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve()
+    assert out == (
+        (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
+        "configs/model_configs/tuned_fmoe.csv",
+    )
 
 
 def test_resolve_artifact_target_absolute_outside_allowlist_rejected(tmp_path, monkeypatch):
@@ -226,7 +229,10 @@ def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
     (fw / "configs" / "model_configs").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
     out = ip._resolve_artifact_target("configs/model_configs/tuned_fmoe.csv")
-    assert out == (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve()
+    assert out == (
+        (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
+        "configs/model_configs/tuned_fmoe.csv",
+    )
 
 
 def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeypatch):
@@ -236,3 +242,28 @@ def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeyp
     (fw / "configs").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
     assert ip._resolve_artifact_target(str(fw / "configs" / ".." / ".." / "x.csv")) is None
+
+
+def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_path, monkeypatch):
+    """Durable-KEEP regression: an absolute target inside an allowlisted root
+    must be recorded with a FRAMEWORK-RELATIVE ``rel_target`` so the KEEP
+    source-snapshot (which treats rel_target as framework-relative via
+    ``snapshot_source_layer``) captures the installed artifact. Previously
+    rel_target kept the raw absolute string, so the snapshot missed the artifact
+    and the KEEP did not survive resume / handoff / current_best relaunch."""
+    fw = tmp_path / "aiter"
+    (fw / "configs" / "model_configs").mkdir(parents=True)
+    ws = tmp_path / "ws"
+    (ws / "worktree" / "artifacts").mkdir(parents=True)
+    (ws / "worktree" / "artifacts" / "tuned.csv").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    abs_target = str(fw / "configs" / "model_configs" / "tuned.csv")
+    specs, errors = ip._resolve_artifact_specs(
+        specialist_workspace=ws,
+        explicit_artifacts=[{"source": "artifacts/tuned.csv", "target": abs_target, "kind": "k"}],
+        done_payload=None,
+    )
+    assert errors == [], errors
+    assert len(specs) == 1
+    assert specs[0].target == (fw / "configs" / "model_configs" / "tuned.csv").resolve()
+    assert specs[0].rel_target == "configs/model_configs/tuned.csv"
