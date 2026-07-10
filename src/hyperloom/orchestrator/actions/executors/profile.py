@@ -564,6 +564,8 @@ def _default_profile_config() -> Path:
         name = "profile_vllm.yaml"
     elif fw == "xdit":
         name = "profile_xdit.yaml"
+    elif fw == "hunyuan_image3":
+        name = "profile_hunyuan_image3.yaml"
     else:
         name = "profile_sglang.yaml"
     return asset_root() / "assets" / "configs" / name
@@ -697,7 +699,12 @@ class ProfileExecutor(BaselineExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            ensure_xdit_profiler_patched()
+            # The baked-profiler verifier is xDiT/xfuser-specific (it inspects
+            # xfuser's base_model.py). Other scriptable frameworks (e.g.
+            # hunyuan_image3, a transformers CausalLM with no xfuser tree) share
+            # the server-less early-return but must not trigger the xDiT check.
+            if str(framework or "").strip().lower() == "xdit":
+                ensure_xdit_profiler_patched()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):

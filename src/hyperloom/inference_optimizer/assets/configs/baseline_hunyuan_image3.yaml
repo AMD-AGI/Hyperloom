@@ -1,0 +1,78 @@
+# Magpie baseline benchmark config for HunyuanImage-3.0 (text-to-image).
+# Resolved by default_baseline_config() / _default_profile_config() when
+# $FRAMEWORK=hunyuan_image3.
+#
+# HunyuanImage-3.0 is a SCRIPTABLE (server-less) framework, like xDiT: there is
+# no OpenAI server, no benchmark_serving.py client, and no server_lifecycle
+# reuse. But unlike xDiT it is NOT an xfuser/diffusers pipeline -- it is an 80B
+# transformers AutoModelForCausalLM (trust_remote_code) driven via its own
+# `generate_image` method. The Magpie wrapper hunyuan_image3_{runner_type}.sh
+# invokes the standalone generation script once per variant, parses E2E latency,
+# runs the image-quality gate (LPIPS/SSIM/MSE vs a fixed BF16 reference), and
+# writes benchmark_report.json directly. Throughput is img/s.
+#
+# Two fields are FALLBACK ONLY and overridden at run time by the executor:
+#   - `benchmark.model`       <- --model / $MODEL_PATH
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+# At materialize time Hyperloom pins benchmark_script to
+# hunyuan_image3_{runner_type}.sh, so it is intentionally NOT set here.
+#
+# The quality-gate env (XDIT_QUALITY_REF / _WRITE / thresholds) is injected by
+# the shared scriptable choke point in _workload_envs (keyed on is_scriptable),
+# so the XDIT_ prefix is reused here for the gate to match what Hyperloom
+# injects. Generation knobs use the HYI3_ prefix.
+
+benchmark:
+  framework: hunyuan_image3
+  workload_kind: scriptable        # drives server-less branching in the loop
+  # benchmark_script: hunyuan_image3_mi355x.sh  # uncomment to force a script
+  model: /primus/models/tencent-HunyuanImage-3.0   # OVERRIDDEN at runtime
+  precision: bf16                  # LOCKED for a hunyuan_image3 session
+  run_mode: local
+
+  envs:
+    # Single-GPU offline path (validated on 1x MI355X, ~176GB peak / 288GB).
+    # TP>1 would require the vLLM serving fork (a different framework/image).
+    TP: 1
+    HYI3_IMAGE_SIZE: "1024x1024"
+    HYI3_DIFF_INFER_STEPS: 50      # model default; A/B smaller step counts in explore
+    HYI3_BOT_TASK: image           # direct image generation (no prompt rewrite)
+    HYI3_USE_SYSTEM_PROMPT: "None"
+    HYI3_ATTN_IMPL: sdpa           # flash_attention_2 needs flash-attn built for ROCm
+    HYI3_MOE_IMPL: eager           # flashinfer MoE not available on this ROCm stack
+    HYI3_SEED: 42
+    HYI3_NUM_ITERATIONS: 5         # timed images (steady-state)
+    HYI3_WARMUP_CALLS: 1
+    HYI3_PROMPT: "A brown and white dog running on the grass, photorealistic, warm sunlight"
+    # Image-quality gate -- same tolerance semantics as xDiT (numeric tolerance
+    # ~1e-2, ~0.15 abs allowed) rather than a tight per-pixel match. These reach
+    # the wrapper via env; the wrapper writes quality_gate.{passed,lpips,ssim,mse}
+    # and _accuracy_gate maps passed->1.0.
+    XDIT_QUALITY_REF: ""           # reference image path; injected at runtime
+    XDIT_QUALITY_LPIPS_MAX: 0.15
+    XDIT_QUALITY_SSIM_MIN: 0.85
+    XDIT_QUALITY_MSE_MAX: 0.006
+    # transformers==4.57.1 lives in a dedicated --target dir shadowing the
+    # image's system transformers; the wrapper prepends it to PYTHONPATH. Offline
+    # weights + remote code load from the pre-provisioned /primus snapshot.
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    TOKENIZERS_PARALLELISM: "false"
+    PATH: "/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # ROCR_VISIBLE_DEVICES is injected at runtime by the executor as 0..TP-1.
+
+  gpu_selection:
+    auto: false                    # executor pins via ROCR_VISIBLE_DEVICES
+
+  server_lifecycle:
+    enabled: false                 # server-less: no reuse
+
+  timeout_seconds: 7200            # 120 min hard cap (158GB load + warmup + iters)
+
+  profiler:
+    torch_profiler:
+      enabled: false               # baseline needs throughput + quality only
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

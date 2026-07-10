@@ -121,14 +121,28 @@ def _detect_stack_fingerprint() -> dict[str, str]:
 
 
 def _git_revision() -> str:
-    """Best-effort short git SHA of the repo containing this package.
+    """Best-effort source revision of the repo containing this package.
+
+    Prefers the live git SHA (dev checkouts). Deployed container images install
+    the package without a ``.git`` tree, so the git lookup returns ``""`` and
+    ``code_revision`` shows up empty in every trace/breakdown — which makes
+    "which build introduced this regression?" impossible to answer at a glance.
+    Fall back to a build-time-baked revision from the environment
+    (``HYPERLOOM_CODE_REVISION`` / ``HYPERLOOM_GIT_SHA``, set in the image
+    Dockerfile) so the field identifies the source commit even in deployment.
 
     Returns:
-        str: Short HEAD SHA, or an empty string when the package directory is
-        not a git checkout or the lookup fails.
+        str: Short HEAD SHA, else the baked env revision, else ``""``.
     """
     here = Path(__file__).resolve().parent
-    return _git_revision_at(here)
+    rev = _git_revision_at(here)
+    if rev:
+        return rev
+    for env_var in ("HYPERLOOM_CODE_REVISION", "HYPERLOOM_GIT_SHA"):
+        val = (os.environ.get(env_var) or "").strip()
+        if val:
+            return val
+    return ""
 
 
 def _git_capture(path: Path, args: list[str]) -> str:
