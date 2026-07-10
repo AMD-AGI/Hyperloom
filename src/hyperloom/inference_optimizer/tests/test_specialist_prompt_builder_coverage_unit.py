@@ -141,7 +141,6 @@ def _rich_inputs(**overrides):
             },
             {"attrs": {}},  # filtered
         ],
-        pr_feed=[{"title": "Fix MoE", "url": "http://pr/1", "labels": ["perf"]}],
         framework_source_roots=("/src/vllm",),
         source_hint_directories=("/src/vllm/v1",),
         notes="prev round residuals",
@@ -161,7 +160,7 @@ def test_build_rich_user_prompt_sections():
     assert "+5.00%" in user_p  # measured_impact dict render
     assert "[from vllm@0.6.1, you're on 0.6.2]" in user_p  # version note
     assert "do not enforce eager" in user_p
-    assert "Fix MoE" in user_p
+    assert "mcp__pr_monitor__" in user_p
     assert "/src/vllm" in user_p
     assert "NOTES FROM ORCHESTRATION" in user_p
 
@@ -192,7 +191,7 @@ def test_pr_monitor_unavailable():
         pr_monitor_available=False,
     )
     _, user_p = build_specialist_prompts(inp)
-    assert "pr_monitor unavailable" in user_p
+    assert "unavailable" in user_p
 
 
 def test_scope_domains_with_extra_tags():

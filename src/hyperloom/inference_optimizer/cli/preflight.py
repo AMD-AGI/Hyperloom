@@ -75,22 +75,15 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
 
 
 def _load_dotenv_fallback() -> None:
-    """Source missing vars from ``$REPO_ROOT/.env`` until a usable LLM endpoint+key is present; env always wins.
+    """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber).
 
-    Skips loading only when both a base URL (OPENAI_BASE_URL / ANTHROPIC_BASE_URL)
-    and a key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
-    ANTHROPIC_AUTH_TOKEN) are already set, so split-entrypoint shells that
-    export only the Anthropic side still pull the missing OpenAI vars from .env.
+    Always parses ``.env`` and loads any key that is not already present in the
+    environment, regardless of whether LLM credentials are already set. Removing
+    the former URL+KEY early-return fixes silent misconfiguration: exporting only
+    ``OPENAI_BASE_URL`` and ``SAFE_API_KEY`` previously skipped unrelated
+    operational vars (e.g. ``TRACELENS_ROOT``, ``FORGE_PATH``,
+    ``KERNEL_OPT_BACKEND_ORDER``) that are also stored in ``.env``.
     """
-    has_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
-    has_key = (
-        os.environ.get("SAFE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    )
-    if has_url and has_key:
-        return
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     if not env_file.exists():
@@ -785,11 +778,14 @@ def _preflight(
             for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
+                    # A genuine operator override is preserved, but a leftover
+                    # install-time 127.0.0.1:4002 proxy is unreachable and must
+                    # be force-rewritten to the gateway.
                     if _is_stale_proxy_url(current):
                         os.environ[alias] = gateway_url
                         print(
                             f"Preflight: {alias} {current} -> {gateway_url} "
-                            "(stale local proxy)"
+                            "(stale install-time proxy; force-rewritten to gateway)"
                         )
                         continue
                     print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
