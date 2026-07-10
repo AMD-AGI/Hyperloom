@@ -1,10 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CI-collected tests for TraceLens agent transcript persistence (#266).
+"""CI-collected tests for TraceLens agent transcript persistence .
 
 The broader ``src/hyperloom/agents/kernel/tests/test_tracelens_csv.py`` file
 exercises many TraceLens integration paths that require repo-local TraceLens
-assets. These tests isolate the small SDK-runner contract added by #266 so CI
+assets. These tests isolate the small SDK-runner transcript contract so CI
 covers the transcript feature without pulling in those environment-dependent
 cases.
 """
@@ -133,3 +133,38 @@ def test_transcript_failure_never_aborts_run(tmp_path):
     )
 
     assert res.report_path.exists()
+
+
+def test_run_tracelens_skill_uses_fallback_model_when_default_missing(tmp_path, monkeypatch):
+    output_dir = tmp_path / "out"
+    seen_model: dict[str, str] = {}
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield type("Msg", (), {"content": [], "result": "done"})()
+
+    class _CaptureOptions:
+        def __init__(self, **kwargs):
+            seen_model["value"] = kwargs.get("model", "")
+
+    monkeypatch.delattr(tlr, "DEFAULT_MODEL", raising=False)
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_CaptureOptions,
+        )
+    )
+
+    assert seen_model["value"] == "claude-opus-4-7"

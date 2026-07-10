@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Import-lint guard for ``hyperloom.common`` (tree-reform.MD §7 "防环规则").
+"""Import-lint guard for ``hyperloom.common`` ("防环规则").
 
 ``hyperloom.common`` is the zero-dependency shared library: it may import only
 the stdlib (plus ``httpx`` for the future ``llm`` submodule) and must NEVER
@@ -31,9 +31,6 @@ _FORBIDDEN_TOP_LEVEL = frozenset(
         "ci",
     }
 )
-
-# Third-party packages ``common`` is explicitly allowed to depend on.
-_ALLOWED_THIRD_PARTY = frozenset({"httpx"})
 
 
 def _common_py_files() -> list[Path]:

@@ -186,6 +186,7 @@ def _visible_gpu_count() -> int:
         if count > 0:
             return count
     except Exception:
+        # GPU count probe failed; fall through to the next method.
         pass
     if shutil.which("rocm-smi"):
         try:
@@ -258,6 +259,8 @@ def default_baseline_config() -> Path:
         name = "baseline_vllm.yaml"
     elif fw == "xdit":
         name = "baseline_xdit.yaml"
+    elif fw == "hunyuan_image3":
+        name = "baseline_hunyuan_image3.yaml"
     else:
         name = "baseline_sglang.yaml"
     return asset_root() / "assets" / "configs" / name
@@ -375,6 +378,7 @@ def materialize_config_with_envs(
         "OSL",
         "MAX_MODEL_LEN",
         "TP",
+        "PORT",
     ):
         val = os.environ.get(env_key, "").strip()
         if val:
@@ -574,7 +578,7 @@ def materialize_config_with_envs(
         # this layer sets no atom profiler envs and must NOT inject
         # --profiler-config.* flags (atom argparse rejects them).
         is_atom = "atom" in fw
-        # #194 §4/§5: TraceLens profiler flags exist only in patched vLLM /
+        # TraceLens profiler flags exist only in patched vLLM /
         # SGLang builds; try to patch, fall back to the safe set on failure.
         # Default-on (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom (native
         # profiler, no patch set).
@@ -611,7 +615,7 @@ def materialize_config_with_envs(
                 f"--profiler-config.max_iterations {max_iters}",
             ]
             if tracelens_patch_ok:
-                # #194 §4: TraceLens-patched vLLM exposes
+                # TraceLens-patched vLLM exposes
                 # capture_torch_profiler_dir + detailed_trace_annotation;
                 # unpatched vLLM rejects them, so gate on the patcher result.
                 capture_dir = output_dir / "capture_traces"
@@ -669,7 +673,7 @@ def materialize_config_with_envs(
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
             if tracelens_patch_ok and _shape_disc:
-                # #194 §5: TraceLens-patched SGLang exposes
+                # TraceLens-patched SGLang exposes
                 # --enable-shape-discovery-for-cuda-graph-profile; unpatched
                 # SGLang errors on it, so gate strictly on the patcher result.
                 existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))

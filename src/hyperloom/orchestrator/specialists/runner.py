@@ -159,7 +159,7 @@ class _PreparedRun:
     gap: str = ""
     max_turns: int = 0
     # Resolved dispatch profile (scope / mode / bench / lane).
-    profile: "SpecialistProfile" = field(default_factory=lambda: SpecialistProfile())
+    profile: "SpecialistProfile" = field(default_factory=SpecialistProfile)
     workspace: Path | None = None
     worktree: Path | None = None
     worktree_base: Path | None = None
@@ -529,7 +529,6 @@ class SpecialistRunner:
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
                 kg_recommended_knobs=[p for p in (params.get("kg_recommended_knobs") or []) if isinstance(p, dict)],
                 kg_guided_knobs=[p for p in (params.get("kg_guided_knobs") or []) if isinstance(p, dict)],
-                pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
@@ -1194,7 +1193,7 @@ class SpecialistRunner:
         # authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
-        # #5-P2: re-stamp cross-framework provenance from task params so the KB
+        # Re-stamp cross-framework provenance from task params so the KB
         # ledger records source/target framework deterministically, regardless
         # of whether the specialist echoed them in its proposal.
         _cf_params = ctx.task.params or {}
@@ -1529,8 +1528,7 @@ class SpecialistRunner:
         concurrent reader (or a high-frequency incremental rewrite)
         never observes a half-written file.
 
-        tree-reform.MD §7/P2.1: delegates to
-        :func:`hyperloom.common.io.atomic_write_json`.
+        Delegates to :func:`hyperloom.common.io.atomic_write_json`.
 
         Args:
             path (Path): Destination file path.

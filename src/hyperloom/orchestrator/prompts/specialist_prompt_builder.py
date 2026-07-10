@@ -709,19 +709,17 @@ class SpecialistPromptInputs:
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 lessons — positive priors from prior KEEPs; rendered as § 5b.
+    # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # KG graph-recommended knobs (cross-recipe IMPROVES candidates reached via
-    # the architecture family graph); advisory candidates rendered as § 5d.
+    # the architecture family graph); advisory candidates rendered in their own section.
     # Each entry: ``{knob, expected_gain, confidence, source}``.
     kg_recommended_knobs: list[dict[str, Any]] = field(default_factory=list)
     # KG graph-guided config knobs (journal-derived ``KNOB_IMPROVES`` for the
-    # current arch+precision); rendered as § 5e. Unlike ``kg_recommended_knobs``
+    # current arch+precision); rendered in their own section. Unlike ``kg_recommended_knobs``
     # these carry runnable ``args``/``envs``. Each entry:
     # ``{knob, args, envs, name, expected_gain, confidence, source}``.
     kg_guided_knobs: list[dict[str, Any]] = field(default_factory=list)
-    # PR feed
-    pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
     # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
@@ -1147,7 +1145,6 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
         and not inp.warm_start_recipe
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
-        and not inp.pr_feed
         and not inp.research_hints
     )
 
@@ -1190,11 +1187,11 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     "",
                     "All prior sources for this gap are empty:",
                     "",
-                    "- KB context: ``(none)`` — no RecipeKB warm-start facts, "
-                    + "research hints, or PR feed entries were available for this "
+                    "- KB context: ``(none)`` — no RecipeKB warm-start facts or "
+                    + "research hints were available for this "
                     + "(model, hardware, domain) tuple.",
                     "- Warm-start recipe: ``(none)`` (Section 5).",
-                    "- PR feed: ``(none)`` (Section 6).",
+                    "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
                     "",
                     "**Directive — DO NOT return an empty proposal_set.** "
                     + "Treat the *Winning techniques* + *Pitfalls* in your "
@@ -1206,7 +1203,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "``confidence: low`` and ``provenance: "
                     + "domain_focus_default`` in the proposal. Use the "
                     + "``residual_questions`` field to record what RecipeKB, "
-                    + "research, or PR query a future round should pre-warm.",
+                    + "research, or ``mcp__pr_monitor__*`` query a future round should pursue.",
                     "",
                     "If the *Winning techniques* block is generic enough "
                     + "that no proposal is safer than a coin-flip, you may "
@@ -1505,7 +1502,7 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     for point in inp.warm_start_pitfalls:
-        # Symmetric with §5b lessons: tolerate plain-string pitfalls from the
+        # Symmetric with lessons: tolerate plain-string pitfalls from the
         # external KB row alongside the structured dict "point" shape.
         if isinstance(point, str):
             description = point.strip()
@@ -1629,32 +1626,34 @@ def _section_kg_guided_knobs(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# Section 6 — PR feed
+# Section 6 — PR query capability
 def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
-    """Render Section 6 (PR feed) of the specialist prompt.
+    """Render Section 6 (PR query capability) of the specialist prompt.
 
-    Lists the pre-warmed PR-monitor entries (title, URL, labels), or an
-    ``unavailable`` / ``(none)`` placeholder when no feed is present.
+    When the PR Monitor MCP is available, describes the self-serve query tools
+    and lists the global repo allowlist the specialist may query. When
+    unavailable, outputs a placeholder.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.
 
     Returns:
-        list[str]: Markdown lines for the PR-feed section.
+        list[str]: Markdown lines for the PR-query capability section.
     """
-    rows = ["## 6. PR FEED", ""]
+    from hyperloom.orchestrator.specialists.domains import PR_QUERY_REPOS
+
+    rows = ["## 6. PR MONITOR", ""]
     if not inp.pr_monitor_available:
-        rows.append("(empty: pr_monitor unavailable)")
+        rows.append("(unavailable: pr_monitor disabled)")
         return rows
-    if not inp.pr_feed:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
-    for pr in inp.pr_feed:
-        title = str(pr.get("title") or "").strip()
-        url = str(pr.get("url") or "").strip()
-        labels = pr.get("labels") or []
-        labels_text = " " + " ".join(f"[{l}]" for l in labels) if isinstance(labels, list) and labels else ""
-        rows.append(f"- {title} — <{url}>{labels_text}")
+    rows += [
+        "Use ``mcp__pr_monitor__*`` tools to query PRs on demand:",
+        "``pr_search`` / ``pr_list`` / ``pr_get`` / ``pr_files`` / ``pr_patches`` / ``pr_file_patch`` / ``pr_blob``",
+        "",
+        "Repos you may query:",
+    ]
+    for repo in PR_QUERY_REPOS:
+        rows.append(f"- {repo}")
     return rows
 
 
@@ -1775,7 +1774,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Field contract:",
         "",
-        "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
+        "- ``proposal_set`` items reuse the explore variant schema.",
         (
             "- ``atomic`` (bool, default false): set ``true`` when this "
             "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
@@ -1792,7 +1791,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
             "entries. You are a curator, not a brainstormer: rank candidates "
             "by expected gain x your confidence, drop everything that "
-            "contradicts ``kb_subgraph`` / ``pr_feed`` evidence already in "
+            "contradicts ``kb_subgraph`` / ``pr_evidence`` already in "
             f"your prompt, and only emit the surviving top {inp.max_proposals}. "
             "Fewer is better than padding."
         ),
@@ -1939,18 +1938,18 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_iron_rules(inp),
     ]
     user_sections = [
-        _section_hardware(inp),  # 0: § 1
-        _section_execution_budget(inp),  # 0a: § 2a (omitted when no budget)
-        _section_gap(inp),  # 1: § 2-3
-        _section_kb_subgraph(inp),  # 2: § 4
-        _section_roofline_evidence(inp),  # 3: § 4a
-        _section_recipe(inp),  # 4: § 5
-        _section_lessons(inp),  # 5: § 5b
-        _section_pitfalls(inp),  # 6: § 5c
-        _section_kg_recommended(inp),  # 6a: § 5d (KG graph-recommended knobs)
-        _section_kg_guided_knobs(inp),  # 6b: § 5e (KG graph-guided runnable knobs)
-        _section_pr_feed(inp),  # 7: § 6
-        _section_source_hint(inp),  # 8: § 7
+        _section_hardware(inp),
+        _section_execution_budget(inp),  # omitted when no budget
+        _section_gap(inp),
+        _section_kb_subgraph(inp),
+        _section_roofline_evidence(inp),
+        _section_recipe(inp),
+        _section_lessons(inp),
+        _section_pitfalls(inp),
+        _section_kg_recommended(inp),  # KG graph-recommended knobs
+        _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
+        _section_pr_feed(inp),
+        _section_source_hint(inp),
     ]
     if inp.notes:
         user_sections.append(

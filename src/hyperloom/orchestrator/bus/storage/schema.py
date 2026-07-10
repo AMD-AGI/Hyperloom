@@ -40,7 +40,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 
 _DDL = [
-    # leases — Resource Lock Manager (DESIGN §3.5). Composite PK
+    # leases — Resource Lock Manager. Composite PK
     # (lane, holder_id); per-lane cap in lane_capacity (acquire_many
     # rolls back when count >= capacity).
     """
@@ -65,7 +65,7 @@ _DDL = [
         capacity INTEGER NOT NULL
     )
     """,
-    # events — A2A message bus (DESIGN §13.1)
+    # events — A2A message bus
     """
     CREATE TABLE IF NOT EXISTS events (
         seq           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +81,7 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_events_to_agent ON events(to_agent, seq)",
     "CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic, seq)",
-    # cursors — idempotent message processing (DESIGN §17.3)
+    # cursors — idempotent message processing
     """
     CREATE TABLE IF NOT EXISTS cursors (
         agent                 TEXT PRIMARY KEY,
@@ -90,7 +90,7 @@ _DDL = [
         processed_at          TEXT    NOT NULL
     )
     """,
-    # tasks — DelegatedTask state machine (DESIGN §17.4)
+    # tasks — DelegatedTask state machine
     """
     CREATE TABLE IF NOT EXISTS tasks (
         task_id          TEXT PRIMARY KEY,
@@ -270,6 +270,7 @@ def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
         if row is not None:
             return int(row[0])
     except sqlite3.OperationalError:
+        # Table/row may not exist yet; treat as no value.
         pass
     finally:
         cur.close()

@@ -2,7 +2,7 @@
 
 """Specialist sub-agent domain catalogue.
 
-LLM sub-agent form factor parameterized by a ``domain`` (§3.5 §5) — a stable
+LLM sub-agent form factor parameterized by a ``domain`` — a stable
 id used by PolicyGate R2. A runtime constant, not per-domain yaml.
 
 Field reference:
@@ -10,8 +10,10 @@ Field reference:
 * ``key`` — canonical id used in ``delegate{params.domain}``.
 * ``layer`` — short human label (analysis layer covered).
 * ``kb_anchor`` — knowledge-domain label for prompt grouping.
-* ``pr_repos`` — repos the PR Monitor pulls recent PRs from.
 * ``available_in`` — ``"M5"`` / ``"M6"``; PolicyGate R2 accepts both.
+
+All specialists share the global :data:`PR_QUERY_REPOS` allowlist and query
+the PR Monitor directly via ``mcp__pr_monitor__*`` tools.
 """
 
 from __future__ import annotations
@@ -24,16 +26,14 @@ class SpecialistDomain:
     """A single specialist domain entry in the canonical catalogue.
 
     Describes one specialist (serving, kernel, comm, compiler, system, etc.)
-    that the Orchestrator can dispatch, including which source layer it reads,
-    which KB anchor it maps to, and which upstream repos it scouts for PRs.
+    that the Orchestrator can dispatch, including which source layer it reads
+    and which KB anchor it maps to.
 
     Attributes:
         key (str): Stable identifier for the domain (e.g. ``serving_specialist``).
         layer (str): Human-readable description of the source/runtime layer it
             focuses on.
         kb_anchor (str): Knowledge-base anchor the domain is associated with.
-        pr_repos (tuple[str, ...]): Upstream repositories scanned for relevant
-            PRs. Defaults to an empty tuple.
         available_in (str): Milestone in which the domain becomes available
             (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
         description (str): Free-form description of the domain's responsibilities.
@@ -47,11 +47,26 @@ class SpecialistDomain:
     key: str
     layer: str
     kb_anchor: str
-    pr_repos: tuple[str, ...] = ()
     available_in: str = "M6"
     description: str = ""
     # Optional per-domain sub_kind catalogue; empty accepts only ``params.sub_kind`` ∈ {None, ""}.
     sub_kinds: tuple[str, ...] = ()
+
+
+# Global allowlist of repos specialists may query via mcp__pr_monitor__*.
+# Shared by all domains; each specialist self-selects which repos to query
+# within this set. ROCm/aiter and triton-lang/triton are intentionally
+# excluded (those are source-editing targets, not PR-query targets).
+PR_QUERY_REPOS: tuple[str, ...] = (
+    "sgl-project/sglang",
+    "ROCm/vllm",
+    "ROCm/rccl",
+    "nvidia/nccl",
+    "pytorch/pytorch",
+    "ROCm/ROCm",
+    "ROCm/HIP",
+    "NVIDIA/TensorRT-LLM",
+)
 
 
 # Canonical catalogue; PolicyGate R2's `specialist_unknown_domain` rule reads this set.
@@ -60,19 +75,16 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="serving_specialist",
         layer="sglang / vllm scheduler / cuda_graph / kv_cache",
         kb_anchor="framework",
-        pr_repos=("sgl-project/sglang", "ROCm/vllm"),
         available_in="M5",
         description=(
             "Reads sglang/vllm source, focuses on scheduler, cuda graph, "
             "kv cache, batching, chunked prefill, max-num-seqs."
         ),
-        # Upstream PR discovery runs as the standalone FRAMEWORK_AGENT phase.
     ),
     SpecialistDomain(
         key="kernel_switch_specialist",
         layer="aiter / sglang kernels / triton",
         kb_anchor="kernel_agent",
-        pr_repos=("ROCm/aiter", "triton-lang/triton"),
         available_in="M6",
         description=(
             "Reads aiter / sglang kernels / triton source; focuses on attention, MoE, GEMM, fused attention paths."
@@ -82,7 +94,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="comm_specialist",
         layer="RCCL / NCCL / QuickReduce / AllReduce",
         kb_anchor="communication",
-        pr_repos=("ROCm/rccl", "nvidia/nccl"),
         available_in="M6",
         description=("Focuses on collective communication, allreduce algorithms, QuickReduce, topology."),
     ),
@@ -90,7 +101,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="compiler_specialist",
         layer="torch.compile / inductor / triton",
         kb_anchor="compiler",
-        pr_repos=("triton-lang/triton", "pytorch/pytorch"),
         available_in="M6",
         description=("Focuses on torch.compile, inductor, triton codegen, AMDGCN, register pressure."),
     ),
@@ -98,7 +108,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="system_specialist",
         layer="KFD / driver / memory / dispatch overhead",
         kb_anchor="systems",
-        pr_repos=("ROCm/ROCm",),
         available_in="M6",
         description=(
             "Fixes launch latency, dispatch overhead, device "
@@ -110,13 +119,10 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="pr_intel_specialist",
         layer="cross-repo PR research",
         kb_anchor="pr_intelligence",
-        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm", "triton-lang/triton", "ROCm/rccl"),
         available_in="M6",
         description=(
             "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
-            "repos and feeds refs to other specialists. The bulk pre-scan "
-            "runs in the dedicated FRAMEWORK_AGENT phase; this domain is for "
-            "narrow follow-ups discovered mid-EXPLORE. Dispatch sparingly "
+            "repos and feeds refs to other specialists. Dispatch sparingly "
             "(one every K rounds)."
         ),
     ),
@@ -124,14 +130,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="research_scout_specialist",
         layer="proven-prior research / reference scripts / arch features",
         kb_anchor="research_scout",
-        pr_repos=(
-            "ROCm/aiter",
-            "sgl-project/sglang",
-            "ROCm/vllm",
-            "triton-lang/triton",
-            "ROCm/rccl",
-            "NVIDIA/TensorRT-LLM",
-        ),
         available_in="M5",
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
@@ -147,7 +145,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="static_recon_specialist",
         layer="framework source static reconnaissance / un-bridged switches",
         kb_anchor="static_recon",
-        pr_repos=("ROCm/vllm", "sgl-project/sglang", "ROCm/aiter"),
         available_in="M6",
         description=(
             "Read-only static-source reconnaissance dispatched at PRELUDE. "
@@ -165,7 +162,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="enablement_specialist",
         layer="non-runnable (model, backend) enablement / framework + ROCm/HIP bridging",
         kb_anchor="framework",
-        pr_repos=("sgl-project/sglang", "ROCm/vllm", "ROCm/aiter", "ROCm/HIP"),
         available_in="M6",
         description=(
             "Authoring specialist for the ENABLEMENT objective: makes a "
@@ -184,7 +180,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="cross_framework_rewrite_specialist",
         layer="cross-framework feature port (sglang <-> vllm), rewrite not git-apply",
         kb_anchor="framework",
-        pr_repos=("sgl-project/sglang", "ROCm/vllm"),
         available_in="M6",
         description=(
             "Authoring specialist for cross-framework feature porting (#5-P2). "
@@ -383,6 +378,7 @@ __all__ = [
     "FREEFORM_DOMAIN",
     "KNOWLEDGE_DOMAIN_TAGS",
     "KNOWLEDGE_DOMAIN_TAG_SET",
+    "PR_QUERY_REPOS",
     "SPECIALIST_DOMAINS",
     "SPECIALIST_DOMAIN_KEYS",
     "SPECIALIST_MAX_TURNS_HARD_CAP",

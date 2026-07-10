@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.5 / M5 / KB_gaps/Gap-01 — specialist sub-agent integration smoke test exercising the cli → Coordinator → SubAgentRunner → SpecialistRunner chain with real wiring."""
+"""Specialist sub-agent integration smoke test exercising the cli → Coordinator → SubAgentRunner → SpecialistRunner chain with real wiring."""
 
 from __future__ import annotations
 
@@ -36,40 +36,11 @@ class _StubTask:
     lease_ttl_sec: int = 60
 
 
-class _StubPRSummary:
-    """PRSummary-shaped duck for the warmup adapter."""
-
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
-
 class _FakeKnowledgePlane:
-    """Minimal KnowledgePlane double returning a deterministic PR feed with both planes enabled."""
+    """Minimal KnowledgePlane double with both planes enabled."""
 
     pr_monitor_enabled = True
     cortex_enabled = True
-
-    def __init__(self, prs: list | None = None):
-        self._prs = (
-            prs
-            if prs is not None
-            else [
-                _StubPRSummary(
-                    repo="sgl-project/sglang",
-                    number=1234,
-                    title="Add MoE expert parallel scheduling",
-                    url="https://example.test/pr/1234",
-                    state="open",
-                    labels=("moe", "perf"),
-                    author="alice",
-                ),
-            ]
-        )
-
-    def pr_feed_warm(self, domain: str, **_kwargs):
-        # Mirrors KnowledgePlane.pr_feed_warm return shape (list[PRSummary], list[str]).
-        return self._prs, []
 
 
 # 1. cli._build_specialist_executor wiring
@@ -80,7 +51,7 @@ def _build_args(**overrides) -> argparse.Namespace:
         specialist_max_turns=4,
         specialist_per_turn_max_seconds=300.0,
         research_lane_capacity=1,
-        # PR-A2: use the in-process ClaudeBackend path so mocks work end-to-end.
+        # Use the in-process ClaudeBackend path so mocks work end-to-end.
         specialist_dispatch_mode="inprocess",
         specialist_mcp_config=None,
     )
@@ -89,7 +60,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 
 
 def test_build_specialist_executor_returns_callable(tmp_path: Path):
-    """Gap-01 — the cli factory must produce a callable executor."""
+    """The cli factory must produce a callable executor."""
     from hyperloom.inference_optimizer.cli import _build_specialist_executor
 
     plane = _FakeKnowledgePlane()
@@ -105,7 +76,7 @@ def test_build_specialist_executor_returns_callable(tmp_path: Path):
 # 2. cli._register_executors wires 'specialist' kind end-to-end
 @pytest.mark.asyncio
 async def test_register_executors_registers_specialist_kind(tmp_path: Path):
-    """Gap-01 regression: ``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
+    """``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
     from hyperloom.inference_optimizer.cli import (
         _build_specialist_executor,
         _register_executors,
@@ -173,8 +144,8 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
 
 # 3. Coordinator._warm_specialist_params populates task params
 @pytest.mark.asyncio
-async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
-    """Warmup mutates ``params`` with the flattened PR feed, pr_monitor_available, and warm-start fields."""
+async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path):
+    """Warmup populates pr_monitor_available and warm-start fields."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
@@ -196,13 +167,6 @@ async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     params: dict = {"domain": "serving_specialist"}
     await coord._warm_specialist_params(params)
 
-    assert "pr_feed" in params
-    assert isinstance(params["pr_feed"], list)
-    assert len(params["pr_feed"]) == 1
-    pr = params["pr_feed"][0]
-    assert pr["title"].startswith("Add MoE expert")
-    assert pr["repo"] == "sgl-project/sglang"
-    assert "moe" in pr["labels"]
     assert params["pr_monitor_available"] is True
     assert params["warm_start_recipe"]["backend"] == "sglang"
     assert "avoid --max-num-seqs 1024 on MoE" in params["warm_start_pitfalls"]
@@ -211,7 +175,7 @@ async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
-    """``--degraded-kb`` (knowledge_plane=None) still leaves a valid empty ``pr_feed``."""
+    """``--degraded-kb`` (knowledge_plane=None) sets pr_monitor_available=False."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
@@ -228,34 +192,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
 
     params: dict = {"domain": "serving_specialist"}
     await coord._warm_specialist_params(params)
-    assert params["pr_feed"] == []
     assert params["pr_monitor_available"] is False
-
-
-@pytest.mark.asyncio
-async def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
-    """A pre-populated ``params['pr_feed']`` is not clobbered — the explicit value wins."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    coord = Coordinator.__new__(Coordinator)
-    coord.knowledge_plane = _FakeKnowledgePlane()
-
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = ""
-
-    coord.shared_state = _State()
-
-    explicit_pr_feed = [{"repo": "x/y", "title": "preset PR", "labels": []}]
-    params: dict = {
-        "domain": "serving_specialist",
-        "pr_feed": explicit_pr_feed,
-    }
-    await coord._warm_specialist_params(params)
-    assert params["pr_feed"] is explicit_pr_feed
 
 
 # 4. End-to-end: SubAgentRunner dispatches a specialist via the adapter
@@ -337,7 +274,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     assert len(sd["proposal_set"]) == 1
     assert sd["proposal_set"][0]["variant_name"] == "moe_expert_parallel"
 
-    # On-disk artefacts (Inv-5.3 requires a transcript per specialist).
+    # On-disk artefacts (a transcript per specialist is required).
     workspace = tmp_path / "runs" / "specialist" / "task-int-1"
     assert (workspace / "prompt.md").exists()
     assert (workspace / "specialist_done.json").exists()
@@ -359,7 +296,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
 async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
     tmp_path: Path,
 ):
-    """When the runner exhausts max_turns without a specialist_done, the adapter synthesises a well-formed empty dict (Inv-5.3)."""
+    """When the runner exhausts max_turns without a specialist_done, the adapter synthesises a well-formed empty dict."""
     from hyperloom.inference_optimizer.cli import _build_specialist_executor
 
     # Backend keeps emitting heartbeats; never produces a done.
@@ -400,7 +337,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
     sd = result_dict["specialist_done"]
     assert sd["empty"] is True
     assert sd["proposal_set"] == []
-    # Transcript + done file still on disk (Inv-5.3: some specialist_done is always written).
+    # Transcript + done file still on disk (some specialist_done is always written).
     workspace = tmp_path / "runs" / "specialist" / "task-stale-1"
     assert (workspace / "specialist_done.json").exists()
 
@@ -408,8 +345,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
 # 5. CLI argparse surface — flags are wired
 def test_cli_specialist_flags_present():
     """Smoke that the new CLI specialist flags parse."""
-    import hyperloom.inference_optimizer.cli as cli_mod
-
+    from hyperloom.inference_optimizer import cli as cli_mod
     parser = cli_mod._build_parser()
     args = parser.parse_args(
         [
@@ -433,7 +369,7 @@ def test_cli_specialist_flags_present():
 
 
 def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
-    import hyperloom.inference_optimizer.cli as cli_mod
+    from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     # research-lane-capacity default is GPU-derived; pin the GPU count for determinism.
@@ -463,5 +399,5 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli falls back to --claude-model.
     assert args.specialist_model is None
-    # PR-A2/A3: subprocess dispatch is the production default.
+    # Subprocess dispatch is the production default.
     assert args.specialist_dispatch_mode == "subprocess"

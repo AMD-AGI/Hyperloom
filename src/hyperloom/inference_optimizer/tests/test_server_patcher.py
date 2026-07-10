@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_server_patcher`` (Hyperloom issue #194 §4 / §5).
+"""Tests for ``_server_patcher``.
 
 Per-framework patchers that are fail-soft, idempotent, concurrency-safe, and
 atomic. Fixtures synthesize fake vLLM/SGLang installs + a fake TraceLens patch
@@ -76,7 +76,7 @@ def _write_fake_vllm_patch(
         "detailed_trace_annotation",
     ),
 ) -> Path:
-    """Generate a minimal unified diff adding both sentinel markers (PR-D §4) to the fake profiler.py."""
+    """Generate a minimal unified diff adding both sentinel markers to the fake profiler.py."""
     patch_path = (
         tracelens_root
         / "examples"
@@ -427,7 +427,7 @@ def test_vllm_concurrent_patchers_converge(fake_vllm_world):
     def worker() -> None:
         try:
             results.append(ensure_vllm_patched_for_tracelens())
-        except BaseException as exc:  # noqa: BLE001 - test-only
+        except Exception as exc:  # noqa: BLE001 - test-only
             errors.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(6)]
@@ -450,8 +450,8 @@ def test_returns_false_when_git_missing(fake_vllm_world, monkeypatch):
     assert ensure_vllm_patched_for_tracelens() is False
 
 
-# PR-C §1 (tightened by PR-D §6): patch -p1 --fuzz=2 fallback when git apply
-# --check rejects. fuzz=2 tolerates single-line drift but rejects multi-line drift.
+# patch -p1 --fuzz=2 fallback when git apply --check rejects. fuzz=2
+# tolerates single-line drift but rejects multi-line drift.
 _REQUIRES_PATCH = pytest.mark.skipif(
     shutil.which("patch") is None,
     reason="`patch` binary not available in test environment",
@@ -469,7 +469,7 @@ def test_apply_atomic_fuzzy_fallback_when_git_strict_check_fails(fake_vllm_world
         textwrap.dedent(
             """\
             # Synthetic vLLM profiler config — used only by tests.
-            # PR-C drift comment that breaks strict git apply --check.
+            # Drift comment that breaks strict git apply --check.
             class ProfilerConfig:
                 profiler: str = ""
                 ignore_frontend: bool = False
@@ -522,10 +522,10 @@ def test_patch_dry_run_returns_false_when_patch_binary_missing(tmp_path):
     assert rc is False
 
 
-# PR-D §6 safety guarantee: the ``_FUZZ`` constant must stay at GNU patch's
+# Safety guarantee: the ``_FUZZ`` constant must stay at GNU patch's
 # default (2); bumping it back to 10 re-opens the silent mis-apply risk.
 def test_fuzz_value_is_default_two_not_maximum_ten():
-    """PR-D §6: ``_FUZZ`` MUST be 2; ``--fuzz=10`` would silently mis-apply on multi-line drift."""
+    """``_FUZZ`` MUST be 2; ``--fuzz=10`` would silently mis-apply on multi-line drift."""
     assert _server_patcher._FUZZ == 2, (
         f"_FUZZ must be 2 (GNU patch default, PR-D §6 safety floor); "
         f"found {_server_patcher._FUZZ}. Bumping it back up to 10 or "
@@ -537,7 +537,7 @@ def test_fuzz_value_is_default_two_not_maximum_ten():
 @_REQUIRES_GIT
 @_REQUIRES_PATCH
 def test_fuzz_fallback_rejects_multi_line_context_mismatch(fake_vllm_world):
-    """PR-D §6: mutating more than ``_FUZZ`` (=2) context lines makes the fuzzy fallback reject (fuzz=10 would accept)."""
+    """Mutating more than ``_FUZZ`` (=2) context lines makes the fuzzy fallback reject (fuzz=10 would accept)."""
     _, install_root, _ = fake_vllm_world
     target = install_root / "vllm" / "config" / "profiler.py"
     # All 3 before-context lines mutated; trailing context kept identical.
@@ -599,7 +599,7 @@ def test_fuzz_fallback_tolerates_offset_slippage(fake_vllm_world):
     assert "detailed_trace_annotation" in text
 
 
-# PR-C §2: SGLang minor-version allowlist (was: exact-version pin)
+# SGLang minor-version allowlist (was: exact-version pin)
 @pytest.mark.parametrize(
     "env, version, expected",
     [
@@ -644,7 +644,7 @@ def test_fuzz_fallback_tolerates_offset_slippage(fake_vllm_world):
     ],
 )
 def test_sglang_version_accepted(monkeypatch, env, version, expected):
-    """Minor-version allowlist (PR-C §2): default 0.5.x band, narrowable/extendable via env overrides."""
+    """Minor-version allowlist: default 0.5.x band, narrowable/extendable via env overrides."""
     for key in (
         "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
         "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS",
@@ -655,7 +655,7 @@ def test_sglang_version_accepted(monkeypatch, env, version, expected):
     assert _server_patcher._sglang_version_accepted(version) is expected
 
 
-# PR-D §1: wheel-install SGLang patching via -p3 strip
+# Wheel-install SGLang patching via -p3 strip.
 def _make_fake_wheel_sglang_install(tmp_path: Path) -> Path:
     """Synthesise a pip-wheel SGLang layout (``site-packages/sglang/...``, no ``python/`` parent)."""
     site_packages = tmp_path / "site-packages"
@@ -767,7 +767,7 @@ def test_resolve_sglang_apply_root_rejects_unexpected_layout(tmp_path):
     assert _server_patcher._resolve_sglang_apply_root(sglang_module) is None
 
 
-# PR-D §4: tuple-of-substrings sentinel for vLLM (false-positive guard)
+# Tuple-of-substrings sentinel for vLLM (false-positive guard).
 def test_is_patched_requires_all_substrings_in_tuple(tmp_path):
     """``_is_patched`` requires EVERY substring in ``plan.sentinel_text``; one marker alone is rejected."""
     sentinel = tmp_path / "fake_sentinel.py"
@@ -814,7 +814,7 @@ def test_is_patched_handles_single_element_tuple(tmp_path):
 
 
 def test_vllm_plan_uses_two_marker_sentinel(tmp_path, monkeypatch):
-    """PR-D §4: the vLLM plan declares a 2-tuple sentinel (both markers)."""
+    """The vLLM plan declares a 2-tuple sentinel (both markers)."""
     tracelens_root = _make_fake_tracelens(tmp_path)
     install_root = _make_fake_vllm_install(tmp_path)
     _write_fake_vllm_patch(tracelens_root, _FAKE_VLLM_VERSION)
@@ -834,7 +834,7 @@ def test_vllm_plan_uses_two_marker_sentinel(tmp_path, monkeypatch):
 
 
 def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
-    """SGLang keeps a single-substring sentinel in a 1-tuple for type uniformity (PR-D §4)."""
+    """SGLang keeps a single-substring sentinel in a 1-tuple for type uniformity."""
     tracelens_root, _, _ = fake_sglang_world
     plan = _server_patcher._discover_sglang_plan(tracelens_root)
     assert plan is not None
@@ -842,7 +842,7 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
     assert plan.sentinel_text == ("kernel_shape_profiler",), plan.sentinel_text
 
 
-# PR-D §5: a TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
+# A TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
 # over the hardcoded minor allowlist (auto-adapts without a code change).
 def _write_sglang_versions_manifest(
     tracelens_root: Path,
@@ -863,7 +863,7 @@ def _write_sglang_versions_manifest(
 
 
 def test_load_sglang_manifest_returns_none_when_absent(tmp_path):
-    """No manifest → the loader returns None so the caller falls back to the PR-C.2 minor allowlist."""
+    """No manifest → the loader returns None so the caller falls back to the default minor-version allowlist."""
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     assert (
@@ -1209,7 +1209,7 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
         assert "sglang_0_5_11" in p.parts, f"versioned layout should be selected, got patch path {p}"
 
 
-# Issue #505: a "new file" member patch whose target is ALREADY pre-baked into
+# A "new file" member patch whose target is ALREADY pre-baked into
 # the sglang 0.5.11 image (byte-identical post-image) must be reverse-check
 # detected and SKIPPED from the atomic set — so the remaining annotation
 # patches still apply — instead of the whole set fail-soft skipping (which

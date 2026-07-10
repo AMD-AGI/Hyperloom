@@ -12,7 +12,7 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) into the pod-local open-source repo tree,
 #      pinned to MAGPIE_REF
-#      (a commit SHA, mirrors the GEAK_REF pin in kernel-agent)
+#      (a commit SHA, mirrors the GEAK_V3_REF pin in kernel-agent)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
 #       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when MAGPIE_REF
 #       is pinned to an upstream-atomic commit)
@@ -134,7 +134,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # post-refactor SHA: the upstream code is already atomic, so the in-place
 # patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
-# (mirrors GEAK_REF in src/hyperloom/agents/kernel/scripts/install.sh).
+# (mirrors GEAK_V3_REF in src/hyperloom/agents/kernel/scripts/install.sh).
 # Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
 # diffusion benchmark framework (#51); the previous pin
 # (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
@@ -157,15 +157,6 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
-# Opt-in PerfSkills/GEAK-e2e optimizer install (forwarded to the chained
-# kernel-agent installer). Default off: the runtime default optimizer is
-# native, so native-only users skip the extra GEAK-e2e checkout + pip. Enable
-# with --with-perfskills or INSTALL_PERFSKILLS=1 when you intend to run
-# with KERNEL_OPT_BACKEND_ORDER=perfskills.
-case "${INSTALL_PERFSKILLS:-0}" in
-  1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
-  *) INSTALL_PERFSKILLS=0 ;;
-esac
 
 usage() {
   cat <<'EOF'
@@ -188,10 +179,6 @@ Installs:
 Options:
   --check-only           Verify only, do not install
   --dry-run              Print actions without running them
-  --with-perfskills      Also install the PerfSkills/GEAK-e2e optimizer
-                         (forwarded to the kernel-agent installer; only
-                         needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
-                         Equivalent to INSTALL_PERFSKILLS=1.
   --skip-kernel-agent    Skip the chained kernel-agent installer
   -h, --help             Show this help
 
@@ -217,7 +204,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    --with-perfskills) INSTALL_PERFSKILLS=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
@@ -305,13 +291,9 @@ acquire_install_lock() {
   fi
 }
 
-# Preflight credential validation. Mirrors the gate in
-# src/hyperloom/agents/kernel/scripts/install.sh so users invoking the inference-optimizer
-# installer directly (the canonical entrypoint) get the same fail-fast
-# behaviour as users running kernel-agent on its own. Without this, a
-# missing SAFE_API_KEY / OPENAI_BASE_URL slips past pip install, Magpie
-# clone, InferenceX clone (~10+ minutes of work) and only surfaces when the
-# chained kernel-agent installer reaches GEAK config generation.
+# Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
+# a usable setup needs at least one LLM base URL and at least one key. This
+# accepts either the AMD single-gateway pair or native split OpenAI/Anthropic.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -328,10 +310,14 @@ preflight_load_dotenv() {
 preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
-  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
-  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
-  if [ "${#missing[@]}" -eq 0 ]; then
-    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+  local has_url=0 has_key=0
+  { [ -n "${OPENAI_BASE_URL:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; } && has_url=1
+  { [ -n "${SAFE_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
+    || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("OPENAI_BASE_URL or ANTHROPIC_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("SAFE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN")
+  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
+    log "credentials preflight: usable LLM base URL + key present"
     return 0
   fi
   local env_file_status
@@ -348,18 +334,24 @@ preflight_validate_credentials() {
     return 0
   fi
   cat >&2 <<EOF
-[inference-optimizer ERROR] Missing required credential(s): ${missing[*]}
+[inference-optimizer ERROR] Missing required credential group(s): ${missing[*]}
 
 Tried loading from:
   - shell environment
   - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
 
 Fix one of:
-  1. Copy .env from a working worktree into this one:
-       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
-  2. Export directly into the shell before re-running:
-       export SAFE_API_KEY=sk-xxxxx
+  1. Single gateway:
+       export SAFE_API_KEY=ak-your-safe-apikey
        export OPENAI_BASE_URL=https://gateway.example.com/v1
+  2. Split OpenAI or Anthropic:
+       export OPENAI_BASE_URL=https://api.openai.com/v1
+       export OPENAI_API_KEY=sk-...
+       # or
+       export ANTHROPIC_BASE_URL=https://api.anthropic.com
+       export ANTHROPIC_API_KEY=sk-ant-...
+  3. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2
 }
@@ -1141,9 +1133,6 @@ chain_kernel_agent() {
   log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
   export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_PATH HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-  # Forward the PerfSkills opt-in so --with-perfskills / INSTALL_PERFSKILLS=1
-  # at this canonical entrypoint reaches kernel-agent's ensure_perfskills gate.
-  export INSTALL_PERFSKILLS
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
   [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
   # Forward the optional internal extension path when provided; unset =>

@@ -36,8 +36,8 @@ from ..trace.parse_usage import (
     parse_oob_json_usage,
 )
 
-# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
-# re-exported here so the module namespace + monkeypatch surface is intact.
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from ._kernel_decisions import (
     _HONEST_E2E_UMBRELLA_ENV as _HONEST_E2E_UMBRELLA_ENV,
     _TRUEY as _TRUEY,
@@ -66,6 +66,11 @@ from ._kernel_decisions import (
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+
+# Recognized trace-analysis routes: the TraceLens ``agent`` (default) / ``deterministic``
+# routes and the independent, TraceLens-free ``bypass`` backend (explicit). An unknown
+# value (e.g. an LLM typo) must not silently mis-route — it falls back to ``agent``.
+_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
@@ -166,7 +171,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
 # autonomous loop) prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
 # its claude-agent-sdk ResultMessages. The other backends (claude/codex/cursor)
 # already account their spend via their own paths.
-_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak", "oob", "forge"})
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak_v3", "oob", "forge"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -248,7 +253,7 @@ _APPLY_TOOL_MODULE: Any | None = None
 # when CURSOR_API_KEY is unset (see _backend_order). An explicit
 # KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order)
 # still overrides this default as-is.
-_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak", "claude", "codex", "cursor")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3", "claude", "codex", "cursor")
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
@@ -1493,6 +1498,7 @@ def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except (OSError, json.JSONDecodeError, ValueError):
+        # Config file missing/corrupt; return the empty dict below.
         pass
     return {}
 
@@ -2414,24 +2420,10 @@ async def trace_analyze_handler(
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
-    # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
-    # vanished mid-run (#722), self-heal it before the fail-fast validation.
-    tracelens_root = _resolve_tracelens_root()
-    # Self-heal when the checkout is missing OR incomplete (exists but no .git,
-    # e.g. a concurrent install's half-done clone). Gating only on is_dir()
-    # would let an incomplete default checkout bypass self-heal (#722/PR#789).
-    if not (tracelens_root / ".git").exists():
-        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-    tl_err = _tracelens_root_error(tracelens_root)
-    if tl_err:
-        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
-
-    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
-    workspace_path = payload.get("workspace_path") or str(session_dir)
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
-
-    # Backfill workload context from SharedState so the tool gets the right framework/platform/model/analysis_mode when Orchestration omits them.
+    # Backfill workload context from SharedState so the tool gets the right
+    # framework/platform/model/analysis_mode when Orchestration omits them.
+    # Resolved up-front because the framework decides the default analysis route
+    # (bypass needs no TraceLens root; that resolution is gated + done below).
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -2441,6 +2433,59 @@ async def trace_analyze_handler(
     analysis_mode = (payload.get("analysis_mode") or "").strip()
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
+
+    # Analysis route: the DEFAULT for all frameworks (text-gen + xDiT) is the
+    # TraceLens ``agent`` route (the shipped/production default). The independent,
+    # TraceLens-free ``bypass`` backend stays available as an explicit route
+    # (``bypass`` via payload ``analysis_route`` or ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``)
+    # — that is how development/validation exercises it. ``deterministic`` is the
+    # no-LLM TraceLens variant. An explicit route always wins; the value is coerced
+    # to str first so a non-string payload value cannot raise AttributeError.
+    explicit_route = (
+        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
+    )
+    # Reject an unknown route rather than silently mis-routing: an LLM typo like
+    # ``"foobar"`` would otherwise be truthy and quietly change routing. Warn +
+    # fall back to the default ``agent`` route instead.
+    route_health_warnings: list[dict[str, Any]] = []
+    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
+        log.warning(
+            "trace_analyze: unknown analysis_route %r (expected one of %s); "
+            "falling back to the default 'agent' route",
+            explicit_route, sorted(_VALID_ANALYSIS_ROUTES),
+        )
+        route_health_warnings.append({
+            "code": "invalid_analysis_route",
+            "severity": "warning",
+            "message": (
+                f"unknown analysis_route {explicit_route!r} (expected one of "
+                f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
+            ),
+            "requested_route": explicit_route,
+        })
+        explicit_route = ""
+    analysis_route = explicit_route or "agent"
+    is_bypass = analysis_route == "bypass"
+    # Resolve TraceLens root independently of inherited env (the coordinator may
+    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
+    # vanished mid-run (#722), self-heal it before the fail-fast validation.
+    # Skipped entirely on the bypass route, which never touches TraceLens.
+    tracelens_root: Path | None = None
+    if not is_bypass:
+        tracelens_root = _resolve_tracelens_root()
+        # Self-heal when the checkout is missing OR incomplete (exists but no
+        # .git, e.g. a concurrent install's half-done clone). Gating only on
+        # is_dir() would let an incomplete default checkout bypass self-heal
+        # (#722/PR#789).
+        if not (tracelens_root / ".git").exists():
+            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+        tl_err = _tracelens_root_error(tracelens_root)
+        if tl_err:
+            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+
+    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
     # Scriptable image frameworks (xDiT diffusion) are server-less and have no
     # LLM decode steady-state window, so the TraceLens steady-state splitter
@@ -2454,20 +2499,23 @@ async def trace_analyze_handler(
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
 
+    # Bypass runs the independent TraceLens-free backend; both tools share the
+    # same CLI surface below except ``--tracelens-root`` (TraceLens-only).
+    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
         "python3",
-        str(_kernel_agent_tool_path("tracelens_analysis.py")),
+        str(_kernel_agent_tool_path(tool_name)),
         "--trace-input",
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
         workspace_path,
+    ]
+    if not is_bypass:
         # Pass the resolved root explicitly so the tool never depends on the
         # subprocess inheriting TRACELENS_ROOT from the coordinator env.
-        "--tracelens-root",
-        str(tracelens_root),
-    ]
+        cmd += ["--tracelens-root", str(tracelens_root)]
     # Kernel-candidate POOL size (issue #667): only forward --top-k when the
     # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
     # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
@@ -2485,17 +2533,23 @@ async def trace_analyze_handler(
         cmd += ["--analysis-mode", str(analysis_mode)]
 
     if scriptable:
-        # No steady-state window to extract; skip the splitter entirely.
-        cmd += ["--skip-split"]
-        # Forward the denoise-step count so the diffusion workload roofline can
-        # emit per-denoise-step timings. Priority: payload override (steps in
-        # the profiled window) > baseline workload metadata (full schedule).
+        # --skip-split is a TraceLens-only splitter control; the bypass backend
+        # has its own steady-state windowing (ProfilerStep anchoring) and does not
+        # define this flag, so route-converge it (sending it to bypass would crash
+        # argparse -> trace_analyze_failed -> degraded roofline).
+        if not is_bypass:
+            cmd += ["--skip-split"]
+        # Forward the denoise-step count to BOTH routes so the diffusion workload
+        # roofline can emit per-denoise-step timings (bypass consumes it too).
+        # Priority: payload override (steps in the profiled window) > baseline
+        # workload metadata (full schedule).
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
                 if int(num_denoise) > 0:
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
+                # Invalid num-denoise value; omit the flag.
                 pass
         # Forward the local model dir + precision so the diffusion roofline
         # sidecar can emit an a-priori analytic compute ceiling (approach-a),
@@ -2529,12 +2583,9 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent). Coerce to str
-    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
-    # bool/list emitted by the LLM) cannot raise AttributeError here.
-    analysis_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
+    # Forward the analysis route switch (deterministic vs agent) to the
+    # TraceLens tool. ``analysis_route`` was resolved above; the bypass tool
+    # takes no ``--analysis-route`` flag so it is intentionally excluded here.
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
@@ -2603,7 +2654,9 @@ async def trace_analyze_handler(
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
         # Guarantee ``trace_health_warnings`` is always a list (empty = nothing wrong).
-        result.setdefault("trace_health_warnings", [])
+        # Prepend any route-validation warning (e.g. an unknown analysis_route that
+        # fell back to bypass) so it is surfaced to record_trace_analyze / the LLM.
+        result["trace_health_warnings"] = route_health_warnings + list(result.get("trace_health_warnings") or [])
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
@@ -2622,19 +2675,20 @@ async def trace_analyze_handler(
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
             # Discovery source = the route that actually ran. The tool reports
-            # the authoritative mode (``orchestrator_mode``); the deterministic
-            # (no-LLM) route is surfaced to the dashboard as ``bypass`` while the
-            # LLM route stays ``tracelens``. Fall back to the requested
-            # ``analysis_route`` when the tool didn't echo a mode (e.g. early
-            # failure). Both routes drive the same TraceLens toolchain, so the
-            # version provenance (``tool``) stays ``tracelens`` either way.
+            # the authoritative mode (``orchestrator_mode``). The TraceLens
+            # deterministic (no-LLM) route is surfaced as ``bypass`` while the
+            # TraceLens LLM route stays ``tracelens``. The independent bypass
+            # route (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``) is its own
+            # source and does not touch TraceLens, so its ``tool`` is ``bypass``.
             _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
-            _is_bypass = _orch_mode == "deterministic" or analysis_route == "deterministic"
+            _independent_bypass = _orch_mode == "bypass" or is_bypass
+            _is_bypass = _independent_bypass or _orch_mode == "deterministic" or analysis_route == "deterministic"
             _disc_source = "bypass" if _is_bypass else "tracelens"
+            _disc_tool = "bypass" if _independent_bypass else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
                 source=_disc_source,
-                tool="tracelens",
+                tool=_disc_tool,
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
@@ -2844,7 +2898,7 @@ def _optimization_budget_minutes(payload: dict) -> float:
     oob_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
     geak_budget = _geak_budget_minutes(payload)
     backend = str(payload.get("backends") or "").strip().lower()
-    if backend == "geak":
+    if backend == "geak_v3":
         return geak_budget
     if backend in {"claude", "codex", "cursor"}:
         return oob_budget
@@ -2873,7 +2927,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
 
     This is the single source of truth for kernel-backend selection and is
     shared by both the per-kernel ladder (:func:`_backend_order`) and the
-    phase-level PerfSkills check (:func:`perfskills_selected`).  Unknown tokens
+    phase-level GEAK e2e check (:func:`geak_selected`).  Unknown tokens
     are kept here on purpose; callers filter to the set they understand.
 
     Precedence (highest to lowest): ``payload['backend_order']`` ->
@@ -2896,22 +2950,23 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
     return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
 
 
-def perfskills_selected(payload: dict | None = None) -> bool:
-    """Whether ``perfskills`` is requested in the kernel backend order.
+def geak_selected(payload: dict | None = None) -> bool:
+    """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order.
 
-    ``perfskills`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL_AGENT phase to the PerfSkills e2e optimizer".
+    ``geak`` is not a per-kernel backend: when it appears in the order it
+    means "delegate the whole KERNEL_AGENT phase to the GEAK e2e optimizer".
     It therefore *owns* the phase whenever present (any other backends in the
-    order are ignored for the kernel phase), so an order of just ``perfskills``
-    runs only PerfSkills.
+    order are ignored for the kernel phase), so an order of just ``geak``
+    runs only the GEAK e2e optimizer. The legacy per-kernel backend is the
+    distinct ``geak_v3`` token.
 
     Args:
         payload: Optional request payload that may carry ``backend_order``.
 
     Returns:
-        bool: ``True`` when ``perfskills`` is in the resolved order.
+        bool: ``True`` when ``geak`` is in the resolved order.
     """
-    return "perfskills" in _raw_kernel_backend_order(payload)
+    return "geak" in _raw_kernel_backend_order(payload)
 
 
 def _kernel_ladder_budget_sec(payload: dict) -> int:
@@ -2955,7 +3010,7 @@ def _backend_order(payload: dict) -> list[str]:
     2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
     3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
        ``KERNEL_OPT_BACKEND_ORDER``.
-    4. The built-in GEAK-first default ladder.
+    4. The built-in forge-first default ladder.
 
     All backend names are normalized to lowercase before filtering, so
     values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
@@ -2968,21 +3023,22 @@ def _backend_order(payload: dict) -> list[str]:
 
     Returns:
         list[str]: The filtered, ordered backend names (subset of
-            ``{"claude", "codex", "cursor", "geak"}``).
+            ``{"claude", "codex", "cursor", "geak_v3"}``).
     """
     order = _raw_kernel_backend_order(payload)
     if order:
         explicit = True
     else:
-        # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
+        # Ignore legacy payload["backends"]; the default ladder (forge first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
     # `forge` (Kernel-Forge autonomous-loop backend) is first in
     # _DEFAULT_KERNEL_BACKEND_ORDER; keep it in `allowed` so it survives the
-    # filter for both the default and any explicit backend_order.  `perfskills`
-    # is intentionally absent: it is a phase-level delegate (see
-    # ``perfskills_selected``), not a per-kernel backend, so it is dropped here.
-    allowed = {"claude", "codex", "cursor", "geak", "forge"}
+    # filter for both the default and any explicit backend_order.  `geak`
+    # (the whole-pipeline e2e delegate) is intentionally absent: it is a
+    # phase-level delegate (see ``geak_selected``), not a per-kernel backend,
+    # so it is dropped here. The per-kernel backend is ``geak_v3``.
+    allowed = {"claude", "codex", "cursor", "geak_v3", "forge"}
     selected = [backend for backend in order if backend in allowed]
     # Drop cursor from the auto-derived ladder when CURSOR_API_KEY is unset (explicit order still wins).
     if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
@@ -3135,13 +3191,21 @@ def _names_specific_kernel(payload: dict) -> bool:
 
 
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
-    """Load every candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
+    """Load every unique candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
+
+    Under the P0 contract ``hot_kernels`` is the FULL ranked hotspot set and
+    ``skipped_kernels`` is its non-routable subset, so the two on-disk lists
+    OVERLAP. Candidates are therefore de-duplicated by kernel identity
+    (``kernel_id`` then ``name``), keeping the first (``hot_kernels``) copy, so
+    ``kernels_considered`` counts each hotspot once instead of double-counting
+    every non-routable kernel. Rows carrying neither id nor name cannot be
+    identified and are always kept (never silently dropped).
 
     Args:
         payload: Request payload carrying ``candidates_path``.
 
     Returns:
-        Every candidate dict from the artifact, or an empty list when the
+        Every unique candidate dict from the artifact, or an empty list when the
         artifact is missing or unreadable.
     """
     candidates_path = payload.get("candidates_path")
@@ -3154,10 +3218,20 @@ def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for key in ("hot_kernels", "kernel_candidates", "skipped_kernels"):
         value = data.get(key)
-        if isinstance(value, list):
-            out.extend(item for item in value if isinstance(item, dict))
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            ident = str(item.get("kernel_id") or item.get("name") or "")
+            if ident:
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            out.append(item)
     return out
 
 
@@ -3469,7 +3543,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
     # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
     # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
-    # Claude/Codex/forge KEEP. Scoped to backend=="geak" so OOB backends are byte-identical;
+    # Claude/Codex/forge KEEP. Scoped to backend=="geak_v3" so OOB backends are byte-identical;
     # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
     _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
     try:
@@ -3482,7 +3556,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
         if (
             _promote
             and keep == 0
-            and _backend == "geak"
+            and _backend == "geak_v3"
             and verification.get("correctness_passed") is True
             and micro >= _thr
         )
@@ -3640,8 +3714,8 @@ async def _run_kernel_backend_sequence(
             best = forge_best
             attempts = forge_attempts
 
-    geak_group = [b for b in remaining if b == "geak"]
-    oob_group = [b for b in remaining if b != "geak"]
+    geak_group = [b for b in remaining if b == "geak_v3"]
+    oob_group = [b for b in remaining if b != "geak_v3"]
 
     if best is not None:
         pass
@@ -3827,8 +3901,8 @@ def _run_combined_e2e_sync(
     if not payload.get("combined_e2e"):
         return None
     order = _backend_order(payload)
-    if "geak" not in [b.lower() for b in (order or [])]:
-        log.info("combined_e2e: skipped (backend is not geak: %s)", order)
+    if "geak_v3" not in [b.lower() for b in (order or [])]:
+        log.info("combined_e2e: skipped (backend is not geak_v3: %s)", order)
         return None
     model = _resolve_local_model_path(str(payload.get("model_path") or "").strip())
     if not model:
@@ -4041,12 +4115,12 @@ def _backends_cli_arg(value: Any) -> str:
     """Normalize a payload ``backends`` field into a bare ``--backends`` value.
 
     The orchestration payload may carry ``backends`` as a bare string
-    (``"geak"``), a comma-joined string (``"geak,claude"``), or a JSON list
-    (``["geak"]``) when an upstream request serializes it as an array. A list
+    (``"geak_v3"``), a comma-joined string (``"geak_v3,claude"``), or a JSON list
+    (``["geak_v3"]``) when an upstream request serializes it as an array. A list
     MUST be comma-joined into bare names, never ``str()``-ed into the repr of a
-    list (``"['geak']"``) — the kernel-agent's ``parse_backends`` validator
+    list (``"['geak_v3']"``) — the kernel-agent's ``parse_backends`` validator
     correctly rejects that opaque token and the dispatch fails with the
-    self-contradictory "unsupported backend(s): ['geak']".
+    self-contradictory "unsupported backend(s): ['geak_v3']".
 
     Args:
         value: The raw ``payload["backends"]`` value (str / list / tuple / None).
@@ -4155,7 +4229,7 @@ async def _run_optimization_single(
         cmd += ["--dry-run"]
     geak_budget_min = _geak_budget_minutes(payload)
     backend = backends_arg.lower()
-    if backend == "geak" or not backend:
+    if backend == "geak_v3" or not backend:
         cmd += ["--geak-budget-min", str(geak_budget_min)]
     if payload.get("budget_minutes") is not None:
         cmd += ["--budget-minutes", str(payload["budget_minutes"])]
@@ -4261,7 +4335,7 @@ def _trace_kernel_attempt_usage(
         except (OSError, ValueError):
             continue
         try:
-            if backend == "geak":
+            if backend == "geak_v3":
                 usage = parse_geak_usage(stdout_text)
             elif backend == "forge":
                 usage = parse_forge_usage(stdout_text)
@@ -5290,4 +5364,26 @@ __all__ = [
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
+    # Re-exported from sibling modules for backward compat and the test
+    # monkeypatch surface (referenced via ``request_handlers.<name>``).
+    # Declared so the re-exports are intentional, not flagged imports.
+    "_HONEST_E2E_UMBRELLA_ENV",
+    "_FALSEY",
+    "_format_last_kernel_opt",
+    "_resolve_kernel_patch_identity",
+    "kernel_patch_key",
+    "find_rejected_kernel_patch",
+    "record_kernel_integrate_result",
+    "record_kernel_opt",
+    "record_gemm_tuning",
+    "_kernel_ids_in_optimization_stack",
+    "_source_files_in_optimization_stack",
+    "_kernel_ids_with_integrate_attempts",
+    "integrate_attempt_count_for_kernel",
+    "_kernel_trace_impact_pct",
+    "next_pending_keep_kernel_id",
+    "pending_keep_kernel_ids",
+    "has_keep_pending_integrate",
+    "kernel_opt_attempts_count",
+    "untried_hot_reusable_kernels",
 ]

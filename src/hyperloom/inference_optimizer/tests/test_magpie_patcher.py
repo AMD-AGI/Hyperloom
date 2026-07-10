@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_magpie_patcher.ensure_magpie_atomic_scripts_patch`` (bugs.md §C #1)."""
+"""Tests for ``_magpie_patcher.ensure_magpie_atomic_scripts_patch``."""
 
 from __future__ import annotations
 
@@ -138,6 +138,9 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     run_benchmark_serving --model "$MODEL" || exit $?
   fi
 fi
+if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+fi
 """
 
 
@@ -248,6 +251,9 @@ def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
     assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
     assert "magpie_run_benchmark_serving_remote_direct trust" in text
     assert "magpie_run_benchmark_serving_remote_direct || exit $?" in text
+    assert "HYPERLOOM_EVAL_CONCURRENCY_FIX" in text
+    assert "EVAL_CONCURRENT_REQUESTS" in text
+    assert "--concurrent-requests" not in text
 
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     assert script.read_text(encoding="utf-8") == text
@@ -505,7 +511,7 @@ def test_concurrent_patchers_produce_one_patch(fake_magpie: Path):
 
 
 def test_reader_never_sees_torn_file(fake_magpie: Path):
-    """bugs.md §C #1: a concurrent reader must never see a torn file —
+    """A concurrent reader must never see a torn file —
     every snapshot is either the verbatim original or contains the sentinel."""
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     original = bench_py.read_text(encoding="utf-8")
@@ -702,7 +708,7 @@ class TestEnsurePatch:
         assert target.read_text().count(mp._PATCH_SENTINEL) == 1
 
 
-# Read-only / shared InferenceX/benchmarks deployment (bugs.md §C #1 follow-up).
+# Read-only / shared InferenceX/benchmarks deployment.
 # Contract: identical target -> no-op; writable -> atomic os.replace; read-only +
 # stale/missing -> a clear error naming the script + dir, not a bare [Errno 30].
 def _exec_patched_benchmarker(fake_magpie: Path):
@@ -818,7 +824,7 @@ def test_patched_block_skips_identical_target():
     assert "_hyperloom_filecmp" in _PATCHED_BLOCK
 
 
-# Redundant --concurrent-requests eval flag strip (Q1 long-term fix).
+# Redundant --concurrent-requests eval flag strip.
 _EVAL_SCRIPT_WITH_FLAG = """\
 #!/usr/bin/env bash
 if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then

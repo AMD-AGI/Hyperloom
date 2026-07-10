@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""``§ 5b. RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests.
+"""``RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests.
 
 Locks the reader → prompt-render path for ``kind=lesson`` KB writes: the
 warmer populates the task param, ``build_specialist_prompts`` renders the
@@ -218,7 +218,7 @@ def test_section_lessons_skips_lessons_with_empty_statement():
     assert "**** " not in text
 
 
-def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
+def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_monitor():
     """End-to-end: section 5b is inserted between section 5 (recipe) and 5c (pitfalls)."""
     inp = _make_inp(
         [
@@ -229,11 +229,11 @@ def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
     recipe_idx = user.index("## 5. WARM-START RECIPE SUMMARY")
     lessons_idx = user.index("## 5b. RELATED LESSONS")
     pitfalls_idx = user.index("## 5c. KNOWN PITFALLS")
-    pr_idx = user.index("## 6. PR FEED")
+    pr_idx = user.index("## 6. PR MONITOR")
     assert recipe_idx < lessons_idx < pitfalls_idx < pr_idx
 
 
-# § 5c pitfalls section — symmetric mirror of § 5b lessons
+# Pitfalls section mirrors lessons.
 def test_section_pitfalls_empty_falls_back_to_placeholder():
     rows = _section_pitfalls(_make_inp())
     text = "\n".join(rows)

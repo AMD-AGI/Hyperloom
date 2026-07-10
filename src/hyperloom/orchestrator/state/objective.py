@@ -2,8 +2,8 @@
 
 """Objective abstraction — the goal driving early-stop, pressure scoring, and the Orchestration prompt.
 
-Four implementations (DESIGN §11.2): TargetGain, TargetTput, TargetBaseline,
-TimeOnly. `build_objective(env)` (§11.3) takes at most one TARGET_* var.
+Four implementations: TargetGain, TargetTput, TargetBaseline,
+TimeOnly. `build_objective(env)` takes at most one TARGET_* var.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class Objective(ABC):
 
     @abstractmethod
     def pressure_input(self, state: "SharedState") -> float:
-        """Feed to scheduler.pressure() (§12): 0.0 = relaxed, 1.0 = max urgency.
+        """Feed to scheduler.pressure(): 0.0 = relaxed, 1.0 = max urgency.
 
         Args:
             state: Current shared optimization state to evaluate.
@@ -438,7 +438,7 @@ class TimeOnlyObjective(Objective):
 
 # ---------------------------------------------------------------------------
 def build_objective(env: dict[str, Any]) -> Objective:
-    """Factory (DESIGN §11.3): requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly).
+    """Factory: requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly).
 
     Args:
         env: Environment mapping; must contain ``MAX_HOURS`` and may contain at

@@ -20,7 +20,7 @@
 # Phase 5  combined env    — write runtime/hyperloom.env.sh
 # Phase 6  verify + print launch prompt
 #
-# Scope: core (native optimizer). PerfSkills/GEAK-e2e, live Langfuse, Quark,
+# Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
 
 set -euo pipefail
@@ -40,13 +40,29 @@ FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/QUICKSTART_LOCAL_MODE.md (SGLang v0.5.12,
+# Framework versions track docs/compatibility.md (SGLang v0.5.12,
 # ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
 # v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
 # is the nearest published ROCm 7.2 wheel. AITER_REF pins ROCm/aiter to a
 # released tag so source builds are reproducible (override to track another ref).
 SGLANG_REF="${SGLANG_REF:-v0.5.12}"
+_SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
+_AITER_REF_WAS_SET="${AITER_REF+x}"
+SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
+if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
+  case "$SGLANG_ROCM_EXTRA" in
+    rocm700) SGLANG_ROCM_PYPI_VERSION="7.0.0" ;;
+    *)       SGLANG_ROCM_PYPI_VERSION="7.2.0" ;;
+  esac
+fi
+SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
+if [ -z "$_AITER_REF_WAS_SET" ]; then
+  case "$SGLANG_ROCM_EXTRA" in
+    rocm700) AITER_REF="v0.1.14.post1" ;;
+    *)       AITER_REF="v0.1.16.post3" ;;
+  esac
+fi
 AITER_REF="${AITER_REF:-v0.1.16.post3}"
 VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
@@ -97,8 +113,10 @@ OPENAI_BASE_URL+OPENAI_API_KEY) is accepted, matching cli.py credential rules.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR, HYPERLOOM_DEPS_ROOT / _OPEN_SOURCE_ROOT,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
-SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, AITER_REPO, AITER_REF, AITER_ROOT, VLLM_VERSION,
-VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX, VLLM_VENV_ROOT.
+SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
+SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
+LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
+VLLM_VENV_ROOT.
 EOF
 }
 
@@ -165,6 +183,79 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
+python_venv_root() {
+  local py="$1" bin_dir venv_dir
+  bin_dir="$(cd "$(dirname "$py")" 2>/dev/null && pwd)" || return 1
+  venv_dir="$(cd "${bin_dir}/.." 2>/dev/null && pwd)" || return 1
+  [ -f "${venv_dir}/pyvenv.cfg" ] || return 1
+  printf '%s\n' "$venv_dir"
+}
+
+export_virtualenv_for_python() {
+  local py="$1" venv_dir
+  if venv_dir="$(python_venv_root "$py")"; then
+    export VIRTUAL_ENV="$venv_dir"
+    case ":$PATH:" in
+      *":${venv_dir}/bin:"*) ;;
+      *) export PATH="${venv_dir}/bin:$PATH" ;;
+    esac
+    log "VIRTUAL_ENV=${VIRTUAL_ENV}"
+  fi
+}
+
+check_torch_rocm_shared_libs() {
+  local py="$1" lib missing
+  command -v ldd >/dev/null 2>&1 || return 0
+  lib="$("$py" - <<'PY' 2>/dev/null || true
+from pathlib import Path
+try:
+    import torch
+    root = Path(torch.__file__).resolve().parent / "lib"
+    for name in ("libtorch_hip.so", "libc10_hip.so"):
+        candidate = root / name
+        if candidate.exists():
+            print(candidate)
+            break
+except Exception:
+    pass
+PY
+)"
+  [ -n "$lib" ] || return 0
+  missing="$(ldd "$lib" 2>/dev/null | grep 'not found' || true)"
+  if [ -n "$missing" ]; then
+    warn "ROCm torch shared libraries are missing for ${lib}:"
+    echo "$missing" >&2
+    warn "Set ROCM_PATH/HIP_PATH and LD_LIBRARY_PATH to a matching ROCm user-space stack."
+    return 1
+  fi
+  return 0
+}
+
+check_rocm_toolchain_alignment() {
+  local hip_version="$1" hip_major hipcc_path hipcc_root header
+  hip_major="${hip_version%%.*}"
+  [ -n "$hip_major" ] || return 0
+  hipcc_path="$(command -v hipcc 2>/dev/null || true)"
+  if [ -z "$hipcc_path" ]; then
+    warn "hipcc not found; AITER/source builds need a ROCm compiler toolchain."
+    return 0
+  fi
+  hipcc_root="$(cd "$(dirname "$hipcc_path")/.." 2>/dev/null && pwd)" || return 0
+  log "hipcc: ${hipcc_path}"
+  if [ -n "${ROCM_PATH:-}" ] && [ "$hipcc_root" != "$(cd "$ROCM_PATH" 2>/dev/null && pwd)" ]; then
+    warn "hipcc root ${hipcc_root} differs from ROCM_PATH=${ROCM_PATH}; JIT builds may use the wrong ROCm headers."
+  fi
+  if [ "$hip_major" -ge 7 ] 2>/dev/null; then
+    header="${hipcc_root}/include/hip/hip_runtime_api.h"
+    if [ ! -f "$header" ] || ! grep -q 'hipDeviceAttributePciChipId' "$header" 2>/dev/null; then
+      warn "hipcc headers at ${hipcc_root} do not look compatible with torch hip=${hip_version}."
+      warn "Set ROCM_PATH/HIP_PATH/PATH to a ROCm ${hip_major}.x toolchain before installing AITER."
+      return 1
+    fi
+  fi
+  return 0
+}
+
 # Human GPU label from arch, refined by rocm-smi product name when available.
 detect_gpu_label() {
   local gfx="$1" product=""
@@ -227,6 +318,8 @@ PY
     warn "torch: ${tv} is NOT a ROCm build (hip=None); will crash on GPU. ${IMAGE_HINT}"; rc=1
   else
     log "torch: ${tv} (hip=${thip}) ROCm OK"
+    check_torch_rocm_shared_libs "$py" || rc=1
+    check_rocm_toolchain_alignment "$thip" || rc=1
   fi
 
   local any_fw=0 fw
@@ -355,13 +448,15 @@ install_sglang_from_source() {
 }
 
 # Install the AMD SGLang wheel only when its dependency set matches this Python.
+# ROCm target is overridable so hosts pinned to an older driver (e.g. amdgpu
+# 6.3.x, which supports up to ROCm 7.0 user space) can select a matching wheel.
 install_sglang_from_wheel() {
   local py="$1"
-  log "installing amd-sglang ROCm 7.2 wheel"
+  log "installing amd-sglang ROCm ${SGLANG_ROCM_PYPI_VERSION} wheel (extra=${SGLANG_ROCM_EXTRA})"
   "$py" -m pip uninstall -y sglang-kernel sgl-kernel sglang amd-sglang || true
   "$py" -m pip install \
-    "amd-sglang[all-hip,rocm720]" \
-    -i https://pypi.amd.com/rocm-7.2.0/simple \
+    "amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]" \
+    -i "https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple" \
     --extra-index-url https://pypi.org/simple
 }
 
@@ -381,9 +476,15 @@ PY
   log "framework python: ${py}"
   log "AITER_ROOT=${aiter_root}"
   log "AITER_REF=${AITER_REF}"
+  log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
+  log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
+
+  if [ "$SGLANG_ROCM_EXTRA" = "rocm700" ] && [ "$py_mm" != "3.10" ]; then
+    die "SGLANG_ROCM_EXTRA=rocm700 currently supports Python 3.10 AMD wheels only; Python ${py_mm} would use source install and can pull mismatched ROCm 7.2 Triton."
+  fi
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,rocm720])"
+    _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
     _py_has "$py" aiter && log "aiter import OK" || warn "aiter missing (check-only; would clone/install ${AITER_REPO}@${AITER_REF})"
     _py_has "$py" sgl_kernel && log "sgl_kernel import OK" || warn "sgl_kernel missing (check-only; installed by amd-sglang)"
     return 0
@@ -391,7 +492,7 @@ PY
 
   if [ "$DRY_RUN" -eq 1 ]; then
     if [ "$py_mm" = "3.10" ]; then
-      log "would run: ${py} -m pip install 'amd-sglang[all-hip,rocm720]' -i https://pypi.amd.com/rocm-7.2.0/simple --extra-index-url https://pypi.org/simple"
+      log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
     else
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
     fi
@@ -711,6 +812,25 @@ write_combined_env() {
     echo '# Generated by src/hyperloom/inference_optimizer/assets/install_baremetal.sh'
     echo '# Source this single file before launching inference_optimizer.'
     printf 'export USER_DATA_PATH=%q\n' "$USER_DATA_PATH"
+    [ -n "${PYTHON:-}" ] && printf 'export PYTHON=%q\n' "$PYTHON"
+    [ -n "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ] && printf 'export INFERENCE_OPTIMIZER_FORCE_PYTHON=%q\n' "$INFERENCE_OPTIMIZER_FORCE_PYTHON"
+    [ -n "${VIRTUAL_ENV:-}" ] && printf 'export VIRTUAL_ENV=%q\n' "$VIRTUAL_ENV"
+    [ -n "${ROCM_PATH:-}" ] && printf 'export ROCM_PATH=%q\n' "$ROCM_PATH"
+    [ -n "${HIP_PATH:-}" ] && printf 'export HIP_PATH=%q\n' "$HIP_PATH"
+    [ -n "${SGLANG_ROCM_EXTRA:-}" ] && printf 'export SGLANG_ROCM_EXTRA=%q\n' "$SGLANG_ROCM_EXTRA"
+    [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && printf 'export SGLANG_ROCM_PYPI_VERSION=%q\n' "$SGLANG_ROCM_PYPI_VERSION"
+    [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
+    [ -n "${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-}" ] && printf 'export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=%q\n' "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX"
+    [ -n "${KERNEL_AGENT_RAG_INDEX_STRICT:-}" ] && printf 'export KERNEL_AGENT_RAG_INDEX_STRICT=%q\n' "$KERNEL_AGENT_RAG_INDEX_STRICT"
+    printf '[ -f %q ] && . %q\n' "$local_env" "$local_env"
+    printf '[ -f %q ] && . %q\n' "$ka_env" "$ka_env"
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+      printf 'export PATH=%q:"$PATH"\n' "${VIRTUAL_ENV}/bin"
+    fi
+    if [ -n "${ROCM_PATH:-}" ]; then
+      printf 'export PATH=%q:"$PATH"\n' "${ROCM_PATH}/bin"
+      printf 'export LD_LIBRARY_PATH=%q:"${LD_LIBRARY_PATH:-}"\n' "${ROCM_PATH}/lib"
+    fi
     [ -n "${SGLANG_USE_AITER:-}" ] && printf 'export SGLANG_USE_AITER=%q\n' "$SGLANG_USE_AITER"
     printf 'export HYPERLOOM_FRAMEWORK_ENV=%q\n' "$FRAMEWORK_ENV"
     if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
@@ -718,8 +838,6 @@ write_combined_env() {
       printf 'export VLLM_PYTHON=%q\n' "${VLLM_VENV_ROOT}/bin/python"
       printf 'export PATH=%q:"$PATH"\n' "${VLLM_VENV_ROOT}/bin"
     fi
-    printf '[ -f %q ] && . %q\n' "$local_env" "$local_env"
-    printf '[ -f %q ] && . %q\n' "$ka_env" "$ka_env"
   } > "$combined"
   chmod 600 "$combined"
   log "wrote ${combined}"
@@ -796,6 +914,11 @@ main() {
   [ "$DRY_RUN" -eq 1 ] && log "mode: dry-run"
   [ "$CHECK_ONLY" -eq 1 ] && log "mode: check-only"
 
+  local py_for_env
+  if py_for_env="$(resolve_python 2>/dev/null)"; then
+    export_virtualenv_for_python "$py_for_env"
+  fi
+
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then
     warn "skipping Phase 0 base preflight (--skip-base-check)"
     DETECTED_GPU="$(detect_gpu_label "$(command -v rocminfo >/dev/null 2>&1 && rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)")"
@@ -832,8 +955,10 @@ main() {
     die "expected ${local_env} after local_setup.sh but it is missing"
   fi
 
-  # Phase 4: runtime install (core scope — no --with-perfskills; Langfuse stays
-  # off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env).
+  # Phase 4: runtime install. The GEAK e2e optimizer is always installed
+  # (whether it runs is chosen per-session via KERNEL_OPT_BACKEND_ORDER);
+  # Langfuse stays off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the
+  # environment/.env.
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)

@@ -1504,9 +1504,9 @@ def _submit_and_collect_pod_json(
 
 
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
-# tree-reform.MD P2.2: cohesive rayjob/dynamo clusters live in
-# commands/{rayjob,dynamo}.py. Bind only the command hooks used below; legacy
-# helper access is handled lazily by ``__getattr__`` to avoid import cycles.
+# Cohesive rayjob/dynamo clusters live in commands/{rayjob,dynamo}.py. Bind
+# only the command hooks used below; legacy helper access is handled lazily by
+# ``__getattr__`` to avoid import cycles.
 from .commands.rayjob import cmd_create_rayjob as cmd_create_rayjob
 from .commands.dynamo import (
     cmd_create_dynamo as cmd_create_dynamo,

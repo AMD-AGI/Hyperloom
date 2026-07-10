@@ -263,7 +263,7 @@ class RooflineExecutor:
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
 
-        # ---- Step 1: profile (with retry) ------------------------------------
+        # ---- Profile (with retry) --------------------------------------------
         # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
         # failure rate (SIGQUIT / "Profiling is not in progress" / engine init
         # crash). Retry up to _PROFILE_MAX_ATTEMPTS times; each call to
@@ -441,13 +441,13 @@ class RooflineExecutor:
         # Inline-promote only the profile fields trace_analyze needs (not
         # current_best / cumulative_gain). Do NOT clear last_trace_analyze
         # here: record_trace_analyze derives the next snapshot_id from it, so
-        # clearing would reset the monotonic counter (§5/§8.7 invariant). The
+        # clearing would reset the monotonic counter. The
         # clear happens only on the trace_analyze failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
         self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
 
-        # ---- Step 2: trace_analyze ----------------------------------------
+        # ---- trace_analyze -------------------------------------------------
         # Pin the snapshot's arm so the ceiling's precision is anchored to the
         # arm this roofline actually profiled. A PRELUDE roofline measures the
         # baseline arm; without this the recorder would infer "current_best"
@@ -491,22 +491,42 @@ class RooflineExecutor:
                 f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
             )
 
-        # auto-retry: on a recovery warning naming an alternate mode the
-        # splitter can serve, re-issue ONCE with that mode rather than
-        # failing (single-retry enforced by the handler idempotency key + the
-        # local gate below).
+        # N26 auto-retry: on a recovery warning naming an alternate mode the
+        # splitter can serve, re-split the SAME trace with that mode and
+        # re-issue trace_analyze ONCE — no re-benchmark is required (cheap).
+        # Single-retry is enforced by the handler idempotency key + the local
+        # gate below. This is a self-healing step, not a genuine failure; the
+        # log below makes that explicit so monitoring cannot mistake the pause
+        # for a hang.
         retry_hint: "tuple[str, dict[str, Any]] | None" = None
         if ta_result.get("status") != "ok":
             retry_hint = _extract_steady_state_retry_mode(ta_result)
         if retry_hint is not None:
             retry_mode, source_warning = retry_hint
+            from_mode = source_warning.get("requested_mode") or "mixed"
+            busy_ratio = source_warning.get("busy_ratio")
+            threshold = source_warning.get("threshold")
+            warning_code = source_warning.get("code", "")
+            log.warning(
+                "roofline: N26 auto-retry — adjusting steady-state window "
+                "(mode %s -> %s%s); re-analyzing same trace without re-benchmarking. "
+                "This is a self-healing step, NOT a failure — monitoring should "
+                "expect a brief pause here.",
+                from_mode,
+                retry_mode,
+                (
+                    f", busy_ratio={busy_ratio * 100:.2f}% < threshold={threshold * 100:.0f}%"
+                    if busy_ratio is not None and threshold is not None
+                    else (f", warning={warning_code}" if warning_code else "")
+                ),
+            )
             ta_payload_retry: dict[str, Any] = {
                 "trace_input": str(trace_path),
                 "steady_state_mode": retry_mode,
                 # Marker against retry loops; single-retry is enforced by not
                 # re-entering this block regardless of the second outcome.
                 "_n26_auto_retry": True,
-                "_n26_retry_from_mode": (source_warning.get("requested_mode") or ""),
+                "_n26_retry_from_mode": from_mode,
             }
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
@@ -519,12 +539,24 @@ class RooflineExecutor:
                 )
             except Exception as exc:  # noqa: BLE001
                 self.shared_state.last_trace_analyze = {}
+                log.error(
+                    "roofline: N26 auto-retry FAILED (mode=%s): %r — "
+                    "this is a genuine trace_analyze failure after window adjustment.",
+                    retry_mode,
+                    exc,
+                )
                 return _failed(
                     "trace_analyze",
                     (f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}"),
                 )
             if not isinstance(ta_result, dict):
                 self.shared_state.last_trace_analyze = {}
+                log.error(
+                    "roofline: N26 auto-retry returned non-dict (mode=%s, type=%s) — "
+                    "genuine failure after window adjustment.",
+                    retry_mode,
+                    type(ta_result).__name__,
+                )
                 return _failed(
                     "trace_analyze",
                     (
@@ -533,6 +565,20 @@ class RooflineExecutor:
                         f"{type(ta_result).__name__}"
                     ),
                 )
+            retry_ok = ta_result.get("status") == "ok"
+            log.info(
+                "roofline: N26 auto-retry completed (mode %s -> %s, status=%s).",
+                from_mode,
+                retry_mode,
+                ta_result.get("status"),
+            )
+            if not retry_ok:
+                log.error(
+                    "roofline: N26 auto-retry status=%s — genuine failure "
+                    "after window adjustment (mode=%s); not a hang.",
+                    ta_result.get("status"),
+                    retry_mode,
+                )
             # Stamp ``n26_auto_retry`` so the recorder / prompt surface
             # "snapshot came from an auto-retry" (best-effort).
             if isinstance(ta_result, dict):
@@ -540,9 +586,9 @@ class RooflineExecutor:
                     "n26_auto_retry",
                     {
                         "applied": True,
-                        "from_mode": (source_warning.get("requested_mode") or "mixed"),
+                        "from_mode": from_mode,
                         "to_mode": retry_mode,
-                        "source_warning_code": source_warning.get("code"),
+                        "source_warning_code": warning_code,
                     },
                 )
 

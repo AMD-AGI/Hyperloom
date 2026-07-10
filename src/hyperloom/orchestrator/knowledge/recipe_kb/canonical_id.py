@@ -42,8 +42,8 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
 )
 
 
-# ``inference:`` is the documented prefix for recipe-snapshot v2 ids
-# (see boundary doc §0). It is a fixed literal here — bumping it is a
+# ``inference:`` is the documented prefix for recipe-snapshot v2 ids.
+# It is a fixed literal here — bumping it is a
 # compatibility break that has to be coordinated with the central
 # kb-service, not silently forked by the local store.
 CANONICAL_ID_PREFIX: str = "inference"

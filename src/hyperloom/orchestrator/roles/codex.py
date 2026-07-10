@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
+from .agent_role import DEFAULT_CODEX_MODEL
 from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 
 
@@ -74,7 +75,7 @@ def _extract_envelope(text: str) -> dict | None:
 class CodexBackend:
     """Production Codex backend. Implements :class:`Backend`."""
 
-    model: str = "gpt-5.4"
+    model: str = DEFAULT_CODEX_MODEL
     # Codex speaks the OpenAI protocol, so prefer the OpenAI-side key/URL; the
     # AMD single-gateway ANTHROPIC_* vars remain accepted as fallbacks below.
     api_key_env: str = "OPENAI_API_KEY"

@@ -32,6 +32,9 @@ _HOST_LEAK_VARS = (
     "HYPERLOOM_DEPS_ROOT",
     "LOCAL_SETUP_ENV",
     "KERNEL_FORGE_REPO",
+    "FORGE_PATH",
+    "KERNEL_FORGE_ROOT",
+    "KERNEL_FORGE_PATH",
     "INFERENCEX_REPO",
     "INFERENCEX_REF",
     "TRACELENS_REPO",
@@ -146,10 +149,12 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert env_file.exists()
     env_text = env_file.read_text(encoding="utf-8")
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
+    assert f"export FORGE_PATH='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
+    assert f"export KERNEL_FORGE_ROOT='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'KernelForge' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
     assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
-    # #722: the env file must export the canonical open-source-root key so
+ # the env file must export the canonical open-source-root key so
     # install.sh / paths / handler / tool resolve the SAME default root.
     assert f"export HYPERLOOM_OPEN_SOURCE_ROOT='{tmp_path / 'deps'}'" in env_text
     # Default is open-source-only: no internal extension.
@@ -236,7 +241,7 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
 
 
 def test_local_setup_ignores_stale_default_checkout_without_override(tmp_path: Path) -> None:
-    # #722 regression: with no TRACELENS_ROOT / TRACELENS_DEFAULT_ROOT override,
+ # with no TRACELENS_ROOT / TRACELENS_DEFAULT_ROOT override,
     # a stale pre-existing checkout outside the pod-local deps root must NOT be
     # adopted — resolution goes to ${deps}/TraceLens via the /opt clone+pin path.
     remotes = tmp_path / "remotes"
@@ -265,7 +270,7 @@ def test_local_setup_ignores_stale_default_checkout_without_override(tmp_path: P
 
 
 def test_local_setup_realigns_default_checkout_on_wrong_commit(tmp_path: Path) -> None:
-    # #722/PR#789 regression: an implicit-default checkout that already exists
+ # an implicit-default checkout that already exists
     # but sits on the WRONG commit must be fetched/checked out to TRACELENS_REF,
     # not silently adopted at its stale SHA.
     remotes = tmp_path / "remotes"
@@ -309,7 +314,7 @@ def test_local_setup_realigns_default_checkout_on_wrong_commit(tmp_path: Path) -
 
 
 def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path: Path) -> None:
-    # #722/PR#789 regression: a historical `TRACELENS_ROOT=\` placeholder in .env
+ # a historical `TRACELENS_ROOT=\` placeholder in .env
     # must NOT be treated as an explicit override. After the placeholder is
     # stripped, the implicit default checkout on a stale SHA must still be
     # realigned to TRACELENS_REF (not adopted as-is).
@@ -358,7 +363,7 @@ def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path
 
 
 def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> None:
-    # #722/PR#789: a MANAGED default checkout that exists but is NOT a git tree
+ # a MANAGED default checkout that exists but is NOT a git tree
     # (half-done/crashed clone, no .git) must be dropped and rebuilt+pinned via
     # the atomic path, not abort. Mirrors src/hyperloom/agents/kernel/scripts/install.sh
     # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout);
@@ -401,7 +406,7 @@ def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> Non
 
 
 def test_local_setup_realigns_default_checkout_when_env_holds_default_path(tmp_path: Path) -> None:
-    # #722/PR#789 regression: a prior run re-exports TRACELENS_ROOT=<default> into
+ # a prior run re-exports TRACELENS_ROOT=<default> into
     # env/.env. That is NOT an operator override — a default checkout on a stale
     # SHA must still be realigned to TRACELENS_REF, matching handler/tool/install.
     remotes = tmp_path / "remotes"
@@ -478,7 +483,7 @@ def _head_sha(repo: Path) -> str:
 
 
 def test_local_setup_default_root_equal_to_default_still_realigns(tmp_path: Path) -> None:
-    # #722/PR#789 regression: an operator who spells TRACELENS_DEFAULT_ROOT as the
+ # an operator who spells TRACELENS_DEFAULT_ROOT as the
     # pod-local default path (trailing slash to exercise canonicalization) must
     # NOT be treated as an explicit override — a stale default checkout is still
     # realigned to TRACELENS_REF.
@@ -501,7 +506,7 @@ def test_local_setup_default_root_equal_to_default_still_realigns(tmp_path: Path
 
 
 def test_local_setup_dotenv_default_path_still_realigns(tmp_path: Path) -> None:
-    # #722/PR#789 regression: .env carrying the FULL default path (not the `\`
+ # .env carrying the FULL default path (not the `\`
     # placeholder) is still installer-managed — a stale default checkout must be
     # realigned to TRACELENS_REF, not adopted at its old SHA.
     forge, inferencex, tracelens_public, default_root, pin_sha = _make_stale_default_checkout(tmp_path)
@@ -526,7 +531,7 @@ def test_local_setup_dotenv_default_path_still_realigns(tmp_path: Path) -> None:
 
 
 def test_local_setup_explicit_override_is_not_realigned(tmp_path: Path) -> None:
-    # #722/PR#789: a NON-default operator override (TRACELENS_ROOT elsewhere) is
+ # a NON-default operator override (TRACELENS_ROOT elsewhere) is
     # operator-maintained — it is adopted as-is and must NOT be fetched/checked
     # out to TRACELENS_REF (guards against widening the _explicit logic).
     forge, inferencex, tracelens_public, _default_root, pin_sha = _make_stale_default_checkout(tmp_path)
@@ -618,7 +623,7 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
 def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path) -> None:
     # Deps root must NOT follow --session-dir: it stays on a pod-local base
     # so a shared session tree never collocates concurrent checkouts. The base
-    # is a non-ephemeral pod-internal dir (NOT /tmp) after #722.
+    # is a non-ephemeral pod-internal dir (NOT /tmp).
     session_dir = tmp_path / "custom-session"
     deps_base = tmp_path / "podlocal"
     deps_base.mkdir()
@@ -641,7 +646,7 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
     assert str(expected_deps / "KernelForge") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "35bbb6380cf69a2655ee28260b02b5f2dc481744" in result.stdout
+    assert "48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3" in result.stdout
 
 
 def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:
@@ -665,7 +670,7 @@ def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> N
 
 
 def test_local_setup_custom_deps_root_env_exports_matching_open_source_root(tmp_path: Path) -> None:
-    # #722: with ONLY --deps-root set (no HYPERLOOM_OPEN_SOURCE_ROOT), the written
+ # with ONLY --deps-root set (no HYPERLOOM_OPEN_SOURCE_ROOT), the written
     # env must export HYPERLOOM_OPEN_SOURCE_ROOT == the custom deps root so a
     # sourcing consumer (install/paths/handler/tool) resolves the SAME default.
     remotes = tmp_path / "remotes"
@@ -702,7 +707,7 @@ def test_local_setup_custom_deps_root_env_exports_matching_open_source_root(tmp_
 
 
 def test_local_setup_exports_open_source_root_in_current_shell(tmp_path: Path) -> None:
-    # #722: HYPERLOOM_OPEN_SOURCE_ROOT must be exported into the running process
+ # HYPERLOOM_OPEN_SOURCE_ROOT must be exported into the running process
     # (not just the env file) so a same-shell install/optimize that skips
     # sourcing still sees the custom deps root. --dry-run + a probe that echoes
     # the exported var back out.
@@ -808,7 +813,7 @@ def test_all_scripts_emit_user_data_path_fallback_notice(script: Path) -> None:
 
 
 def test_ka_install_classifies_tracelens_override_by_path_not_env_presence() -> None:
-    # #722/PR#789 regression: the persistent kernel-agent env re-exports the
+ # the persistent kernel-agent env re-exports the
     # resolved default TRACELENS_ROOT, so a presence-only classifier
     # (${TRACELENS_ROOT:+1}) would treat the default as an operator override and
     # skip managed clone/realign. Override must be decided by comparing against
@@ -914,7 +919,7 @@ def _run_ensure_tracelens(tmp_path: Path, extra_env: dict[str, str]) -> subproce
 
 
 def test_ka_ensure_tracelens_clones_and_pins_missing_default(tmp_path: Path) -> None:
-    # #722/PR#789: default path (TRACELENS_ROOT=<default>, not an override) that
+ # default path (TRACELENS_ROOT=<default>, not an override) that
     # is MISSING must be cloned and pinned to TRACELENS_REF, not fail.
     remote, _old_sha, pin_sha = _two_commit_tracelens_remote(tmp_path)
     default_root = tmp_path / "deps" / "TraceLens"
@@ -938,7 +943,7 @@ def test_ka_ensure_tracelens_clones_and_pins_missing_default(tmp_path: Path) -> 
 
 
 def test_ka_ensure_tracelens_realigns_stale_default(tmp_path: Path) -> None:
-    # #722/PR#789: default path already present but on a stale SHA must be
+ # default path already present but on a stale SHA must be
     # fetched/checked out to TRACELENS_REF.
     remote, old_sha, pin_sha = _two_commit_tracelens_remote(tmp_path)
     default_root = tmp_path / "deps" / "TraceLens"
@@ -965,7 +970,7 @@ def test_ka_ensure_tracelens_realigns_stale_default(tmp_path: Path) -> None:
 
 
 def test_ka_ensure_tracelens_override_fails_on_incomplete_checkout(tmp_path: Path) -> None:
-    # #722/PR#789: a non-default operator override that exists but lacks .git
+ # a non-default operator override that exists but lacks .git
     # (half-done clone) must fail fast, not be silently accepted.
     remote, _old_sha, pin_sha = _two_commit_tracelens_remote(tmp_path)
     override = tmp_path / "operator" / "TraceLens"
@@ -989,7 +994,7 @@ def test_ka_ensure_tracelens_override_fails_on_incomplete_checkout(tmp_path: Pat
 # Integration: run the top-level override classifier (which computes
 # _tracelens_root_was_set from the canonicalized TRACELENS_ROOT) TOGETHER with
 # ensure_tracelens(), so a regression in the classifier block — not just the
-# function body — is caught end-to-end (#722/PR#789).
+# function body — is caught end-to-end.
 _CLASSIFY_ENSURE_SHIM = """
 set -euo pipefail
 log(){ :; }
@@ -1124,7 +1129,7 @@ def test_ka_classifier_clones_and_pins_missing_default(tmp_path: Path) -> None:
 
 
 def test_ka_ensure_tracelens_managed_rebuilds_non_git_tree(tmp_path: Path) -> None:
-    # #722/PR#789: a MANAGED default path that exists but is NOT a git tree
+ # a MANAGED default path that exists but is NOT a git tree
     # (half-done/crashed clone) is dropped and rebuilt+pinned, so it never
     # lingers as an unusable tree. Mirrors the runtime self-heal
     # (_ensure_tracelens_checkout move-aside+re-clone) and local_setup.sh; the
@@ -1192,7 +1197,7 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
 
 
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
-    # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
+    # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift.
     text = IO_INSTALL.read_text(encoding="utf-8")
     assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"' in text
     assert 'MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"' in text

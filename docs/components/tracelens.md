@@ -1,18 +1,24 @@
+---
+myst:
+    html_meta:
+        "description": "Learn about TraceLens, Hyperloom's trace analysis library. Covers hierarchical GPU performance breakdowns, roofline modeling, multi-GPU analysis, and trace comparison."
+        "keywords": "TraceLens, Hyperloom, GPU performance, trace analysis, roofline modeling, PyTorch profiler, JAX, rocprofv3, AMD GPU, ROCm, benchmarking, LLM inference, vLLM, SGLang"
+---
 # TraceLens
 
-TraceLens is a Python library focused on **automating analysis from trace
-files**. It turns raw PyTorch / JAX / rocprofv3 traces into hierarchical
+TraceLens is a Python library focused on automating analysis from trace
+files. It turns raw PyTorch / JAX / rocprofv3 traces into hierarchical
 performance breakdowns, roofline metrics, and multi-GPU communication analysis.
 
-Within Hyperloom, TraceLens is the profiling brain of the **workload
-understanding** stage: it consumes traces collected by [Magpie](magpie.md),
+Within Hyperloom, TraceLens is the profiling brain of the workload
+understanding stage: it consumes traces collected by [Magpie](magpie.md),
 captures bottlenecks, and derives the roofline targets that seed the
 optimization search tree.
 
-- **Source:** <https://github.com/AMD-AGI/TraceLens>
-- **License:** MIT
+- **Source**: <https://github.com/AMD-AGI/TraceLens>
+- **License**: MIT
 
-## Overview
+## Capabilities and modules
 
 TraceLens provides a top-down view of GPU performance and a hackable SDK:
 
@@ -34,6 +40,8 @@ The package is organized into composable modules: `Trace2Tree`, `TreePerf`,
 
 ## Installation
 
+Install TraceLens directly from the GitHub repository using pip.
+
 ```bash
 pip install git+https://github.com/AMD-AGI/TraceLens.git
 ```
@@ -47,7 +55,7 @@ python -m pytest tests/ -v
 ```
 
 ```{note}
-Hyperloom resolves the public checkout via `TRACELENS_ROOT`. `local_setup.sh`
+Hyperloom resolves the public checkout via `TRACELENS_ROOT`. `src/hyperloom/inference_optimizer/assets/local_setup.sh`
 can clone or update the checkout and write it into `local-setup.env.sh`; the
 runtime installation is performed by `src/hyperloom/inference_optimizer/assets/install.sh`,
 which chains into `src/hyperloom/agents/kernel/scripts/install.sh` and editable-installs the
@@ -61,6 +69,8 @@ report.
 
 ## Usage
 
+TraceLens provides CLI entry points for generating performance reports, comparing traces, and running agentic analysis.
+
 ### Generate a report from a PyTorch trace
 
 ```bash
@@ -72,6 +82,8 @@ and roofline metrics.
 
 ### Supported profile formats
 
+TraceLens supports the following trace formats.
+
 | Format | Producer | CLI entry point |
 |--------|----------|-----------------|
 | PyTorch | `torch.profiler` | `TraceLens_generate_perf_report_pytorch` |
@@ -81,6 +93,8 @@ and roofline metrics.
 | rocprofv3 pftrace | Perfetto-style | `TraceLens_generate_perf_report_pftrace_hip_api` |
 
 ### Compare two reports
+
+Compare two TraceLens Excel reports to quantify the impact of a change.
 
 ```bash
 TraceLens_compare_perf_reports_pytorch baseline.xlsx candidate.xlsx \
@@ -92,19 +106,26 @@ For the full CLI reference and module deep-dives, see the
 
 ## Role in Hyperloom
 
-The orchestration runtime enters TraceLens through the kernel request path:
-`src/hyperloom/orchestrator/kernel/request_handlers.py` dispatches
-`trace_analyze` requests as subprocesses that run
-`src/hyperloom/agents/kernel/tools/tracelens_analysis.py` (and the skill runner when needed).
-The composite roofline executor first profiles the workload with Magpie, then
-hands the trace to that `trace_analyze` path.
+The orchestration runtime enters TraceLens through two paths:
+
+- The kernel request path:
+  `src/hyperloom/orchestrator/kernel/request_handlers.py` dispatches
+  `trace_analyze` requests as subprocesses that run
+  `src/hyperloom/agents/kernel/tools/tracelens_analysis.py`. That script itself
+  imports and calls `run_tracelens_skill` (the skill runner) internally under
+  the agent route — the runner is not a separate subprocess dispatched by the
+  orchestrator.
+- The composite roofline action: `RooflineExecutor`
+  (`src/hyperloom/orchestrator/actions/executors/roofline.py`) is an atomic
+  `profile` + `trace_analyze` pipeline that first profiles the workload with
+  Magpie, then calls `trace_analyze_handler()` directly on the trace.
 
 Before profiling, Hyperloom can patch the active vLLM/SGLang server tree with
 TraceLens-specific runtime flags through
 `src/hyperloom/orchestrator/actions/executors/_server_patcher.py` and the
 workload environment helpers. The generated report feeds the roofline ceilings
 and bottleneck list used to score candidate optimizations. See
-[How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORKS.md).
+[Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
 ## API reference
 

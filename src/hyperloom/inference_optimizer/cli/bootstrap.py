@@ -205,7 +205,7 @@ def _seed_shared_state(
     # Single control plane for the KERNEL_AGENT phase: the kernel backend order env
     # (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``), set by the
     # launcher / CI submit layer. The per-kernel ladder and the phase-level
-    # PerfSkills check read it directly; here we derive the persisted
+    # GEAK e2e check read it directly; here we derive the persisted
     # ``kernel_optimizer`` record from the resolved order so resume/breakdown
     # stay correct even if the env var is not re-exported in a fresh shell.
     _resolved_kernel_order = [
@@ -217,7 +217,7 @@ def _seed_shared_state(
         ).split(",")
         if t.strip()
     ]
-    _kernel_optimizer_record = "perfskills" if "perfskills" in _resolved_kernel_order else "native"
+    _kernel_optimizer_record = "geak" if "geak" in _resolved_kernel_order else "native"
 
     # Reference launch recipe (fresh-launch only): explicit --reference-script
     # wins; else auto-discover an exact-match InferenceX single-node recipe.
@@ -283,7 +283,7 @@ def _seed_shared_state(
         framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
         # --no-explore skips the EXPLORE phase entirely.
         explore_enabled=not bool(getattr(args, "no_explore", False)),
-        # (Stage-1, default OFF) FRAMEWORK config-exploration lane toggle.
+        # FRAMEWORK config-exploration lane toggle (default OFF).
         framework_config_exploration_enabled=bool(
             getattr(args, "enable_framework_config_exploration", False),
         ),

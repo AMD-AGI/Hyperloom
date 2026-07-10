@@ -13,11 +13,14 @@ gain still 0). Both short-circuit in ``closing_phase`` or once a
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..role.prompt_inputs import ReactorContext, SharedStateSnapshot
 from ..sources.base import SourceData
-from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
+
+if TYPE_CHECKING:
+    from ..state_store import DetectorStateView
 
 
 @dataclass

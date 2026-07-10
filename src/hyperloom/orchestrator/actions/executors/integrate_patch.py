@@ -81,6 +81,15 @@ from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import accuracy_keep_block, accuracy_passed, parse_eval_results
 from ._git import _run_git_cp
+from ._nogit_patch import (
+    _P_LEVELS,
+    _PATCH_DEV_NULL,
+    _apply_patch_no_git,
+    _is_git_tree,
+    _is_within,
+    _revert_patches_no_git,
+    _strip_path_prefix,
+)
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -229,6 +238,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
+        # Logging is best-effort; a filesystem error must not fail the action.
         pass
     log_path = log_dir / "enablement_setup.log"
     env = dict(os.environ)
@@ -254,6 +264,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
                 with open(log_path, "a", encoding="utf-8") as fh:
                     fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
             except OSError:
+                # Logging is best-effort; a filesystem error must not fail the action.
                 pass
             if proc.returncode == 0:
                 applied.append(cmd)
@@ -327,15 +338,6 @@ def _resolve_framework_root(
         if p.is_dir():
             return p
     return None
-
-
-# Candidate ``-p`` strip levels, tried in priority order. ``-p1`` is the
-# git-native default and stays first for backward-compat; specialists author
-# patches with heterogeneous path prefixes (``a/vllm/...`` -> -p1,
-# ``b/_aiter_ops.py`` -> -p0/-p2, full absolute
-# ``b/usr/local/lib/python3.12/dist-packages/vllm/...`` -> -p7), so we must
-# auto-detect rather than assume a single level.
-_P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 
 def _run_git_apply(
@@ -641,26 +643,6 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     return cp2.returncode == 0, cp2.stderr.strip()
 
 
-_PATCH_DEV_NULL = "/dev/null"
-
-
-def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``).
-
-    Args:
-        path: The diff-header path to strip.
-        level: The number of leading components to drop (``<= 0`` is a no-op).
-
-    Returns:
-        The path with ``level`` leading components removed (or the basename
-        when there are not enough components).
-    """
-    if level <= 0:
-        return path
-    parts = path.split("/")
-    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
-
-
 def _commit_strip_level(
     framework_root: Path,
     pairs: list[tuple[str, str]],
@@ -816,140 +798,6 @@ def _git_commit_kept(
     if "nothing to commit" in out:
         return True, "nothing to commit"
     return False, cp.stderr.strip()
-
-
-def _is_within(child: Path, root: Path) -> bool:
-    """True iff ``child`` is ``root`` or nested under it (both pre-resolved)."""
-    try:
-        child.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _is_git_tree(path: Path) -> bool:
-    """True when ``path`` is inside an initialised git work tree."""
-    try:
-        cp = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        return cp.returncode == 0 and cp.stdout.strip() == "true"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-def _apply_patch_no_git(
-    framework_root: Path,
-    patch_path: Path,
-    backup_root: Path,
-) -> tuple[bool, str, list[dict[str, Any]]]:
-    """Apply ``patch_path`` into ``framework_root`` without git, backing up targets.
-
-    Uses the ``patch`` CLI (POSIX standard) with automatic ``-p`` strip-level
-    detection via a dry-run pass, then backs up each target file before
-    mutating, mirroring the artifact backup scheme.
-
-    Args:
-        framework_root: The source-tree root to apply into (need not be a git repo).
-        patch_path: The unified-diff patch file to apply.
-        backup_root: Directory under which target backups are written.
-
-    Returns:
-        A ``(ok, err, backups)`` triple: ``ok`` is ``True`` on success, ``err``
-        is a human-readable failure description, and ``backups`` is a list of
-        per-file backup records in the same format as :meth:`_apply_artifacts`
-        (``target``, ``backup_path`` or ``None`` when the file was created).
-    """
-    # Detect strip level via dry-run.
-    detected_level: int | None = None
-    for lvl in _P_LEVELS:
-        try:
-            cp = subprocess.run(
-                ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_path)],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-                cwd=str(framework_root),
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return False, f"patch CLI unavailable or timed out: {exc}", []
-        if cp.returncode == 0:
-            detected_level = lvl
-            break
-    if detected_level is None:
-        return False, f"patch --dry-run failed at all strip levels for {patch_path.name}", []
-
-    # Resolve target files to back up before mutation.
-    try:
-        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return False, f"cannot read patch file: {exc}", []
-
-    framework_root_resolved = framework_root.resolve()
-    backup_root.mkdir(parents=True, exist_ok=True)
-    backups: list[dict[str, Any]] = []
-    for old, new in patch_file_targets(patch_text):
-        target_raw = new if (new and new != _PATCH_DEV_NULL) else old
-        if not target_raw or target_raw == _PATCH_DEV_NULL:
-            continue
-        rel_target = Path(_strip_path_prefix(target_raw, detected_level))
-        if rel_target.is_absolute() or ".." in rel_target.parts:
-            return False, f"patch target escapes framework root: {target_raw}", backups
-        target = (framework_root_resolved / rel_target).resolve()
-        if not _is_within(target, framework_root_resolved):
-            return False, f"patch target escapes framework root: {target_raw}", backups
-        existed = target.exists()
-        record: dict[str, Any] = {"target": str(target), "existed": existed, "backup_path": None}
-        if existed:
-            bak = backup_root / f"{len(backups):03d}_{target.name}.bak"
-            try:
-                shutil.copy2(target, bak)
-                record["backup_path"] = str(bak)
-            except OSError as exc:
-                return False, f"backup of {target} failed: {exc}", backups
-        backups.append(record)
-
-    # Apply for real.
-    try:
-        cp2 = subprocess.run(
-            ["patch", f"-p{detected_level}", "-i", str(patch_path)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            cwd=str(framework_root),
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"patch apply failed: {exc}", backups
-    if cp2.returncode != 0:
-        return False, cp2.stderr.strip() or cp2.stdout.strip(), backups
-    return True, "", backups
-
-
-def _revert_patches_no_git(backups: list[dict[str, Any]]) -> None:
-    """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`).
-
-    Iterates in reverse so multi-file patches unwind in the correct order.
-    Errors are logged but never raised — best-effort, matching :meth:`_revert_artifacts`.
-
-    Args:
-        backups: The per-file backup records produced by :func:`_apply_patch_no_git`.
-    """
-    for record in reversed(backups):
-        target = Path(record["target"])
-        bak = record.get("backup_path")
-        try:
-            if bak:
-                shutil.copy2(bak, target)
-            elif target.exists():
-                target.unlink()
-        except OSError as exc:
-            log.warning("integrate_patch: no-git revert failed for %s: %s", target, exc)
 
 
 def _resolve_patch_paths(
@@ -1365,7 +1213,7 @@ class IntegratePatchExecutor:
         done_payload = _read_done_payload(specialist_workspace)
         _stamp_framework_kb_provenance(done_payload, params=params, shared_state=shared_state)
 
-        # Enablement environment setup (Q3): replay allowlisted install-only
+        # Enablement environment setup: replay allowlisted install-only
         # commands (base stacked from prior rounds + this specialist's
         # ``setup_commands``) BEFORE applying patches / booting, so a package or
         # tool a specialist relied on (e.g. a newer ``transformers`` for a new
@@ -1548,7 +1396,7 @@ class IntegratePatchExecutor:
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
 
-        # Stage 1: apply patches (best-effort with -3 fallback for git trees;
+        # Apply patches (best-effort with -3 fallback for git trees;
         # backup-based patch apply for non-git roots such as wheel installs).
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
@@ -1569,7 +1417,12 @@ class IntegratePatchExecutor:
                     err = err2
             else:
                 nogit_backup_root = output_root / "patch_backups"
-                ok, err, backups = _apply_patch_no_git(framework_root, patch, nogit_backup_root)
+                ok, err, backups = _apply_patch_no_git(
+                    framework_root,
+                    patch,
+                    nogit_backup_root,
+                    seq_offset=len(self._nogit_patch_backups),
+                )
                 self._nogit_patch_backups.extend(backups)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
@@ -1595,7 +1448,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 1b: install non-diff tuned artifacts (after patches, before
+        # Install non-diff tuned artifacts (after patches, before
         # config_changes). On any artifact error, roll back artifacts + patches
         # and surface a clean apply_failed (not an opaque git_apply_failed).
         if artifact_specs:
@@ -1624,7 +1477,7 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 }
 
-        # Stage 2: layer config_changes onto the launch env (via the
+        # Layer config_changes onto the launch env (via the
         # variant's ``extra_envs`` knob).
         config_changes_applied = dict(config_changes)
 
@@ -1667,7 +1520,7 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 })
 
-        # Stage 3: optionally skip the bench (test / smoke).
+        # Optionally skip the bench (test / smoke).
         if params.get("apply_only"):
             return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "applied_no_bench",
@@ -1680,7 +1533,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 4: bench the patched config via run_grid (1 variant).
+        # Bench the patched config via run_grid (1 variant).
         try:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
@@ -1718,7 +1571,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 5 (enablement): RUNNABILITY + minimal-correctness gate. A
+        # Enablement gate: RUNNABILITY + minimal-correctness gate. A
         # positive ``output_throughput`` means the server booted and served at
         # least one request. Accuracy is compared against an absolute floor
         # (``ENABLEMENT_ACCURACY_FLOOR``). Three states:
@@ -1874,7 +1727,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 5: KEEP / REVERT decision.
+        # KEEP / REVERT decision.
         # The Coordinator seeds ``base_tput`` per-dispatch, but a direct
         # invocation (resume path / test / external caller) may bypass that and
         # leave it 0.0, which would make ``delta_pct`` None and auto-REVERT a
@@ -1900,7 +1753,7 @@ class IntegratePatchExecutor:
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         # KEEP requires delta_pct ≥ keep_threshold AND the accuracy gate.
-        # Step 4 / Q5: framework-authored source patches require the accuracy
+        # Framework-authored source patches require the accuracy
         # gate (gated on the framework authoring markers so generic EXPLORE
         # integrate_patch keeps its prior throughput-only behaviour).
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
@@ -1933,7 +1786,7 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
-            # G8: distinguish "accuracy required but unevaluated" from a
+            # Distinguish "accuracy required but unevaluated" from a
             # throughput/regression revert.
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
@@ -1994,7 +1847,7 @@ class IntegratePatchExecutor:
                     reasons.append("accuracy regression on rebench")
                 elif rb_acc_block and rb_acc_reason:
                     reasons.append(rb_acc_reason)
-                # G8 parity: distinguish "accuracy required but unevaluated on the
+                # Distinguish "accuracy required but unevaluated on the
                 # stable rebench" from a measured regression / stability revert.
                 rb_revert_status = (
                     "accuracy_unavailable_reject"
@@ -2056,6 +1909,52 @@ class IntegratePatchExecutor:
                     )
         except Exception:  # noqa: BLE001 — commit durability is best-effort
             log.exception("integrate_patch: commit-on-KEEP raised")
+        # Durability: snapshot the KEEP's realized source layer into a
+        # session-scoped, self-contained directory so a later candidate's
+        # ``git reset``/``clean``/``stash pop`` on the shared live tree cannot
+        # wipe it (the root cause of current_best becoming unrelaunchable and
+        # the GEAK baseline falling back to the stock framework). Generic:
+        # keyed on the touched patch targets + applied artifacts, never on a
+        # specific file. Best-effort — a snapshot failure never blocks the KEEP.
+        source_snapshot_dir = ""
+        source_base_sha = ""
+        try:
+            from ...source_snapshot import snapshot_source_layer
+
+            if framework_root is not None:
+                # HEAD is the clean base: KEEP edits are uncommitted (non-cyclic)
+                # so HEAD == pre-apply sha; in cyclic mode HEAD already includes
+                # them and the overlay is idempotent on re-checkout. Either way
+                # this is the base the snapshot files overlay onto.
+                _cp = _run_git_cp(
+                    ["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0
+                )
+                if _cp is not None and getattr(_cp, "returncode", 1) == 0:
+                    source_base_sha = (_cp.stdout or "").strip()
+                rel_paths = list(_patch_touched_paths(framework_root, applied))
+                rel_paths += [
+                    str(a.get("rel_target") or "")
+                    for a in (applied_artifacts or [])
+                    if isinstance(a, dict)
+                ]
+                dest = (
+                    self.session_dir
+                    / "optimization_stack"
+                    / "src"
+                    / (specialist_task_id or str(getattr(ctx.task, "task_id", "") or "keep"))
+                )
+                snap = snapshot_source_layer(
+                    framework_root=framework_root,
+                    base_sha=source_base_sha,
+                    rel_paths=rel_paths,
+                    dest_dir=dest,
+                    provenance="integrate_patch",
+                    extra={"specialist_task_id": specialist_task_id},
+                )
+                if snap:
+                    source_snapshot_dir = str(snap.get("snapshot_dir") or "")
+        except Exception:  # noqa: BLE001 — snapshot is best-effort durability
+            log.exception("integrate_patch: source-layer snapshot failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -2071,6 +1970,11 @@ class IntegratePatchExecutor:
             "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            # Durable source-layer snapshot handles (consumed by the coordinator
+            # lift -> optimization_stack entry -> env_spec -> handoff).
+            "source_snapshot": source_snapshot_dir,
+            "framework_root": str(framework_root or ""),
+            "base_sha": source_base_sha,
         })
 
     # Helpers

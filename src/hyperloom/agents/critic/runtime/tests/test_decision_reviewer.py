@@ -708,7 +708,7 @@ def test_kb_assess_skipped_when_unconfigured(tmp_path, monkeypatch):
     kb = InMemoryKBClient()
     writer = KBWriter(kb, session_memory=sm)
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
-    # no CORTEX_KB_URL → no assess client built from env
+ # no CORTEX_KB_URL → no assess client built from env
     assert rev.kb_assess_client is None
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_noassess"))
     assert bundle.kb_assess_by_proposal == {}

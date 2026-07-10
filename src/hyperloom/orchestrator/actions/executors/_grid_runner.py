@@ -35,8 +35,8 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 
-# tree-reform.MD P2.2: cohesive clusters extracted to sibling modules;
-# re-exported here so the module namespace + monkeypatch surface is intact.
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from ._grid_base import (
     variant_fingerprint as variant_fingerprint,
     _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
@@ -565,6 +565,15 @@ def _build_variant_yaml(
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
+    # the relaunched server imports the overlay's kernels (same mechanism as the
+    # geak sweep's OVERLAY_PYTHONPATH). Inert for env/flag variants where
+    # ``overlay_pythonpath`` is unset. getattr-guarded so non-GridVariant callers
+    # (or older payloads) never break.
+    _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+    if _overlay:
+        _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+        envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
 
     # PATH guard: the xdit/scriptable wrapper needs BOTH `/venv/bin` (for the
     # `xdit` console script) and `/opt/rocm/bin` (for `hipcc`, required by
@@ -760,6 +769,7 @@ def _run_magpie(
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
     preclean: bool = True,
+    server_already_ready: bool = False,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -768,6 +778,9 @@ def _run_magpie(
     land in the per-task workspace, not ``/workspace/``. ``soft_deadline_sec``
     is the Fix-E overtime cap: the tree is reaped and a sentinel
     ``OVERTIME_KILL_RETURNCODE`` returned instead of raising ``TimeoutExpired``.
+    ``server_already_ready`` is forwarded to :func:`run_with_session_kill` so
+    warm reuse rounds (client-only, no server boot) use the from-spawn soft clock
+    instead of the from-ready clock (which would never arm on an empty log).
 
     Args:
         magpie_python (str): Python interpreter used to launch Magpie.
@@ -779,6 +792,9 @@ def _run_magpie(
             defaults to ``output_dir``.
         soft_deadline_sec (float | None): Overtime soft deadline; reaps the tree
             and returns ``OVERTIME_KILL_RETURNCODE``.
+        preclean (bool): Whether to pre-clean stale servers before launch.
+        server_already_ready (bool): Pass ``True`` for warm reuse rounds so the
+            soft-deadline clock runs from process spawn, not the ready marker.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -840,6 +856,7 @@ def _run_magpie(
         timeout=timeout_sec,
         soft_deadline_sec=soft_deadline_sec,
         server_log_path=str(output_dir / "server.log"),
+        server_already_ready=server_already_ready,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -862,6 +879,7 @@ async def run_grid(
     server_lifecycle: dict[str, Any] | None = None,
     warmup_before_measure: bool | None = None,
     preclean_before_run: bool = True,
+    server_already_ready: bool = False,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -905,6 +923,12 @@ async def run_grid(
             ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``.
         preclean_before_run (bool): Whether to pre-clean stale servers before
             the measured Magpie launch. Reattach rounds must pass ``False``.
+        server_already_ready (bool): Pass ``True`` when the measured round
+            re-attaches to a server booted by a prior subprocess (warm reuse /
+            auto-warmup measure round). This bypasses the from-ready soft-deadline
+            anchor so the overtime soft-kill fires from spawn instead of waiting
+            for a ready marker that will never appear in the reuse round's own
+            server.log.
 
     Returns:
         list[VariantResult]: Per-variant results for every attempt, in order.
@@ -1315,6 +1339,7 @@ async def run_grid(
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
                 preclean=(False if auto_warmup else preclean_before_run),
+                server_already_ready=(server_already_ready or auto_warmup),
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks so the variant slot captures whatever
@@ -1812,4 +1837,51 @@ __all__ = [
     "sanitize_script_name",
     "server_args_env_name",
     "variant_fingerprint",
+    # Re-exported from the extracted sibling modules (_grid_base /
+    # _grid_server_args / _grid_variant_filter) to keep the module namespace
+    # and test monkeypatch surface intact. Declared so the re-exports are
+    # intentional rather than flagged unused imports.
+    "coerce_extra_envs",
+    "compact_json_server_args",
+    "_SPACE_VALUE_FLAGS",
+    "_MULTI_VALUE_FLAGS",
+    "_VLLM_SINGLE_VALUE_FLAGS",
+    "dedup_vllm_server_args",
+    "_SGLANG_WATCHDOG_FLAG",
+    "_SGLANG_WATCHDOG_RE",
+    "DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS",
+    "DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS",
+    "SGLANG_CONTEXT_HEADROOM_ENV",
+    "SGLANG_CONTEXT_FLOOR_ENV",
+    "_SGLANG_CONTEXT_LENGTH_FLAG",
+    "_SGLANG_CONTEXT_LENGTH_RE",
+    "_SGLANG_ATTN_BACKEND_FLAG",
+    "_SGLANG_ATTN_BACKEND_RE",
+    "_SGLANG_DUAL_CHUNK_BACKEND",
+    "_resolve_nonneg_int_env",
+    "_coerce_optional_positive_int",
+    "resolve_sglang_context_cap",
+    "_resolve_dual_chunk_backend",
+    "HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV",
+    "DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND",
+    "_SGLANG_MOE_RUNNER_BACKEND_FLAG",
+    "_SGLANG_MOE_RUNNER_BACKEND_RE",
+    "inject_sglang_moe_runner_backend",
+    "resolve_skip_spec",
+    "_parse_skip_spec",
+    "_RE_CUDA_GRAPH_MAX_BS",
+    "_MN_PARAMS_PRIORITY",
+    "_MN_BACKENDS_PRIORITY",
+    "_mn_priority_index",
+    "_COMPATIBILITY_FLAG_RULES",
+    "_XDIT_ENV_BLACKLIST",
+    "_XDIT_ENV_COMBO_BLACKLIST",
+    "xdit_blacklist_reason",
+    "_HELP_TEXT_CACHE",
+    "_HELP_PROBE_COMMANDS",
+    "_probe_server_help_text",
+    "_probe_sglang_help_text",
+    "_detect_model_class",
+    "apply_compatibility_filter",
+    "apply_user_skip_list",
 ]

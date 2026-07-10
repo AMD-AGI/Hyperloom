@@ -21,7 +21,6 @@ The suite checks:
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 
 import pytest
@@ -33,13 +32,14 @@ def _build_coord(
     *,
     gpu_specialist_capacity: int,
     visible_devices: str | None = "0,1,2,3",
+    tp: int = 0,
 ):
     """Build a minimal Coordinator with a deterministic GPU env.
 
     ``visible_devices`` is written into ``ROCR_VISIBLE_DEVICES`` *before*
     construction so both the carved ``gpu_specialist_pool`` and the
     whole-machine ``framework_gpu_pool`` resolve deterministically (the pools
-    are baked at construction). ``TP`` is cleared so the serving carve is 0.
+    are baked at construction). ``tp`` sets the serving TP carve (0 = no carve).
     """
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.mock_backend import (
@@ -65,6 +65,7 @@ def _build_coord(
 
     state = SharedState(session_id="framework-gpu")
     state.gpu_specialist_capacity = gpu_specialist_capacity
+    state.tp = tp
     # research_lane headroom so a GPU task is never blocked by the LLM lane.
     state.research_lane_capacity = 4
     state.save(tmp_path)
@@ -333,3 +334,82 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
 
     assert probe.entries
     assert probe.gpu_ids_by_task[probe.entries[0]] == [0]
+
+
+# ── 5. EXPLORE bench specialists take the whole-machine time-shared lane ─────
+
+
+@pytest.mark.asyncio
+async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(
+    tmp_path, monkeypatch
+):
+    """A bench-capable EXPLORE specialist (mode=patch & bench=true) leases the
+    whole machine from ``framework_gpu_pool`` — so serving occupying the whole
+    node (TP == #GPUs, which empties the serving-disjoint pool) no longer leaves
+    it unschedulable. This is the EXPLORE-phase GPU-specialist fix."""
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4, tp=4)
+    # Serving carve empties the disjoint pool; the whole-machine pool is full.
+    assert coord.gpu_specialist_pool.capacity == 0
+    assert coord.framework_gpu_pool.capacity == 4
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+
+    await coord.tasks.create_or_return_existing(
+        kind="specialist",
+        params={
+            "scope": "freeform",
+            "task_description": "start a TP-sharded server and rebench a patch",
+            "mode": "patch",
+            "bench": True,
+            "needs_gpu": True,
+            # gpu_count omitted → defaults to serving TP (floored to 4).
+        },
+        idempotency_key="explore-bench-wholemachine",
+        requires_lanes=["research_lane", "gpu_research_lane", "benchmark_lane"],
+        lease_ttl_sec=3600,
+    )
+
+    await coord._pump_dispatcher_once()
+
+    assert probe.entries, "bench specialist never dispatched"
+    tid = probe.entries[0]
+    assert probe.gpu_ids_by_task[tid] == [0, 1, 2, 3]
+    assert not await coord.tasks.queued()
+
+
+@pytest.mark.asyncio
+async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch):
+    """A non-bench GPU probe (bench=false) keeps the serving-disjoint pool — the
+    whole-machine route must NOT leak to ordinary microbench/profiling probes."""
+    # 8 visible cards, serving TP=4 → carved pool = cards [4..7].
+    coord = _build_coord(
+        tmp_path,
+        monkeypatch,
+        gpu_specialist_capacity=8,
+        visible_devices="0,1,2,3,4,5,6,7",
+        tp=4,
+    )
+    assert coord.gpu_specialist_pool.capacity == 4
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+
+    await coord.tasks.create_or_return_existing(
+        kind="specialist",
+        params={
+            "scope": "freeform",
+            "task_description": "microbench the decode attention kernel",
+            "mode": "patch",
+            "bench": False,
+            "needs_gpu": True,
+            "gpu_count": 1,
+        },
+        idempotency_key="explore-nonbench-carved",
+        requires_lanes=["research_lane", "gpu_research_lane"],
+        lease_ttl_sec=3600,
+    )
+
+    await coord._pump_dispatcher_once()
+
+    assert probe.entries
+    # First card of the carved (serving-disjoint) pool, not card 0.
+    assert probe.gpu_ids_by_task[probe.entries[0]] == [4]

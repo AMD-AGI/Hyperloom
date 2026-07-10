@@ -78,7 +78,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI from `GEAK_REF` (default `v3.2.1`) +
+- GEAK CLI (per-kernel backend) from `GEAK_V3_REF` (default `GEAK_v3.2`) +
   `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
@@ -88,7 +88,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   preset. Other yaml budget knobs are not env-overridable on purpose —
   edit `$GEAK_CONFIG` directly if you need to tune them per pod.
 - GEAK MCP tools — installed as four pip packages from
-  `${GEAK_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
+  `${GEAK_V3_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
   these at preprocess + run time; missing any of them fails the GEAK
   attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
   installed → 4-minute aborts with zero-byte baselines).
@@ -117,8 +117,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   Anthropic URL derived from `$OPENAI_BASE_URL` with a trailing `/v1`
   stripped) + `~/.codex/auth.json`. The AMD primus-safe gateway accepts
   both `x-api-key` (what claude/codex CLIs send) and
-  `Authorization: Bearer` natively, so no local auth-proxy is in the
-  loop. The cursor backend talks to
+  `Authorization: Bearer` natively. The cursor backend talks to
   Cursor's own gateway via `@cursor/sdk` and requires `CURSOR_API_KEY`
   (separate Cursor account, prefix `crsr_...`).
 
@@ -164,11 +163,6 @@ If a tool fails with HTTP 401 / `Primus.00009 token not present` /
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
-
-A stale `customApiUrl=http://127.0.0.1:4002/...` in
-`~/.claude/config.json` left over from a previous install can also
-trigger this — re-run `install.sh` to have `ensure_llm_auth_files`
-rewrite the file to the upstream URL.
 
 If a pod or venv was rebuilt and `ray --version` fails / Ray CLI rejects
 `--num-gpus`, repair the Ray/Click pair (Click >= 8.3 is incompatible
@@ -364,7 +358,7 @@ repeat the manual install above.
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
 `ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
 the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
-`${GEAK_ROOT}` / `${OOB_ROOT}`) via `cp -r`, runs `pip install -e` against
+`${GEAK_V3_ROOT}` / `${OOB_ROOT}`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.

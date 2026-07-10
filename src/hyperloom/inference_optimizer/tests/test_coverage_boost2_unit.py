@@ -43,6 +43,31 @@ def test_coerce_bool_and_infer_scope() -> None:
     assert profile.scope == sp.SCOPE_FREEFORM
 
 
+def test_uses_whole_machine_gpu_lane() -> None:
+    from hyperloom.orchestrator.specialists import profile as sp
+
+    # Framework-authoring specialists always take the whole-machine lane.
+    assert sp.uses_whole_machine_gpu_lane({"framework_agent_authoring": True}) is True
+
+    # Bench-capable (mode=patch & bench=true) specialists take it too.
+    assert (
+        sp.uses_whole_machine_gpu_lane(
+            {"scope": "freeform", "mode": "patch", "bench": True}
+        )
+        is True
+    )
+
+    # Non-bench patch probes and research specialists keep the disjoint pool.
+    assert (
+        sp.uses_whole_machine_gpu_lane(
+            {"scope": "freeform", "mode": "patch", "bench": False}
+        )
+        is False
+    )
+    assert sp.uses_whole_machine_gpu_lane({"scope": "freeform", "mode": "research"}) is False
+    assert sp.uses_whole_machine_gpu_lane(None) is False
+
+
 # --------------------------------------------------------------------------- #
 # orchestrator.action_executors._accuracy_gate.parse_quality_gate            #
 # --------------------------------------------------------------------------- #

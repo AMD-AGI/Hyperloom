@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..framework.paths import resolve_source_file_allowlist
-from ..bus.gpu_pool import resolve_gpu_specialist_devices
+from ..bus.gpu_pool import (
+    resolve_gpu_specialist_devices,
+    resolve_whole_machine_devices,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -269,6 +272,18 @@ def _effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
     )
 
 
+def _whole_machine_pool_size() -> int:
+    """Policy-time size of the whole-machine (framework/bench) GPU pool.
+
+    Mirrors ``Coordinator.framework_gpu_pool`` (``resolve_whole_machine_devices``):
+    every visible card, with *no* serving carve and no
+    ``gpu_specialist_capacity`` gate. Used to validate whole-machine, time-shared
+    GPU specialists (framework-authoring + bench) which the dispatcher routes to
+    ``framework_gpu_pool`` rather than the serving-disjoint pool.
+    """
+    return len(resolve_whole_machine_devices())
+
+
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
@@ -399,16 +414,16 @@ class _SpecialistPseudoRole:
 _SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
 
 
-# REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4): source role → allowed target_agents (only orchestration→kernel).
+# REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel_agent"}),
 }
 
 
-# Critic-only: REVIEW_VERDICT (DESIGN §18.2)
+# Critic-only: REVIEW_VERDICT
 REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
 
-# Verdict vocabulary for review_verdict (DESIGN §18.2)
+# Verdict vocabulary for review_verdict
 REVIEW_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",
@@ -420,7 +435,7 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Robustness-only: kill_task + scheduling-police intents (DESIGN §7.4 / §19.3)
+# Robustness-only: kill_task + scheduling-police intents
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
@@ -1052,8 +1067,7 @@ class PolicyGate:
         """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
 
         Unknown topics are intentionally not rejected here — the
-        Coordinator soft-degrades them to ``"observation"`` (DESIGN
-        §13.2) — so agents can still surface unstructured observations.
+        Coordinator soft-degrades them to ``"observation"`` — so agents can still surface unstructured observations.
 
         Args:
             payload (dict[str, Any]): the send_message payload, expected to
@@ -1069,7 +1083,7 @@ class PolicyGate:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
-        # Unknown topics are soft-degraded by the Coordinator to "observation" (DESIGN §13.2); not rejected here.
+        # Unknown topics are soft-degraded by the Coordinator to "observation"; not rejected here.
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent against the routing matrix.
@@ -1382,7 +1396,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; KB_design §3.11 §4.4 / Inv-11.3).
+        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; Inv-11.3).
 
         Args:
             action_name (str): the action name (or REQUEST ``kind``) being
@@ -1417,7 +1431,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only; KB_design §3.11 §4.5).
+        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only).
 
         Args:
             role_name (str): the name of the emitting role.
@@ -1930,7 +1944,22 @@ class PolicyGate:
         if not needs_gpu:
             return
         serving_tp = _serving_tp_for_policy(self.shared_state)
-        default_gpu_count = serving_tp or 1
+        from ..specialists.profile import (
+            resolve_specialist_profile,
+            uses_whole_machine_gpu_lane,
+        )
+
+        # Whole-machine bench specialists lease from ``framework_gpu_pool``
+        # (the full node), so their default gpu_count must match the dispatcher:
+        # serving_tp when known, otherwise the whole-machine pool capacity.
+        # When serving_tp > 0 the existing bench-floor below already aligns them;
+        # the special case is serving_tp == 0 (no serving yet) where the old
+        # ``serving_tp or 1`` default was 1 while the dispatcher fell back to
+        # ``gpu_pool.capacity`` — corrected here to match.
+        if uses_whole_machine_gpu_lane(params) and serving_tp == 0:
+            default_gpu_count = _whole_machine_pool_size() or 1
+        else:
+            default_gpu_count = serving_tp or 1
         gpu_count_raw = params.get("gpu_count", default_gpu_count)
         if gpu_count_raw is None or (isinstance(gpu_count_raw, str) and not gpu_count_raw.strip()):
             gpu_count_raw = default_gpu_count
@@ -1957,23 +1986,33 @@ class PolicyGate:
                     "before dispatching GPU specialists."
                 ),
             )
-        from ..specialists.profile import resolve_specialist_profile
 
         if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
             gpu_count = serving_tp
-        effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
+        # Whole-machine, time-shared specialists (framework-authoring + bench)
+        # are validated against the whole-machine pool, NOT the serving-disjoint
+        # pool: the dispatcher routes them to ``framework_gpu_pool`` and they
+        # serialize with serving via ``gpu_research_lane`` (server torn down
+        # between rounds), so the serving carve does not apply. Without this a
+        # bench specialist is spuriously denied whenever serving occupies the
+        # whole node (serving-disjoint size == 0 at TP == #GPUs).
+        if uses_whole_machine_gpu_lane(params):
+            effective_pool_size = _whole_machine_pool_size()
+            pool_desc = "whole-machine GPU pool"
+        else:
+            effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
+            pool_desc = "serving-disjoint GPU specialist pool"
         if gpu_count > effective_pool_size:
             raise PolicyDenied(
                 "delegate{action='specialist'}: "
-                f"effective gpu_count={gpu_count} exceeds serving-disjoint "
-                f"GPU specialist pool size={effective_pool_size} "
+                f"effective gpu_count={gpu_count} exceeds {pool_desc} "
+                f"size={effective_pool_size} "
                 f"(configured capacity={ceiling}, serving_tp={serving_tp})",
                 rule="specialist_gpu_request_exceeds_capacity",
                 hint=(
                     "Lower params.gpu_count for non-bench probes, omit it for "
-                    "bench specialists only when the specialist pool has at "
-                    "least serving TP free cards, or start a session with a "
-                    "larger/disjoint GPU specialist pool."
+                    "bench specialists only when the pool has at least serving "
+                    "TP free cards, or start a session with a larger GPU pool."
                 ),
             )
 

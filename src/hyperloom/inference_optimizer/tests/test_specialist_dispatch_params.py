@@ -325,7 +325,7 @@ def test_gap_backfill_prefers_high_severity_then_least_attempted(orchestration_r
     )
     params = {"domain": "serving_specialist"}
     gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
-    # framework is serving_specialist's kb_anchor, so both match; high wins.
+ # framework is serving_specialist's kb_anchor, so both match; high wins.
     assert params["gap_canonical_id"] == "gap.win"
 
 
@@ -480,11 +480,41 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
 
-def test_bench_specialist_policy_uses_effective_tp_and_carved_pool(orchestration_role, monkeypatch):
-    """Policy must reject a bench specialist that dispatch would floor to TP
-    but could never lease after serving-disjoint carving."""
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+def test_bench_specialist_whole_machine_lane_allows_full_node(orchestration_role, monkeypatch):
+    """A bench specialist takes the whole-machine, time-shared GPU lane
+    (serialized with serving via ``gpu_research_lane``; server torn down between
+    rounds), so serving occupying the whole node (TP == #GPUs) NO LONGER denies
+    it — the serving-disjoint carve does not apply to the whole-machine pool.
+
+    Regression for the EXPLORE-phase GPU-specialist fix: previously this was
+    rejected with ``specialist_gpu_request_exceeds_capacity`` (disjoint pool
+    size 0)."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    gate = _gate_with_gpu_capacity(4, tp=4)
+    # gpu_count is floored to serving TP=4; the whole-machine pool has all 4
+    # cards (no serving carve), so this is now schedulable and must not raise.
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "start a TP-sharded server and rebench a patch",
+                "mode": "patch",
+                "bench": True,
+                "gpu_count": 1,
+            }
+        ),
+    )
+
+
+def test_bench_specialist_denied_when_whole_machine_too_small(orchestration_role, monkeypatch):
+    """A bench specialist is still denied when the whole node physically has
+    fewer cards than the serving TP it must shard a server across."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1")
     gate = _gate_with_gpu_capacity(4, tp=4)
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
@@ -495,20 +525,20 @@ def test_bench_specialist_policy_uses_effective_tp_and_carved_pool(orchestration
                     "task_description": "start a TP-sharded server and rebench a patch",
                     "mode": "patch",
                     "bench": True,
-                    "gpu_count": 1,
                 }
             ),
         )
     assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"
     assert "effective gpu_count=4" in str(exc.value)
-    assert "pool size=0" in str(exc.value)
+    assert "whole-machine GPU pool size=2" in str(exc.value)
 
 
-def test_bench_specialist_omitted_gpu_count_allows_sufficient_carved_pool(orchestration_role, monkeypatch):
-    """Omitting gpu_count defaults to serving TP and is valid when enough
-    serving-disjoint specialist cards remain."""
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+def test_bench_specialist_omitted_gpu_count_allows_whole_machine(orchestration_role, monkeypatch):
+    """Omitting gpu_count defaults a bench specialist to serving TP and is valid
+    when the whole-machine pool has at least that many cards."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     gate = _gate_with_gpu_capacity(8, tp=4)
     gate._validate_specialist_dispatch(
         orchestration_role,
@@ -567,13 +597,13 @@ def test_task_tool_granted_and_todowrite_granted():
 
 
 # --------------------------------------------------------------------------- #
-# Problem 2 — domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
+# domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
 # on legitimate keys leaking through params.tags untranslated).
 # --------------------------------------------------------------------------- #
 def test_normalize_dispatch_tags_translates_key_to_anchor():
     from hyperloom.orchestrator.specialists.domains import normalize_dispatch_tags
 
-    # A domain KEY in params.tags is translated to its kb_anchor.
+ # A domain KEY in params.tags is translated to its kb_anchor.
     assert normalize_dispatch_tags({"tags": ["serving_specialist"]}) == ["framework"]
     assert normalize_dispatch_tags({"tags": ["kernel_switch_specialist"]}) == ["kernel_agent"]
 
@@ -654,3 +684,36 @@ def test_specialist_emit_hint_lists_all_eight_llm_domains():
         "static_recon_specialist",
     ):
         assert key in hint, key
+
+
+# --------------------------------------------------------------------------- #
+# Medium #1 — gate gpu_count default aligned with dispatcher at serving_tp=0
+# --------------------------------------------------------------------------- #
+def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_role, monkeypatch):
+    """When serving_tp=0 (no serving yet), a bench specialist with no explicit
+    gpu_count must default to the whole-machine pool size in the gate, matching
+    the dispatcher's fallback to ``gpu_pool.capacity`` (Medium #1 fix).
+
+    Previously the gate defaulted to 1 (``serving_tp or 1``) while the
+    dispatcher fell back to the pool capacity, causing a default mismatch."""
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    # tp=0: no serving, gpu_specialist_capacity=4 (4-card node).
+    gate = _gate_with_gpu_capacity(4, tp=0)
+    # Must not raise: gate's default gpu_count must now be 4 (whole-machine)
+    # not 1 (the old ``serving_tp or 1`` when serving_tp=0), so the validation
+    # agrees with the dispatcher that actually leases all 4 cards.
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "bench patch before any serving baseline exists",
+                "mode": "patch",
+                "bench": True,
+                "needs_gpu": True,
+                # gpu_count omitted → gate must default to whole-machine size.
+            }
+        ),
+    )

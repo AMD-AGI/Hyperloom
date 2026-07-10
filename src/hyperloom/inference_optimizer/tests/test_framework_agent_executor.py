@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FrameworkAgentExecutor — Stage 2d coverage."""
+"""FrameworkAgentExecutor coverage tests."""
 
 from __future__ import annotations
 
@@ -922,7 +922,7 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# 3d. accuracy gate inside _bench_candidate (Step 0 regression)
+# Accuracy gate inside _bench_candidate.
 #
 # Regression for the framework accuracy-gate bug: the gate read the
 # nonexistent ``score`` key from parse_eval_results (which returns
@@ -953,8 +953,7 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import hyperloom.orchestrator.actions.executors.framework_agent as fp_mod
-
+    from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
         patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
@@ -988,8 +987,7 @@ async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: 
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import hyperloom.orchestrator.actions.executors.framework_agent as fp_mod
-
+    from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
         patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
@@ -1004,7 +1002,7 @@ async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: 
     assert gate["accuracy_pass"] is None
 
 
-# 3e. accuracy-gate KEEP enforcement (Step 4)
+# Accuracy-gate KEEP enforcement.
 @pytest.mark.asyncio
 async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: Path):
     """+gain but accuracy unevaluated (None) with a baseline present -> REVERT.

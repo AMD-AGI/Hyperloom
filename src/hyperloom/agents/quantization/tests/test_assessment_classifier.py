@@ -240,14 +240,14 @@ def test_eval_report_malformed_treated_as_env_unavailable(build_workspace):
 
 
 def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
-    ws = build_workspace(
+    build_workspace(
         include_manifest=False,
         include_quantized_dir=False,
         include_validation_report=False,
         include_eval_report=False,
         last_phase="exec",
     )
-    # Need to add manifest so we get past §3 phase-gap check; instead pass
+    # Need to add manifest so we get past the phase-gap check; instead pass
     # last_phase via sdk path. With no manifest under exec phase, the
     # phase-aware check fires first and returns manifest_artifact_*.
     # So test phase-tagged sdk_error path with manifest present but quantized
