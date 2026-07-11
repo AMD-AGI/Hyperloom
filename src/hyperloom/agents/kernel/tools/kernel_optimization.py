@@ -538,13 +538,15 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if not user_backends:
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
-            # 'geak' is the whole-pipeline e2e phase-level delegate owned by the
-            # coordinator, not a per-kernel backend; drop it so a geak-only order
-            # does not crash parse_backends here (this subprocess only runs on the
-            # native per-kernel path, which the coordinator skips for the GEAK
-            # e2e optimizer). An empty remainder falls back to the default ladder.
+            # Drop tokens parse_backends no longer accepts so a legacy env
+            # (e.g. KERNEL_OPT_BACKEND_ORDER=forge,geak,claude,codex) degrades to
+            # the surviving backends instead of raising ValueError. 'geak' is the
+            # whole-pipeline e2e delegate (coordinator-owned, not per-kernel);
+            # claude/codex/cursor are the removed OOB backends. An empty remainder
+            # falls back to the default ladder.
+            _dropped = {"geak", "claude", "codex", "cursor"}
             env_tokens = ",".join(
-                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak"
+                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() not in _dropped
             )
             if env_tokens:
                 user_backends = parse_backends(env_tokens)

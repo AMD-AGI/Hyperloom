@@ -25,8 +25,8 @@ log = logging.getLogger(__name__)
 def _ensure_forge_on_path() -> str:
     """Make `kernel_agents` (Kernel-Forge) importable from $FORGE_PATH.
 
-    Mirrors how the OOB backend is located via OOB_PATH: read $FORGE_PATH
-    (also accepts $KERNEL_FORGE_ROOT / $KERNEL_FORGE_PATH), resolve the dir
+    Read $FORGE_PATH (also accepts $KERNEL_FORGE_ROOT / $KERNEL_FORGE_PATH),
+    resolve the dir
     that actually contains the `kernel_agents` package (the repo root, its
     `src/`, or the package dir itself) and prepend it to sys.path. When the
     env var is unset, do nothing and rely on an installed `kernel_agents`

@@ -1435,6 +1435,60 @@ ensure_geak() {
   fi
 }
 
+# The forge backend drives the `claude` CLI inside its autonomous loop
+# (see forge_submit._apply_fellow_env), so it needs Node/npm, the claude npm
+# CLI, and ~/.claude auth even though the OOB backends are gone.
+ensure_forge_claude_cli() {
+  log "ensuring claude CLI for the forge backend"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    command -v claude >/dev/null 2>&1 || warn "claude CLI missing; forge backend will fail to drive its fellow"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install Node.js/npm + @anthropic-ai/claude-code and write ~/.claude/config.json"
+    return 0
+  fi
+  # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
+  if ! command -v npm >/dev/null 2>&1; then
+    if ! command -v apt-get >/dev/null 2>&1; then
+      warn "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
+      return 0
+    fi
+    command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
+    log "installing Node.js 20 from NodeSource"
+    local ns_script="/tmp/nodesource_setup_20.x"
+    if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
+       && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
+       && bash "$ns_script" >/dev/null 2>&1; then
+      apt-get -y install nodejs >/dev/null || warn "nodejs install failed; forge claude CLI unavailable"
+    else
+      warn "NodeSource setup failed; forge claude CLI unavailable"
+      return 0
+    fi
+  fi
+  if command -v npm >/dev/null 2>&1 && ! command -v claude >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @anthropic-ai/claude-code
+  fi
+  # ~/.claude auth from the shared gateway env so the fellow authenticates.
+  if [ -n "$OOB_API_KEY_VAL" ]; then
+    mkdir -p /root/.claude
+    local _anthropic_url="${OOB_BASE_URL_VAL%/}"
+    _anthropic_url="${_anthropic_url%/v1}"
+    cat > /root/.claude/config.json <<EOF
+{
+  "theme": "dark",
+  "hasCompletedOnboarding": true,
+  "primaryApiKey": "${OOB_API_KEY_VAL}",
+  "customApiUrl": "${_anthropic_url}"
+}
+EOF
+    chmod 600 /root/.claude/config.json
+  else
+    warn "gateway API key not set; ~/.claude/config.json not written (forge fellow auth may fail)"
+  fi
+}
+
 report_status() {
   log "root: ${KERNEL_AGENT_ROOT}"
   log "ray: $(python3 - <<'PY' 2>/dev/null || echo missing
@@ -1515,6 +1569,7 @@ main() {
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
+  ensure_forge_claude_cli
   ensure_rag_index
   write_env_file
 
