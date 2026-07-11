@@ -59,7 +59,7 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
                 "gpu_pct": 42.0,
                 "bottleneck": "memory",
                 "reusable_native_kernel": True,
-                "recommended_backends": ["geak", "oob"],
+                "recommended_backends": ["forge", "geak_v3"],
             },
             {"kernel_id": "k002", "name": "ln", "gpu_pct": 7.5},
         ],
@@ -69,7 +69,7 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
         tmp_path,
         kernel_id="k001",
         dispatched=True,
-        backends=["geak", "claude"],
+        backends=["forge", "geak_v3"],
         orchestration_commit="abc1234",
     )
     instrument.record_kernel_dispatch(

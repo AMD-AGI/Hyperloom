@@ -45,7 +45,7 @@ def _top15_entry(
         "bound_type": bound_type,
         "arithmetic_intensity": arithmetic_intensity,
         "reusable_native_kernel": reusable,
-        "recommended_backends": (list(backends) if backends is not None else ["geak_v3", "claude", "codex"]),
+        "recommended_backends": (list(backends) if backends is not None else ["forge", "geak_v3"]),
         "kernel_category": "test",
     }
 
