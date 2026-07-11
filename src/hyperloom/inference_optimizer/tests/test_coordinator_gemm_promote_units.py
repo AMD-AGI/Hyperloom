@@ -50,6 +50,15 @@ def _coord(tmp_path: Path, **state_kwargs) -> Coordinator:
     return coord
 
 
+class _Bus:
+    def __init__(self) -> None:
+        self.messages = []
+
+    async def append_and_seq(self, message):
+        self.messages.append(message)
+        return message
+
+
 class TestPromoteGemmTuningKeep:
     def test_ignores_non_dict(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
@@ -208,6 +217,306 @@ class TestPromoteFusionIntegrateKeep:
         assert coord.shared_state.current_best["tput"] == 180.0
         assert coord.shared_state.cumulative_gain_validated == 80.0
         assert coord.shared_state.cumulative_gain_validated_stack_len == 1
+
+    def test_guard_paths_do_not_promote(self, tmp_path):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+
+        phase._promote_fusion_integrate_keep("bad", {"decision": "KEEP"})  # type: ignore[arg-type]
+        phase._promote_fusion_integrate_keep({}, {"decision": "REVERT"})
+        phase._promote_fusion_integrate_keep({}, {"decision": "KEEP", "new_tput": "bad"})
+        phase._promote_fusion_integrate_keep({}, {"decision": "KEEP", "new_tput": 0})
+
+        assert coord.shared_state.optimization_stack == []
+        assert coord.shared_state.current_best == {}
+
+    def test_dedupes_same_fusion_patch(self, tmp_path):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        fusion = {"patch": "/tmp/fusion.patch", "source_file": "/repo/model.py"}
+        integ = {"decision": "KEEP", "new_tput": 150.0, "gain_pct": 50.0}
+
+        phase._promote_fusion_integrate_keep(fusion, integ)
+        phase._promote_fusion_integrate_keep(fusion, integ)
+
+        assert len(coord.shared_state.optimization_stack) == 1
+        assert coord.shared_state.current_best["patch_path"] == "/tmp/fusion.patch"
+
+    @pytest.mark.asyncio
+    async def test_handle_fusion_result_posts_and_integrates_kept_candidate(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integrated: list[dict] = []
+
+        async def _fake_integrate(result):
+            integrated.append(result)
+
+        monkeypatch.setattr(phase, "_integrate_fusion", _fake_integrate)
+        result = {
+            "status": "ok",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "engine": "forge_fusion",
+        }
+
+        await phase._handle_fusion_result(result)
+
+        assert coord.shared_state.last_fusion == result
+        assert integrated == [result]
+        assert coord.bus.messages[0].payload["kind"] == "run_fusion_done"
+
+    @pytest.mark.asyncio
+    async def test_handle_fusion_result_tolerates_non_dict_and_bus_failure(
+        self, tmp_path
+    ):
+        coord = _coord(tmp_path)
+
+        class BadBus:
+            async def append_and_seq(self, *_args, **_kwargs):
+                raise RuntimeError("bus down")
+
+        coord.bus = BadBus()
+        phase = KernelPhase(coord)
+
+        await phase._handle_fusion_result("not-dict")  # type: ignore[arg-type]
+
+        assert coord.shared_state.last_fusion == {"status": "failed"}
+
+    @pytest.mark.asyncio
+    async def test_integrate_fusion_builds_payload_and_records_keep(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            current_best={"extra_envs": {"SGLANG_USE_AITER": "1"}},
+        )
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "new_tput": 170.0,
+                "gain_pct": 70.0,
+                "workspace": str(tmp_path / "integrate"),
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            krh_mod,
+            "materialize_unified_patch_snapshot",
+            lambda **_kwargs: str(tmp_path / "snapshot"),
+        )
+
+        await phase._integrate_fusion(
+            {
+                "patch": str(tmp_path / "fusion.patch"),
+                "source_file": "/repo/model.py",
+                "kernel_repo": "/repo",
+                "env_flags": {"ZAYA_FUSED": "1"},
+                "kernel_speedup": 2.5,
+                "best_pattern": "llm:fused",
+            }
+        )
+
+        assert calls[0]["source"] == "forge_fusion"
+        assert calls[0]["snapshot_dir"] == str(tmp_path / "snapshot")
+        assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1", "ZAYA_FUSED": "1"}
+        assert coord.shared_state.last_fusion_integrate["decision"] == "KEEP"
+        assert coord.shared_state.current_best["engine"] == "forge_fusion"
+        assert coord.bus.messages[-1].payload["kind"] == "fusion_integrate_done"
+
+    @pytest.mark.asyncio
+    async def test_integrate_fusion_records_snapshot_failure(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        def _raise_snapshot(**_kwargs):
+            raise ValueError("bad patch")
+
+        monkeypatch.setattr(krh_mod, "materialize_unified_patch_snapshot", _raise_snapshot)
+
+        await phase._integrate_fusion(
+            {
+                "patch": str(tmp_path / "fusion.patch"),
+                "source_file": "/repo/model.py",
+                "kernel_repo": "/repo",
+            }
+        )
+
+        assert coord.shared_state.last_fusion_integrate["decision"] == "REVERT"
+        assert coord.shared_state.last_fusion_integrate["error_class"] == "ValueError"
+
+    @pytest.mark.asyncio
+    async def test_integrate_fusion_skips_missing_patch_or_target(self, tmp_path):
+        coord = _coord(tmp_path)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        await phase._integrate_fusion({"patch": "", "source_file": "/repo/model.py"})
+        await phase._integrate_fusion({"patch": "/tmp/fusion.patch", "source_file": ""})
+
+        assert coord.shared_state.last_fusion_integrate == {}
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_after_gemm_handles_handler_exception(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(tmp_path)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        async def _raise(*_args, **_kwargs):
+            raise RuntimeError("fusion boom")
+
+        monkeypatch.setattr(krh_mod, "run_fusion_handler", _raise)
+
+        await phase._run_forge_fusion_after_gemm()
+
+        assert coord.shared_state.last_fusion["decision"] == "REVERT"
+        assert coord.shared_state.last_fusion["error_class"] == "RuntimeError"
+
+
+class TestValidateForgeGemmTuningE2E:
+    @pytest.mark.asyncio
+    async def test_stacks_keeps_and_reverts(self, tmp_path, monkeypatch):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            baseline_runtime_sec=10.0,
+            framework="sglang",
+            current_best={"action": "warm_replay", "tput": 110.0},
+        )
+        phase = KernelPhase(coord)
+        calls: list[dict] = []
+        responses = [
+            {"decision": "KEEP", "new_tput": 130.0, "gain_pct": 18.18},
+            {"decision": "REVERT", "new_tput": 125.0, "gain_pct": -3.8},
+        ]
+
+        async def _fake_integrate(payload, *, session_dir):
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return responses[len(calls) - 1]
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+
+        result = {
+            "backend": "forge",
+            "precision": "bf16",
+            "workspace": str(tmp_path / "gemm"),
+            "recommended_env": {"AITER_CONFIG_FMOE": "/raw.csv"},
+            "extra_envs": {"AITER_CONFIG_FMOE": "/raw.csv"},
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "fmoe_ck",
+                    "improved_shapes": 2,
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": "/fmoe.csv",
+                    "best_micro_speedup": 1.2,
+                },
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": "/dense.csv",
+                    "best_micro_speedup": 1.1,
+                },
+                {"status": "failed", "tuner": "ignored"},
+                {"status": "ok", "tuner": "no_env", "improved_shapes": 1},
+            ],
+        }
+
+        await phase._validate_forge_gemm_tuning_e2e(result)
+
+        assert [c["kernel_id"] for c in calls] == [
+            "gemm_tune_fmoe_ck",
+            "gemm_tune_dense_bf16",
+        ]
+        assert calls[0]["base_tput"] == 110.0
+        assert calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
+        assert calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": "/fmoe.csv"}
+        assert calls[0]["budget_minutes"] == 2
+        assert calls[1]["base_tput"] == 130.0
+        assert calls[1]["extra_envs"] == {
+            "AITER_CONFIG_FMOE": "/fmoe.csv",
+            "AITER_CONFIG_DENSE": "/dense.csv",
+        }
+        assert coord.shared_state.current_best["engine"] == "forge"
+        assert coord.shared_state.current_best["tput"] == 130.0
+        assert coord.shared_state.optimization_stack[0]["variant_name"] == "forge_fmoe_ck"
+        assert result["decision"] == "KEEP"
+        assert result["recommended_env"] == {"AITER_CONFIG_FMOE": "/fmoe.csv"}
+        assert result["e2e_results"]["kept"][0]["tuner"] == "fmoe_ck"
+        assert result["e2e_results"]["reverted"][0]["tuner"] == "dense_bf16"
+
+    @pytest.mark.asyncio
+    async def test_handles_no_candidates_without_rewriting_raw_result(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+        monkeypatch.setattr(
+            KernelPhase,
+            "_ck_blockscale_switch_eligible",
+            lambda self, result: False,
+        )
+        result = {
+            "backend": "forge",
+            "precision": "bf16",
+            "recommended_env": {"AITER_CONFIG": "/raw.csv"},
+            "extra_envs": {"AITER_CONFIG": "/raw.csv"},
+            "tuners_run": [
+                {"status": "failed", "tuner": "bad"},
+                {"status": "ok", "tuner": "zero", "improved_shapes": 0},
+            ],
+        }
+
+        await phase._validate_forge_gemm_tuning_e2e(result)
+
+        assert result["recommended_env"] == {"AITER_CONFIG": "/raw.csv"}
+        assert coord.shared_state.optimization_stack == []
+
+    @pytest.mark.asyncio
+    async def test_records_integrate_exception_as_revert(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+
+        async def _raise_integrate(*_args, **_kwargs):
+            raise RuntimeError("integrate failed")
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _raise_integrate)
+        result = {
+            "backend": "forge",
+            "precision": "bf16",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": "/dense.csv",
+                },
+            ],
+        }
+
+        await phase._validate_forge_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "REVERT"
+        assert result["micro_decision"] == "candidate_no_e2e_gain"
+        assert "integrate failed" in result["e2e_results"]["reverted"][0]["reason"]
 
 
 class TestBf16DenseFallback:
