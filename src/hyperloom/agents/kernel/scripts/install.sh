@@ -1621,8 +1621,12 @@ ensure_geak() {
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # GEAK's own installer: upgrades the Claude Code CLI to the dynamic Workflow
     # floor (>= 2.1.177) and installs its py deps. Idempotent.
+    # `env -u REPO_ROOT`: we export REPO_ROOT (Hyperloom's checkout) for our own
+    # steps, but GEAK's setup.sh keys its requirements.txt path off REPO_ROOT too
+    # (${REPO_ROOT:-...}), so leaking ours makes it look for requirements.txt in
+    # the Hyperloom tree and die. Strip it so setup.sh derives its own repo root.
     if [ -x "${GEAK_ROOT}/setup.sh" ]; then
-      run bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
+      run env -u REPO_ROOT bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
     else
       warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_oob"
     fi
