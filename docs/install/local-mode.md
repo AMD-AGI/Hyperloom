@@ -123,7 +123,7 @@ If you explicitly run the forge kernel backend, prepare KernelForge before
 `install.sh`:
 
 ```bash
-export KERNEL_OPT_BACKEND_ORDER=forge,geak_v3
+export KERNEL_OPT_BACKEND_ORDER=forge
 bash src/hyperloom/inference_optimizer/assets/local_setup.sh --no-next-steps
 source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 bash src/hyperloom/inference_optimizer/assets/install.sh

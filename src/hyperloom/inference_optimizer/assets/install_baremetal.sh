@@ -1312,7 +1312,7 @@ main() {
   local user_data runtime_dir local_env ka_env combined_env
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-/workspace/hyperloom}}"
   export USER_DATA_PATH="$user_data"
-  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak_v3}"
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
   # Honor the same override chain local_setup.sh / install.sh use so the
   # generated env files are located where those scripts actually write them.
   runtime_dir="${HYPERLOOM_RUNTIME_DIR:-${user_data}/runtime}"

@@ -354,9 +354,9 @@ def test_ka_install_repo_root_fallback_tracks_src_layout() -> None:
 
 
 def test_baremetal_defaults_kernel_backend_order_to_geak() -> None:
-    """Bare-metal installs default to GEAK so closed-source forge is opt-in."""
+    """Bare-metal installs default to whole-pipeline GEAK so forge is opt-in."""
     text = BAREMETAL.read_text(encoding="utf-8")
-    assert 'export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak_v3}"' in text
+    assert 'export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"' in text
     assert 'printf \'export KERNEL_OPT_BACKEND_ORDER=%q\\n\' "$KERNEL_OPT_BACKEND_ORDER"' in text
     assert "kernel_backend_order_includes_forge()" in text
     assert "skipping local_setup.sh" in text

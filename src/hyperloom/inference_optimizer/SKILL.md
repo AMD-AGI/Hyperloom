@@ -330,7 +330,7 @@ KernelForge checkout first and source the generated env so `install.sh` can
 find it:
 
 ```bash
-export KERNEL_OPT_BACKEND_ORDER=forge,geak_v3
+export KERNEL_OPT_BACKEND_ORDER=forge
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/local_setup.sh" --no-next-steps
 . "${LOCAL_SETUP_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh}"
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"

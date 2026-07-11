@@ -103,8 +103,8 @@ Earlier launchers may have waited for the Coordinator to emit a
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
 
-The default kernel-opt ladder is now `forge,geak_v3`. If you had a custom
-order hard-coded, confirm it is still intentional.
+Bare-metal installs now default `KERNEL_OPT_BACKEND_ORDER` to `geak`. If you
+had a custom order hard-coded, confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
