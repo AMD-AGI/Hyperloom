@@ -12,14 +12,14 @@
 # Phase 1b ROCm hotfix    — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 2  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
-# Phase 3  dep checkouts   — src/hyperloom/inference_optimizer/assets/local_setup.sh
-#                            (clone KernelForge, InferenceX, TraceLens)
-# Phase 4  runtime install — src/hyperloom/inference_optimizer/assets/install.sh
-#                            (io pkg, Magpie, InferenceX deps, forge-gemm-tune,
-#                             + chained kernel-agent: Ray/GEAK/TraceLens;
-#                             + framework-agent: fa)
-# Phase 5  combined env    — write runtime/hyperloom.env.sh
-# Phase 6  verify + print launch prompt
+# Phase 3  dependencies + runtime install
+#                          — if KERNEL_OPT_BACKEND_ORDER explicitly includes
+#                            forge: local_setup.sh clones private KernelForge
+#                          — install.sh installs open-source deps/runtime:
+#                            io pkg, Magpie, InferenceX deps, forge-gemm-tune,
+#                            chained kernel-agent Ray/GEAK/TraceLens, and fa
+# Phase 4  combined env  — write runtime/hyperloom.env.sh
+# Phase 5  verify + print launch prompt
 #
 # Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
@@ -1240,6 +1240,20 @@ write_combined_env() {
   log "wrote ${combined}"
 }
 
+kernel_backend_order_includes_forge() {
+  local raw="${KERNEL_OPT_BACKEND_ORDER:-}" token
+  [ -z "$raw" ] && return 1
+  IFS=',' read -ra _kernel_backend_tokens <<< "$raw"
+  for token in "${_kernel_backend_tokens[@]}"; do
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [ "${token,,}" = "forge" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 print_next_steps() {
   local combined_env="$1" framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
@@ -1283,10 +1297,8 @@ EOF
 main() {
   bootstrap_wheel_install
   if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
-    [ -f "$LOCAL_SETUP_SH" ] || warn "local_setup.sh not present locally (dry-run; wheel assets would be used after install)"
     [ -f "$INSTALL_SH" ] || warn "install.sh not present locally (dry-run; wheel assets would be used after install)"
   else
-    [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
     [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
   fi
   case "$FRAMEWORK_ENV" in
@@ -1338,37 +1350,47 @@ main() {
 
   resolve_credentials
 
-  # Phase 3: dependency checkouts.
-  local ls_args=()
-  ls_args+=(--no-next-steps)
-  [ "$DRY_RUN" -eq 1 ] && ls_args+=(--dry-run)
-  [ "$CHECK_ONLY" -eq 1 ] && ls_args+=(--check-only)
-  [ -n "$DEPS_ROOT_ARG" ] && ls_args+=(--deps-root "$DEPS_ROOT_ARG")
-  log "Phase 3: local_setup.sh ${ls_args[*]}"
-  # In preview modes (check-only / dry-run) a sub-script probe failure must not
-  # abort the preview; only a real install aborts on local_setup.sh failure.
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    bash "$LOCAL_SETUP_SH" "${ls_args[@]}" || warn "local_setup.sh (preview) reported issues"
+  # Phase 3: dependency and runtime install. KernelForge is private and only
+  # needed when forge is explicitly requested; open-source deps are handled by
+  # install.sh and the chained kernel-agent installer below.
+  if kernel_backend_order_includes_forge; then
+    if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
+      [ -f "$LOCAL_SETUP_SH" ] || warn "local_setup.sh not present locally (dry-run; wheel assets would be used after install)"
+    else
+      [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
+    fi
+    local ls_args=()
+    ls_args+=(--no-next-steps)
+    [ "$DRY_RUN" -eq 1 ] && ls_args+=(--dry-run)
+    [ "$CHECK_ONLY" -eq 1 ] && ls_args+=(--check-only)
+    [ -n "$DEPS_ROOT_ARG" ] && ls_args+=(--deps-root "$DEPS_ROOT_ARG")
+    log "Phase 3: local_setup.sh ${ls_args[*]} (forge backend requested)"
+    # In preview modes (check-only / dry-run) a sub-script probe failure must not
+    # abort the preview; only a real install aborts on local_setup.sh failure.
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      bash "$LOCAL_SETUP_SH" "${ls_args[@]}" || warn "local_setup.sh (preview) reported issues"
+    else
+      bash "$LOCAL_SETUP_SH" "${ls_args[@]}"
+    fi
+
+    if [ -f "$local_env" ]; then
+      log "sourcing ${local_env}"
+      # shellcheck disable=SC1090
+      . "$local_env"
+    elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      die "expected ${local_env} after local_setup.sh but it is missing"
+    fi
   else
-    bash "$LOCAL_SETUP_SH" "${ls_args[@]}"
+    log "Phase 3: skipping local_setup.sh (KERNEL_OPT_BACKEND_ORDER=${KERNEL_OPT_BACKEND_ORDER}; forge not requested)"
   fi
 
-  if [ -f "$local_env" ]; then
-    log "sourcing ${local_env}"
-    # shellcheck disable=SC1090
-    . "$local_env"
-  elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    die "expected ${local_env} after local_setup.sh but it is missing"
-  fi
-
-  # Phase 4: runtime install. The GEAK e2e optimizer is always installed
-  # (whether it runs is chosen per-session via KERNEL_OPT_BACKEND_ORDER);
-  # Langfuse stays off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the
-  # environment/.env.
+  # Runtime install. The GEAK e2e optimizer is always installed (whether it runs
+  # is chosen per-session via KERNEL_OPT_BACKEND_ORDER); Langfuse stays off
+  # unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env.
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)
-  log "Phase 4: install.sh ${in_args[*]}"
+  log "Phase 3: install.sh ${in_args[*]}"
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     bash "$INSTALL_SH" "${in_args[@]}" || warn "install.sh (preview) reported issues"
   else
@@ -1382,13 +1404,15 @@ main() {
     warn "expected ${ka_env} after install.sh but it is missing"
   fi
 
-  # Phase 5: combined env.
+  # Phase 4: combined env.
   write_combined_env "$combined_env" "$local_env" "$ka_env"
 
-  # Phase 6: verification pass.
+  # Phase 5: verification pass.
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    log "Phase 6: verifying (--check-only)"
-    bash "$LOCAL_SETUP_SH" --check-only || warn "local_setup.sh --check-only reported issues"
+    log "Phase 5: verifying (--check-only)"
+    if kernel_backend_order_includes_forge; then
+      bash "$LOCAL_SETUP_SH" --check-only || warn "local_setup.sh --check-only reported issues"
+    fi
     bash "$INSTALL_SH" --check-only || warn "install.sh --check-only reported issues"
   fi
 

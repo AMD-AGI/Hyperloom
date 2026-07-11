@@ -28,6 +28,10 @@
 # InferenceX / the inference_optimizer Python package itself. The two
 # are composable: kernel-agent works standalone; inference_optimizer
 # drags kernel-agent in via this script.
+#
+# Open-source deps (Magpie / InferenceX / TraceLens) are cloned here or by the
+# chained kernel-agent installer. local_setup.sh is reserved for the private
+# KernelForge checkout used by the forge backend.
 
 set -euo pipefail
 

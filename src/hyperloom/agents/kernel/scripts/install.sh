@@ -1428,26 +1428,6 @@ ensure_geak() {
   fi
 }
 
-should_install_forge_backend() {
-  local raw="${KERNEL_OPT_BACKEND_ORDER:-${KERNEL_OPT_BACKENDS:-}}"
-  # No explicit backend order: preserve non-bare-metal install behavior.
-  # Bare-metal sets KERNEL_OPT_BACKEND_ORDER=geak_v3 by default before chaining
-  # here, so forge becomes opt-in there without changing other installers.
-  if [ -z "$raw" ]; then
-    return 0
-  fi
-  local token
-  IFS=',' read -ra _backend_tokens <<< "$raw"
-  for token in "${_backend_tokens[@]}"; do
-    token="${token#"${token%%[![:space:]]*}"}"
-    token="${token%"${token##*[![:space:]]}"}"
-    if [ "${token,,}" = "forge" ]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
 # The forge backend drives the `claude` CLI inside its autonomous loop
 # (see forge_submit._apply_fellow_env), so it needs Node/npm, the claude npm
 # CLI, and ~/.claude auth even though claude/codex/cursor backends are gone.
@@ -1584,11 +1564,7 @@ main() {
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
-  if should_install_forge_backend; then
-    ensure_forge_claude_cli
-  else
-    log "skipping forge claude CLI (KERNEL_OPT_BACKEND_ORDER=${KERNEL_OPT_BACKEND_ORDER:-${KERNEL_OPT_BACKENDS:-}} does not include forge)"
-  fi
+  ensure_forge_claude_cli
   ensure_rag_index
   write_env_file
 

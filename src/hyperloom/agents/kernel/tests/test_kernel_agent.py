@@ -305,12 +305,12 @@ class KernelAgentToolTests(unittest.TestCase):
             install_text,
         )
 
-    def test_forge_cli_install_is_backend_order_gated(self) -> None:
+    def test_forge_cli_install_is_not_backend_order_gated(self) -> None:
         install_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("should_install_forge_backend()", install_text)
-        self.assertIn("if should_install_forge_backend; then", install_text)
+        self.assertNotIn("should_install_forge_backend()", install_text)
+        self.assertNotIn("if should_install_forge_backend; then", install_text)
         self.assertIn("ensure_forge_claude_cli", install_text)
-        self.assertIn("skipping forge claude CLI", install_text)
+        self.assertNotIn("skipping forge claude CLI", install_text)
         with tempfile.TemporaryDirectory() as td:
             env = {
                 **os.environ,
@@ -327,8 +327,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 env=env,
             )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("skipping forge claude CLI", proc.stdout)
-        self.assertNotIn("would install Node.js/npm + @anthropic-ai/claude-code", proc.stdout)
+        self.assertIn("would install Node.js/npm + @anthropic-ai/claude-code", proc.stdout)
         self.assertIn('TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
  # clone AND pin the ref inside the temp sibling, then atomically
