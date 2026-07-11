@@ -46,23 +46,7 @@ if [ ! -x "$HYPERLOOM_VENV/bin/python3" ]; then
     exit 1
 fi
 
-# --- 2. (removed) OOB CLI install. The multi-node kernel-agent path uses
-#        ``multi_node kernel-bench`` (NodeAffinity-hard-pinned to the head
-#        pod via ``kernel_bench_multinode.py``); the head pod runs the
-#        bench script directly, no OOB CLI is invoked inside the pod.
-#        ``oob_submit.run_via_ray`` (the legacy single-node ray.remote
-#        entrypoint) is not the path LLMs are prompted to take on
-#        ``--nodes >= 2``. See ``multi_node/SKILL.md`` and
-#        ``src/hyperloom/agents/kernel/tools/kernel_optimization.py:1244-1283``.
-
-# --- 2c. (removed, multi-node only) claude/codex CLI install.
-#        Multi-node head pod never invokes claude/codex CLI directly:
-#        claude_agent_sdk runs as a Python lib inside the sandbox;
-#        critic-agent runs as a sandbox subprocess; kernel-bench fans out
-#        a python bench script (NodeAffinity-pinned to head) without
-#        forking any CLI. So Node.js + npm packages are not needed here.
-
-# --- 3. Render /etc/profile.d/hyperloom-env.sh so every later REST job
+# --- 2. Render /etc/profile.d/hyperloom-env.sh so every later REST job
 #        can ``source`` it and inherit the same PATH + credentials. We
 #        only emit keys that are actually set in this process env so we
 #        don't leak ``KEY=`` empty placeholders (which would shadow real
@@ -87,6 +71,6 @@ echo "bootstrap.sh: writing $ENV_FILE"
 } > "$ENV_FILE"
 chmod 0644 "$ENV_FILE"
 
-# --- 4. Mark done.
+# --- 3. Mark done.
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "$BOOTSTRAP_MARKER"
 echo "bootstrap.sh: OK ($BOOTSTRAP_MARKER)"

@@ -13,11 +13,11 @@
 # Phase 2  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
 # Phase 3  dep checkouts   — src/hyperloom/inference_optimizer/assets/local_setup.sh
-#                            (clone KernelForge/OOB, InferenceX, TraceLens)
+#                            (clone KernelForge, InferenceX, TraceLens)
 # Phase 4  runtime install — src/hyperloom/inference_optimizer/assets/install.sh
 #                            (io pkg, Magpie, InferenceX deps, forge-gemm-tune,
-#                             + chained kernel-agent: Ray/GEAK/OOB/TraceLens/
-#                             claude+codex+cursor CLIs; + framework-agent: fa)
+#                             + chained kernel-agent: Ray/GEAK/TraceLens;
+#                             + framework-agent: fa)
 # Phase 5  combined env    — write runtime/hyperloom.env.sh
 # Phase 6  verify + print launch prompt
 #

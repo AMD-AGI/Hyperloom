@@ -40,7 +40,7 @@ def test_parse_backends_tolerates_stringified_list():
     # must recover the inner token rather than rejecting a valid backend.
     assert ko.parse_backends("['geak_v3']") == ["geak_v3"]
     assert ko.parse_backends('["geak_v3"]') == ["geak_v3"]
-    assert ko.parse_backends("['geak_v3', 'claude']") == ["geak_v3", "claude"]
+    assert ko.parse_backends("['geak_v3', 'forge']") == ["geak_v3", "forge"]
 
 
 def test_parse_backends_stringified_list_still_rejects_unknown():

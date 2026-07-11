@@ -104,10 +104,8 @@ Earlier launchers may have waited for the Coordinator to emit a
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
 
-The default kernel-opt ladder is now `forge,geak,claude,codex,cursor`; `cursor`
-is dropped from the auto-derived default when `$CURSOR_API_KEY` is unset. If you
-had a custom order hard-coded (for example, `claude,geak`), confirm it is still
-intentional.
+The default kernel-opt ladder is now `forge,geak_v3`. If you had a custom
+order hard-coded, confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
@@ -138,12 +136,6 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 `--no-enable-roofline` for a profile-only run, or set
 `INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0` for the same effect. See
 [Environment variables](environment-variables.md).
-
-### Optional: opt into the Cursor backend
-
-If you have a Cursor account, export `CURSOR_API_KEY=crsr_...` to add
-`cursor` to the kernel-opt ladder. Without the key, behavior is
-unchanged (silently dropped).
 
 ### Schema compatibility
 

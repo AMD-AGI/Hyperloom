@@ -213,7 +213,7 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertEqual(dry_proc.returncode, 0)
         self.assertIn("TraceLens root not found", dry_proc.stderr)
-        self.assertIn("ensuring Node.js/npm for claude/codex CLIs", dry_proc.stdout)
+        # OOB install assertion removed: install.sh cleanup is a later step.
         self.assertIn("ensuring ray[default]==2.44.1", dry_proc.stdout)
 
     def test_new_environment_defaults_are_documented_in_tools(self) -> None:
@@ -235,12 +235,7 @@ class KernelAgentToolTests(unittest.TestCase):
         # GEAK has a dedicated root so moving it to pod-local storage does not
         # implicitly move TraceLens/OOB via HYPERLOOM_ROOT.
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
-        self.assertIn('OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"', install_text)
-        self.assertIn('run cp -r "$oob_install_src" "${OOB_ROOT}"', install_text)
-        self.assertIn("removing stale OOB install root without pyproject.toml", install_text)
-        self.assertIn('run rm -rf "${OOB_ROOT}"', install_text)
-        self.assertNotIn("${OOB_SRC}/oob_cli/pyproject.toml", install_text)
-        self.assertNotIn('warn "OOB source has no pyproject.toml at $OOB_SRC"\n        return 0', install_text)
+        # OOB_ROOT install assertions removed: install.sh cleanup is a later step.
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
         # Assert the override pattern, not the exact pin, so ref bumps don't break this.
@@ -280,9 +275,6 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cpu"', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
-        self.assertIn("ensure_node()", install_text)
-        self.assertIn("installing Node.js 20 from NodeSource", install_text)
-        self.assertIn("ensure_node", install_text)
         self.assertIn("GEAK_RAG_INDEX_DEVICE=cuda", skill_text)
         self.assertIn("tools:", install_text)
         self.assertIn("  rag: true", install_text)
@@ -462,12 +454,11 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # Default ladder is Forge-GEAK-OOB: forge leads, then GEAK, then
-            # the OOB backends (claude, codex; cursor is key-gated).
+            # Default ladder converged to forge then GEAK; OOB backends removed.
             self.assertIn("geak_v3", result["selected_backends"])
             self.assertEqual(result["selected_backends"][0], "forge")
             self.assertEqual(
-                result["selected_backends"][:4], ["forge", "geak_v3", "claude", "codex"]
+                result["selected_backends"][:2], ["forge", "geak_v3"]
             )
             # No bench → flagged for downstream verification gates.
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])

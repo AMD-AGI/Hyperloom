@@ -214,20 +214,14 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
         os.environ["MAGPIE_RUN_PHASE"] = "client"
         print(f"multi-node(dynamo): BENCHMARK_BASE_URL={su} (frontend :8000)")
 
-    # Deliver OOB credentials to the GPU pods regardless of the kernel phase:
-    # multi-node inference still needs API keys even with --no-kernel. GEAK
-    # kernel tooling (SSH-installed so the kernel-agent finds `geak` on PATH) is
-    # skipped when the run opted out of the kernel phase. Both are best-effort
-    # (failures surface later as clear pod-side errors) and Dynamo-only (the
-    # helpers no-op for other backends).
-    from ..multi_node.cli import (
-        install_geak_on_pods_best_effort,
-        install_oob_on_pods_best_effort,
-    )
+    # Install GEAK kernel tooling on the GPU pods (SSH-installed so the
+    # kernel-agent finds `geak` on PATH). Skipped when the run opted out of
+    # the kernel phase. Best-effort (failures surface later as clear pod-side
+    # errors) and Dynamo-only (the helper no-ops for other backends).
+    from ..multi_node.cli import install_geak_on_pods_best_effort
 
     if not getattr(args, "no_kernel", False):
         install_geak_on_pods_best_effort()
-    install_oob_on_pods_best_effort()
 
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
@@ -321,12 +315,6 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         rc_boot = cmd_bootstrap(ns_boot)
         if rc_boot != 0:
             sys.exit(rc_boot)
-
-    # OOB credential delivery must run even with --no-kernel: multi-node pods
-    # still need API keys for inference. RayJob has no GEAK kernel step to gate.
-    from ..multi_node.cli import install_oob_on_pods_best_effort
-
-    install_oob_on_pods_best_effort()
 
     export_ray_address_to_os()
     ra = os.environ.get("RAY_ADDRESS", "")

@@ -93,7 +93,7 @@ namespace: hyperloom
 │   └── (subprocess) kernel-agent + Ray head
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
 ├── PersistentVolumeClaim: weka-tracelens  # read-only mount of TraceLens-internal
-├── Secret: hyperloom-creds                # SAFE_API_KEY, CURSOR_API_KEY
+├── Secret: hyperloom-creds                # SAFE_API_KEY
 └── ConfigMap: hyperloom-env               # path env, KB env, observability env
 ```
 

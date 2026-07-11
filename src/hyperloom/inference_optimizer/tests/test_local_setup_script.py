@@ -40,14 +40,12 @@ _HOST_LEAK_VARS = (
     "INFERENCEX_REF",
     "TRACELENS_REPO",
     "TRACELENS_REF",
-    "OOB_SRC",
     "INFERENCEX_PATH",
     "TRACELENS_ROOT",
     "TRACELENS_DEFAULT_ROOT",
     "TRACELENS_INTERNAL_ROOT",
     "SAFE_API_KEY",
     "OPENAI_BASE_URL",
-    "CURSOR_API_KEY",
 )
 
 
@@ -152,7 +150,6 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
     assert f"export FORGE_PATH='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
     assert f"export KERNEL_FORGE_ROOT='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
-    assert f"export OOB_SRC='{tmp_path / 'deps' / 'KernelForge' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
     assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
  # the env file must export the canonical open-source-root key so
@@ -218,8 +215,8 @@ def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path
 
 
 def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
-    existing_oob = tmp_path / "existing" / "KernelForge" / "OOB"
-    existing_oob.mkdir(parents=True)
+    existing_forge = tmp_path / "existing" / "KernelForge"
+    existing_forge.mkdir(parents=True)
     remotes = tmp_path / "remotes"
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
@@ -227,7 +224,7 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
     result = _run_local_setup(
         tmp_path,
         env={
-            "OOB_SRC": str(existing_oob),
+            "FORGE_PATH": str(existing_forge),
             "INFERENCEX_REPO": str(inferencex),
             "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
@@ -237,7 +234,7 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr + result.stdout
     env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert f"export OOB_SRC='{existing_oob}'" in env_text
+    assert f"export FORGE_PATH='{existing_forge}'" in env_text
     assert not (tmp_path / "deps" / "KernelForge").exists()
 
 
@@ -587,16 +584,6 @@ def test_local_setup_honours_explicit_tracelens_default_root(tmp_path: Path) -> 
     env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
     assert f"export TRACELENS_ROOT='{manual}'" in env_text
     assert not (tmp_path / "deps" / "TraceLens").exists()
-
-
-def test_local_setup_fails_for_missing_explicit_dependency_path(tmp_path: Path) -> None:
-    result = _run_local_setup(
-        tmp_path,
-        env={"OOB_SRC": str(tmp_path / "missing" / "OOB")},
-    )
-
-    assert result.returncode != 0
-    assert "OOB_SRC is set but does not exist" in result.stderr
 
 
 def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> None:

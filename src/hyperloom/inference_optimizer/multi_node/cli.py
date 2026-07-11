@@ -293,30 +293,6 @@ def _ray_dashboard_client(state: dict[str, Any] | None = None) -> ray_dashboard.
     return ray_dashboard.RayDashboardClient(head, token=token)
 
 
-def _oob_install_env(*, oob_src: str | None = None) -> dict[str, str]:
-    """Build env for a one-shot OOB install (RayJob runtime_env or Dynamo SSH).
-
-    Args:
-        oob_src: Optional explicit OOB source path; falls back to ``$OOB_SRC``.
-
-    Returns:
-        dict[str, str]: Env vars for ``install_oob_node.sh``.
-    """
-    env: dict[str, str] = {}
-    src = (oob_src or os.environ.get("OOB_SRC", "") or "").strip()
-    if src:
-        env["OOB_SRC"] = src
-    for key in ("OOB_BASE_URL", "OOB_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
-        val = os.environ.get(key, "").strip()
-        if val:
-            env[key] = val
-    if "OOB_API_KEY" not in env:
-        safe = os.environ.get("SAFE_API_KEY", "").strip()
-        if safe:
-            env["OOB_API_KEY"] = safe
-    return env
-
-
 def _dynamo_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
     """Resolve the session known_hosts file for Dynamo SSH.
 
@@ -620,82 +596,6 @@ def _short_poll(
 
 
 
-def _rayjob_install_oob_entrypoint() -> str:
-    """Build a Ray Dashboard entrypoint that runs ``install_oob_node.sh`` on the head pod.
-
-    Returns:
-        str: Shell entrypoint (wrapped again by :func:`_wrap_for_dash` at submit).
-    """
-    script = _read_pod_script("install_oob_node.sh")
-    return (
-        "set -euo pipefail; "
-        'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
-        "cat > \"$WORK_DIR/install_oob_node.sh\" <<'__MN_OOB_EOF__'\n"
-        f"{script}__MN_OOB_EOF__\n"
-        'chmod +x "$WORK_DIR/install_oob_node.sh"; '
-        'bash "$WORK_DIR/install_oob_node.sh"'
-    )
-
-
-def _rayjob_install_oob(
-    state: dict[str, Any],
-    *,
-    oob_src: str,
-    poll_interval: int,
-    poll_timeout: int,
-    print_logs: bool = False,
-) -> int:
-    """Install OOB on the RayJob head pod via Dashboard ``runtime_env``.
-
-    Args:
-        state: Multi-node state (head IP + dashboard token).
-        oob_src: Shared NFS path to the OOB checkout.
-        poll_interval: Seconds between dashboard status polls.
-        poll_timeout: Overall poll budget in seconds.
-        print_logs: When true, print dashboard job logs on completion.
-
-    Returns:
-        int: ``EXIT_OK`` on installed/skipped, else a non-zero exit code.
-    """
-    env = _oob_install_env(oob_src=oob_src)
-    if not env.get("OOB_SRC"):
-        err("install-oob (rayjob): OOB_SRC is empty after resolution")
-        return EXIT_CONFIG_ERROR
-    assert_env_key_shapes(env)
-    runtime_env = {"env_vars": env}
-    timeout = max(int(poll_timeout), 1800)
-    entrypoint = _rayjob_install_oob_entrypoint()
-    info(f"install-oob (rayjob): oob_src={oob_src} head={state.get('head_pod_ip')}")
-    rc, parsed, logs = _submit_and_collect_pod_json(
-        state,
-        entrypoint,
-        label="install-oob",
-        poll_interval=poll_interval,
-        poll_timeout=timeout,
-        runtime_env=runtime_env,
-        success_statuses=frozenset({"installed", "skipped", "ok"}),
-    )
-    if print_logs:
-        print(logs)
-    host = str(state.get("head_pod_ip") or "")
-    result = parsed if isinstance(parsed, dict) else {"status": "failed", "reason": "no_json"}
-    if host:
-        result = dict(result)
-        result.setdefault("host", host)
-    print(
-        json.dumps(
-            {
-                "command": "install-oob",
-                "backend": "rayjob",
-                "results": [result],
-                "status": "ok" if rc == 0 else "partial",
-            },
-            indent=2,
-        )
-    )
-    return rc
-
-
 def install_geak_on_pods_best_effort() -> int:
     """Best-effort GEAK install on the Dynamo GPU pods (provisioner hook).
 
@@ -722,65 +622,16 @@ def install_geak_on_pods_best_effort() -> int:
         return 0
 
 
-def install_oob_on_pods_best_effort() -> int:
-    """Best-effort OOB install (RayJob Dashboard or Dynamo SSH provisioner hook).
-
-    Failures are logged but never abort provisioning. Missing ``$OOB_SRC``
-    returns ``0`` (skipped).
-
-    Returns:
-        int: The install return code, or ``0`` when skipped / on a swallowed error.
-    """
-    state = _load_state()
-    backend = str(state.get("backend") or "").strip().lower()
-    if backend not in ("dynamo", "rayjob"):
-        return 0
-    oob_src = (os.environ.get("OOB_SRC", "") or "").strip()
-    if not oob_src:
-        warn("install-oob skipped: $OOB_SRC unset")
-        return 0
-    ns = argparse.Namespace(
-        oob_src=None,
-        print_logs=False,
-        poll_interval=_DEFAULT_POLL_INTERVAL_S,
-        poll_timeout=_resolve_poll_timeout_s(),
-    )
-    try:
-        if backend == "rayjob":
-            head_ip = (state.get("head_pod_ip") or "").strip()
-            if not head_ip:
-                err("install-oob (rayjob): head_pod_ip missing in state; run create-rayjob first")
-                return 0
-            rc = _rayjob_install_oob(
-                state,
-                oob_src=oob_src,
-                poll_interval=ns.poll_interval,
-                poll_timeout=ns.poll_timeout,
-                print_logs=ns.print_logs,
-            )
-        else:
-            rc = cmd_install_oob(ns)
-        if rc == EXIT_CONFIG_ERROR:
-            return 0
-        return rc
-    except Exception as exc:  # noqa: BLE001
-        warn(f"install-oob skipped: {type(exc).__name__}: {exc}")
-        return 0
-
-
 def install_kernel_tools_on_pods_best_effort() -> int:
-    """Provisioner hook: install BOTH GEAK and OOB on the Dynamo GPU pods.
+    """Provisioner hook: install GEAK on the Dynamo GPU pods.
 
-    No-op for non-dynamo. Returns non-zero only if a sub-install reported a
+    No-op for non-dynamo. Returns non-zero only if the install reported a
     hard failure (best-effort; provisioning continues regardless).
 
     Returns:
-        int: Non-zero if either sub-install reported a hard failure, else
-        ``0``.
+        int: Non-zero if the install reported a hard failure, else ``0``.
     """
-    rc_geak = install_geak_on_pods_best_effort()
-    rc_oob = install_oob_on_pods_best_effort()
-    return rc_geak or rc_oob
+    return install_geak_on_pods_best_effort()
 
 
 # ---------------------------------------------------------------------------
@@ -1517,7 +1368,6 @@ from .commands.dynamo import (
     _dynamo_revert_patch as _dynamo_revert_patch,
     _dynamo_kernel_bench as _dynamo_kernel_bench,
     cmd_install_geak as cmd_install_geak,
-    cmd_install_oob as cmd_install_oob,
 )
 
 _RAYJOB_COMPAT_EXPORTS = frozenset(
@@ -2646,17 +2496,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_install_geak)
-
-    # install-oob (dynamo only)
-    sp = sub.add_parser(
-        "install-oob",
-        help="install the OOB backend (oob/claude/codex/@cursor) on every "
-        "Dynamo GPU pod over SSH (idempotent); dynamo only",
-    )
-    sp.add_argument("--oob-src", default=None, help="OOB source dir on the shared mount (default: $OOB_SRC)")
-    sp.add_argument("--print-logs", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_install_oob)
 
     return p
 

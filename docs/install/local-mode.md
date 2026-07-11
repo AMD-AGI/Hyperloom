@@ -170,7 +170,6 @@ For setups beyond the single-gateway default above, see [Authentication and cred
 
 - **Split Anthropic + OpenAI entrypoints** — [Split entrypoints](../reference/authentication.md#split-entrypoints-native-anthropic-openai)
 - **Non-AMD / self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd-self-hosted-gateway)
-- **Optional `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL`** — [Cursor SDK kernel-opt backend](../reference/authentication.md#cursor-api-key-cursor-sdk-kernel-opt-backend)
 - **Optional `TRACELENS_INTERNAL_ROOT`** — [Dependency checkout variables](../reference/authentication.md#dependency-checkout-variables)
 
 </details>

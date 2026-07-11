@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "Authoritative reference for Hyperloom credentials and environment configuration. Covers single-gateway and split-entrypoint LLM setup, SAFE_API_KEY, CURSOR_API_KEY, path variables, and hosted mode."
-        "keywords": "Hyperloom, authentication, credentials, SAFE_API_KEY, CURSOR_API_KEY, OPENAI_BASE_URL, ANTHROPIC_BASE_URL, environment variables, OOB, LLM gateway, ROCm, AMD GPU, API key, configuration"
+        "description": "Authoritative reference for Hyperloom credentials and environment configuration. Covers single-gateway and split-entrypoint LLM setup, SAFE_API_KEY, path variables, and hosted mode."
+        "keywords": "Hyperloom, authentication, credentials, SAFE_API_KEY, OPENAI_BASE_URL, ANTHROPIC_BASE_URL, environment variables, LLM gateway, ROCm, AMD GPU, API key, configuration"
 ---
 # Hyperloom authentication and credentials
 
@@ -13,29 +13,27 @@ environment configuration in Hyperloom. If any other document
 `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
 page, this page wins. Open an issue against the contradicting file.
 
-Hyperloom needs at most three classes of configuration:
+Hyperloom needs at most two classes of configuration:
 
 - **LLM gateway credentials** — at least one upstream base URL and one API
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-- The **Cursor SDK** key (`CURSOR_API_KEY`) — optional, only needed if
-   you want the OOB `cursor` kernel-opt backend.
 - **Path / workspace layout** — for local mode, run
    `src/hyperloom/inference_optimizer/assets/local_setup.sh` once (credentials and the
    Hyperloom checkout are enough). It clones missing dependency repos under
    `HYPERLOOM_OPEN_SOURCE_ROOT`, writes
-   `$USER_DATA_PATH/runtime/local-setup.env.sh`, and exports `OOB_SRC`,
+   `$USER_DATA_PATH/runtime/local-setup.env.sh`, and exports
    `INFERENCEX_PATH`, `TRACELENS_ROOT`, and so on. You normally only set
    `USER_DATA_PATH` (writable artifact root; default `/workspace/hyperloom`).
    `REPO_ROOT` is auto-detected. Explicit overrides for dependency paths are
    optional (see [Path environment](#path-environment)).
 
-In the **single-gateway** setup, GEAK keys, OOB Claude/Codex keys, and
-Anthropic / OpenAI aliases are **derived** from `SAFE_API_KEY` and
+In the **single-gateway** setup, GEAK keys and Anthropic / OpenAI
+aliases are **derived** from `SAFE_API_KEY` and
 `OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
 the inference optimizer CLI preflight. You normally do not set those
-aliases by hand. Split-gateway and GEAK/OOB endpoint overrides are the
+aliases by hand. Split-gateway and GEAK gateway endpoint overrides are the
 exceptions (see below).
 
 ---
@@ -86,7 +84,7 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 tooling:
 
 * GEAK → `GEAK_API_KEY` / `GEAK_BASE_URL` (auto-aliased).
-* OOB `claude` and `codex` → `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (auto-aliased).
+* Orchestration LLM → `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (auto-aliased).
 * Robustness-agent uses it for the optional LLM RCA engine.
 * Critic-agent uses it for KB summary / synthesis calls.
 
@@ -126,7 +124,7 @@ Set each side explicitly; `SAFE_API_KEY` is optional.
 Preflight resolves `(anthropic_base_url, openai_base_url)` independently:
 when both are set, each is kept as-is. Claude CLI auth uses
 `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) in preference to any
-shared key. GEAK and OOB Codex inherit the OpenAI-side URL and key.
+shared key. GEAK inherits the OpenAI-side URL and key.
 
 To pin models in split mode:
 
@@ -158,21 +156,6 @@ gateway's `/models` catalog instead of hard-gating to AMD opus-4-7/4-6.
 
 The following credentials are optional and only needed for specific backends.
 
-### `CURSOR_API_KEY` — Cursor SDK kernel-opt backend
-
-The OOB `cursor` backend talks to Cursor's gateway, not your LLM
-gateway. It therefore requires a separate issuer key with prefix `crsr_...`:
-
-| Variable                | Default           | Description                                                                                                                                                                          |
-|-------------------------|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CURSOR_API_KEY`        | unset             | Cursor SDK key. Never inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset. |
-| `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7-thinking-xhigh` | Override the default Cursor model id.                                                                                                                                                |
-
-The selection notes carry `cursor_key_present: bool` for observability.
-If you pass `--backends cursor` explicitly without a key set, the
-attempt is still launched and surfaces as a single failed `cursor`
-attempt with a 401, rather than a silent skip.
-
 ### LLM RCA in robustness-agent
 
 `robustness-agent`'s LLM root-cause-analysis engine activates when an
@@ -201,7 +184,7 @@ Only set these variables when the target is reachable from the worker runtime.
 ## Path environment
 
 These are *not* secrets. In local mode you normally do not hand-export
-`OOB_SRC`, `INFERENCEX_PATH`, or `TRACELENS_ROOT` — `local_setup.sh`
+`INFERENCEX_PATH` or `TRACELENS_ROOT` — `local_setup.sh`
 clones them when missing and records the resolved paths in
 `local-setup.env.sh`. Before launching optimization, source that file:
 
@@ -239,9 +222,8 @@ explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, GEAK, and OOB. Writable `/opt` required unless overridden. |
+| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, and GEAK. Writable `/opt` required unless overridden. |
 | `FORGE_PATH`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge`                | KernelForge checkout root for the `forge` backend. `local_setup.sh` also exports `KERNEL_FORGE_ROOT` with the same value. |
-| `OOB_SRC`                    | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge/OOB`           | OOB kernel-opt backends (claude / codex / cursor). Derived from the KernelForge checkout.                           |
 | `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis.        |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; pinned to a fixed SHA on auto-clone. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (open-source-only)                                   | Internal TraceLens extension (roofline gap, MI355+ MAF). Hyperloom never clones it — set only when you maintain a checkout. |
@@ -312,12 +294,6 @@ The exported (shell) value wins. `.env` only fills missing keys.
 Yes, in split-entrypoint mode: set `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`
 (and the matching base URLs) instead. See
 [Split entrypoints](#split-entrypoints-native-anthropic--openai).
-
-**Q: I don't have a Cursor account. Will optimization still work?**
-
-Yes. The default kernel-opt ladder is `forge,geak,claude,codex,cursor`,
-but `cursor` is auto-dropped when `CURSOR_API_KEY` is unset. The run
-proceeds with the remaining backends.
 
 **Q: Where do `GEAK_API_KEY` / `ANTHROPIC_API_KEY` come from?**
 

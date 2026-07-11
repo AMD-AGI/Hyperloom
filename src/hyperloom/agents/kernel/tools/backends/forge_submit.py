@@ -1491,7 +1491,7 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
 
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
                 gpu_ids: str = "", skipped: bool = False) -> dict:
-    """Shape the result like oob_submit/geak_submit return dicts.
+    """Shape the result like geak_submit return dicts.
 
     ``skipped=True`` marks a forge self-skip: forge bailed before any real
     optimization attempt (unsupported source type, repo not a clean git

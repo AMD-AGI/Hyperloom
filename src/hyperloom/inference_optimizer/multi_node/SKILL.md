@@ -77,12 +77,12 @@ requests with HTTP 200 but produces 0 output tokens (prefill OK, decode emits
 nothing — KV handoff via UCX/nixl fails to register/transfer). `mooncake`
 auto-detects the RDMA device and is the sglang framework default.
 
-Kernel-agent on the Dynamo backend (no Ray): GEAK and OOB (claude/codex/cursor)
-run on a GPU pod over SSH (`KERNEL_AGENT_GPU_PLACEMENT=ssh`, injected only when
+Kernel-agent on the Dynamo backend (no Ray): GEAK
+runs on a GPU pod over SSH (`KERNEL_AGENT_GPU_PLACEMENT=ssh`, injected only when
 `backend==dynamo`); `apply-patch` / `revert-patch` / `kernel-bench` fan out over
-SSH (routed by `state.backend`). The provisioner installs both toolchains on
-the pods once (`install-geak` + `install-oob`, from the shared `$HYPERLOOM_ROOT/
-geak` and `$OOB_SRC` checkouts) — skipped under `--no-kernel`. vLLM multi-node
+SSH (routed by `state.backend`). The provisioner installs the toolchain on
+the pods once (`install-geak`, from the shared `$HYPERLOOM_ROOT/geak`
+checkout) — skipped under `--no-kernel`. vLLM multi-node
 bootstraps Ray across the pods pod-side.
 
 ## The Five Subcommands
@@ -132,7 +132,7 @@ Typical prompt fields and where they land:
 | `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake` (or export `$PD_TRANSFER_BACKEND`); `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
 | `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
 | `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
-| prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`OOB_SRC` / `INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `src/hyperloom/inference_optimizer/SKILL.md` "Tool source fields". |
+| prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `src/hyperloom/inference_optimizer/SKILL.md` "Tool source fields". |
 | MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
 
 If the prompt already contains the first rows, **do not** claim the
@@ -163,10 +163,10 @@ shadowing real values.
   CLI poll budget, not a pod env)
 
 Forward to `--rayjob-extra-env` **only** the prompt `env:` block lines
-(`NCCL_DEBUG`, `PATH_TO_*` etc.). `OOB_SRC` / `INFERENCEX_PATH` /
+(`NCCL_DEBUG`, `PATH_TO_*` etc.). `INFERENCEX_PATH` /
 `TRACELENS_ROOT` are sandbox-only and **must NOT** be forwarded (the
 RayJob pod does not consume them — kernel-bench is NodeAffinity-pinned
-to the head pod and the head pod does not invoke OOB CLI).
+to the head pod).
 
 Example `optimize` tail (**example only** — map each flag from the user
 Environment block / `setup_env.sh`; do not treat literals below as defaults):
@@ -176,7 +176,7 @@ Environment block / `setup_env.sh`; do not treat literals below as defaults):
 export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
 export HYPERLOOM_MN_HEALTH_WAIT_S=1800
 # Optional kernel exports — only when the prompt specifies them
-export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-claude}"
+export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-forge,geak_v3}"
 export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
 
 setsid nohup inference_optimizer --verbose optimize \
@@ -193,7 +193,6 @@ setsid nohup inference_optimizer --verbose optimize \
   --precision "${PRECISION:?set from prompt}" \
   --target-gain "${TARGET_GAIN:?set from prompt}" \
   --max-hours "${MAX_HOURS:?set from prompt}" \
-  ${KERNEL_CLAUDE:+--kernel-claude} \
   ${CLAUDE_MODEL:+--claude-model "$CLAUDE_MODEL"} \
   $(for kv in "${RAYJOB_EXTRA_ENV[@]:-}"; do [ -n "$kv" ] && printf -- '--rayjob-extra-env %q ' "$kv"; done) \
   > "$RUN_LOG" 2>&1 < /dev/null &
@@ -240,7 +239,7 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
    (overlapping retries never spawn a second RayJob), then fills
    `head_pod_ip` / `service_url` once phase is `Running`.
 2. **`bootstrap`** — once. Submits `bootstrap.sh` via Ray Dashboard REST
-   to install oob / claude / codex / tracelens on the head pod.
+   to install geak / tracelens on the head pod.
 3. **`verify`** — once. Checks `ray` on PATH on the head pod.
    On `MISSING:`, re-run `bootstrap --print-logs`.
 4. **`restart-server`** — every framework / model / TP / flag change.
@@ -258,7 +257,7 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
    in-flight optimize loses access to head_pod_ip / service_url even
    if RayJob teardown lags a few seconds behind sandbox pod removal.
 
-After step 4 route all benchmark / OOB / Magpie traffic to
+After step 4 route all benchmark / Magpie traffic to
 `state.service_url` (head pod ClusterIP `:8888`). Re-read
 `/tmp/multi_node_state.json` every turn; never cache `head_pod_ip` /
 `service_url` across actions — RayJob recreate (or `stop-rayjob` then

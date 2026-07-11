@@ -65,10 +65,6 @@ def test_optimization_budget_geak(monkeypatch) -> None:
     assert krh._optimization_budget_minutes({"backends": "geak_v3", "geak_budget_min": 20}) == 20.0
 
 
-def test_optimization_budget_oob(monkeypatch) -> None:
-    assert krh._optimization_budget_minutes({"backends": "claude", "budget_minutes": 15}) == 15.0
-
-
 def test_optimization_budget_multi_is_max(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
     out = krh._optimization_budget_minutes(
@@ -77,8 +73,9 @@ def test_optimization_budget_multi_is_max(monkeypatch) -> None:
     assert out == 40.0
 
 
-def test_optimization_wrapper_timeout_adds_grace() -> None:
-    secs = krh._optimization_wrapper_timeout_sec({"backends": "claude", "budget_minutes": 10})
+def test_optimization_wrapper_timeout_adds_grace(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    secs = krh._optimization_wrapper_timeout_sec({"backends": "geak_v3", "geak_budget_min": 10})
     assert secs == 10 * 60 + 180
 
 
@@ -86,24 +83,22 @@ def test_optimization_wrapper_timeout_adds_grace() -> None:
 def test_backend_order_explicit_payload(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    # explicit order honoured as-is, including cursor without an api key
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    assert krh._backend_order({"backend_order": "GEAK_V3,Cursor,unknown"}) == ["geak_v3", "cursor"]
+    # removed OOB backends (cursor/unknown) are filtered out of the ladder
+    assert krh._backend_order({"backend_order": "GEAK_V3,Cursor,unknown"}) == ["geak_v3"]
 
 
 def test_backend_order_env_alias(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    # removed OOB backends are filtered out, leaving an empty ladder
     monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
-    assert krh._backend_order({}) == ["codex", "claude"]
+    assert krh._backend_order({}) == []
 
 
-def test_backend_order_default_drops_cursor_without_key(monkeypatch) -> None:
+def test_backend_order_default_is_forge_geak(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     out = krh._backend_order({})
-    assert "cursor" not in out
-    assert "geak_v3" in out
+    assert out == ["forge", "geak_v3"]
 
 
 def test_backend_order_drops_geak_from_per_kernel_ladder(monkeypatch) -> None:
