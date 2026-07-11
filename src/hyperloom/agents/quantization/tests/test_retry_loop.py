@@ -74,7 +74,7 @@ async def test_quark_root_missing_fast_path(tmp_path, monkeypatch):
     # With QUARK_ROOT unset the resolver falls back to DEFAULT_QUARK_ROOT;
     # point that at a nonexistent path so the bootstrap still fails with
     # quark_root_missing (hermetic — doesn't depend on the host's real
-    # /wekafs/hyperloom/Quark checkout).
+    # /primus/hyperloom/Quark checkout).
     monkeypatch.delenv("QUARK_ROOT", raising=False)
     monkeypatch.setattr(
         "hyperloom.agents.quantization.driver.retry.DEFAULT_QUARK_ROOT",
@@ -334,8 +334,7 @@ async def test_eval_gap_exceeded_accepted_by_operator_promotes_to_accepted(
         return None
 
     # Stub the interactive yes/no — answer "y".
-    import hyperloom.agents.quantization.driver.retry as retry_mod
-
+    from hyperloom.agents.quantization.driver import retry as retry_mod
     monkeypatch.setattr(retry_mod, "_ask_operator", lambda msg: True)
 
     runner = _StubRunner([gap_exceeded])
@@ -371,8 +370,7 @@ async def test_eval_gap_exceeded_rejected_stays_partial(tmp_path, quark_root, bu
         )
         return None
 
-    import hyperloom.agents.quantization.driver.retry as retry_mod
-
+    from hyperloom.agents.quantization.driver import retry as retry_mod
     monkeypatch.setattr(retry_mod, "_ask_operator", lambda msg: False)
 
     runner = _StubRunner([gap_exceeded])
@@ -544,8 +542,7 @@ def test_decide_next_step_checkpoint_aborted_never_retries(tmp_path):
 
 
 def test_decide_next_step_eval_gap_accepted_promotes(tmp_path, monkeypatch):
-    import hyperloom.agents.quantization.driver.retry as rmod
-
+    from hyperloom.agents.quantization.driver import retry as rmod
     monkeypatch.setattr(rmod, "_ask_operator", lambda msg: True)
     d = _decide_next_step(
         OutcomeId.eval_gap_exceeded,

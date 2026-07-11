@@ -75,22 +75,15 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
 
 
 def _load_dotenv_fallback() -> None:
-    """Source missing vars from ``$REPO_ROOT/.env`` until a usable LLM endpoint+key is present; env always wins.
+    """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber).
 
-    Skips loading only when both a base URL (OPENAI_BASE_URL / ANTHROPIC_BASE_URL)
-    and a key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
-    ANTHROPIC_AUTH_TOKEN) are already set, so split-entrypoint shells that
-    export only the Anthropic side still pull the missing OpenAI vars from .env.
+    Always parses ``.env`` and loads any key that is not already present in the
+    environment, regardless of whether LLM credentials are already set. Removing
+    the former URL+KEY early-return fixes silent misconfiguration: exporting only
+    ``OPENAI_BASE_URL`` and ``SAFE_API_KEY`` previously skipped unrelated
+    operational vars (e.g. ``TRACELENS_ROOT``, ``FORGE_PATH``,
+    ``KERNEL_OPT_BACKEND_ORDER``) that are also stored in ``.env``.
     """
-    has_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
-    has_key = (
-        os.environ.get("SAFE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    )
-    if has_url and has_key:
-        return
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     if not env_file.exists():
@@ -559,7 +552,7 @@ def _emit_preflight_diagnostics(
         print(f"  kb_degraded_reason  = {kb_reason}")
         print(f"  pr_degraded_reason  = {pr_reason}")
 
-    # Issue-H: surface Cortex KB offline-queue state; dead-letter pile-up signals a cold-start session.
+    # Surface Cortex KB offline-queue state; dead-letter pile-up signals a cold-start session.
     try:
         _print_cortex_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -708,9 +701,7 @@ def _preflight(
     # "_load_dotenv_fallback", ...)``), and since this function now lives in a
     # sibling module, a bare-name call would resolve this module's own
     # (un-patched) binding and silently bypass the patch. Re-reading the
-    # current package attribute at call time picks up the patched version —
-    # same technique used for coordinator.py's cross-collaborator calls
-    # (tree-reform-lessons.MD §3.3/§5c).
+    # current package attribute at call time picks up the patched version.
     from . import _load_dotenv_fallback as _load_dotenv_fallback_current
     from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
 
@@ -753,8 +744,7 @@ def _preflight(
 
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     # Explicit operator values on each side are preserved; a missing side falls
-    # back to the other (legacy single-gateway stays one URL). We still rewrite
-    # known-stale 127.0.0.1:4002 leftovers so they can't reach the CLIs.
+    # back to the other (legacy single-gateway stays one URL).
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if anthropic_url or openai_url:
@@ -766,9 +756,8 @@ def _preflight(
                 continue
             prev = os.environ.get(var, "")
             if prev != want:
-                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "resolved endpoint"
                 os.environ[var] = want
-                print(f"Preflight: {var} {prev or '<unset>'} -> {want} ({why})")
+                print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
         # Claude CLI primary key: prefer the explicit Anthropic-side key so a
         # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY
         # (single-gateway) is the fallback.
@@ -783,20 +772,28 @@ def _preflight(
         # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
         # gateway URL, but an INTENTIONAL operator override is preserved (#521:
         # GEAK runs in a separate network namespace reached via a host-local
-        # reverse tunnel). We still force-rewrite the known-stale legacy
-        # auth-proxy URL (127.0.0.1:4002) so leftovers can't reach the CLIs.
+        # reverse tunnel).
         gateway_url = openai_url or anthropic_url
         if gateway_url:
             for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
-                if current and current != gateway_url and not _is_stale_proxy_url(current):
+                if current and current != gateway_url:
+                    # A genuine operator override is preserved, but a leftover
+                    # install-time 127.0.0.1:4002 proxy is unreachable and must
+                    # be force-rewritten to the gateway.
+                    if _is_stale_proxy_url(current):
+                        os.environ[alias] = gateway_url
+                        print(
+                            f"Preflight: {alias} {current} -> {gateway_url} "
+                            "(stale install-time proxy; force-rewritten to gateway)"
+                        )
+                        continue
                     print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
                     continue
                 if os.environ.get(alias) != gateway_url:
                     prev = os.environ.get(alias, "")
                     os.environ[alias] = gateway_url
-                    why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
-                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} ({why})")
+                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
         # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
         # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
@@ -934,7 +931,7 @@ def _preflight(
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
-    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off; SKILL Step 2 step 8.5) ---
+    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off) ---
     # Catches launchers that skip install.sh, else missing-CLI only surfaces at the tick ~6 robustness probe.
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True

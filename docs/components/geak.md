@@ -1,22 +1,29 @@
+---
+myst:
+    html_meta:
+        "description": "Learn about GEAK, Hyperloom's agent-driven GPU kernel optimization framework. Covers Triton, HIP, and FlyDSL kernel rewriting, parallel optimization, and patch validation."
+        "keywords": "GEAK, Hyperloom, GPU kernel optimization, Triton, HIP, FlyDSL, AMD GPU, ROCm, kernel rewriting, benchmarking, parallel optimization, LLM inference, agent, Ray"
+---
 # GEAK
 
-GEAK is an agent-driven framework for end-to-end GPU kernel optimization in
+GEAK (Generating Efficient AI-Centric Kernels) is an agent-driven framework for end-to-end GPU kernel optimization in
 real codebases. It runs a closed loop of profiling, optimization, and
 validation, and produces reviewable patches backed by reproducible benchmarks.
-GEAK supports **Triton**, **HIP** (and CUDA / CK / HSACO), and **FlyDSL**
+GEAK supports Triton, HIP (and CUDA / Composable Kernel (CK) / HSA Code Object (HSACO)), and FlyDSL
 kernels, and extends [mini-SWE-agent](https://github.com/SWE-agent/mini-SWE-agent)
 for its agent loop and environment tooling.
 
 Within Hyperloom, GEAK is one of the kernel-rewrite backends: when a hot kernel
-is identified, it is optimized asynchronously through GEAK (alongside the OOB
-kernel-optimization path that uses Claude Code / OpenAI Codex). The Kernel-agent
-dispatches GEAK runs through Ray so multiple candidates can be explored in
+is identified, it is optimized asynchronously through GEAK (alongside the out-of-box (OOB)
+kernel-optimization path that uses Claude Code or OpenAI Codex). The kernel agent
+dispatches GEAK runs with placement precedence SSH (Dynamo multi-node) > Ray
+(when available) > direct CLI, so multiple candidates can be explored in
 parallel on the cluster's GPUs.
 
-- **Source:** <https://github.com/AMD-AGI/GEAK>
-- **License:** MIT
+- **Source**: <https://github.com/AMD-AGI/GEAK>
+- **License**: MIT
 
-## Overview
+## Optimization workflow and features
 
 GEAK turns a natural-language task plus a target repository into a verified,
 patch-based kernel optimization:
@@ -33,10 +40,10 @@ patch-based kernel optimization:
   result in `final_report.json`.
 - **Skills & subagents** — domain skills (`triton`, `hip`, `flydsl`,
   `pytorch2flydsl-translation`, `fp8-gemm-tuning-sglang-aiter`) and specialist
-  subagents (e.g. `general-kernel-optimization`, `harness-generator`,
+  subagents (for example, `general-kernel-optimization`, `harness-generator`,
   `codebase-explore`, `gemm-tuning`, `speedup-verify`) handle different kernel
   types and tasks.
-- **Tooling layer** — kernel profiling for bottleneck analysis, optional RAG
+- **Tooling layer** — kernel profiling for bottleneck analysis, optional retrieval-augmented generation (RAG)
   for GPU knowledge retrieval, and within-/cross-session memory of past
   optimization insights.
 
@@ -44,6 +51,8 @@ The package is published as `minisweagent` and ships its agent loop, config
 templates, skills, and subagents inside the wheel.
 
 ## Installation
+
+Clone the GEAK repository and install using make or pip:
 
 ```bash
 git clone https://github.com/AMD-AGI/GEAK
@@ -54,7 +63,7 @@ pip install -e .      # editable
 pip install .         # non-editable (recommended for embedding consumers)
 ```
 
-Configure a model and provider key before running, e.g.:
+Configure a model and provider key before running, for example:
 
 ```bash
 export MSWEA_MODEL_NAME="openai/gpt-5"
@@ -67,9 +76,9 @@ chains into `src/hyperloom/agents/kernel/scripts/install.sh`, whose `ensure_geak
 GEAK under the pod-local open-source checkout root by default
 (`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`)
 and pip-installs it. Runtime config is written under
-`$USER_DATA_PATH/runtime/geak-config/local.yaml`. For multi-node runs,
-`hyperloom.inference_optimizer.multi_node install-geak` can pip-install a supplied GEAK
-checkout into GPU pods so the `geak` CLI lands on `PATH`; pass `--geak-src` or
+`$USER_DATA_PATH/runtime/geak-config/local.yaml`. For multi-node Dynamo runs
+(`--mn-backend dynamo`), `python -m hyperloom.inference_optimizer.multi_node install-geak`
+can pip-install a supplied GEAK checkout into GPU pods so the `geak` CLI lands on `PATH`; pass `--geak-src` or
 `HYPERLOOM_GEAK_SRC` when the checkout is not in a shared runtime path. The GEAK
 run config is resolved from `$GEAK_CONFIG` and must set
 `model.model_class: litellm`.
@@ -83,10 +92,12 @@ console scripts:
 | CLI entry point | Purpose |
 |-----------------|---------|
 | `geak` | Optimize a kernel / repository (`minisweagent.run.mini:app`) |
-| `geak-preprocess` | Preprocess a target and set up the harness contract |
-| `geak-gemm-tuning` | GEMM selection / configuration tuning for SGLang + AITer |
+| `geak-preprocess` | Pre-process a target and set up the harness contract |
+| `geak-gemm-tuning` | General matrix multiplication (GEMM) selection and configuration tuning for SGLang + AITer |
 
 ### Optimize a kernel
+
+Run the `geak` CLI with a target repository and optimization task:
 
 ```bash
 geak --repo /path/to/kernel/repo \
@@ -95,6 +106,8 @@ geak --repo /path/to/kernel/repo \
 
 ### Parallel optimization
 
+Use `--num-parallel` and `--gpu-ids` to run multiple optimization agents simultaneously:
+
 ```bash
 geak --repo /path/to/kernel/repo \
   --task "Optimize the block_reduce kernel." \
@@ -102,37 +115,47 @@ geak --repo /path/to/kernel/repo \
   --gpu-ids 0,1,2,3
 ```
 
-Key flags: `--repo` (required target repo), `--kernel-path` / `--kernel-url`
-(target kernel file), `--test-command` (the correctness/benchmark contract;
-when omitted GEAK discovers or generates a harness), `--num-parallel`,
-`--gpu-ids`, `--cost-limit`, `--config`, and `--mode quick|full` (60 / 120 min
-wall-clock caps). Outputs land under `optimization_logs/<kernel>_<timestamp>/`,
-keeping `final_report.json`, the winning `.diff`, and `geak_agent.log`.
+Key flags:
+
+- `--repo` (required target repo)
+- `--kernel-path` / `--kernel-url` (target kernel file)
+- `--test-command` (the correctness/benchmark contract; when omitted GEAK discovers or generates a harness)
+- `--num-parallel`, `--gpu-ids`, `--cost-limit`, `--config`, and `--mode quick|full` (60 / 120 min wall-clock caps).
+
+Outputs land under `optimization_logs/<kernel>_<timestamp>/`, keeping `final_report.json`, the winning `.diff`, and `geak_agent.log`.
 
 For the full CLI reference and examples, see the
 [GEAK Quick start](https://github.com/AMD-AGI/GEAK/blob/main/docs/quick_start.md).
 
 ## Role in Hyperloom
 
-GEAK is wired in as a kernel-rewrite backend of the Kernel-agent:
+GEAK is wired in as a kernel-rewrite backend of the kernel agent:
 
-- `src/hyperloom/agents/kernel/tools/kernel_optimization.py` selects the backend ladder
-  (defaulting to `forge,geak,claude,codex,cursor` (Forge-GEAK-OOB); `cursor` is
-  auto-dropped when `CURSOR_API_KEY` is unset) and builds the GEAK task
-  prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
-  vocabulary and rendering the `--test-command` and budget.
-- `src/hyperloom/agents/kernel/tools/backends/geak_submit.py` is the GEAK submission backend.
-  It locates the `geak` CLI on `PATH`, resolves `$GEAK_CONFIG`, assembles the
-  argument vector (`geak -t <prompt> --yolo --output <dir> --gpu-ids <ids>
-  --config <cfg> ...`), and dispatches it inside a `num_gpus`-pinned **Ray**
-  remote task (`run_via_ray`), remapping visible GPUs to logical ids and
-  isolating per-attempt compile caches so a co-running OOB ladder cannot clobber
-  artifacts.
-- `src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py` adapts the task prompt that GEAK
-  receives.
+- The orchestrator's `src/hyperloom/orchestrator/kernel/request_handlers.py`
+  (`_backend_order()`) selects the backend ladder, defaulting to
+  `forge,geak_v3,claude,codex,cursor` (`cursor` is key-gated), and dispatches one
+  backend per child. `kernel_optimization.choose_backends()` mirrors the same
+  default when a subprocess runs without an explicit `--backends`.
+- `src/hyperloom/agents/kernel/tools/kernel_optimization.py` builds the GEAK
+  task prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
+  vocabulary and rendering the budget/shape metadata into the prompt. It does
+  **not** pass `--test-command` to GEAK — GEAK owns harness construction from
+  the prompt, so Hyperloom deliberately omits `common_test_command`.
+- `src/hyperloom/agents/kernel/tools/backends/geak_submit.py` is the GEAK
+  submission backend. It locates the `geak` CLI on `PATH`, resolves
+  `$GEAK_CONFIG`, assembles the argument vector (`geak -t <prompt> --yolo
+  --output <dir> --gpu-ids <ids> --config <cfg> ...`), and dispatches it with
+  placement precedence `ssh (Dynamo multi-node) > ray (`run_via_ray`, when
+  `ray_available()`) > direct CLI`. The Ray path pins `num_gpus`, remaps
+  visible GPUs to logical IDs, and isolates per-attempt compile caches so a
+  co-running OOB ladder can't clobber artifacts.
+- `src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py` runs at install
+  time to patch GEAK's bundled `mini_kernel_strategy_list.yaml`; it does not
+  alter the runtime task prompt (that is built by
+  `kernel_optimization.build_prompt()`).
 
 This lets Hyperloom optimize hot kernels asynchronously and in parallel on the
-cluster. See [How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORKS.md).
+cluster. See [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
 ```{note}
 GEAK is distinct from the Kernel-Forge backend
@@ -144,7 +167,4 @@ self-contained rewrite backend and does not depend on GEAK.
 
 GEAK ships its own documentation in-repo; see the
 [docs index](https://github.com/AMD-AGI/GEAK/tree/main/docs) covering
-[Quick start](https://github.com/AMD-AGI/GEAK/blob/main/docs/quick_start.md),
-[Configuration](https://github.com/AMD-AGI/GEAK/blob/main/docs/configuration.md),
-and the
-[Subagent guide](https://github.com/AMD-AGI/GEAK/blob/main/docs/subagent_guide.md).
+[Quick start](https://github.com/AMD-AGI/GEAK/blob/main/docs/quick_start.md).

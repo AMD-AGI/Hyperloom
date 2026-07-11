@@ -8,7 +8,7 @@ extraction, HTTP server probe). A failing sub-probe returns empty data
 without raising; :class:`LocalProbeSource` raises
 :class:`SourceUnavailable` only when *every* sub-probe yields nothing,
 so :class:`DegradeRouter` does not flap. Cluster-wide metrics and
-node-level fault detection stay with robustness-server (plan §6.1).
+node-level fault detection stay with robustness-server.
 """
 
 from __future__ import annotations
@@ -146,7 +146,7 @@ class LocalProbeConfig:
     aiter_jit_dir: Path | None = None
     fd_probe_pid: int | None = None
     fd_probe_enabled: bool = True
-    # G — decision-audit probe. Scans ``runs/integrate/*/result.json``,
+    # Decision-audit probe. Scans ``runs/integrate/*/result.json``,
     # ``results/ci_metrics*.json``, ``kernel-agent/runs/*/optimization_attempts.jsonl``
     # into :attr:`SourceData.local_decision_audit`.
     decision_audit_enabled: bool = True
@@ -155,22 +155,22 @@ class LocalProbeConfig:
     decision_audit_max_integrate: int = 20
     # Max tail entries pulled from ``optimization_attempts.jsonl``.
     decision_audit_max_oob_attempts: int = 50
-    # C — preflight probe. Reads ``manifest.json`` into local_manifest and
+    # Preflight probe. Reads ``manifest.json`` into local_manifest and
     # aggregates ``profiles/kernel_breakdown.json`` into local_kernel_breakdown.
     preflight_enabled: bool = True
-    # E — critic-health probe. Scans ``critic-workdir/*/judge_bundle.json`` for
+    # Critic-health probe. Scans ``critic-workdir/*/judge_bundle.json`` for
     # KB-unreachable markers and counts workdir entries (``critic_prune_stuck``).
     critic_health_enabled: bool = True
     # Max ``critic-workdir/<turn>/`` dirs scanned per tick; recent ones suffice
     # to catch a consecutive-tick KB outage.
     max_critic_judge_bundles: int = 20
-    # I — state-integrity probe. Scans state.json / coordinator.db-wal / leases /
+    # State-integrity probe. Scans state.json / coordinator.db-wal / leases /
     # agent JSONLs / Coordinator PID file.
     state_integrity_enabled: bool = True
     # Optimiser-run dir under ``session_dir`` holding ``run_*.pid``
     # (defaults to ``$USER_DATA_PATH/optimizer_runs/`` per SKILL.md).
     optimizer_runs_dirname: str = "optimizer_runs"
-    # J — external-deps probe. Reads $OPENAI_BASE_URL etc. from env.
+    # External-deps probe. Reads $OPENAI_BASE_URL etc. from env.
     external_deps_enabled: bool = True
     # Per-mount stat-latency budget; above this → ``wekafs_degraded`` (5s per SKILL.md).
     external_mount_stat_timeout_s: float = 5.0
@@ -1226,7 +1226,7 @@ def _resolve_aiter_jit_dir(explicit: Path | None) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# G — decision-audit probe (reads persisted decision artefacts)
+# Decision-audit probe (reads persisted decision artefacts)
 # ---------------------------------------------------------------------------
 
 
@@ -1699,7 +1699,7 @@ def _sample_critic_workdir(
 
 
 # ---------------------------------------------------------------------------
-# I — state-integrity probe (state.json / WAL / leases / agent JSONLs / PID)
+# State-integrity probe (state.json / WAL / leases / agent JSONLs / PID)
 # ---------------------------------------------------------------------------
 
 
@@ -1807,11 +1807,13 @@ def _probe_wal_size(session_dir: Path) -> dict[str, Any]:
         if wal_path.is_file():
             out["wal_bytes"] = int(wal_path.stat().st_size)
     except OSError:
+        # Stat failed; leave the size unset.
         pass
     try:
         if db_path.is_file():
             out["db_bytes"] = int(db_path.stat().st_size)
     except OSError:
+        # Stat failed; leave the size unset.
         pass
     return out
 
@@ -1919,11 +1921,13 @@ def _probe_agent_files(session_dir: Path) -> dict[str, Any]:
                 if inbox.is_file():
                     inbox_bytes = int(inbox.stat().st_size)
             except OSError:
+                # Stat failed; leave the size unset.
                 pass
             try:
                 if outbox.is_file():
                     outbox_bytes = int(outbox.stat().st_size)
             except OSError:
+                # Stat failed; leave the size unset.
                 pass
             if inbox_bytes or outbox_bytes:
                 out[role] = {

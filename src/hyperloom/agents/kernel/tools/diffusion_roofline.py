@@ -247,19 +247,61 @@ def build_report(
 
     totals = aggregate_unified(unified_rows)
     timeline = parse_gpu_timeline(_read_csv_rows(csv_dir / GPU_TIMELINE_CSV))
+    report = assemble_report(
+        totals,
+        timeline,
+        num_denoise_steps,
+        top_kernels(unified_rows, top_k),
+        dit_geometry=dit_geometry,
+        achievable_tflops=achievable_tflops,
+        source="tracelens_csv",
+    )
+    report["source_csv_dir"] = str(csv_dir)
+    return report
 
+
+def assemble_report(
+    totals: dict[str, Any],
+    timeline: dict[str, float],
+    num_denoise_steps: int | None,
+    top_kernels_list: list[dict[str, Any]],
+    *,
+    dit_geometry: dict[str, Any] | None = None,
+    achievable_tflops: float | None = None,
+    source: str = "tracelens_csv",
+) -> dict[str, Any]:
+    """Assemble the workload roofline report from pre-aggregated inputs.
+
+    Backend-agnostic single source of truth for the report *shape* (totals +
+    timeline + end-to-end efficiency + per-denoise-step split + optional analytic
+    DiT ceiling). Fed either by the TraceLens perf CSVs (``build_report``) or by
+    the bypass analytical candidate set (``build_report_from_bypass``), so both
+    routes emit an identically-shaped ``diffusion_roofline.json``.
+
+    Args:
+        totals: Workload totals (see ``aggregate_unified`` for the key contract).
+        timeline: GPU timeline percentages keyed by type (``busy_time`` etc.).
+        num_denoise_steps: Denoise steps in the profiled window (enables per-step).
+        top_kernels_list: Pre-ranked hottest-kernel summary entries.
+        dit_geometry: Optional DiT geometry enabling the analytic compute ceiling.
+        achievable_tflops: Optional achievable peak enabling the analytic ceiling.
+        source: Provenance label recorded on the report.
+
+    Returns:
+        The full workload-roofline report dict.
+    """
     busy_pct = timeline.get("busy_time")
     gpu_busy_ratio = (busy_pct / 100.0) if busy_pct is not None else None
     kernel_eff = totals["kernel_roofline_efficiency"]
     end_to_end_eff = (kernel_eff * gpu_busy_ratio) if gpu_busy_ratio is not None else None
 
     report: dict[str, Any] = {
-        "source_csv_dir": str(csv_dir),
+        "source": source,
         "totals": totals,
         "gpu_timeline_pct": timeline,
         "gpu_busy_ratio": gpu_busy_ratio,
         "end_to_end_efficiency_estimate": end_to_end_eff,
-        "top_kernels": top_kernels(unified_rows, top_k),
+        "top_kernels": top_kernels_list,
     }
 
     if num_denoise_steps and num_denoise_steps > 0:
@@ -288,7 +330,135 @@ def build_report(
                 if recon:
                     report["reconciliation"] = recon
         except (KeyError, TypeError, ValueError):
+            # Optional reconciliation data missing/malformed; skip it.
             pass
+    return report
+
+
+def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate the bypass analytical candidate set into workload totals.
+
+    The bypass backend has no TraceLens perf CSV; it carries the same numbers on
+    each candidate: ``duration_us`` (summed GPU time = the actual side) and
+    ``efficiency_percent`` (ideal/actual, from the analytical roofline) with a
+    ``bound_type`` for the compute/memory split. Candidates whose roofline is a
+    placeholder (no shapes) contribute only to ``no_perf_model_us`` so the kernel
+    efficiency reflects modelled kernels only. Mirrors ``aggregate_unified``.
+
+    Args:
+        hot_kernels: The bypass candidate dicts (``hot_kernels`` list).
+
+    Returns:
+        Workload totals keyed identically to ``aggregate_unified``.
+    """
+    sigma_actual = 0.0
+    sigma_ideal = 0.0
+    compute_us = 0.0
+    memory_us = 0.0
+    no_model_us = 0.0
+    for c in hot_kernels:
+        actual = _to_float(c.get("duration_us"))
+        sigma_actual += actual
+        src = str(c.get("roofline_source") or "")
+        # Binding-side attainment (cross-route comparable), not the compute-side
+        # efficiency_percent which reads ~0 for memory-bound kernels.
+        attain = _to_float(c.get("roofline_attainment_pct"))
+        if src not in ("", "placeholder") and attain > 0:
+            sigma_ideal += actual * (attain / 100.0)
+            bound = str(c.get("bound_type") or "").upper()
+            if "COMPUTE" in bound:
+                compute_us += actual
+            elif "MEMORY" in bound:
+                memory_us += actual
+            else:
+                no_model_us += actual
+        else:
+            no_model_us += actual
+    kernel_eff = (sigma_ideal / sigma_actual) if sigma_actual > 0 else 0.0
+    return {
+        "sigma_actual_kernel_us": sigma_actual,
+        "sigma_ideal_roofline_us": sigma_ideal,
+        "kernel_roofline_efficiency": kernel_eff,
+        "compute_bound_us": compute_us,
+        "memory_bound_us": memory_us,
+        "no_perf_model_us": no_model_us,
+    }
+
+
+def _top_bypass_kernels(hot_kernels: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """Top-k bypass candidates by GPU time for the summary block."""
+    ranked = sorted(hot_kernels, key=lambda c: _to_float(c.get("duration_us")), reverse=True)
+    return [
+        {
+            "name": (c.get("name") or "")[:48],
+            "category": c.get("kernel_category") or "",
+            "bound": c.get("bound_type") or "",
+            "kernel_time_us": _to_float(c.get("duration_us")),
+        }
+        for c in ranked[:k]
+    ]
+
+
+def build_report_from_bypass(
+    hot_kernels: list[dict[str, Any]],
+    timeline: dict[str, Any],
+    num_denoise_steps: int | None,
+    top_k: int,
+    *,
+    dit_geometry: dict[str, Any] | None = None,
+    achievable_tflops: float | None = None,
+    totals: dict[str, Any] | None = None,
+    kernels_aggregated: int | None = None,
+) -> dict[str, Any]:
+    """Build the workload roofline report from the bypass candidate set.
+
+    Produces an identically-shaped report to ``build_report`` (TraceLens CSV
+    path) so downstream consumers read ``diffusion_roofline.json`` the same way
+    regardless of route.
+
+    Args:
+        hot_kernels: The bypass ``hot_kernels`` candidate dicts (used for the
+            top-N summary block).
+        timeline: The bypass ``analyze["timeline"]`` (``busy_pct``/``idle_pct``).
+        num_denoise_steps: Effective denoise steps (enables the per-step split).
+        top_k: How many hottest kernels to include in the summary.
+        dit_geometry: Optional DiT geometry for the analytic compute ceiling.
+        achievable_tflops: Optional achievable peak for the analytic ceiling.
+        totals: Pre-computed WORKLOAD totals over ALL analyzed kernels (from
+            ``_bypass_report.build_workload_roofline_totals``). When omitted,
+            falls back to aggregating the (top-k capped) ``hot_kernels`` only.
+        kernels_aggregated: Count of device kernels the ``totals`` cover (for the
+            ``kernels_aggregated`` metadata under full scope). Defaults to
+            ``len(hot_kernels)`` when omitted.
+
+    Returns:
+        The workload-roofline report dict.
+    """
+    full_scope = totals is not None
+    if totals is None:
+        totals = aggregate_bypass_candidates(hot_kernels)
+    timeline_pct: dict[str, float] = {}
+    if isinstance(timeline, dict):
+        if timeline.get("busy_pct") is not None:
+            timeline_pct["busy_time"] = _to_float(timeline.get("busy_pct"))
+        if timeline.get("idle_pct") is not None:
+            timeline_pct["idle_time"] = _to_float(timeline.get("idle_pct"))
+    report = assemble_report(
+        totals,
+        timeline_pct,
+        num_denoise_steps,
+        _top_bypass_kernels(hot_kernels, top_k),
+        dit_geometry=dit_geometry,
+        achievable_tflops=achievable_tflops,
+        source="bypass_analytical",
+    )
+    # ``all_device_kernels`` when totals cover every kernel; else the top-k subset.
+    # kernels_aggregated must match that scope: the caller's all-kernel count when
+    # full scope, else the (top-k) candidate count actually aggregated.
+    report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
+    report["kernels_aggregated"] = (
+        int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
+    )
     return report
 
 

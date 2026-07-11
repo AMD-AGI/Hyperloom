@@ -116,12 +116,15 @@ def test_build_grid_two_arms_per_conc():
     )
     assert len(grid) == 6
     names = [v.name for v in grid]
+    # CONC-major with arms interleaved: each conc emits an adjacent
+    # baseline/optimized pair, so a budget-truncated run leaves complete A/B
+    # pairs. With no anchor the ladder order is preserved.
     assert names == [
         "baseline_conc1",
-        "baseline_conc4",
-        "baseline_conc16",
         "optimized_conc1",
+        "baseline_conc4",
         "optimized_conc4",
+        "baseline_conc16",
         "optimized_conc16",
     ]
     baseline = next(v for v in grid if v.name == "baseline_conc4")
@@ -144,6 +147,50 @@ def test_build_grid_two_arms_per_conc():
         "NUM_PROMPTS": "80",
         "RUN_EVAL": "false",
     }
+
+
+def test_build_grid_anchor_conc_runs_first():
+    """The operating-point CONC emits its complete A/B pair before any other."""
+    grid = _build_grid(
+        concs=[1, 4, 16, 64],
+        isl=1024,
+        osl=1024,
+        num_prompts_factor=5,
+        optimized_args="--x",
+        optimized_envs={},
+        anchor_conc=64,
+    )
+    names = [v.name for v in grid]
+    assert names[:2] == ["baseline_conc64", "optimized_conc64"]
+    # Remaining concs keep their requested order, arms still interleaved.
+    assert names[2:] == [
+        "baseline_conc1",
+        "optimized_conc1",
+        "baseline_conc4",
+        "optimized_conc4",
+        "baseline_conc16",
+        "optimized_conc16",
+    ]
+
+
+def test_build_grid_anchor_absent_is_noop():
+    """An anchor not present in the ladder (or <=0) leaves the order untouched."""
+    for anchor in (0, 999):
+        grid = _build_grid(
+            concs=[1, 8],
+            isl=512,
+            osl=512,
+            num_prompts_factor=5,
+            optimized_args="--x",
+            optimized_envs={},
+            anchor_conc=anchor,
+        )
+        assert [v.name for v in grid] == [
+            "baseline_conc1",
+            "optimized_conc1",
+            "baseline_conc8",
+            "optimized_conc8",
+        ]
 
 
 def test_build_grid_disables_eval_by_default(monkeypatch):
@@ -919,7 +966,7 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
     assert result["skip_reason"] == "no_baseline_tput"
 
 
-# Bug #12: record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
+# record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
 def test_record_conc_sweep_writes_last_conc_sweep():
     s = SharedState()
     assert s.last_conc_sweep == {}
@@ -950,7 +997,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 
 def test_exit_normal_sweep_returns_conc_sweep_done():
-    """Bug #12: SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
+    """SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
     from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
 
     class _State:
@@ -980,7 +1027,6 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
-    import asyncio
     from unittest.mock import AsyncMock, MagicMock
     from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
@@ -1020,7 +1066,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
 
 
 def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
-    """Bug #11: ``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
+    """``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
     from hyperloom.orchestrator.policy.gate import PolicyGate, PolicyDenied
 
     class _State:

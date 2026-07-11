@@ -88,7 +88,7 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert "max_position_embeddings=2048" in final_md
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
-    # PR-review-1: fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
+    # Fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
     breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
 
@@ -175,16 +175,16 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
 
 def test_monitor_offline_vocab_includes_context_window():
     """The robustness monitor's offline STOP_REASON_VOCAB fallback must list the preflight stop_reason so it's treated as terminal."""
-    import hyperloom.inference_optimizer
+    from hyperloom import inference_optimizer
 
-    package_root = Path(hyperloom.inference_optimizer.__file__).resolve().parent
+    package_root = Path(inference_optimizer.__file__).resolve().parent
     monitor = package_root / "tools" / "robustness_monitor.sh.example"
     text = monitor.read_text(encoding="utf-8")
     assert "model_context_window_too_small" in text
 
 
 def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):
-    """follow-up #4: the fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
+    """The fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
     monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
     model = tmp_path / "ctx2048reason"
     _write_config(model, max_position_embeddings=2048)

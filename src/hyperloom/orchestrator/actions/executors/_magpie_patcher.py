@@ -108,6 +108,7 @@ _PATCHED_BLOCK = (
 # "Already patched?" sentinel.
 _PATCH_SENTINEL = "Hyperloom #C1 patch"
 _REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
+_EVAL_CONC_SENTINEL = "HYPERLOOM_EVAL_CONCURRENCY_FIX"
 
 # Magpie's remote-server SGLang client path bypasses the local run_benchmark
 # helper, so the trust gate for --trust-remote-code (custom tokenizer models)
@@ -137,6 +138,19 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
 # already-fixed upstream script is a no-op.
 _EVAL_CONCURRENCY_FLAG_MARKER = "--concurrent-requests"
 _EVAL_CONCURRENCY_FLAG_RE = re.compile(r"\s*--concurrent-requests\s+(?:\"\$CONC\"|\$\{CONC\}|\$CONC)")
+
+# InferenceX benchmark_lib.sh::run_lm_eval reads concurrency from env
+# (EVAL_CONCURRENT_REQUESTS, fallback CONC). Passing --concurrent-requests to
+# run_eval is rejected as an unknown argument.
+_RUN_EVAL_LEGACY_BLOCK = (
+    '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
+)
+_RUN_EVAL_PATCHED_BLOCK = (
+    "        # HYPERLOOM_EVAL_CONCURRENCY_FIX: benchmark_lib.sh resolves eval\n"
+    "        # concurrency from EVAL_CONCURRENT_REQUESTS (fallback CONC).\n"
+    "        EVAL_CONCURRENT_REQUESTS=\"${EVAL_CONCURRENT_REQUESTS:-$CONC}\" "
+    "run_eval --framework lm-eval --port \"$PORT\" || exit $?\n"
+)
 
 # Name of the upstream atomic-copy helper; its presence signals Magpie already
 # copies benchmark scripts atomically.
@@ -461,7 +475,7 @@ def _apply_patch_atomic_reason(src: Path) -> str:
 
     Unlike a bare bool, the reason lets a caller distinguish an EXPECTED no-op
     (already-patched / upstream-atomic) from a GENUINE failure (unrecognized
-    shape / I/O error) where bugs.md §C #1 is actually unmitigated.
+    shape / I/O error) where the script-tearing race is actually unmitigated.
 
     Args:
         src (Path): The ``benchmarker.py`` file to patch in place.
@@ -532,28 +546,45 @@ def _apply_patch_atomic(src: Path) -> bool:
 
 
 def _is_remote_trust_patched(src: Path) -> bool:
-    """Return whether the SGLang remote-client trust gate is already present.
+    """Return whether SGLang compatibility sentinels are already present.
+
+    This gate intentionally checks BOTH sentinels:
+    - ``MAGPIE_TRUST_REMOTE_CODE`` (remote trust compatibility)
+    - ``HYPERLOOM_EVAL_CONCURRENCY_FIX`` (eval concurrency compatibility)
+
+    so a pre-existing remote-trust patch does not short-circuit and skip the
+    newer eval-concurrency fix.
 
     Args:
         src: The ``sglang_mi300x.sh`` file to inspect.
 
     Returns:
-        True iff the remote-trust sentinel is present, False on a miss or read
-        error.
+        True iff both compatibility sentinels are present, False on a miss or
+        read error.
     """
-    return file_contains_sentinel(src, _REMOTE_TRUST_SENTINEL, log, "_magpie_patcher")
+    return file_contains_sentinel(src, _REMOTE_TRUST_SENTINEL, log, "_magpie_patcher") and file_contains_sentinel(
+        src,
+        _EVAL_CONC_SENTINEL,
+        log,
+        "_magpie_patcher",
+    )
 
 
 def _apply_remote_trust_patch_atomic(src: Path) -> bool:
-    """Patch ``sglang_mi300x.sh`` so remote clients can pass trust mode.
+    """Patch ``sglang_mi300x.sh`` for Hyperloom compatibility.
+
+    Applies two independent compatibility fixes:
+    - remote client trust gating via ``MAGPIE_TRUST_REMOTE_CODE``
+    - eval concurrency wiring via ``EVAL_CONCURRENT_REQUESTS`` env (no
+      unsupported ``--concurrent-requests`` arg)
 
     Args:
         src: The ``sglang_mi300x.sh`` file to patch in place.
 
     Returns:
-        True when the trust gate is present after the call (already patched or
-        freshly written), False when the legacy block is missing or any IO
-        step fails.
+        True when both compatibility fixes are present after the call (already
+        patched or freshly written), False when a required legacy block is
+        missing or any IO step fails.
     """
     try:
         original = src.read_text(encoding="utf-8")
@@ -561,21 +592,39 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
         log.warning("_magpie_patcher: cannot read %s: %s", src, e)
         return False
 
-    if _REMOTE_TRUST_SENTINEL in original:
-        return True
-    if _REMOTE_DIRECT_LEGACY_BLOCK not in original:
-        log.warning(
-            "_magpie_patcher: remote benchmark direct-call block not found in "
-            "%s; Magpie custom-tokenizer trust patch could not be applied",
-            src,
-        )
-        return False
+    patched = original
 
-    patched = original.replace(
-        _REMOTE_DIRECT_LEGACY_BLOCK,
-        _REMOTE_DIRECT_PATCHED_BLOCK,
-        1,
-    )
+    if _REMOTE_TRUST_SENTINEL not in patched:
+        if _REMOTE_DIRECT_LEGACY_BLOCK not in patched:
+            log.warning(
+                "_magpie_patcher: remote benchmark direct-call block not found in "
+                "%s; Magpie custom-tokenizer trust patch could not be applied",
+                src,
+            )
+            return False
+        patched = patched.replace(
+            _REMOTE_DIRECT_LEGACY_BLOCK,
+            _REMOTE_DIRECT_PATCHED_BLOCK,
+            1,
+        )
+
+    if _EVAL_CONC_SENTINEL not in patched:
+        if _RUN_EVAL_LEGACY_BLOCK not in patched:
+            log.warning(
+                "_magpie_patcher: run_eval concurrency block not found in %s; "
+                "eval concurrency compatibility patch could not be applied",
+                src,
+            )
+            return False
+        patched = patched.replace(
+            _RUN_EVAL_LEGACY_BLOCK,
+            _RUN_EVAL_PATCHED_BLOCK,
+            1,
+        )
+
+    if patched == original:
+        return True
+
     if not atomic_write_text(
         src,
         patched,
@@ -585,7 +634,7 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
         return False
 
     log.info(
-        "_magpie_patcher: applied SGLang remote trust patch to %s",
+        "_magpie_patcher: applied SGLang script compatibility patches to %s",
         src,
     )
     return True
@@ -597,7 +646,7 @@ class MagpiePatchStatus:
     remote_trust_ok: bool
     # Classified atomic-patch outcome (``_ATOMIC_REASON_*``). Lets callers tell
     # an EXPECTED no-op (upstream-atomic / already-patched / missing tree) apart
-    # from a GENUINE failure where bugs.md §C #1 is unmitigated.
+    # from a GENUINE failure where the atomic-write safeguard is absent.
     atomic_reason: str = _ATOMIC_REASON_MISSING
     # Whether the redundant ``--concurrent-requests`` eval flag was stripped
     # from every generic benchmark script (or none needed it). ``False`` means

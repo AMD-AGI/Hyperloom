@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_inferencex_patcher.ensure_benchmark_lib_patched`` (Hyperloom issue #194 §2).
+"""Tests for ``_inferencex_patcher.ensure_benchmark_lib_patched``.
 
 Pins the patcher contract: a backward-compatible, idempotent, concurrency-safe,
 fail-soft patch to ``benchmark_lib.sh`` that honours ``$NUM_PROMPTS``. Fixtures
@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
 
 @pytest.fixture(autouse=True)
 def _isolate_inferencex_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every test hermetic w.r.t. the #210 discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
+    """Make every test hermetic w.r.t. the discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
@@ -187,7 +187,7 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
     def worker() -> None:
         try:
             results.append(ensure_benchmark_lib_patched(fake_inferencex))
-        except BaseException as exc:  # noqa: BLE001 - test-only
+        except Exception as exc:  # noqa: BLE001 - test-only
             errors.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
@@ -203,13 +203,13 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
     assert _LEGACY_LINE not in text
 
 
-# PR-D §2: benchmark_serving.py PROFILE_EXTRA_BODY consumer patch
+# benchmark_serving.py PROFILE_EXTRA_BODY consumer patch.
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import (  # noqa: E402
     ensure_benchmark_serving_patched,
 )
 
 
-# Verbatim copy of the PR-D §2 line (41-space indent the patcher matches on).
+# Verbatim copy of the legacy line (41-space indent the patcher matches on).
 _BS_LEGACY_LINE = (
     '                                         extra_body={"num_steps": 1, '
     '"merge_profiles": True, "profile_by_stage": True},'
@@ -383,7 +383,7 @@ def test_discover_inferencex_roots_includes_both_when_paths_differ(
     tmp_path,
     monkeypatch,
 ):
-    """The #210 case: distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_PATH/InferenceX`` both show up so both get patched."""
+    """Distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_PATH/InferenceX`` both show up so both get patched."""
     inferencex_external = tmp_path / "external" / "InferenceX"
     inferencex_external.mkdir(parents=True)
     magpie_dir = tmp_path / "workspace" / "Magpie"
@@ -422,7 +422,7 @@ def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
     tmp_path,
     monkeypatch,
 ):
-    """End-to-end #210 invariant: distinct roots → both ``benchmark_serving.py`` files get patched."""
+    """Distinct roots → both ``benchmark_serving.py`` files get patched."""
     external = tmp_path / "external" / "InferenceX"
     external.mkdir(parents=True)
     magpie = tmp_path / "Magpie"

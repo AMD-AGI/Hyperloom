@@ -60,6 +60,27 @@ from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
 
+# Idle-gate threshold + high-idle warning: shared single source of truth so the
+# TraceLens and bypass routes gate on identical semantics (kept as private
+# aliases to preserve existing references/tests in this module).
+from _idle_gate import (
+    HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
+    HIGH_IDLE_PCT_THRESHOLD_ENV,
+    build_high_idle_warning as _build_high_idle_warning,
+    resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
+)
+
+# Canonical roofline_source provenance enum, shared with the bypass route so both
+# emit the field from one vocabulary (see _roofline_source for the value ladder).
+from _roofline_source import (
+    ANALYTICAL as _RL_ANALYTICAL,
+    PLACEHOLDER as _RL_PLACEHOLDER,
+)
+
+# Shared canonical analysis.md renderer so the deterministic route emits the same
+# section structure + table schemas as the bypass route.
+from _analysis_md import render_report as _render_canonical_report
+
 
 # Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
 # Override with HYPERLOOM_KERNEL_CANDIDATES_TOP_K; non-positive means unbounded.
@@ -626,8 +647,8 @@ def resolve_op_source(
     )
 
 
-HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
-HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
+# HIGH_IDLE_PCT_THRESHOLD_* and the idle-gate helpers now live in _idle_gate
+# (imported above) as the shared single source of truth across trace routes.
 
 ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
 ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
@@ -669,29 +690,6 @@ def _resolve_tracelens_model() -> str:
         return raw
     return raw.lower().replace(".", "-")
 
-
-def _resolve_idle_pct_threshold() -> float:
-    """Return the idle-percent gate threshold (default 80.0%).
-
-    Relaxed from the docx §2 ~20% target to 80% because real SGLang inference traces
-    sit structurally at ~50-60% idle (host scheduling + JIT/launch overhead), which the
-    20% gate over-suppressed. Pin via ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
-
-    Returns:
-        The idle-percent gate threshold.
-    """
-    raw = os.environ.get(HIGH_IDLE_PCT_THRESHOLD_ENV, "").strip()
-    if not raw:
-        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    if value < 0.0:
-        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    return value
-
-
 def _resolve_arch_benchmark_timeout_s() -> int:
     """Return the GPU arch microbenchmark timeout in seconds (floor 600s).
 
@@ -712,46 +710,13 @@ def _resolve_arch_benchmark_timeout_s() -> int:
     return max(ARCH_BENCHMARK_TIMEOUT_FLOOR_S, value)
 
 
-def _build_high_idle_warning(
-    *,
-    idle_pct: float,
-    threshold_pct: float,
-    report_path: Path,
-) -> dict[str, Any]:
-    """Build the ``trace_health_warnings[]`` entry for a high-idle trace.
-
-    Consumed by ``trace_analyze_handler`` T4 to route to param optimization.
-
-    Args:
-        idle_pct: The measured GPU idle percentage.
-        threshold_pct: The idle-gate threshold that was exceeded.
-        report_path: Path to the source report, recorded in the entry.
-
-    Returns:
-        The structured ``high_gpu_idle_pct`` warning entry.
-    """
-    return {
-        "code": "high_gpu_idle_pct",
-        "severity": "warning",
-        "idle_pct": round(idle_pct, 2),
-        "threshold_pct": round(threshold_pct, 2),
-        "source": str(report_path),
-        "message": (
-            f"GPU was idle {idle_pct:.2f}% of trace wall time (threshold "
-            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §2 "
-            "(idle-gate sanity check in Possible Approach (Hyperloom v3)), "
-            "kernel-level rewriting is unlikely to improve end-to-end "
-            "latency in this regime — recommend parameter optimization "
-            "(batch size, KV-cache shape, prefill/decode split) over "
-            "per-kernel rewrites. Hyperloom is suppressing the hot-kernel "
-            "candidate list and surfacing this warning so the Coordinator "
-            "can route to params/backends."
-        ),
-    }
-
-
 def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple[float, dict[str, Any] | None]:
-    """Return the idle threshold plus a warning when the gate is exceeded."""
+    """Return the idle threshold plus a warning when the gate is exceeded.
+
+    ``_build_high_idle_warning`` and ``_resolve_idle_pct_threshold`` are the
+    shared ``_idle_gate`` helpers (imported as private aliases at module top), so
+    the threshold, gate semantics, and warning shape stay unified across routes.
+    """
     threshold = _resolve_idle_pct_threshold()
     if idle_pct is None or idle_pct <= threshold:
         return threshold, None
@@ -1441,7 +1406,7 @@ def source_type_for(name: str, source_file: str) -> str:
             ``triton``, ``python``, ``vendor_binary``, or ``unknown``.
     """
     lower_name = name.lower()
-    # PR #668: synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
+    # Synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
     if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
         return "flydsl"
     if is_runtime_generated_kernel(name, source_file):
@@ -1522,7 +1487,7 @@ def _aiter_csrc_root() -> str:
 
 
 def _flydsl_reusable_roots() -> tuple[str, ...]:
-    """Resolve FlyDSL checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+    """Resolve FlyDSL checkout root(s) for moe_flydsl pseudo-ops.
 
     ``$DSL2_ROOT`` / ``$FLYDSL_ROOT`` take precedence over the WekaFS default.
 
@@ -3759,7 +3724,7 @@ def _finalize_candidates(
             # Re-resolve repo in case the upgraded path lives in a different repo.
             item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
             item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
-            # PR #668 FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
+            # FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
             # MoE kernel source before the patchability gate so FlyDSL routes to GEAK.
             if item["source_type"] == "flydsl":
                 _sf = str(item.get("source_file") or "").strip()
@@ -3807,9 +3772,12 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # forge then GEAK; append cursor only when CURSOR_API_KEY is provisioned.
+    # forge then the per-kernel GEAK backend (geak_v3); append cursor only when
+    # CURSOR_API_KEY is provisioned. Uses ``geak_v3`` (not ``geak``) because the
+    # per-kernel ladder token was renamed when the e2e optimizer took over ``geak``;
+    # parse_backends/choose_backends reject bare ``geak`` on the per-kernel path.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
-    return ["forge", "geak", "claude", "codex"] + cursor_tail
+    return ["forge", "geak_v3", "claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
@@ -4004,7 +3972,7 @@ def _run_deterministic_tracelens_steps(
     csv_dir = output_dir / "perf_report_csvs"
     csv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: perf report. Serving frameworks use the inference report (adds
+    # Perf report. Serving frameworks use the inference report (adds
     # steady-state phase columns, call stacks, pseudo-ops, graph-capture replay).
     # Scriptable image frameworks (xDiT diffusion) have no steady-state decode
     # phase and no capture sidecar, so use the plain pytorch report, which is
@@ -4058,7 +4026,7 @@ def _run_deterministic_tracelens_steps(
     if rc != 0:
         return rc
 
-    # Step 7: category analysis scripts. The TraceLens manifest uses analyzer
+    # Category analysis scripts. The TraceLens manifest uses analyzer
     # category names (e.g. sdpa_fwd / norm_bwd), while the Python modules are
     # shared by families (sdpa_analysis / norm_analysis).
     manifest_path = output_dir / "category_data" / "category_manifest.json"
@@ -4096,7 +4064,7 @@ def _run_deterministic_tracelens_steps(
                     f"with rc={rc_cat}; continuing with remaining categories",
                 )
 
-    # Step 7.5: generate_priority_data
+    # generate_priority_data
     priority_cmd = [
         sys.executable,
         "-c",
@@ -4307,7 +4275,7 @@ def deterministic_extract_hot_kernels(
 
     candidates: list[dict[str, Any]] = []
 
-    # --- Phase 1: Collect candidates from priority_data findings ---
+    # Collect candidates from priority_data findings
     for finding in findings:
         global_rank = finding.get("global_rank", 0)
         category = finding.get("category", "")
@@ -4393,7 +4361,7 @@ def deterministic_extract_hot_kernels(
             }
             candidates.append(candidate)
 
-    # --- Phase 2: Include "other" category ops with actionable source files ---
+    # Include "other" category ops with actionable source files
     # These are often the largest GPU-time consumers (e.g. Triton fused_moe,
     # 75% of GPU time) but don't appear in priority_data because TraceLens
     # categorizes them as "other" with no efficiency model.
@@ -4476,7 +4444,7 @@ def deterministic_extract_hot_kernels(
         }
         candidates.append(candidate)
 
-    # --- Phase 3: Sort all candidates by GPU time (duration) descending ---
+    # Sort all candidates by GPU time (duration) descending
     candidates.sort(key=lambda c: c.get("duration_us", 0), reverse=True)
 
     return candidates[:top_k]
@@ -4486,178 +4454,132 @@ def generate_minimal_analysis_md(
     output_dir: Path,
     candidates: list[dict[str, Any]],
     idle_pct: float | None = None,
+    *,
+    model_name: str = "",
 ) -> Path:
-    """Generate a minimal deterministic analysis.md for human-readable output.
+    """Generate the deterministic-route ``analysis.md`` (human-readable output).
 
     Deterministic hot-kernel extraction uses structured ``*_metrics.json`` and
-    ``priority_data.json`` directly. This Markdown report is intentionally not
-    the parser contract used by the LLM-agent route.
+    ``priority_data.json`` directly; this Markdown report is intentionally not
+    the LLM-agent parser contract. It is rendered through the SHARED canonical
+    renderer (:func:`_analysis_md.render_report`), so its section structure and
+    table schemas match the bypass route exactly (fields the deterministic
+    minimal report does not model, e.g. arithmetic intensity, render as an em
+    dash rather than a fabricated value).
 
     Args:
         output_dir: Directory the ``analysis.md`` report is written into.
         candidates: The finalized hot-kernel candidates to tabulate.
-        idle_pct: Optional GPU idle percentage to include in the summary.
+        idle_pct: Optional GPU idle percentage (Executive Summary + idle gate).
+        model_name: Model identifier for the shared report title.
 
     Returns:
         The path to the written ``analysis.md``.
     """
     report_path = output_dir / "analysis.md"
-    lines: list[str] = []
-
-    def _fnum(v: Any, default: float = 0.0) -> float:
-        """Coerce a possibly-null/str metric to float for ``:.Nf`` formatting.
-
-        Deterministic "other"-bucket candidates (e.g. synthetic GDN/MoE ops)
-        can carry present-but-null metric fields; a bare ``.get(k, 0)`` returns
-        None then and ``f"{None:.2f}"`` raises ``unsupported format string
-        passed to NoneType.__format__``. Treat null/non-numeric as the default.
-        """
-        if isinstance(v, bool):
-            return default
-        if isinstance(v, (int, float)):
-            return float(v)
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return default
 
     gpu_rows = _load_gpu_timeline_rows(output_dir)
 
-    lines.append("# TraceLens Performance Analysis Report")
-    lines.append("")
-    lines.append("> Generated via deterministic analysis route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic)")
-    lines.append("")
-
-    # Executive Summary
-    lines.append("## Executive Summary")
-    lines.append("")
-    if gpu_rows:
-        lines.append("| Metric | Time (ms) | % |")
-        lines.append("|--------|-----------|---|")
+    def _row_field(row_type: str, field: str) -> float | None:
+        """Return a numeric field from the gpu_timeline row of ``row_type``."""
         for row in gpu_rows:
-            rtype = row.get("type", "")
-            time_ms = row.get("time ms", "0")
-            pct = row.get("percent", "0")
-            lines.append(f"| {rtype} | {time_ms} | {pct}% |")
-        lines.append("")
+            if (row.get("type") or "").strip().lower() == row_type:
+                try:
+                    return float(row.get(field, 0))
+                except (TypeError, ValueError):
+                    return None
+        return None
 
-    if idle_pct is not None:
-        lines.append(f"**Idle %**: {idle_pct:.2f}%")
-        lines.append("")
+    idle_share = idle_pct if idle_pct is not None else _row_field("idle_time", "percent")
+    busy_pct = _row_field("busy_time", "percent")
+    if busy_pct is None and isinstance(idle_share, (int, float)):
+        busy_pct = 100.0 - float(idle_share)
+    busy_ms = _row_field("busy_time", "time ms")
+    idle_ms = _row_field("idle_time", "time ms")
+    total_ms: float | None = None
+    if isinstance(busy_ms, (int, float)) or isinstance(idle_ms, (int, float)):
+        total_ms = (busy_ms or 0.0) + (idle_ms or 0.0) or None
+    memcpy_ms = _row_field("exposed_memcpy_time", "time ms")
 
-    # System-Level Signals — deterministic GPU-timeline shares (idle / exposed
-    # communication / exposed device copy). Read straight from gpu_timeline.csv
-    # with no LLM interpretation; idle is flagged against the same threshold
-    # that gates hot-kernel extraction. The agent route surfaces these as
-    # LLM-written recommendations — here we expose only the underlying numbers.
-    if gpu_rows:
+    def _cand_weight(c: dict[str, Any]) -> float:
+        """GPU-time weight for ranking (gpu_pct, else duration_us); robust to null."""
+        for key in ("gpu_pct", "duration_us"):
+            v = c.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+        return 0.0
 
-        def _timeline_pct(row_type: str) -> float | None:
-            """Return the GPU-timeline percentage for a given row type.
-
-            Args:
-                row_type (str): The timeline row ``type`` to match (e.g.
-                    ``idle_time``).
-
-            Returns:
-                float | None: The row's ``percent`` value, or ``None`` when the
-                row is absent or its percent is unparseable.
-            """
-            for row in gpu_rows:
-                if (row.get("type") or "").strip().lower() == row_type:
-                    try:
-                        return float(row.get("percent", 0))
-                    except (TypeError, ValueError):
-                        return None
-            return None
-
-        idle_share = _timeline_pct("idle_time")
-        comm_share = _timeline_pct("exposed_comm_time")
-        memcpy_share = _timeline_pct("exposed_memcpy_time")
-        if any(v is not None for v in (idle_share, comm_share, memcpy_share)):
-            idle_threshold = _resolve_idle_pct_threshold()
-            lines.append("## System-Level Signals")
-            lines.append("")
-            lines.append("| Signal | % of total GPU time | Note |")
-            lines.append("|--------|---------------------|------|")
-            if idle_share is not None:
-                note = (
-                    f"above {idle_threshold:.0f}% idle gate"
-                    if idle_share > idle_threshold
-                    else f"within {idle_threshold:.0f}% idle gate"
-                )
-                lines.append(f"| GPU idle | {idle_share:.2f}% | {note} |")
-            if comm_share is not None:
-                lines.append(f"| Exposed communication | {comm_share:.2f}% | - |")
-            if memcpy_share is not None:
-                lines.append(f"| Exposed memcpy (device copy) | {memcpy_share:.2f}% | - |")
-            lines.append("")
-
-    # Top Hot Kernels table
-    lines.append("## Top Hot Kernels")
-    lines.append("")
+    top_cat = ""
     if candidates:
-        # GPU% is the kernel's share of total GPU time (gpu_pct), the real
-        # impact signal — unlike Impact (impact_score) which is 0 for the
-        # "other" bucket that has no TraceLens efficiency model.
-        lines.append("| Rank | Operation | Time (us) | GPU% | Efficiency | Impact | Category | Bound | Source File |")
-        lines.append("|------|-----------|-----------|------|------------|--------|----------|-------|-------------|")
-        for i, c in enumerate(candidates, 1):
-            lines.append(
-                f"| {i} | {c.get('name', '')} "
-                f"| {_fnum(c.get('duration_us')):.1f} "
-                f"| {_fnum(c.get('gpu_pct')):.2f}% "
-                f"| {_fnum(c.get('efficiency_percent')):.1f}% "
-                f"| {_fnum(c.get('impact_score')):.2f} "
-                f"| {c.get('tracelens_category', '')} "
-                f"| {c.get('bound_type', '')} "
-                f"| {c.get('source_file', '') or '-'} |"
-            )
-        lines.append("")
+        # Pick the hottest candidate's category rather than assuming candidates[0]
+        # is time-sorted (robust to caller ordering).
+        _top = max(candidates, key=_cand_weight)
+        top_cat = _top.get("kernel_category") or _top.get("tracelens_category") or ""
 
-    # Per-P-item details for humans/downstream display; deterministic route
-    # consumers should use the structured JSON artifacts instead of parsing this.
-    # Emit P-item sections in ascending rank order (P0, P1, ...) regardless of
-    # the time-sorted candidate order above.
-    seen_ranks: set[int] = set()
-    ordered_ranks = sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates})
-    for rank in ordered_ranks:
-        if rank in seen_ranks:
-            continue
-        seen_ranks.add(rank)
-        rank_cands = [x for x in candidates if x.get("tracelens_pitem_rank") == rank]
-        cat = rank_cands[0].get("tracelens_category", "") if rank_cands else ""
+    exec_summary = {
+        "total_gpu_time_ms": total_ms,
+        "gpu_busy_pct": busy_pct,
+        "gpu_idle_pct": idle_share,
+        "gpu_memcpy_ms": memcpy_ms,
+        "top_bottleneck_category": top_cat,
+        "attribution_pct": None,  # not modelled by the deterministic minimal report
+    }
+    system_signals = {
+        "idle_pct": idle_share,
+        "exposed_comm_pct": _row_field("exposed_comm_time", "percent"),
+        "exposed_memcpy_pct": _row_field("exposed_memcpy_time", "percent"),
+    }
 
-        lines.append(f"### P{rank}: {cat} kernels")
-        lines.append("")
-        lines.append(f"<!-- reasoning-candidate tier=compute rank={rank} -->")
-        lines.append("")
-        lines.append(
-            "**Data:**\n\n"
-            "| Operation | Time (us) | GPU% | %E2E | Count | FLOPS/Byte | "
-            "Efficiency | Bound | Args | Source File | Kernel Path (launcher) |"
-        )
-        lines.append(
-            "|-----------|-----------|------|------|-------|------------|"
-            "------------|-------|------|-------------|------------------------|"
-        )
-        for rc in rank_cands:
-            lines.append(
-                f"| {rc.get('name', '')} "
-                f"| {_fnum(rc.get('duration_us')):.1f} "
-                f"| {_fnum(rc.get('gpu_pct')):.2f}% "
-                f"| {_fnum(rc.get('impact_score')):.2f} "
-                f"| {rc.get('call_count', 1)} "
-                f"| - "
-                f"| {_fnum(rc.get('efficiency_percent')):.1f}% "
-                f"| {rc.get('bound_type', '')} "
-                f"| {' '.join(rc.get('shapes', []))} "
-                f"| {rc.get('source_file', '') or '-'} "
-                f"| {rc.get('kernel_path', '')} |"
-            )
-        lines.append("")
+    hot_rows = [
+        {
+            "name": c.get("name"),
+            "time_us": c.get("duration_us"),
+            "gpu_pct": c.get("gpu_pct"),
+            "efficiency_percent": c.get("efficiency_percent"),
+            "arithmetic_intensity": c.get("arithmetic_intensity") or c.get("flops_per_byte"),
+            "bound_type": c.get("bound_type"),
+            "category": c.get("kernel_category") or c.get("tracelens_category"),
+            "source_file": c.get("source_file"),
+        }
+        for c in candidates
+    ]
 
-    report_path.write_text("\n".join(lines), encoding="utf-8")
+    # P-items in ascending rank order (P0, P1, ...), one group per pitem rank.
+    p_items: list[dict[str, Any]] = []
+    for rank in sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates}):
+        rank_cands = [x for x in candidates if int(x.get("tracelens_pitem_rank", 0)) == rank]
+        cat = ""
+        if rank_cands:
+            cat = rank_cands[0].get("kernel_category") or rank_cands[0].get("tracelens_category") or ""
+        rows = [
+            {
+                "name": rc.get("name"),
+                "time_us": rc.get("duration_us"),
+                "gpu_pct": rc.get("gpu_pct"),
+                "e2e_pct": rc.get("impact_score"),
+                "call_count": rc.get("call_count", 1),
+                "flops_per_byte": rc.get("flops_per_byte"),
+                "efficiency_percent": rc.get("efficiency_percent"),
+                "bound_type": rc.get("bound_type"),
+                "args": rc.get("shapes"),
+                "source_file": rc.get("source_file"),
+                "kernel_path": rc.get("kernel_path"),
+            }
+            for rc in rank_cands
+        ]
+        p_items.append({"rank": rank, "category": cat, "rows": rows})
+
+    body = _render_canonical_report(
+        route="deterministic",
+        model_name=model_name,
+        provenance_detail="Deterministic hot-kernel extraction from structured *_metrics.json / priority_data.json.",
+        exec_summary=exec_summary,
+        system_signals=system_signals,
+        idle_threshold=_resolve_idle_pct_threshold(),
+        hot_kernels=hot_rows,
+        p_items=p_items,
+    )
+    report_path.write_text(body, encoding="utf-8")
     return report_path
 
 
@@ -4699,7 +4621,7 @@ def run_command(
 # Defaults kept in sync with kernel-agent/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
+_TRACELENS_REF_DEFAULT = "48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"
 
 
 def _default_tracelens_root() -> Path:
@@ -4984,6 +4906,21 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
         "rocprof_roofline": candidate.get("rocprof_roofline"),
+        # Contract alignment (F6): emit the shared roofline_source provenance enum
+        # so both routes carry it. TraceLens rows come from its per-op perf model
+        # (analytical) when that model produced numbers, else placeholder.
+        "roofline_source": _RL_ANALYTICAL
+        if any(
+            candidate.get(k) is not None
+            for k in (
+                "arithmetic_intensity",
+                "flops_per_byte",
+                "efficiency_percent",
+                "compute_utilization_pct",
+                "bandwidth_utilization_pct",
+            )
+        )
+        else _RL_PLACEHOLDER,
     }
 
 
@@ -5144,7 +5081,7 @@ _FLYDSL_BUFFER_LOAD_MARKERS = (
 def _resolve_flydsl_source_fallback() -> str:
     """Resolve the real FlyDSL MoE kernel source for synthetic pseudo-ops.
 
-    Used for PR #668 pseudo-ops, looking for
+    Used for FlyDSL pseudo-ops, looking for
     ``$DSL2_ROOT/kernels/moe_gemm_2stage.py`` and known fallback roots.
 
     Returns:
@@ -5262,7 +5199,7 @@ def enrich_candidates_with_runtime_metadata(
                 for key, value in model_params.items():
                     params.setdefault(key, value)
         if item.get("source_type") == "flydsl":
-            # PR #668 pseudo-ops carry no real source_file; inject the FlyDSL MoE kernel source.
+            # FlyDSL pseudo-ops carry no real source_file; inject the FlyDSL MoE kernel source.
             _sf2 = str(item.get("source_file") or "").strip()
             if (not _sf2) or (not os.path.isfile(_sf2)):
                 fb = _resolve_flydsl_source_fallback()
@@ -5440,7 +5377,7 @@ def build_audit_summary(
         else:
             compact["skip_reason"] = cand.get("skip_reason") or "unknown"
             skipped.append(compact)
-    # PR-B §1: compact task_group projections for the audit view (full rows live on kernel_candidates.json).
+    # Compact task_group projections for the audit view (full rows live on kernel_candidates.json).
     group_entries: list[dict[str, Any]] = []
     for group in task_groups or []:
         if not isinstance(group, dict):
@@ -5518,7 +5455,7 @@ def write_reports(
         "trace_files": [str(p) for p in trace_files],
         "created_at": utc_now(),
     }
-    # PR-B §1: aggregate reusable candidates into source-function task groups (additive; hot_kernels keeps full order).
+    # Aggregate reusable candidates into source-function task groups (additive; hot_kernels keeps full order).
     source_root_str = getattr(args, "source_root", None)
     task_groups = build_task_groups(candidates, source_root=source_root_str)
     report = {
@@ -5536,21 +5473,25 @@ def write_reports(
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
     kernel_candidates_path = run_dir / "kernel_candidates.json"
-    # Hyperloom#314: hot_kernels is the dispatch payload (routable only); skipped_kernels keeps
-    # full dicts so direct lookups can still resolve non-routable kernels. Full list stays in tracelens_report.json.
+    # Contract alignment (P0): ``hot_kernels`` is ALWAYS the full ranked hotspot
+    # set (same semantics as the bypass route); the reusable dispatch subset is
+    # exposed separately as ``routable_kernels``, and ``skipped_kernels`` keeps the
+    # non-routable dicts for direct lookups. The kernel-opt dispatch filters by
+    # ``reusable_native_kernel`` itself, so a full hot_kernels stays dispatch-safe.
     routable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
     skipped_kernels = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is not True]
     atomic_write_json(
         kernel_candidates_path,
         {
             **report,
-            "hot_kernels": routable_candidates,
+            "hot_kernels": candidates,
+            "routable_kernels": routable_candidates,
             "skipped_kernels": skipped_kernels,
             "task_groups": task_groups,
         },
     )
 
-    # PR-A §3: per-run audit sidecar (tasks routed vs skipped w/ reason); PR-B adds task_groups[].
+    # Per-run audit sidecar (tasks routed vs skipped w/ reason); includes task_groups[].
     summary = build_audit_summary(
         candidates,
         trace_input=str(Path(args.trace_input).resolve()),
@@ -5641,11 +5582,19 @@ def write_reports(
             if tools_dir not in sys.path:
                 sys.path.insert(0, tools_dir)
             from diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
+            from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
 
-            _num_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
+            # Per-step divisor = denoise steps ACTUALLY IN the trace (profiled
+            # ProfilerStep iterations), preferred over the requested full sampler
+            # schedule; the deterministic route has no steady-window detection, so
+            # this full-trace count is a documented average-over-profiled-steps.
+            _num_steps = resolve_perstep_divisor(
+                count_profiler_steps(getattr(args, "trace_input", "") or ""),
+                int(getattr(args, "num_denoise_steps", 0) or 0),
+            )
             _diff_report = _build_diffusion_roofline(
                 tracelens_dir / "perf_report_csvs",
-                _num_steps or None,
+                _num_steps,
                 int(getattr(args, "top_k", 10) or 10),
             )
             # A-priori analytic compute ceiling (approach-a, config/safetensors
@@ -6348,7 +6297,10 @@ def main() -> int:
                         f"alternate modes with higher busy_ratio: "
                         f"{low_quality_warning['non_empty_modes']}. "
                         "Refusing to analyze (would yield misleading "
-                        "high-idle Executive Summary).",
+                        "high-idle Executive Summary). "
+                        "The roofline executor will auto-retry trace_analyze "
+                        "with an adjusted steady-state window — this is a "
+                        "self-healing step on the same captured trace, not a hang.",
                     )
                     raise RuntimeError(
                         f"steady_state_chunk_low_quality: requested "
@@ -6479,6 +6431,7 @@ def main() -> int:
                     tracelens_dir,
                     agent_candidates or [],
                     idle_pct=idle_pct_value,
+                    model_name=getattr(args, "model_name", "") or "",
                 )
                 artifacts["tracelens_agent_report"] = str(agent_report_path)
 
@@ -6693,7 +6646,7 @@ def main() -> int:
         artifacts["cli_log_path"] = str(log_path)
         artifacts["status_path"] = str(status_path)
 
-        # Surface the contracted ``analysis.md`` exit path so consumers can read it alongside hot_kernels (PR #155).
+        # Surface the contracted ``analysis.md`` exit path so consumers can read it alongside hot_kernels.
         analysis_report_path = ""
         for cand_key in ("tracelens_agent_report", "trace_report_path"):
             if artifacts.get(cand_key):

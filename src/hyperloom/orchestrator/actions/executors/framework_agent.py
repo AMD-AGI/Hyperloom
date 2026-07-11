@@ -93,6 +93,11 @@ from .integrate_patch import (
     _with_stash_restore,
     _resolve_framework_root,
 )
+from ._nogit_patch import (
+    _apply_patch_no_git,
+    _is_git_tree,
+    _revert_patches_no_git,
+)
 from ...knowledge.kb_writeback import (
     OUTCOME_INTEGRATED,
     OUTCOME_REVERTED_SMOKE_FAIL,
@@ -542,7 +547,7 @@ class FrameworkAgentExecutor:
         # Patch source modes, in priority order: explicit ``params.patches``
         # → checkout-head (net diff from an isolated worktree at the PR head)
         # → diff_url (curl GitHub's served diff). All produce a .patch
-        # applied + benched identically (Stage 1 below).
+        # applied + benched identically.
         explicit_patches = params.get("patches") or None
         patch_paths: list[Path] = []
         patch_source_mode = ""
@@ -695,35 +700,56 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             }
 
+        git_tree = _is_git_tree(framework_root)
+        self._nogit_patch_backups: list[dict] = []
+
         # Capture HEAD before apply so REVERT/REJECT can reset cleanly;
         # prior KEEPs are committed past this sha and survive a reset.
-        pre_apply_sha, sha_err = _git_head_sha(framework_root)
-        if pre_apply_sha is None:
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "apply_failed",
-                "error_class": "no_pre_apply_sha",
-                "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "workspace": str(output_root),
-            })
+        # Non-git source trees skip this step entirely — revert uses
+        # backup-based _revert_patches_no_git instead of git reset.
+        pre_apply_sha: str | None = None
+        if git_tree:
+            pre_apply_sha, sha_err = _git_head_sha(framework_root)
+            if pre_apply_sha is None:
+                return _with_stash_restore(framework_root, stash_state, stash_note, {
+                    "status": "apply_failed",
+                    "error_class": "no_pre_apply_sha",
+                    "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "workspace": str(output_root),
+                })
 
-        # Stage 1: apply patches (with -3 fallback like integrate_patch).
+        # Stage 1: apply patches (with -3 fallback for git trees;
+        # backup-based apply for non-git roots like pip wheel installs).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
         for patch in patch_paths:
-            ok, err = _git_apply(framework_root, patch, three_way=False)
-            if not ok:
-                ok2, err2 = _git_apply(framework_root, patch, three_way=True)
-                if not ok2:
-                    apply_errors.append(
-                        {
-                            "patch": str(patch),
-                            "stderr": err + " | -3 retry: " + err2,
-                        }
-                    )
+            if git_tree:
+                ok, err = _git_apply(framework_root, patch, three_way=False)
+                if not ok:
+                    ok2, err2 = _git_apply(framework_root, patch, three_way=True)
+                    if not ok2:
+                        apply_errors.append(
+                            {
+                                "patch": str(patch),
+                                "stderr": err + " | -3 retry: " + err2,
+                            }
+                        )
+                        break
+            else:
+                nogit_backup_root = output_root / "patch_backups"
+                ok, err, backups = _apply_patch_no_git(
+                    framework_root,
+                    patch,
+                    nogit_backup_root,
+                    seq_offset=len(self._nogit_patch_backups),
+                )
+                self._nogit_patch_backups.extend(backups)
+                if not ok:
+                    apply_errors.append({"patch": str(patch), "stderr": err})
                     break
             applied.append(patch)
         if apply_errors:
@@ -757,7 +783,7 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 2: bench via run_grid (size=1).
+        # Bench via run_grid (size=1).
         try:
             bench_result, gate_evidence = await self._bench_candidate(
                 params=params,
@@ -799,7 +825,7 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 3: KEEP / REVERT.
+        # KEEP / REVERT decision.
         base_tput = float(params.get("base_tput") or 0.0)
         if base_tput <= 0:
             ss = extra.get("shared_state") or extra.get("state")
@@ -814,7 +840,7 @@ class FrameworkAgentExecutor:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
-        # Step 4 / Q5: source patches require the accuracy gate for a KEEP. A
+        # Source patches require the accuracy gate for a KEEP. A
         # measured regression always blocks; a missing verdict blocks only when
         # a baseline accuracy was available (else degrade to throughput-only).
         acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
@@ -845,7 +871,7 @@ class FrameworkAgentExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
-            # G8: distinguish "accuracy required but unevaluated" (None, not a
+            # Distinguish "accuracy required but unevaluated" (None, not a
             # measured regression) from a throughput/regression revert.
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and tput_ok) else "reverted"
@@ -876,33 +902,38 @@ class FrameworkAgentExecutor:
 
         # KEEP: commit the patches so they survive the next candidate's
         # REJECT (whose pre_apply_sha already includes this commit).
+        # Non-git source trees skip the commit step — the patches are kept
+        # in-place as working-tree edits (no git durability guarantee, but
+        # the same outcome as integrate_patch's non-git KEEP path).
         keep_message = f"framework KEEP {slug}"
-        keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
-        if keep_sha is None:
-            # Commit failed — reset to pre_apply_sha so the next candidate
-            # doesn't see a dirty baseline.
-            reverted = self._revert_patches(
-                framework_root,
-                applied,
-                pre_apply_sha=pre_apply_sha,
-            )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "apply_failed",
-                "error_class": "keep_commit_failed",
-                "error": commit_err or "git commit returned no sha",
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "accuracy_pass": accuracy_pass,
-                "base_tput": base_tput,
-                "keep_threshold_pct": keep_threshold_pct,
-                "reason": f"KEEP commit failed: {commit_err}",
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            })
+        keep_sha: str | None = None
+        if git_tree:
+            keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
+            if keep_sha is None:
+                # Commit failed — reset to pre_apply_sha so the next candidate
+                # doesn't see a dirty baseline.
+                reverted = self._revert_patches(
+                    framework_root,
+                    applied,
+                    pre_apply_sha=pre_apply_sha,
+                )
+                return _with_stash_restore(framework_root, stash_state, stash_note, {
+                    "status": "apply_failed",
+                    "error_class": "keep_commit_failed",
+                    "error": commit_err or "git commit returned no sha",
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "accuracy_pass": accuracy_pass,
+                    "base_tput": base_tput,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "reason": f"KEEP commit failed: {commit_err}",
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                })
 
         await self._write_kb_record(
             candidate=candidate,
@@ -1004,23 +1035,39 @@ class FrameworkAgentExecutor:
         framework_root: Path | None,
         applied: list[Path],
         *,
-        pre_apply_sha: str,
+        pre_apply_sha: str | None,
     ) -> list[Path]:
-        """Roll back this candidate's changes via ``git reset --hard
-        <pre_apply_sha>`` (prior KEEPs are committed past that sha, so they
-        survive). Returns the patches reverted (full ``applied`` on success,
-        empty on failure) for telemetry / schema compat.
+        """Roll back this candidate's changes.
+
+        For git trees: ``git reset --hard <pre_apply_sha>`` (prior KEEPs are
+        committed past that sha, so they survive).
+        For non-git trees: backup-based restore via
+        :func:`_revert_patches_no_git`.
+
+        Returns the patches reverted (full ``applied`` on success, empty on
+        failure) for telemetry / schema compat.
 
         Args:
-            framework_root: The git checkout to reset, or ``None`` (no-op).
+            framework_root: The source root to revert, or ``None`` (no-op).
             applied: The patches applied this candidate.
-            pre_apply_sha: The HEAD sha captured before this candidate applied.
+            pre_apply_sha: The HEAD sha captured before this candidate applied
+                (``None`` for non-git trees — backup revert is used instead).
 
         Returns:
             The reverted patches (full ``applied`` on success, ``[]`` on
             failure or no-op).
         """
         if framework_root is None or not applied:
+            return []
+        nogit_backups = getattr(self, "_nogit_patch_backups", None)
+        if nogit_backups is not None and not _is_git_tree(framework_root):
+            _revert_patches_no_git(nogit_backups)
+            return list(applied)
+        if not pre_apply_sha:
+            log.error(
+                "framework: cannot revert in %s: no pre_apply_sha and not a non-git tree",
+                framework_root,
+            )
             return []
         ok, err = _git_reset_hard(framework_root, pre_apply_sha)
         if not ok:
@@ -1061,7 +1108,7 @@ class FrameworkAgentExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
-        # G2: when the accuracy gate is required and a baseline accuracy exists,
+        # When the accuracy gate is required and a baseline accuracy exists,
         # force RUN_EVAL=true so a stale config / process env can't silently
         # disable eval and leave the gate unable to produce a verdict.
         bench_extra_envs: dict[str, Any] = {}

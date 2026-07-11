@@ -1,168 +1,95 @@
-"""Sphinx configuration for the Hyperloom documentation build.
+# Copyright Advanced Micro Devices, Inc. or its affiliates.
+# SPDX-License-Identifier: MIT
 
-This configuration wires up :mod:`sphinx.ext.autodoc` (plus
-:mod:`sphinx.ext.napoleon` for the Google-style docstrings used across the
-codebase) and renders the result with the Furo theme. The API reference pages
-are generated automatically from the in-code docstrings via recursive
-``autosummary`` stubs, so no per-module ``.rst`` files need to be maintained by
-hand.
-"""
-
-from __future__ import annotations
+# Configuration file for the Sphinx documentation builder.
+#
+# This file only contains a selection of the most common options. For a full
+# list see the documentation:
+#  https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
 import sys
-from datetime import datetime
-from pathlib import Path
 
 # -- Path setup --------------------------------------------------------------
-# conf.py lives in <repo>/docs; the importable source packages live at the repo
-# root and under the per-agent ``src`` / package directories. Add them all to
-# sys.path so autodoc can import the modules it documents.
-DOCS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = DOCS_DIR.parent
-for _path in (
-    REPO_ROOT,
-    REPO_ROOT / "src",
-    REPO_ROOT / "robustness-agent" / "src",
-    REPO_ROOT / "framework-agent" / "src",
-):
-    if _path.is_dir():
-        sys.path.insert(0, str(_path))
+# After the src-layout tree-reform the whole ``hyperloom`` distribution lives
+# under a single ``src/`` namespace. Add repo root and ``src`` for autodoc.
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for _path in (_repo_root, os.path.join(_repo_root, "src")):
+    if os.path.isdir(_path):
+        sys.path.insert(0, _path)
 
-# Some runtime modules log an operator warning at import time when
-# ``USER_DATA_PATH`` is unset (it controls where session artefacts are
-# written). The docs build never writes artefacts, so point it at a throwaway
-# path to keep the build log clean.
-os.environ.setdefault("USER_DATA_PATH", str(DOCS_DIR / "_build" / "_docs_workspace"))
+"""
+html_theme is usually unchanged (rocm_docs_theme).
+flavor defines the site header display, select the flavor for the corresponding portals
+flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
+"""
 
-# -- Project information -----------------------------------------------------
-project = "Hyperloom"
-author = "AMD AGI"
-copyright = f"{datetime.now():%Y}, {author}"
 # Keep in sync with pyproject.toml [project].version.
-release = "0.6.0"
-version = "0.6"
+version_number = "0.8.0"
 
-# -- General configuration ---------------------------------------------------
-extensions = [
-    "sphinx.ext.autodoc",  # pull docstrings out of the source
-    "sphinx.ext.autosummary",  # auto-generate per-module API stub pages
-    "sphinx.ext.napoleon",  # understand Google- (and NumPy-) style docstrings
-    "sphinx.ext.viewcode",  # add "[source]" links next to documented objects
-    "sphinx.ext.intersphinx",  # cross-link to the Python/3rd-party docs
-    "sphinx.ext.todo",
-    "myst_parser",  # render the existing Markdown guides in docs/
-]
-
-templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
-
-# Treat both reStructuredText and Markdown as documentation sources so the
-# hand-written guides already in docs/ are picked up alongside the .rst files.
-source_suffix = {
-    ".rst": "restructuredtext",
-    ".md": "markdown",
-}
-root_doc = "index"
-
-# -- autodoc / autosummary ---------------------------------------------------
-autosummary_generate = True  # build stub pages from the autosummary directives
-autosummary_imported_members = False
-
-autodoc_default_options = {
-    "members": True,
-    "undoc-members": True,
-    "show-inheritance": True,
-    "member-order": "bysource",
-    # Document each object only in the module that *defines* it. Without this,
-    # classes that a package re-exports from a submodule (e.g.
-    # ``robustness_agent.signals.Symptom`` <- ``...signals.symptom.Symptom``)
-    # get a second py:class target, which makes every type cross-reference to
-    # that name ambiguous ("more than one target found"). Ignoring ``__all__``
-    # keeps the re-exports off the package page so each name resolves uniquely.
-    "ignore-module-all": True,
-}
-autodoc_typehints = "description"  # render type hints in the description, not the signature
-autodoc_typehints_format = "short"
-autodoc_preserve_defaults = True
-autoclass_content = "class"  # use the class docstring (not __init__) for the class body
-
-# Many runtime modules import heavy / hardware-bound third-party packages at
-# import time. Mock them so the documentation build does not require a full
-# runtime environment (GPUs, SDK credentials, etc.).
-autodoc_mock_imports = [
-    # Third-party runtime dependencies.
-    "claude_agent_sdk",
-    "openai",
-    "httpx",
-    "yaml",
-    "markdownify",
-    "cachetools",
-    "respx",
-    "numpy",
-    "pandas",
-    "matplotlib",
-    "torch",
-    "triton",
-    "ray",
-    # POSIX-only stdlib modules imported by the runtime. Mocking them lets the
-    # docs build on non-POSIX hosts (e.g. Windows CI) without import errors.
-    "fcntl",
-    "termios",
-    "grp",
-    "pwd",
-    "resource",
-]
-
-# -- napoleon (Google-style docstrings) --------------------------------------
-napoleon_google_docstring = True
-napoleon_numpy_docstring = False
-napoleon_include_init_with_doc = True
-napoleon_include_private_with_doc = False
-napoleon_use_param = True
-napoleon_use_rtype = True
-napoleon_use_ivar = True
-napoleon_preprocess_types = True
-
-# -- MyST (Markdown) ---------------------------------------------------------
-myst_enable_extensions = ["colon_fence", "deflist", "linkify", "tasklist"]
-myst_heading_anchors = 3
-# The repo's Markdown guides are top-level docs that intentionally link to
-# files which live at the repository root (README, CHANGELOG, per-agent
-# SKILL.md, dashboards/) rather than inside the Sphinx tree. Those links
-# resolve on GitHub where the guides are primarily read; suppress the
-# corresponding cross-reference / header warnings so the docs build stays
-# clean instead of flagging links that are correct by design.
-suppress_warnings = ["myst.header", "myst.xref_missing"]
-
-# A handful of short type names (``BackendTurnResult``, ``Intent``, ``schema``)
-# exist as *distinct* classes/modules in both ``inference_optimizer`` and
-# ``robustness_agent``. With ``autodoc_typehints = "description"`` Sphinx tries
-# to cross-link every annotation by its short name and cannot disambiguate
-# those cross-package collisions ("more than one target found"). The rendered
-# type text is still correct; only the hyperlink target is ambiguous, so
-# suppress this one category to keep the build clean.
-suppress_warnings += ["ref.python"]
-
-# -- intersphinx -------------------------------------------------------------
-intersphinx_mapping = {
-    "python": ("https://docs.python.org/3", None),
-}
-
-# -- todo --------------------------------------------------------------------
-todo_include_todos = True
-
-# -- HTML output (Furo) ------------------------------------------------------
-html_theme = "furo"
-html_title = f"{project} {version}"
-html_static_path = ["_static"]
+html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "source_repository": "https://github.com/AMD-AGI/Hyperloom",
-    "source_branch": "main",
-    "source_directory": "docs/",
-    "navigation_with_keys": True,
+    "flavor": "generic",
+    "header_title": f"Hyperloom {version_number}",
+    "header_link": False,
+    "version_list_link": False,
+    "nav_secondary_items": {
+        "GitHub": "https://github.com/AMD-AGI/Hyperloom",
+        "Community": False,
+        "Blogs": "https://rocm.blogs.amd.com/",
+        "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
+        "Instinct™ Docs": "https://instinct.docs.amd.com/",
+        "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
+        "Support": "https://github.com/AMD-AGI/Hyperloom/issues/new/choose",
+    },
+    "link_main_doc": False,
 }
 
-# Fail the build loudly in CI when a cross-reference cannot be resolved.
-nitpicky = bool(os.environ.get("SPHINX_NITPICKY"))
+
+# This section turns on/off article info
+setting_all_article_info = True
+all_article_info_os = ["linux"]
+all_article_info_author = ""
+
+# for PDF output on Read the Docs
+project = "Hyperloom"
+author = "Advanced Micro Devices, Inc."
+copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
+version = version_number
+release = version_number
+
+external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
+
+exclude_patterns = [
+    "_build",
+    "_templates",
+]
+
+suppress_warnings = [
+    # Autosummary-generated API pages contain toctrees; external-toc warns even
+    # though those pages are generated implementation details.
+    "etoc.toctree",
+]
+
+"""
+Doxygen Settings
+Ensure Doxyfile is located at docs/doxygen.
+If the component does not need doxygen, delete this section for optimal build time
+"""
+# doxygen_root = "doxygen"
+# doxysphinx_enabled = True
+# doxygen_project = {
+#    "name": "doxygen",
+#    "path": "doxygen/xml",
+# }
+
+# Add more addtional package accordingly
+extensions = [
+    "rocm_docs",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.autodoc",
+]
+
+html_title = f"{project} {version_number} documentation"
+
+external_projects_current_project = "Hyperloom"

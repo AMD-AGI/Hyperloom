@@ -117,8 +117,8 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# 1. Patch path resolution
-# G2 — force RUN_EVAL for framework-authored source patches (only with a baseline)
+# Patch path resolution.
+# Force RUN_EVAL for framework-authored source patches (only with a baseline).
 def test_framework_run_eval_envs_forces_for_authored_with_baseline():
     assert IntegratePatchExecutor._framework_run_eval_envs(
         {"framework_agent_authoring": True, "accuracy_baseline": 0.8}
@@ -130,7 +130,7 @@ def test_framework_run_eval_envs_forces_for_authored_with_baseline():
 
 def test_framework_run_eval_envs_no_force_without_baseline():
     # baseline eval never produced a score -> nothing to gate against -> don't
-    # force eval on the candidate (matches the framework path / G1 degrade).
+    # force eval on the candidate (matches the framework degradation path).
     assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
     assert (
         IntegratePatchExecutor._framework_run_eval_envs(
@@ -297,7 +297,7 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    workspace = _write_specialist_workspace(
+    _write_specialist_workspace(
         session_dir,
         "t-spec-1",
         patch_contents=[_VALID_PATCH],
@@ -327,7 +327,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    workspace = _write_specialist_workspace(
+    _write_specialist_workspace(
         session_dir,
         "t-spec-2",
         patch_contents=[_BAD_PATCH],
@@ -676,7 +676,7 @@ async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, mon
 
 @pytest.mark.asyncio
 async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, monkeypatch):
-    """Patch clears gap #1 (shape_mismatch) but boot stops at gap #2 (missing_weight).
+    """Patch clears the shape_mismatch gap but boot stops at a new missing_weight gap.
 
     The server still does not fully boot (output_throughput=0), but the failure
     moved to a NEW, deeper actionable signature -> status='advanced': the patch
@@ -764,7 +764,7 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# 4c. Enablement environment-setup replay (Q3): allowlist + resolve + runner.
+# Enablement environment-setup replay: allowlist + resolve + runner.
 @pytest.mark.parametrize(
     "cmd",
     [
@@ -836,8 +836,7 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
     """Q3: enablement integrate replays setup_commands and surfaces them in the result."""
-    import hyperloom.orchestrator.actions.executors.integrate_patch as ip_mod
-
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"

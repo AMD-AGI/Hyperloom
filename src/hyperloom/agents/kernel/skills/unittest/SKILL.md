@@ -96,7 +96,7 @@ For each candidate test file, check:
 Run static validation on promising candidates:
 
 ```bash
-python3 "$REPO_ROOT/kernel-agent/skills/unittest/validate_harness.py" "$CANDIDATE" --static
+python3 "$REPO_ROOT/src/hyperloom/agents/kernel/skills/unittest/validate_harness.py" "$CANDIDATE" --static
 ```
 
 If a candidate passes static validation, go to **Phase 3** (validation).
@@ -654,7 +654,7 @@ catch most of these, but self-checking first saves a retry cycle.
 python3 "$SKILL_DIR/validate_harness.py" "$HARNESS_PATH" --static
 ```
 
-where `$SKILL_DIR` is the absolute path to `kernel-agent/skills/unittest/`.
+where `$SKILL_DIR` is the absolute path to `src/hyperloom/agents/kernel/skills/unittest/`.
 
 If static check fails, read the errors, fix the harness, and retry.
 

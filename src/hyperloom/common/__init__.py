@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""``hyperloom.common`` — zero-dependency shared library (tree-reform scaffold).
+"""``hyperloom.common`` — zero-dependency shared library.
 
 Target home for the deduplicated, first-party-dependency-free building blocks
-described in ``tree-reform.MD`` §7 (``io`` / ``env`` / ``payload_aliases`` /
+(``io`` / ``env`` / ``payload_aliases`` /
 ``jsonio`` / ``timeutil`` / ``gain_math`` / ``paths`` / ``subprocess_bridge`` /
 ``llm/`` …). Constraint: this package may only import the stdlib (plus ``httpx``
 for the future ``llm`` submodule) and must never import ``orchestrator`` /
@@ -11,7 +11,7 @@ for the future ``llm`` submodule) and must never import ``orchestrator`` /
 
 Phase P2.0 intentionally ships an empty scaffold: extraction happens in P2.1.
 
-No ``paths.py`` module (re-investigated post-P2.8): tree-reform.MD §7 lists
+No ``paths.py`` module (re-investigated post-P2.8): the extraction plan lists
 ``paths.py`` (common path primitives, "replaces the 2 ``_paths`` copies") as
 an extraction candidate, but a from-scratch re-audit found the "2 copies" are
 NOT a safe-to-merge in-package duplication:
@@ -30,7 +30,7 @@ NOT a safe-to-merge in-package duplication:
   ``hyperloom.orchestrator.kernel.request_handlers``) and some of their
   code paths run inside Ray workers (``tools/backends/``) that do not
   inherit the driver's ``sys.path`` — the same constraint already documented
-  for ``tools/_payload_aliases.py`` (tree-reform-lessons.MD §13). Adding a
+  for ``tools/_payload_aliases.py`` (standalone-script anti-cycle rule). Adding a
   ``hyperloom.common`` (or even a first-party ``hyperloom.*``) import to
   ``tools/_paths.py`` would break that contract.
 

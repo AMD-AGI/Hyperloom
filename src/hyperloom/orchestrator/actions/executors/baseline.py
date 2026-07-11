@@ -118,6 +118,17 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
     "unknown",
 )
 
+# KV-cache OOM: weights loaded but no room left for the KV cache. Kept
+# distinct from a generic nonzero exit so the loop/report attributes it to an
+# over-aggressive --mem-fraction-static (raise it) rather than a hard crash.
+# This surfaces AFTER weight load (often minutes in), so it must be matched
+# regardless of the fast-exit elapsed threshold.
+_KV_CACHE_OOM_MARKERS = (
+    "no gpu memory for the kv cache",
+    "leave no gpu memory",
+    "raise --mem-fraction-static above",
+)
+
 
 # Strong cuda-graph capture markers: stream-capture incompatibility, reliably
 # recoverable by disabling cuda-graph. Markers live in server.log, not the
@@ -261,9 +272,13 @@ def _classify_subprocess_error(
         ``"fast_exit_arg_error"`` for a fast exit caused by argument
         validation, else ``"subprocess_nonzero"``.
     """
+    tail = (stderr_tail or "").lower()
+    # KV-cache OOM can surface long after weight load, so it is matched before
+    # the fast-exit elapsed gate below.
+    if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
+        return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
         return "subprocess_nonzero"
-    tail = stderr_tail.lower()
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
         return "fast_exit_arg_error"
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
@@ -1210,7 +1225,7 @@ class BaselineExecutor:
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
-        # Phase 0+1: apply warm-replay code patches before server launch.
+        # Apply warm-replay code patches before server launch.
         # Record pre-apply HEAD so patches are reverted after the benchmark
         # completes (or fails), preventing residue in the shared checkout.
         patch_target = effective_inferencex_path or ix_env
@@ -1589,6 +1604,7 @@ class BaselineExecutor:
                 if p.exists():
                     p.unlink()
             except OSError:
+                # Best-effort cleanup; a filesystem error here is non-fatal.
                 pass
         # Narrow trigger: only deep-clean when the port is occupied by a
         # zombie (healthy endpoint, no metadata). Avoids killing unrelated
@@ -1788,6 +1804,7 @@ class BaselineExecutor:
         try:
             stale_server_log.unlink()
         except FileNotFoundError:
+            # Stale log already absent; nothing to remove.
             pass
         except OSError as exc:
             log.warning(

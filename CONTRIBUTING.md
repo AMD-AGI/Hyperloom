@@ -19,7 +19,7 @@ This repository treats **documentation-only** pushes and pull requests the same 
 | **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
 | **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
 | **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; steps use `continue-on-error: true` until backlog is cleared) | Yes (same `paths-ignore` as tests / CodeQL) |
-| **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `inference_optimizer`, `robustness_agent`, `framework_agent`, `hyperloom.agents.critic.runtime`, `quantization_agent`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
+| **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.robustness`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
 | **Mypy** | Local / optional tooling only here | N/A |
 
 If you add standalone workflows for **pytest**, **ruff**, **pylint**, or similar, copy the **same** `paths-ignore` blocks as in `tests-coverage.yml` / `codeql.yml` so documentation-only PRs stay consistent and cheap.
@@ -58,7 +58,7 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 
 ### Coverage (source of truth)
 
-**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and report options), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). There is **no** minimum line-coverage percentage enforced in CI. Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`src/hyperloom/inference_optimizer/tests/test_oob_units.py`](src/hyperloom/inference_optimizer/tests/test_oob_units.py).
+**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and report options), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). CI **enforces** a minimum line coverage of **90%** (`[tool.coverage.report].fail_under` in `pyproject.toml`) via a dedicated "Enforce coverage fail_under" step in `tests-coverage.yml`; set the `COVERAGE_RELAX_FAIL_UNDER` repository variable to `1`/`true`/`yes`/`on` to skip enforcement. Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`src/hyperloom/inference_optimizer/tests/test_oob_units.py`](src/hyperloom/inference_optimizer/tests/test_oob_units.py).
 
 The default pytest **`testpaths`** include **`src/hyperloom/agents/quantization/tests`** so quantization driver code is exercised in CI, not only via inference_optimizer tests.
 
@@ -70,7 +70,7 @@ Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow a
 - Ruff:  
   `ruff check .`
 - Type checks (mypy):  
-  `mypy src/hyperloom robustness-agent`
+  `mypy src/hyperloom`
   - Adjust paths if you change package locations.
 - CI runs **Pylint** with **`--errors-only`** (fatal/error severity only, not style) on several first-party packages from [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error` today). Root **`[tool.pylint.main]`** in `pyproject.toml` holds minimal defaults (e.g. `jobs`); tighten or add message disables there as the backlog shrinks.
 

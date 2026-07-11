@@ -184,6 +184,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # pull provenance/evidence; safe on the plain dataclass.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
+        # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag
+        # variants. Consumed by _grid_runner._build_variant_yaml. Stashed as a
+        # plain attr like the other metadata above.
+        gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
@@ -643,11 +647,6 @@ class ExploreExecutor:
             )
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
-        if baseline_runtime_sec > 0 and overtime_kill_ratio > 0:
-            overtime_deadline_sec: float | None = baseline_runtime_sec * overtime_kill_ratio
-        else:
-            overtime_deadline_sec = None
-
         # Per-variant hard cap precedence: explicit
         # ``params['variant_timeout_sec']`` → auto-derive from baseline
         # runtime + kill ratio (see ``_compute_explore_variant_timeout``) →
@@ -707,6 +706,7 @@ class ExploreExecutor:
                 seed_isl = int(params.get("isl") or _yaml_envs.get("ISL") or os.environ.get("ISL") or 0)
                 seed_osl = int(params.get("osl") or _yaml_envs.get("OSL") or os.environ.get("OSL") or 0)
             except (TypeError, ValueError):
+                # Non-integer seed hint; fall back to the default grid below.
                 pass
             seed = _default_grid_for_framework(
                 framework,
@@ -1073,7 +1073,8 @@ class ExploreExecutor:
                     # fresh cold boot (legacy). cleanup=false keeps it hot for the
                     # warm stack-rebench round below. ``soft_deadline_sec`` is the
                     # overtime kill, anchored on the WARM measure time when
-                    # warm-decision is active (stack-rebench omits it, Q4).
+                    # warm-decision is active; round-2 stack-rebench inherits the
+                    # same ``decision_deadline_sec`` (Issue 1 fix).
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
@@ -1087,6 +1088,7 @@ class ExploreExecutor:
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=round1_lifecycle,
                         preclean_before_run=not use_warm_decision,
+                        server_already_ready=use_warm_decision,
                     )
                     if not results:
                         # Defensive — run_grid returns one result per grid entry.
@@ -1304,8 +1306,11 @@ class ExploreExecutor:
                             # Round 2: same config as round 1. When eligible,
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
-                            # comparable; otherwise a fresh cold boot. No
-                            # ``soft_deadline_sec`` is applied for the rebench.
+                            # comparable; otherwise a fresh cold boot.
+                            # ``soft_deadline_sec=decision_deadline_sec`` applies
+                            # (Issue 1 fix: warm client-only rounds must be
+                            # bounded by the overtime-kill ratio, just like the
+                            # decision round).
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
@@ -1335,6 +1340,8 @@ class ExploreExecutor:
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
                                 preclean_before_run=not lifecycle_eligible,
+                                soft_deadline_sec=decision_deadline_sec,
+                                server_already_ready=lifecycle_eligible,
                             )
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace

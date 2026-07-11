@@ -21,7 +21,12 @@ _LEGACY_SRC = (
     "        return\n"
 )
 
-_SGLANG_LEGACY = "#!/bin/bash\n    SERVER_MONITOR_ARGS=()\n    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+_SGLANG_LEGACY = (
+    "#!/bin/bash\n"
+    "    SERVER_MONITOR_ARGS=()\n"
+    "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+    '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
+)
 
 
 def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: str | None = _SGLANG_LEGACY) -> Path:
@@ -199,13 +204,21 @@ def test_is_remote_trust_patched(tmp_path):
     f.write_text("no sentinel", encoding="utf-8")
     assert mp._is_remote_trust_patched(f) is False
     f.write_text("MAGPIE_TRUST_REMOTE_CODE here", encoding="utf-8")
+    assert mp._is_remote_trust_patched(f) is False
+    f.write_text(
+        "MAGPIE_TRUST_REMOTE_CODE here\nHYPERLOOM_EVAL_CONCURRENCY_FIX\n",
+        encoding="utf-8",
+    )
     assert mp._is_remote_trust_patched(f) is True
     assert mp._is_remote_trust_patched(tmp_path / "missing") is False
 
 
 def test_apply_remote_trust_already(tmp_path):
     f = tmp_path / "s.sh"
-    f.write_text("MAGPIE_TRUST_REMOTE_CODE", encoding="utf-8")
+    f.write_text(
+        "MAGPIE_TRUST_REMOTE_CODE\nHYPERLOOM_EVAL_CONCURRENCY_FIX\n",
+        encoding="utf-8",
+    )
     assert mp._apply_remote_trust_patch_atomic(f) is True
 
 

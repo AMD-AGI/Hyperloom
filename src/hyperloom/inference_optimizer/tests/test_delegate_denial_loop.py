@@ -111,7 +111,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 
 @pytest.mark.asyncio
 async def test_policy_denial_streak_records_streak_at_two(session_dir):
-    """v0.8 §3.9 — the denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
+    """The denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
     c = _silent_coordinator(session_dir)
     try:
         from hyperloom.orchestrator.policy.gate import PolicyDenied
@@ -331,7 +331,7 @@ def test_cli_real_executors_still_contains_explore_and_sweep():
 
 # Mission-summary + robustness prompt point at explore, not retired names
 def test_dead_c_mission_summary_tag_points_at_explore():
-    """KB_gaps/Dead-C — the ``stack changed`` warning points at ``explore``, not the retired ``validate_stack``."""
+    """The ``stack changed`` warning points at ``explore``, not the retired ``validate_stack``."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState(
@@ -359,7 +359,7 @@ def test_mission_summary_surfaces_resume_pending_revalidation():
 
 
 def test_dead_c_robustness_md_prune_branch_family_list():
-    """KB_gaps/Dead-C — the Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
+    """The Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     fragment = (asset_system_prompts_dir() / "robustness.md").read_text(encoding="utf-8")

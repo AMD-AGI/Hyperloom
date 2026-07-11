@@ -107,12 +107,12 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v0.7.0 integration (#474): head of
-# release/hyperloom_integration_v0.7.0. The optional internal extension tracks
-# the matching release/hyperloom_integration_v0.7.0 branch of
+# TraceLens v0.8.0 integration (#474): head of
+# release/hyperloom_integration_v0.8.0. The optional internal extension tracks
+# the matching release/hyperloom_integration_v0.8.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"
+TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -140,15 +140,20 @@ TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
 
-# Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
-# is missing from env, source $REPO_ROOT/.env (resolved above from this
-# script's parent dir) but protect any keys already set in env from being
-# overwritten by .env.
+# Credentials fallback: env always wins. If any supported LLM credential is
+# missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR_API_KEY:-}" ]; then
+if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
+   || [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${ANTHROPIC_BASE_URL:-}" ] \
+   || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] \
+   || [ -z "${CURSOR_API_KEY:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
     _snap_url="${OPENAI_BASE_URL-}"
+    _snap_openai_key="${OPENAI_API_KEY-}"
+    _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
+    _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
+    _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
     _snap_cursor="${CURSOR_API_KEY-}"
     set -a
     # shellcheck disable=SC1091
@@ -156,34 +161,43 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
     set +a
     [ -n "$_snap_safe" ] && export SAFE_API_KEY="$_snap_safe"
     [ -n "$_snap_url" ]  && export OPENAI_BASE_URL="$_snap_url"
+    [ -n "$_snap_openai_key" ] && export OPENAI_API_KEY="$_snap_openai_key"
+    [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
+    [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
+    [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
     [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
-    unset _snap_safe _snap_url _snap_cursor
+    unset _snap_safe _snap_url _snap_openai_key _snap_anthropic_url
+    unset _snap_anthropic_key _snap_anthropic_token _snap_cursor
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
+# Per-kernel GEAK backend (GEAK_v3.2 branch): the single-kernel optimizer + GEMM
+# tuning entrypoint. Its env handle is GEAK_V3_* — renamed from the former GEAK_*
+# to free the GEAK_* namespace for the whole-pipeline e2e optimizer below (which
+# Hyperloom now calls simply "geak"). The per-kernel CLI binary stays `geak`.
+GEAK_V3_REPO="${GEAK_V3_REPO:-https://github.com/AMD-AGI/GEAK.git}"
+GEAK_V3_ROOT="${GEAK_V3_ROOT:-${_open_source_root}/GEAK_v3}"
+# Track the per-kernel GEAK on the ``GEAK_v3.2`` maintenance branch. Unlike the
+# immutable v3.2.2 tag, this branch is where the per-kernel checkout carries the
+# Hyperloom-compat change that makes minisweagent honor $GEAK_V3_ROOT (so the
+# per-kernel repo root no longer collides with the e2e optimizer's $GEAK_ROOT),
+# on top of the v3.2.2 GEMM tuning entrypoint (minisweagent.run.gemm_tuning) and
+# the upstreamed subagent docs/resources. Operators can override with
+# GEAK_V3_REF=<tag|branch|sha>.
+GEAK_V3_REF="${GEAK_V3_REF:-GEAK_v3.2}"
+# e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
+# standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
+# + e2e_workflow/), now tracked on the ``main`` branch. Hyperloom calls
+# interface/run_e2e.py at the KERNEL_AGENT phase when
+# KERNEL_OPT_BACKEND_ORDER=geak. This is a SECOND GEAK checkout pinned to the
+# e2e ref, kept SEPARATE from the per-kernel GEAK_V3 checkout above. It owns
+# the GEAK_* handle; operators override repo/ref/root with GEAK_REPO / GEAK_REF /
+# GEAK_ROOT. NOTE: only Hyperloom's internal naming changed — no upstream GEAK
+# branch was renamed.
+GEAK_REPO="${GEAK_REPO:-${GEAK_V3_REPO}}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
-# Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
-# chore/subagent-docs-upstream-resource branch / PR #290). It carries the
-# GEMM tuning entrypoint used by kernel-agent/tools/gemm_tuning.py
-# (minisweagent.run.gemm_tuning) plus the upstreamed subagent docs/resources.
-# A tag is a permanent ref: it stays reachable regardless of how PR #290 is
-# merged to main (merge/squash/rebase) or whether the source branch is later
-# deleted, unlike a branch-HEAD SHA. Operators can override with
-# GEAK_REF=<tag|branch|sha>; bump to the next patch tag if the branch advances.
-GEAK_REF="${GEAK_REF:-v3.2.2}"
-# e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
-# code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
-# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL_AGENT phase when
-# KERNEL_OPT_BACKEND_ORDER=perfskills. This is a SECOND GEAK checkout pinned to the
-# e2e branch, kept SEPARATE from the single-kernel GEAK checkout above. The
-# PERFSKILLS_* names are retained as the stable handle for this optimizer;
-# operators override repo/ref/root with PERFSKILLS_REPO / PERFSKILLS_REF /
-# PERFSKILLS_ROOT.
-PERFSKILLS_REPO="${PERFSKILLS_REPO:-${GEAK_REPO}}"
-PERFSKILLS_ROOT="${PERFSKILLS_ROOT:-${_open_source_root}/GEAK-e2e}"
-PERFSKILLS_REF="${PERFSKILLS_REF:-GEAK_v4}"
-PERFSKILLS_E2E_RUNNER="${PERFSKILLS_E2E_RUNNER:-${PERFSKILLS_ROOT}/interface/run_e2e.py}"
+GEAK_REF="${GEAK_REF:-main}"
+GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 # --- OOB source resolution (BEGIN: kept in sync with test_oob_src_default) ---
 # OOB now ships inside the KernelForge checkout ($FORGE_PATH/OOB), so derive
 # the OOB source from the forge path instead of requiring a separate OOB path
@@ -259,22 +273,19 @@ else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
 # When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
-# install. Defaults to 1 so GEAK kernel-opt gets RAG-augmented retrieval
-# out of the box on the canonical GPU-pod path (cuda auto-detect, BGE-
-# large embedding ~1min). Callers that don't want this — e.g. claude-only
-# kernel-opt, CPU-only sandbox where BGE-large takes ~1.5h, or any path
-# where install.sh latency matters more than RAG quality — should set
-# `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` in the launching env (Brain
-# propagates Environment block vars from the prompt into sandbox env, so
-# operators can flip this per-task without editing this script).
+# install. A build failure warns by default; set strict=1 to fail install.
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
+KERNEL_AGENT_RAG_INDEX_STRICT_VAL="${KERNEL_AGENT_RAG_INDEX_STRICT:-0}"
+# Explicit alias for operators who want to skip the final model/index load
+# step during install (e.g. Docker builds without visible GPUs).
+KERNEL_AGENT_SKIP_MODEL_LOAD_VAL="${KERNEL_AGENT_SKIP_MODEL_LOAD:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
+GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # LiteLLM provider-specific base_url normalisation:
 #   * openai/* models require the OpenAI-compatible base URL, which in our
@@ -305,39 +316,38 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 # not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
-# The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
-# session sets ``KERNEL_OPT_BACKEND_ORDER=perfskills``. The default runtime
-# optimizer is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
-# + claude-agent-sdk pip) unconditionally would tax every native-only user. Gate
-# it behind ``--with-perfskills`` / ``INSTALL_PERFSKILLS=1``; default off.
-case "${INSTALL_PERFSKILLS:-0}" in
-  1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
-  *) INSTALL_PERFSKILLS=0 ;;
+# Optional build-time escape hatch: skip Ray daemon startup while still
+# installing Ray itself and all downstream dependencies (TraceLens/GEAK/OOB).
+# Useful in Docker image builds where launching background daemons is fragile.
+case "${SKIP_RAY_START:-0}" in
+  1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
+  *) SKIP_RAY_START=0 ;;
 esac
-
 usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
 Always installs:
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
-  Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
-  and LLM gateway env/auth (claude/codex CLIs talk to the gateway
-  directly).
+  Node.js/npm, GEAK CLI/config, the GEAK e2e whole-pipeline optimizer,
+  OOB + claude/codex CLI auth, and LLM gateway env/auth (claude/codex
+  CLIs talk to the gateway directly).
 
 Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
-  --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
-                     (only needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
+  --skip-model-load  Skip the final GEAK RAG model/index build step.
   -h, --help         Show this help
 
 Environment (optional):
+  SKIP_RAY_START=1                      Skip `ray start --head` during install (default 0).
+                                        Installs ray/click but defers daemon startup to runtime.
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
-  INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
-                                        Equivalent to --with-perfskills. Default native users skip it.
+  KERNEL_AGENT_RAG_INDEX_STRICT=1       Fail install when the RAG index build fails (default warns).
+  KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
+                                        Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
 EOF
 }
 
@@ -345,7 +355,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    --with-perfskills) INSTALL_PERFSKILLS=1 ;;
+    --skip-model-load) KERNEL_AGENT_SKIP_MODEL_LOAD_VAL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -363,13 +373,8 @@ verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
 }
 
-# Preflight credential validation. The env+.env fallback loader above
-# (lines 89-105) only LOADS missing keys; it does not VALIDATE that they
-# were actually provided. Without this gate, a missing SAFE_API_KEY or
-# OPENAI_BASE_URL would slip past pip install / GEAK clone / aiter JIT
-# (~10-20 minutes of work) and only blow up at the final
-# generate_geak_litellm_config step (line ~670). Fail fast here so the
-# operator can fix .env / export before any expensive work happens.
+# Preflight credential validation. A usable setup needs at least one LLM base
+# URL and at least one key; single-gateway and split OpenAI/Anthropic are valid.
 #
 # Strict mode by design: no bypass env var. The chained installer
 # steps (GEAK config, OOB CLI auth) all need real credentials, so an
@@ -378,10 +383,14 @@ verify_die() {
 # does not actually install.
 preflight_validate_credentials() {
   local missing=()
-  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
-  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
-  if [ "${#missing[@]}" -eq 0 ]; then
-    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+  local has_url=0 has_key=0
+  { [ -n "${OPENAI_BASE_URL:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; } && has_url=1
+  { [ -n "${SAFE_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
+    || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("OPENAI_BASE_URL or ANTHROPIC_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("SAFE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN")
+  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
+    log "credentials preflight: usable LLM base URL + key present"
     return 0
   fi
   local env_file_status
@@ -398,18 +407,24 @@ preflight_validate_credentials() {
     return 0
   fi
   cat >&2 <<EOF
-[kernel-agent ERROR] Missing required credential(s): ${missing[*]}
+[kernel-agent ERROR] Missing required credential group(s): ${missing[*]}
 
 Tried loading from:
   - shell environment
   - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
 
 Fix one of:
-  1. Copy .env from a working worktree into this one:
-       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
-  2. Export directly into the shell before re-running:
-       export SAFE_API_KEY=sk-xxxxx
+  1. Single gateway:
+       export SAFE_API_KEY=ak-your-safe-apikey
        export OPENAI_BASE_URL=https://gateway.example.com/v1
+  2. Split OpenAI or Anthropic:
+       export OPENAI_BASE_URL=https://api.openai.com/v1
+       export OPENAI_API_KEY=sk-...
+       # or
+       export ANTHROPIC_BASE_URL=https://api.anthropic.com
+       export ANTHROPIC_API_KEY=sk-ant-...
+  3. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
   exit 2
 }
@@ -752,6 +767,10 @@ ensure_ray_started() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
+  if [ "$SKIP_RAY_START" -eq 1 ]; then
+    log "skipping ray head startup (SKIP_RAY_START=1)"
+    return 0
+  fi
   if ! command -v ray >/dev/null 2>&1; then
     warn "ray CLI missing; cannot start ray head"
     return 0
@@ -796,12 +815,73 @@ _pip_install_editable() {
     fi
     die "${label} checkout not found: ${root}"
   fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    local project_name
+    project_name="$(_project_name_from_pyproject "$root")"
+    if [ -n "$project_name" ] && _local_install_matches_root "$project_name" "$root"; then
+      log "${label} already installed from ${root}; skipping reinstall"
+      return 0
+    fi
+  fi
   log "ensuring ${label} editable install from ${root}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
     run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
   fi
   return 0
+}
+
+_project_name_from_pyproject() {
+  local root="$1"
+  local pyproject="${root%/}/pyproject.toml"
+  [ -f "$pyproject" ] || return 0
+  python3 - "$pyproject" <<'PY' 2>/dev/null || true
+import sys
+path = sys.argv[1]
+try:
+    import tomllib
+except Exception:
+    import tomli as tomllib  # py<3.11 fallback
+with open(path, "rb") as f:
+    data = tomllib.load(f)
+name = (((data.get("project") or {}).get("name")) or "").strip()
+print(name)
+PY
+}
+
+_local_install_matches_root() {
+  local project_name="$1"
+  local root="$2"
+  [ -n "$project_name" ] || return 1
+  python3 - "$project_name" "$root" <<'PY' >/dev/null 2>&1
+import importlib.metadata
+import json
+import os
+import sys
+from urllib.parse import urlparse, unquote
+
+project = sys.argv[1]
+root = os.path.realpath(sys.argv[2])
+try:
+    dist = importlib.metadata.distribution(project)
+except importlib.metadata.PackageNotFoundError:
+    raise SystemExit(1)
+direct = dist.read_text("direct_url.json")
+if not direct:
+    raise SystemExit(1)
+try:
+    payload = json.loads(direct)
+except Exception:
+    raise SystemExit(1)
+url = payload.get("url") or ""
+if not url.startswith("file:"):
+    raise SystemExit(1)
+parsed = urlparse(url)
+installed_root = os.path.realpath(unquote(parsed.path))
+if os.path.normcase(installed_root) != os.path.normcase(root):
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
 }
 
 # Internal extension is opt-in: enabled iff $TRACELENS_INTERNAL_ROOT is set.
@@ -900,7 +980,7 @@ ensure_tracelens() {
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
   # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
-  # ${GEAK_ROOT} / ${OOB_ROOT}) lets both
+  # ${GEAK_V3_ROOT} / ${OOB_ROOT}) lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
   # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
@@ -937,30 +1017,30 @@ ensure_tracelens() {
   fi
 }
 
-ensure_geak() {
-  log "ensuring GEAK backend"
+ensure_geak_v3() {
+  log "ensuring per-kernel GEAK backend (geak_v3)"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${GEAK_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
+    mkdir -p "${GEAK_V3_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
-  if [ ! -d "${GEAK_ROOT}/.git" ]; then
+  if [ ! -d "${GEAK_V3_ROOT}/.git" ]; then
     # ``git clone --branch`` only accepts tags / branches, not SHAs. Detect
     # a 7-40 hex char SHA and use a fetch-checkout dance instead so the
     # SHA pin above stays shallow. GitHub serves shallow SHA fetches
     # (uploadpack.allowReachableSHA1InWant=true).
-    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-      run git init -q "${GEAK_ROOT}"
-      run git -C "${GEAK_ROOT}" remote add origin "$GEAK_REPO"
-      run git -C "${GEAK_ROOT}" fetch --depth 1 origin "$GEAK_REF"
-      run git -C "${GEAK_ROOT}" checkout -q --force FETCH_HEAD
+    if [[ "$GEAK_V3_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${GEAK_V3_ROOT}"
+      run git -C "${GEAK_V3_ROOT}" remote add origin "$GEAK_V3_REPO"
+      run git -C "${GEAK_V3_ROOT}" fetch --depth 1 origin "$GEAK_V3_REF"
+      run git -C "${GEAK_V3_ROOT}" checkout -q --force FETCH_HEAD
     else
-      run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${GEAK_ROOT}"
+      run git clone --depth 1 --branch "$GEAK_V3_REF" "$GEAK_V3_REPO" "${GEAK_V3_ROOT}"
     fi
   else
-    log "GEAK checkout already present: ${GEAK_ROOT}"
+    log "per-kernel GEAK checkout already present: ${GEAK_V3_ROOT}"
     if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-      # Keep existing runtime mirrors aligned with the requested GEAK_REF.
-      run git -C "${GEAK_ROOT}" fetch --depth 1 origin "$GEAK_REF"
-      run git -C "${GEAK_ROOT}" checkout -q --force FETCH_HEAD
+      # Keep existing runtime mirrors aligned with the requested GEAK_V3_REF.
+      run git -C "${GEAK_V3_ROOT}" fetch --depth 1 origin "$GEAK_V3_REF"
+      run git -C "${GEAK_V3_ROOT}" checkout -q --force FETCH_HEAD
     fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
@@ -974,7 +1054,11 @@ ensure_geak() {
     if [ -n "${GEAK_PIP_CONSTRAINT_FILE:-}" ] && [ -f "${GEAK_PIP_CONSTRAINT_FILE}" ]; then
       _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
     fi
-    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"
+    if _local_install_matches_root "mini-swe-agent" "${GEAK_V3_ROOT}"; then
+      log "per-kernel GEAK already installed from ${GEAK_V3_ROOT}; skipping pip reinstall"
+    else
+      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_V3_ROOT}"
+    fi
     # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -990,8 +1074,12 @@ ensure_geak() {
     # break install with "File ... does not exist".
     for _geak_mcp in rag-mcp profiler-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
-      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
-        "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"
+      if _local_install_matches_root "${_geak_mcp}" "${GEAK_V3_ROOT}/mcp_tools/${_geak_mcp}"; then
+        log "${_geak_mcp} already installed from ${GEAK_V3_ROOT}/mcp_tools/${_geak_mcp}; skipping pip reinstall"
+      else
+        run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
+          "${GEAK_V3_ROOT}/mcp_tools/${_geak_mcp}"
+      fi
     done
     # Patch GEAK's bundled prompt YAML to remove the misleading
     # ``task_runner.py performance`` example that causes sub-agent
@@ -1011,7 +1099,7 @@ ensure_geak() {
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
       if [ -z "$GEAK_API_KEY_VAL" ] || [ -z "$GEAK_BASE_URL_VAL" ]; then
-        die "Cannot generate GEAK litellm config: SAFE_API_KEY and OPENAI_BASE_URL are required"
+        die "Cannot generate GEAK litellm config: need a usable LLM base URL and key"
       fi
       cat > "$GEAK_CONFIG" <<EOF
 model:
@@ -1102,7 +1190,7 @@ patch_geak_minisweagent_runtime() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  GEAK_ROOT="${GEAK_ROOT}" python3 - <<'PY'
+  GEAK_ROOT="${GEAK_V3_ROOT}" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -1218,6 +1306,12 @@ PY
 }
 
 ensure_rag_index() {
+  case "$KERNEL_AGENT_SKIP_MODEL_LOAD_VAL" in
+    1|true|TRUE|yes|YES|on|ON)
+      log "skipping GEAK model/index load step (KERNEL_AGENT_SKIP_MODEL_LOAD=$KERNEL_AGENT_SKIP_MODEL_LOAD_VAL)"
+      return 0
+      ;;
+  esac
   case "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL" in
     0|false|FALSE|no|NO|off|OFF)
       log "skipping GEAK RAG index build (KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL)"
@@ -1233,7 +1327,16 @@ ensure_rag_index() {
     return
   fi
   log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run sh -c "cd '${GEAK_ROOT}' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  if run sh -c "cd '${GEAK_V3_ROOT}' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"; then
+    return 0
+  fi
+  case "$KERNEL_AGENT_RAG_INDEX_STRICT_VAL" in
+    1|true|TRUE|yes|YES|on|ON)
+      die "GEAK RAG index build failed (KERNEL_AGENT_RAG_INDEX_STRICT=$KERNEL_AGENT_RAG_INDEX_STRICT_VAL)"
+      ;;
+  esac
+  warn "GEAK RAG index build failed; continuing install without a prebuilt index"
+  warn "Set KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 to skip or KERNEL_AGENT_RAG_INDEX_STRICT=1 to fail."
 }
 
 ensure_oob() {
@@ -1398,15 +1501,22 @@ write_env_file() {
       echo "export TL_EXTENSION='TraceLens_internal'"
     fi
     [ -n "${HYPERLOOM_ROOT:-}" ] && echo "export HYPERLOOM_ROOT='${HYPERLOOM_ROOT}'"
+    # Per-kernel GEAK (geak_v3) bundled layout: HYPERLOOM ships the per-kernel
+    # checkout under ${HYPERLOOM_ROOT}/geak. Export it as GEAK_V3_ROOT so the
+    # per-kernel backend + provenance resolve it; GEAK_ROOT is reserved for the
+    # e2e optimizer ("geak") below.
     if [ -d "${HYPERLOOM_ROOT}/geak/src" ]; then
-      echo "export GEAK_ROOT='${HYPERLOOM_ROOT}/geak'"
+      echo "export GEAK_V3_ROOT='${HYPERLOOM_ROOT}/geak'"
       echo "export HYPERLOOM_GEAK_ROOT='${HYPERLOOM_ROOT}/geak'"
       echo "export PYTHONPATH='${HYPERLOOM_ROOT}/geak/src:${PYTHONPATH:-}'"
     fi
-    [ -n "${PERFSKILLS_ROOT}" ] && echo "export PERFSKILLS_ROOT='${PERFSKILLS_ROOT}'"
-    [ -n "${PERFSKILLS_E2E_RUNNER}" ] && echo "export PERFSKILLS_E2E_RUNNER='${PERFSKILLS_E2E_RUNNER}'"
+    # e2e optimizer ("geak") checkout + runner (GEAK_ROOT / GEAK_E2E_RUNNER),
+    # consumed by kernel-agent/tools/backends/geak_runner.py.
+    [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
+    # Per-kernel GEAK (geak_v3) checkout for provenance / version detection.
+    [ -n "${GEAK_V3_ROOT}" ] && echo "export GEAK_V3_ROOT='${GEAK_V3_ROOT}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
@@ -1432,33 +1542,33 @@ write_env_file() {
   log "wrote ${env_file} (source it before running kernel-agent tools)"
 }
 
-# Clone the e2e optimizer (GEAK@GEAK_v4, formerly PerfSkills) the same way
-# ensure_geak does: SHA pins use a shallow fetch-checkout; tags/branches use
-# git clone --branch. It is NOT pip-installed (it's a JS workflow dir invoked
+# Clone the e2e optimizer ("geak"; GEAK@GEAK_v4, formerly PerfSkills) the same
+# way ensure_geak_v3 does: SHA pins use a shallow fetch-checkout; tags/branches
+# use git clone --branch. It is NOT pip-installed (it's a JS workflow dir invoked
 # via the Claude Code Workflow tool); we only need the checkout + the
 # claude_agent_sdk that its interface/run_e2e.py uses.
-ensure_perfskills() {
-  log "ensuring e2e optimizer (GEAK@${PERFSKILLS_REF}, formerly PerfSkills)"
+ensure_geak() {
+  log "ensuring e2e optimizer geak (GEAK@${GEAK_REF}, formerly PerfSkills)"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "${PERFSKILLS_ROOT}"
+    mkdir -p "${GEAK_ROOT}"
   fi
-  if [ ! -d "${PERFSKILLS_ROOT}/.git" ]; then
-    if [[ "$PERFSKILLS_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-      run git init -q "${PERFSKILLS_ROOT}"
-      run git -C "${PERFSKILLS_ROOT}" remote add origin "$PERFSKILLS_REPO"
-      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
-      run git -C "${PERFSKILLS_ROOT}" checkout -q FETCH_HEAD
+  if [ ! -d "${GEAK_ROOT}/.git" ]; then
+    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${GEAK_ROOT}"
+      run git -C "${GEAK_ROOT}" remote add origin "$GEAK_REPO"
+      run git -C "${GEAK_ROOT}" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${GEAK_ROOT}" checkout -q FETCH_HEAD
     else
-      run git clone --depth 1 --branch "$PERFSKILLS_REF" "$PERFSKILLS_REPO" "${PERFSKILLS_ROOT}"
+      run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${GEAK_ROOT}"
     fi
   else
-    log "e2e optimizer checkout already present: ${PERFSKILLS_ROOT}"
+    log "e2e optimizer checkout already present: ${GEAK_ROOT}"
     if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-      # Keep an existing checkout aligned with the requested PERFSKILLS_REF,
-      # mirroring ensure_geak: without this a ref bump (branch/tag/SHA) leaves
-      # the runtime pinned to the stale GEAK_v4 code it first cloned.
-      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
-      run git -C "${PERFSKILLS_ROOT}" checkout -q --force FETCH_HEAD
+      # Keep an existing checkout aligned with the requested GEAK_REF,
+      # mirroring ensure_geak_v3: without this a ref bump (branch/tag/SHA) leaves
+      # the runtime pinned to the stale e2e code it first cloned.
+      run git -C "${GEAK_ROOT}" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${GEAK_ROOT}" checkout -q --force FETCH_HEAD
     fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
@@ -1466,8 +1576,8 @@ ensure_perfskills() {
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
     run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
       warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
-    if [ ! -f "${PERFSKILLS_E2E_RUNNER}" ]; then
-      warn "e2e runner not found at ${PERFSKILLS_E2E_RUNNER} (interface/ missing — is the checkout on the GEAK_v4 branch?)"
+    if [ ! -f "${GEAK_E2E_RUNNER}" ]; then
+      warn "e2e runner not found at ${GEAK_E2E_RUNNER} (interface/ missing — is the checkout on the ${GEAK_REF} branch with the e2e code?)"
     fi
   else
     log "check-only: skipping e2e optimizer sdk installation"
@@ -1519,10 +1629,10 @@ PY
   else
     warn "CURSOR_API_KEY not set; cursor backend will 401 if invoked"
   fi
-  if [ -d "${GEAK_ROOT}/.git" ]; then
-    log "GEAK ref: $(git -C "${GEAK_ROOT}" describe --tags --always 2>/dev/null || echo unknown)"
+  if [ -d "${GEAK_V3_ROOT}/.git" ]; then
+    log "per-kernel GEAK (geak_v3) ref: $(git -C "${GEAK_V3_ROOT}" describe --tags --always 2>/dev/null || echo unknown)"
   else
-    warn "GEAK checkout missing at ${GEAK_ROOT}"
+    warn "per-kernel GEAK (geak_v3) checkout missing at ${GEAK_V3_ROOT}"
   fi
   if python3 -c "import rag_mcp" >/dev/null 2>&1; then
     log "rag-mcp installed: yes"
@@ -1564,16 +1674,12 @@ main() {
   acquire_install_lock
   ensure_tracelens
 
-  # Always install everything; ensure_oob also calls ensure_llm_auth_files.
+  # Always install the per-kernel GEAK backend; ensure_oob also calls ensure_llm_auth_files.
+  ensure_geak_v3
+  # The GEAK e2e whole-pipeline optimizer is installed by default; opt out with
+  # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
+  # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
-  # PerfSkills/GEAK-e2e is opt-in (see INSTALL_PERFSKILLS / --with-perfskills):
-  # the default runtime optimizer is native, so native-only users skip the
-  # extra GEAK-e2e clone + claude-agent-sdk pip.
-  if [ "$INSTALL_PERFSKILLS" -eq 1 ]; then
-    ensure_perfskills
-  else
-    log "skipping PerfSkills/GEAK-e2e optimizer install (default native; pass --with-perfskills or INSTALL_PERFSKILLS=1 to enable)"
-  fi
   ensure_rag_index
   ensure_oob
   write_env_file

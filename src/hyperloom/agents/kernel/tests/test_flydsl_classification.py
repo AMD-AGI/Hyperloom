@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
+import unittest.mock as mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,7 +113,7 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertEqual(skip, "")
 
     def test_flydsl_default_wekafs_root_is_reusable(self) -> None:
-        # Default WekaFS FlyDSL checkout reaches GEAK (PR #668 contract).
+        # Default WekaFS FlyDSL checkout reaches GEAK.
         cand = self._flydsl_candidate(
             "/wekafs/yunkai/flydsl/kernels/moe_gemm_2stage.py",
         )
@@ -397,7 +397,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
 
 
 class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
-    """PR #668 pseudo_op names must be classified as FlyDSL (matched by name prefix; no on-disk source)."""
+    """pseudo_op names must be classified as FlyDSL by name prefix without on-disk source."""
 
     def test_pseudo_op_moe_flydsl_stage1_recognised(self) -> None:
         self.assertEqual(

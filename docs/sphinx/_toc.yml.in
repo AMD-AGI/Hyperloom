@@ -1,0 +1,79 @@
+defaults:
+  numbered: False
+  maxdepth: 6
+root: index
+
+subtrees:
+- entries:
+  - file: what-is-hyperloom.md
+    title: What is Hyperloom?
+  - file: release-notes.md
+    title: Release notes
+  - file: compatibility.md
+    title: Compatibility matrix
+
+- caption: Install
+  entries:
+  - file: install/quickstart.md
+    title: Quickstart — hosted UI
+  - file: install/local-mode.md
+    title: Quickstart — local mode
+  - file: install/bare-metal.md
+    title: Quickstart — bare metal
+
+- caption: Components
+  entries:
+  - file: components/index.md
+    title: Components
+    subtrees:
+    - entries:
+      - file: components/intellikit.md
+        title: IntelliKit
+      - file: components/magpie.md
+        title: Magpie
+      - file: components/tracelens.md
+        title: TraceLens
+      - file: components/geak.md
+        title: GEAK
+      - file: components/agentkernelarena.md
+        title: AgentKernelArena
+
+- caption: How to
+  entries:
+  - file: how-to/optimize.md
+    title: Run a Hyperloom optimization
+  - file: how-to/quantization-quark.md
+    title: Quantization with AMD Quark
+
+- caption: Conceptual
+  entries:
+  - file: conceptual/optimization-loop.md
+    title: Hyperloom optimization loop
+
+- caption: Reference
+  entries:
+  - file: reference/api-reference.rst
+    title: API reference
+  - file: reference/environment-variables.md
+    title: Environment variables
+  - file: reference/authentication.md
+    title: Authentication and credentials
+  - file: reference/troubleshooting.md
+    title: Troubleshooting
+  - file: reference/integrate-kb.md
+    title: Knowledge base integration
+  - file: reference/operator-scripts.md
+    title: Operator scripts
+  - file: reference/session-breakdown.md
+    title: session_breakdown.json
+  - file: reference/operations.md
+    title: Operations
+  - file: reference/upgrade.md
+    title: Upgrade
+
+- caption: About
+  entries:
+  - file: about.md
+    title: About
+  - file: license.rst
+    title: License

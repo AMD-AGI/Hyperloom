@@ -53,7 +53,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
-    # A usable checkout needs .git (#722/PR#789 completeness gate); a bare dir
+    # A usable checkout needs .git (completeness gate); a bare dir
     # is now treated as an incomplete override and fails fast.
     (tracelens_root / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
@@ -208,7 +208,7 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["FOO"] == "bar"
 
 
-# Regression: gpu_type injection sets runner_type AND force-pins the generic `{framework}_{gpu_type}.sh` (Magpie priority 1). See `design/magpie-generic-script-and-user-data-path.md` §3.
+# Regression: gpu_type injection sets runner_type AND force-pins the generic `{framework}_{gpu_type}.sh` (Magpie priority 1).
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
     import yaml
@@ -390,7 +390,7 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
 
 
-# Regression #194: steady-state window must follow the TraceLens magpie skill formulas (max_iters/delay_iters), not the old placeholders.
+# steady-state window must follow the TraceLens magpie skill formulas (max_iters/delay_iters), not the old placeholders.
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
     """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
@@ -472,7 +472,6 @@ def test_materialize_profile_window_sglang_skill_formula(
     monkeypatch,
 ):
     """SGLang path writes the same window into PROFILE_EXTRA_BODY."""
-    import json
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -516,7 +515,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     assert "--profiler-config.max_iterations 128" in extra, extra
 
 
-# Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
+# Regression: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
 def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path,
     monkeypatch,
@@ -573,7 +572,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     tmp_path,
     monkeypatch,
 ):
-    """The §2 override is profile-only; baseline / sweep paths keep the seq_cost-based NUM_PROMPTS."""
+    """The profile-only NUM_PROMPTS override does not affect baseline / sweep paths (they keep the seq_cost-based value)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -596,7 +595,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
 
 
-# Regression #194 §4 / §5: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
+# Regression: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
     """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
     from hyperloom.orchestrator.actions.executors import _workload_envs
@@ -628,7 +627,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of §1 iterations."""
+    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of the default iteration count."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -649,7 +648,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     monkeypatch,
     caplog,
 ):
-    """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
+    """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the default safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -721,7 +720,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    # Safe §1 flags still present.
+    # Safe profiler flags still present.
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     # TraceLens-only flags absent.
     assert "capture_torch_profiler_dir" not in extra, extra
@@ -1000,7 +999,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
 
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
-    import hyperloom.orchestrator.actions.executors.profile as profile_mod
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
 
     # The symbols must be re-exportable for monkey-patching.
     assert profile_mod.ensure_benchmark_lib_patched is not None
@@ -1228,7 +1227,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     rexec = RooflineExecutor(shared_state=SimpleNamespace())
 
     # Sentinel: prove the lazy import / sub-step orchestration is reached.
-    import hyperloom.orchestrator.actions.executors.profile as profile_mod
+    from hyperloom.orchestrator.actions.executors import profile as profile_mod
 
     async def _explode(_ctx):
         raise AssertionError("profile_executor must not be invoked under atom")
@@ -1543,12 +1542,15 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         "top_k": 5,
         "dry_run": True,
         "budget_minutes": 1,
+        # Exercise the structured-result plumbing via the explicit bypass route
+        # (the default is now the TraceLens agent route, which needs a real root).
+        "analysis_route": "bypass",
     }
     res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-    # No trace files → failed, but the response must still be structured.
+    # Structured result surfaced verbatim by the bypass backend.
     assert res["status"] in ("ok", "succeeded", "failed")
-    assert "tool" in res or "run_id" in res or "error" in res
-    assert res.get("session_id") == session_dir.name or "run_id" in res
+    assert res.get("route") == "bypass"
+    assert res.get("candidates_path") and "artifact_paths" in res
 
 
 @pytest.mark.asyncio
@@ -1570,6 +1572,234 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
         res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
         # Must return a structured result, never raise AttributeError.
         assert res["status"] in ("ok", "succeeded", "failed")
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the
+    TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "xdit",
+            "model_name": "FLUX.1-dev",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+    assert "--tracelens-root" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkeypatch):
+    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even
+    for a text-gen framework (explicit env route wins over the default)."""
+    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bypass")
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "orchestrator_mode": "bypass", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--tracelens-root" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
+    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route
+    (the shipped default). Bypass is reached only via an explicit route."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_invalid_route_falls_back_to_agent(session_dir, monkeypatch):
+    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route;
+    it falls back to the default TraceLens ``agent`` route and surfaces a warning."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "analysis_route": "foobar",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "agent" in cmd
+    codes = {w.get("code") for w in res.get("trace_health_warnings", [])}
+    assert "invalid_analysis_route" in codes
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
+    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only
+    (must NOT reach bypass, which would crash argparse -> degraded), while
+    --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    base = {
+        "trace_input": str(fake_trace),
+        "session_id": session_dir.name,
+        "framework": "xdit",
+        "num_denoise_steps": 20,
+        "top_k": 5,
+    }
+    # Explicit bypass route: no --skip-split, but --num-denoise-steps forwarded.
+    await krh.trace_analyze_handler({**base, "analysis_route": "bypass"}, session_dir=session_dir)
+    cmd = captured["cmd"]
+    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert "--skip-split" not in cmd
+    assert "--num-denoise-steps" in cmd and "20" in cmd
+    # TraceLens (deterministic) route: both flags present.
+    await krh.trace_analyze_handler({**base, "analysis_route": "deterministic"}, session_dir=session_dir)
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--skip-split" in cmd
+    assert "--num-denoise-steps" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_text_gen_deterministic_escapes_to_tracelens(session_dir, monkeypatch):
+    """TraceLens stays reachable as an explicit escape hatch: text-gen with
+    analysis_route=deterministic runs the TraceLens tool, not bypass."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "analysis_route": "deterministic",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--tracelens-root" in cmd
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_xdit_explicit_route_overrides_bypass(session_dir, monkeypatch):
+    """An explicit route wins over the xDiT bypass default (e.g. forcing the
+    TraceLens deterministic route)."""
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "orchestrator_mode": "deterministic", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "xdit",
+            "analysis_route": "deterministic",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    cmd = captured["cmd"]
+    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert "--analysis-route" in cmd and "deterministic" in cmd
 
 
 @pytest.mark.asyncio
@@ -1639,7 +1869,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
     session_dir,
     monkeypatch,
 ):
-    """Issue #667: without an explicit ``top_k`` the handler must NOT pass
+    """Without an explicit ``top_k`` the handler must NOT pass
     ``--top-k`` so tracelens_analysis.py applies its own large-pool default
     (candidate-build cap decoupled from the dispatch-side budget)."""
     fake_trace = session_dir / "fake_trace_dir"
@@ -1668,7 +1898,7 @@ async def test_trace_analyze_handler_forwards_explicit_top_k(
     session_dir,
     monkeypatch,
 ):
-    """Issue #667: an explicit ``top_k`` request param is still forwarded to
+    """An explicit ``top_k`` request param is still forwarded to
     the tool as ``--top-k <n>`` (operator/LLM override path)."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2139,7 +2369,7 @@ async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, mon
     assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
-# T4 — TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
+# TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
 
 
 @pytest.mark.asyncio
@@ -2236,7 +2466,7 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
     assert res["trace_health_warnings"] == []
 
 
-# T5 — trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
+# trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
 
 
 def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
@@ -2499,15 +2729,15 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
-    # Step 1: handler boundary carries the warning.
+    # Handler boundary carries the warning.
     assert res["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
-    # Step 2: SharedState persists it.
+    # SharedState persists it.
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze({"trace_input": str(session_dir)}, res)
     assert state.last_trace_analyze["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
-    # Step 3: prompt rendering surfaces it.
+    # Prompt rendering surfaces it.
     rendered = state._format_last_trace_analyze()
     assert "high_gpu_idle_pct" in rendered
     assert "42.0%" in rendered
@@ -2727,7 +2957,7 @@ def test_handlers_dispatch_table():
     assert not krh.has_handler("totally_unknown_kind")
 
 
-# PR-B §1: _batch_kernel_candidates collapses task_group members
+# _batch_kernel_candidates collapses task_group members.
 def _write_candidates_json(tmp_path, payload):
     p = tmp_path / "kernel_candidates.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
@@ -2736,7 +2966,7 @@ def _write_candidates_json(tmp_path, payload):
 
 def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
     """Two reusable kernels in the same task_group dispatch as ONE candidate (the primary), with the full group attached."""
-    # PR-I: rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
+    # Rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2797,7 +3027,7 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
 
 def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
     """When the group's primary_kernel_id is non-reusable, dispatch falls back to the first reusable member instead of dropping the group."""
-    # PR-I: rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
+    # Rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2841,7 +3071,7 @@ def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_pat
 
 def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
     """With no task_groups[] (legacy runs), the candidate list matches pre-PR-B behaviour."""
-    # PR-I: legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001 (orthogonal to PR-I).
+    # Legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2966,7 +3196,9 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             await c.stop()
 
 
-# PR-X: batch dispatch enablers — _DEFAULT_KERNEL_BATCH_PARALLEL sized for a full node, and Coordinator force-injects candidates_path so the batch path fires deterministically (LLM values still win).
+# Batch dispatch enablers: _DEFAULT_KERNEL_BATCH_PARALLEL is sized for a full
+# node, and Coordinator force-injects candidates_path so the batch path fires
+# deterministically (LLM values still win).
 def test_default_kernel_batch_parallel_matches_full_node():
     """Default fanout is sized for a single MI300X / MI355X node (8 GPU)
     so a typical ``run_optimization`` batch (TraceLens emits 3-8 reusable
@@ -3035,7 +3267,8 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
             await c.stop()
 
 
-# PR-B: multi-KEEP integrate queue + streaming batch record — streaming record_partial callback, batch_mode dedup, and base_tput auto-injection on integrate.
+# Multi-KEEP integrate queue + streaming batch record: streaming record_partial
+# callback, batch_mode dedup, and base_tput auto-injection on integrate.
 @pytest.mark.asyncio
 async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     session_dir,
@@ -3082,7 +3315,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
         await krh._run_optimization_batch(
             payload={
                 "candidates_path": "/dummy",
-                "backend_order": "geak,claude,codex",
+                "backend_order": "geak_v3,claude,codex",
                 "max_parallel": 3,
                 "parallel_backends": False,
             },
@@ -3101,29 +3334,17 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     session_dir,
 ):
-    """PR-F bug repro: the GEAK→Claude→Codex ladder used to pick the
-    backend with the highest ``micro_speedup``, ignoring whether that
-    attempt was a real KEEP or just a NEEDS_REVIEW with a paper claim.
+    """The backend ladder must prefer a real KEEP over a higher-speed NEEDS_REVIEW.
 
-    Qwen3-30B-A3B-Base session 20260523T035235Z k004 trace:
-      * GEAK         micro=1.30  decision=NEEDS_REVIEW (correctness missing)
-      * Claude       micro=??    decision=??
-      * Codex        micro=1.17  decision=KEEP (correctness PASS)
-
-    Before PR-F: best=GEAK (1.30 > 1.17), KEEP signal silently
-    discarded, integrate gate never fires, k004 patch ends up in
-    rejected with attempts=1 and the actual production-quality 1.17x
-    KEEP is wasted.
-
-    Fix: ladder must prefer KEEP over non-KEEP regardless of micro.
-    Mirror the batch handler's tuple key.
+    A non-KEEP attempt with the highest micro_speedup must not mask a lower-speed
+    KEEP that can safely integrate. Mirror the batch handler's tuple key.
     """
     calls: list[str] = []
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3131,7 +3352,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
                 "verification": {
                     "micro_speedup": 1.30,
                     "correctness_passed": False,
-                    "best_artifact_path": "/tmp/geak.py",
+                    "best_artifact_path": "/tmp/geak_v3.py",
                 },
             }
         if backend == "claude":
@@ -3165,13 +3386,13 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     }
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             candidate,
             session_dir=session_dir,
         )
 
     # Ladder walks past GEAK NEEDS_REVIEW + Claude REVERT, then breaks on Codex KEEP.
-    assert calls == ["geak", "claude", "codex"], calls
+    assert calls == ["geak_v3", "claude", "codex"], calls
     assert (best.get("proposal") or {}).get("decision") == "KEEP", best
     assert (best.get("verification") or {}).get("micro_speedup") == 1.17
     assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/codex.py"
@@ -3185,7 +3406,7 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3193,19 +3414,19 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
                 "verification": {
                     "micro_speedup": 1.50,
                     "correctness_passed": True,
-                    "best_artifact_path": "/tmp/geak.py",
+                    "best_artifact_path": "/tmp/geak_v3.py",
                 },
             }
         raise AssertionError(f"ladder must NOT run {backend!r} after GEAK KEEP")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
 
-    assert calls == ["geak"]
+    assert calls == ["geak_v3"]
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.50
 
@@ -3218,12 +3439,12 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak_v3.py"},
             }
         if backend == "claude":
             return {
@@ -3243,7 +3464,7 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
@@ -3264,7 +3485,7 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3272,7 +3493,7 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
                 "verification": {
                     "micro_speedup": 1.20,
                     "correctness_passed": True,
-                    "best_artifact_path": "/tmp/geak.py",
+                    "best_artifact_path": "/tmp/geak_v3.py",
                 },
             }
         if backend == "claude":
@@ -3290,21 +3511,21 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
 
     # GEAK KEEP no longer short-circuits: claude (OOB) must have run too.
-    assert "geak" in calls and "claude" in calls, calls
-    # Higher micro wins (claude 1.50 > geak 1.20).
+    assert "geak_v3" in calls and "claude" in calls, calls
+    # Higher micro wins (claude 1.50 > geak_v3 1.20).
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.50
     assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/claude.py"
     # Attempt ledger records both ladders.
     logged = {a["backend"] for a in best["backend_fallback_attempts"]}
-    assert "geak" in logged and "claude" in logged, logged
+    assert "geak_v3" in logged and "claude" in logged, logged
 
 
 @pytest.mark.asyncio
@@ -3314,12 +3535,12 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.60, "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.60, "best_artifact_path": "/tmp/geak_v3.py"},
             }
         if backend == "claude":
             return {
@@ -3339,14 +3560,14 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
 
     assert (best.get("verification") or {}).get("micro_speedup") == 1.60
-    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak.py"
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak_v3.py"
 
 
 @pytest.mark.asyncio
@@ -3359,12 +3580,12 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
-        if backend == "geak":
+        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak_v3.py"},
             }
         if backend == "claude":
             return {
@@ -3384,16 +3605,16 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
 
-    # OOB group walked claude -> codex; geak raced alongside exactly once.
-    assert calls.count("geak") == 1
+    # OOB group walked claude -> codex; geak_v3 raced alongside exactly once.
+    assert calls.count("geak_v3") == 1
     assert "claude" in calls and "codex" in calls, calls
-    # codex KEEP (1.45) beats geak NEEDS_REVIEW (1.30).
+    # codex KEEP (1.45) beats geak_v3 NEEDS_REVIEW (1.30).
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.45
     assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/codex.py"
@@ -3453,7 +3674,7 @@ async def test_backend_sequence_forge_keep_short_circuits(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge,geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "forge,geak_v3,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
@@ -3494,7 +3715,7 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
     monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
 
     out = await krh._run_optimization_batch(
-        {"candidates_path": "/dummy", "backend_order": "forge,geak,claude,codex", "max_parallel": 8},
+        {"candidates_path": "/dummy", "backend_order": "forge,geak_v3,claude,codex", "max_parallel": 8},
         [
             {"kernel_id": "k001", "source_file": "/p/a.py"},
             {"kernel_id": "k002", "source_file": "/p/b.py"},
@@ -3747,7 +3968,7 @@ def test_batch_candidates_filters_rejected_kernel_ids(
     session_dir,
     _candidates_factory,
 ):
-    """PR-C: a kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
+    """A kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
@@ -3772,7 +3993,7 @@ def test_batch_candidates_filters_kernels_with_recorded_attempts(
     session_dir,
     _candidates_factory,
 ):
-    """PR-C max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
+    """max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     cpath = _candidates_factory(
@@ -3875,7 +4096,7 @@ def test_batch_candidates_skips_in_flight_kernels(
                 "state": "running",
                 "current_step": "run_backends",
                 "pid": 123456,
-                "last_lines": ["kernel_id=k004", "selected_backends=geak"],
+                "last_lines": ["kernel_id=k004", "selected_backends=geak_v3"],
             }
         )
     )

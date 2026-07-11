@@ -80,6 +80,7 @@ def _signal_group(pgid: int, sig: int) -> None:
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
+        # Group already gone; nothing to signal.
         pass
     except OSError as exc:
         log.warning(
@@ -121,6 +122,7 @@ def kill_my_spawned_server(
             try:
                 proc.kill()
             except OSError:
+                # Process already exited; nothing to signal.
                 pass
         return
 
@@ -137,6 +139,7 @@ def kill_my_spawned_server(
         try:
             proc.terminate()
         except OSError:
+            # Process already exited; nothing to terminate.
             pass
         return
 
@@ -175,6 +178,7 @@ def kill_my_spawned_server(
             proc.pid,
         )
     except OSError:
+        # Child already reaped; nothing to wait on.
         pass
 
 
@@ -482,6 +486,7 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
             if p != path
         )
     except OSError:
+        # Directory listing failed; skip sibling-file discovery.
         pass
     for candidate in candidates:
         try:
@@ -558,12 +563,13 @@ def run_with_session_kill(
     server_log_path: str | None = None,
     server_dead_grace_sec: float | None = None,
     detok_stall_grace_sec: float | None = None,
+    server_already_ready: bool = False,
 ) -> subprocess.CompletedProcess:
     """``subprocess.run``-compatible call that ALSO tears down the entire
     descendant tree on every exit path.
 
     Unlike ``subprocess.run`` (which discards the Popen handle and can't reach
-    leaked grandchildren — the bugs.md §B server leak), this launches via
+    leaked grandchildren — the known server leak), this launches via
     ``Popen(start_new_session=True)`` and reaps the tree in a ``finally:``.
     Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
     ``subprocess.run``.
@@ -616,6 +622,14 @@ def run_with_session_kill(
             defaults to the ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` env
             value or ``_DETOK_STALL_GRACE_SEC_DEFAULT`` (1800s). ``≤ 0``
             disables the stall gate.
+        server_already_ready: Set ``True`` for warm *reuse* rounds (client-only
+            runs that re-attach to a server booted by a prior subprocess). Such
+            a process never boots a server, so it never writes a ready marker to
+            its own ``server.log`` — the from-ready ``soft_deadline_sec`` clock
+            would never arm, leaving a pathological post-sample server drain
+            bounded only by the hard ``timeout``. When ``True`` the soft-deadline
+            clock measures from process spawn instead (the reused server is
+            already serving; there is no cold-boot phase to exclude).
 
     Returns:
         A ``CompletedProcess`` carrying the child's returncode (or one of the
@@ -668,6 +682,7 @@ def run_with_session_kill(
                 server_dead_grace_sec=server_dead_grace_sec,
                 detok_stall_grace_sec=detok_stall_grace_sec,
                 capture=capture,
+                server_already_ready=server_already_ready,
             )
         except subprocess.TimeoutExpired:
             # Reap before re-raising so the caller doesn't see a running tree.
@@ -827,6 +842,7 @@ def _communicate_with_soft_deadline(
     server_dead_grace_sec: float | None = None,
     detok_stall_grace_sec: float | None = None,
     capture: _StreamCapture | None = None,
+    server_already_ready: bool = False,
 ) -> tuple[str | bytes, str | bytes]:
     """``proc.communicate`` shim enforcing the soft deadline + server watchdog.
 
@@ -836,11 +852,12 @@ def _communicate_with_soft_deadline(
 
     * ``soft_deadline_sec`` — raise :class:`_SoftDeadlineExceeded` once passed.
       When a ``server_log_path`` is available (and
-      ``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY`` is not disabled) the
-      clock is measured from the server-ready marker (the "pure hot client"
-      phase) rather than process spawn, so pre-ready boot / weight load /
-      first-request recompile is excluded; without a ``server.log`` it is the
-      legacy from-spawn elapsed;
+      ``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY`` is not disabled) AND
+      ``server_already_ready`` is ``False`` the clock is measured from the
+      server-ready marker (the "pure hot client" phase) rather than process
+      spawn, so pre-ready boot / weight load / first-request recompile is
+      excluded; without a ``server.log`` (or when ``server_already_ready`` is
+      ``True``) it falls back to the legacy from-spawn elapsed.
     * ``server_log_path`` death watchdog — once a terminal init marker
       (:data:`_SERVER_DEAD_MARKERS`) is observed AND it persists for
       ``server_dead_grace_sec`` without the child exiting on its own, raise
@@ -867,6 +884,10 @@ def _communicate_with_soft_deadline(
             disables the stall gate.
         capture: Optional stream capture whose threads are joined to assemble
             the returned output.
+        server_already_ready: When ``True`` the from-ready soft-deadline anchor
+            is bypassed and the clock runs from process spawn. Use for warm
+            reuse rounds (client-only) that never boot a server and therefore
+            never write a fresh ready marker to their ``server.log``.
 
     Returns:
         A ``(stdout, stderr)`` tuple (``str`` or ``bytes`` per the capture
@@ -904,9 +925,16 @@ def _communicate_with_soft_deadline(
     # ``baseline_warm_runtime_sec`` (itself a client-only measure round). Without
     # a ``server.log`` it falls back to the legacy from-spawn clock. Opt out with
     # ``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0``.
+    #
+    # Exception: when ``server_already_ready`` is True this is a warm reuse round
+    # (client-only) that never boots a server and therefore never writes a ready
+    # marker to its own server.log. The from-ready clock would never arm, leaving
+    # a pathological post-sample drain bounded only by the hard timeout. Force the
+    # from-spawn path so the configured overtime soft-kill fires normally.
     soft_from_ready = (
         soft_active
         and bool(server_log_path)
+        and not server_already_ready
         and os.environ.get(
             "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "1"
         ).strip().lower()

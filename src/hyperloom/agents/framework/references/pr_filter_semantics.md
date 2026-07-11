@@ -2,8 +2,8 @@
 
 > Technical reference for the 9-dimension filter applied between
 > Stage 2 (`enrich_candidate`) and Stage 4 (`isolate_and_run`).
-> Distilled from `framework_agent.explorer._passes_filter` and
-> `framework_agent.models.PrFilter`; this file is the authoritative
+> Distilled from `hyperloom.agents.framework.explorer._passes_filter` and
+> `hyperloom.agents.framework.models.PrFilter`; this file is the authoritative
 > contract.
 
 ## Wire shape

@@ -29,11 +29,8 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 
-# Critic-agent skill root resolution. Env wins; else the in-tree
-# ``src/hyperloom/agents/critic/`` package (tree-reform.MD P2.5: critic-agent
-# was promoted from the sibling ``critic-agent/`` checkout into the
-# ``hyperloom`` src-layout namespace; the CLI module is now package-qualified
-# as ``hyperloom.agents.critic.runtime.cli`` instead of bare ``runtime.cli``).
+# Critic-agent skill root resolution. Env wins; else use the in-tree
+# ``src/hyperloom/agents/critic/`` package and its package-qualified CLI module.
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 def _resolve_critic_agent_root() -> Path | None:
@@ -63,13 +60,21 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             non-zero.
     """
     cmd = [sys.executable, "-m", "hyperloom.agents.critic.runtime.cli", "--help"]
+    # The probe cost is dominated by Python import time, which can spike on a
+    # loaded / shared pod (heavy transitive imports over a busy filesystem).
+    # Keep a safe default but allow operators to widen it via env so a slow-but-
+    # healthy runtime is not misdiagnosed as broken.
+    try:
+        _probe_timeout = float(os.environ.get("CRITIC_AGENT_PROBE_TIMEOUT_SEC", "90"))
+    except (TypeError, ValueError):
+        _probe_timeout = 90.0
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_probe_timeout,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
@@ -92,10 +97,7 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         sys.exit(2)
 
 # Robustness-agent runtime location resolution; mirrors critic-agent helpers
-# above. tree-reform.MD P2.5: robustness-agent was promoted from a sibling
-# ``robustness-agent/`` checkout into the in-tree
-# ``src/hyperloom/agents/robustness/`` package (module ``robustness_agent``
-# -> package-qualified ``hyperloom.agents.robustness``).
+# above and uses the in-tree ``src/hyperloom/agents/robustness/`` package.
 _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 def _resolve_robustness_agent_root() -> Path | None:
@@ -128,13 +130,20 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         SystemExit: With code 2 when the runtime cannot start or exits non-zero.
     """
     cmd = [sys.executable, "-m", "hyperloom.agents.robustness.runtime.cli", "--help"]
+    # See _validate_critic_agent_runtime: probe cost is import-bound and can
+    # spike on a loaded / shared pod. Widen the default and allow an env
+    # override so a slow-but-healthy runtime is not misdiagnosed as broken.
+    try:
+        _probe_timeout = float(os.environ.get("ROBUSTNESS_AGENT_PROBE_TIMEOUT_SEC", "90"))
+    except (TypeError, ValueError):
+        _probe_timeout = 90.0
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_probe_timeout,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
@@ -155,22 +164,6 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-
-# Legacy local auth-proxy endpoint. The component was removed; any leftover
-# URL pinned at this host:port is stale and must be force-rewritten to the
-# upstream gateway even when an operator value is otherwise preserved (#521).
-_STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
-
-def _is_stale_proxy_url(url: str | None) -> bool:
-    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``).
-
-    Args:
-        url (str | None): The URL to test.
-
-    Returns:
-        bool: ``True`` when the URL pins the stale legacy proxy host:port.
-    """
-    return _STALE_PROXY_HOSTPORT in str(url or "")
 
 # Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
 # written by kernel-agent/scripts/install.sh, but tolerant of any indent).
@@ -244,21 +237,36 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
         path = path[: -len("/v1")]
     return urlunparse(parsed._replace(path=path))
 
+
+def _is_stale_proxy_url(value: str | None) -> bool:
+    """Return true for the retired local llm-proxy endpoint.
+
+    The old installer wrote ``127.0.0.1:4002`` as a local proxy default. Modern
+    operator tunnels may also be loopback URLs, so only that legacy port is
+    treated as stale and force-rewritten by preflight.
+    """
+    if not value:
+        return False
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(value).strip())
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return False
+    try:
+        return parsed.port == 4002
+    except ValueError:
+        return False
+
+
 def _resolve_llm_endpoints() -> tuple[str, str]:
     """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
 
     Each side keeps an explicit operator value; a missing side falls back to
     the other so the legacy single-gateway setup (only ``OPENAI_BASE_URL``)
-    keeps working and both Claude and Codex still reach an endpoint. Known
-    stale auth-proxy leftovers (127.0.0.1:4002) are treated as unset so they
-    are re-derived rather than preserved.
+    keeps working and both Claude and Codex still reach an endpoint.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-    if _is_stale_proxy_url(openai_url):
-        openai_url = ""
-    if _is_stale_proxy_url(anthropic_url):
-        anthropic_url = ""
 
     if anthropic_url and openai_url:
         # Both explicitly configured: respect each as-is (true dual entry).
@@ -272,7 +280,7 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
     return "", ""
 
 def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway.
 
     Args:
         primary_api_key (str): The Claude CLI primary API key to write; blank
@@ -348,7 +356,7 @@ def _validate_credentials() -> None:
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
         "Configure ONE of:\n"
         "  1. Single gateway (AMD / LiteLLM-style):\n"
-        "       export SAFE_API_KEY=sk-xxxxx\n"
+        "       export SAFE_API_KEY=ak-your-safe-apikey\n"
         "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
         "  2. Split entrypoints (native Anthropic + OpenAI):\n"
         "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"

@@ -30,32 +30,32 @@ except ImportError:  # Python 3.10 fallback — mirror 3.11 StrEnum semantics
 
 
 class OutcomeId(StrEnum):
-    # §A.1 Bootstrap / environment
+    # Bootstrap / environment
     quark_root_missing = "quark_root_missing"  # #1   Auto-fail
     quark_skill_unavailable = "quark_skill_unavailable"  # #7   Auto-fail
     intent_parse_failed = "intent_parse_failed"  # #8   Auto-recover
     workspace_unwritable = "workspace_unwritable"  # #23  Auto-fail
 
-    # §A.2 Intake (Quark Step 1)
+    # Intake artifacts
     model_path_unreachable = "model_path_unreachable"  # #9   Auto-fail
     analysis_artifact_invalid_or_missing = "analysis_artifact_invalid_or_missing"  # #10  Auto-recover
 
-    # §A.3 Plan (Quark Step 2)
+    # Planning artifacts
     checkpoint_aborted = "checkpoint_aborted"  # #2   Ask
     plan_artifact_invalid_or_missing = "plan_artifact_invalid_or_missing"  # #11  Auto-recover
 
-    # §A.4 Manifest (Quark Step 3)
+    # Manifest artifacts
     manifest_artifact_invalid_or_missing = "manifest_artifact_invalid_or_missing"  # #12  Auto-recover
 
-    # §A.5 Execute (Quark Step 4a)
+    # Execution outcomes
     exec_oom = "exec_oom"  # #3   Ask
     exec_model_load_failed = "exec_model_load_failed"  # #4   Auto-fail
     exec_calibration_data_missing = "exec_calibration_data_missing"  # #5   Auto-fail
 
-    # §A.6 Export (Quark Step 4b)
+    # Export outcomes
     export_crashed = "export_crashed"  # #6   Ask
 
-    # §A.7 Validate (validator workflow)
+    # Validation outcomes
     validator_self_test_failed = "validator_self_test_failed"  # #13  Auto-fail
     must_have_config_missing_or_invalid = "must_have_config_missing_or_invalid"  # #14  Auto-recover
     must_have_tokenizer_missing = "must_have_tokenizer_missing"  # #15  Auto-recover
@@ -68,25 +68,25 @@ class OutcomeId(StrEnum):
     fuzzy_check_failed = "fuzzy_check_failed"  # #26  Ask
     must_validate_skipped = "must_validate_skipped"  # #27  Auto-recover
 
-    # §A.8 Eval
+    # Eval outcomes
     eval_gap_exceeded = "eval_gap_exceeded"  # #21  Ask
     eval_env_unavailable = "eval_env_unavailable"  # #22  Auto-recover
     quantized_load_failed = "quantized_load_failed"  # #28  Auto-fail
     eval_oom = "eval_oom"  # #29  Auto-recover
 
-    # §A.9 SDK / catch-all
+    # SDK / catch-all
     sdk_runtime_error = "sdk_runtime_error"  # #24  Auto-fail
     unclassified_failure = "unclassified_failure"  # #30  Auto-recover* (runtime-classified)
 
     # Narrative / derived tags (not in the 30-row table):
     #   eval_gap_accepted — success with gap-within-threshold, worth surfacing
     #   upstream_change_required — #30 diagnosed as "needs quark_root edit";
-    #                              promoted to Auto-fail per §A bottom note
+    #                              promoted to Auto-fail by the retry policy
     eval_gap_accepted = "eval_gap_accepted"
     upstream_change_required = "upstream_change_required"
 
 
-# Partition of the 30 IDs from Appendix §A (rows #1–#29 explicit + #30 catch-all).
+# Partition of the outcome IDs into retry classes.
 AUTO_RECOVER: frozenset[OutcomeId] = frozenset(
     {
         OutcomeId.intent_parse_failed,  # #8
@@ -141,7 +141,7 @@ UNCLASSIFIED_FAILURE: OutcomeId = OutcomeId.unclassified_failure  # #30 sentinel
 SUCCESS_TAGS: frozenset[OutcomeId | None] = frozenset({None, OutcomeId.eval_gap_accepted})
 
 
-# Ask-class IDs that participate in Python-driven retry (§A bottom of table).
+# Ask-class IDs that participate in Python-driven retry.
 # These are the only outcomes that increment ``requantize_attempts.txt``.
 ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
     {
@@ -155,7 +155,7 @@ ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
 
 # Auto-recover outcomes that should still demote to "failed" (not "partial")
 # when the underlying MUST-have artifact is still missing on the final
-# attempt. SKILL.md's §6 fix is `cp` from source; if those files aren't on
+# attempt. The expected fix is `cp` from source; if those files aren't on
 # disk by the end, the model isn't usable even if classification is lenient.
 # Consumed by ``_assessment.derive_status``.
 MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT: frozenset[OutcomeId] = frozenset(

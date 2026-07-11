@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 KB_design §3.5 §5 / M5 §5 step 5 / KB_gaps/Gap-11 — Critic per-variant ``verdict_map`` tests."""
+"""Critic per-variant ``verdict_map`` tests."""
 
 from __future__ import annotations
 
@@ -198,7 +198,7 @@ def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
 
 
 def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
-    """REVIEW_VERDICTS must cover the five canonical strings the Critic prompt documents in §7."""
+    """REVIEW_VERDICTS must cover the five canonical strings the Critic prompt documents."""
     for v in ("approve", "reject", "redirect", "advise", "needs_review"):
         assert v in REVIEW_VERDICTS
 
@@ -305,7 +305,7 @@ def _seed_explore_proposal(
 # routing
 @pytest.mark.asyncio
 async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
-    """Non-grid actions keep the v0.6 single-verdict path: approve materialises the whole proposal."""
+    """Non-grid actions keep the single-verdict path: approve materialises the whole proposal."""
     pending = PendingProposal(
         proposal_msg_id="msg-kernel",
         from_agent="orchestration",
@@ -511,7 +511,7 @@ def test_critic_prompt_does_not_advertise_per_variant_verdict_map():
 # 5. _materialize_approved_proposal — filter semantics (unit)
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
-    """Pin the ``approved_variant_names`` filter contract independently (Gap-11 correctness)."""
+    """Pin the ``approved_variant_names`` filter contract independently."""
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = _BareSharedState()
@@ -566,7 +566,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
-    """Legacy v0.6 path: ``approved_variant_names=None`` leaves the grid untouched."""
+    """``approved_variant_names=None`` leaves the grid untouched."""
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
@@ -801,7 +801,7 @@ class TestCriticPromptBuilder:
         assert build_critic_prompt(**kwargs) == build_critic_prompt(**kwargs)
 
     def test_full_prompt_contains_all_registered_actions(self, registry):
-        """Regression guard: every action in _meta must appear in §3."""
+        """Regression guard: every action in _meta must appear in the known-actions section."""
         from hyperloom.orchestrator.prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
@@ -932,7 +932,7 @@ class TestCriticRobustnessRenderer:
         assert "Showing first" in out.markdown_block
 
 
-# N38 — per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
+# per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
 class TestN38ActionVerdictClass:
     """N38 (May 2026): per-action ``verdict_class`` metadata so new actions don't reintroduce N33/N35/N37 deadlocks."""
 

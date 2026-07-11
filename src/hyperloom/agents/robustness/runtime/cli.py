@@ -39,7 +39,7 @@ hosts can audit what each tick did without rerunning the reactor::
         "parse_warnings": ["..."]
     }
 
-Exit codes (mirror critic-agent contract §6):
+Exit codes (mirror critic-agent contract):
     0 — logical success (zero or more intents emitted)
     2 — adapter / configuration bug (caller should treat as fatal)
 """
@@ -77,10 +77,9 @@ COORDINATOR_INBOX = "coordinator_inbox"
 REQUEST_KINDS: frozenset[str] = frozenset({COORDINATOR_INBOX})
 
 # RuntimeAdapterError / _read_json / _emit_json are re-exported from
-# hyperloom.common.subprocess_bridge (tree-reform.MD §7) above; kept as
-# module-level bindings so any `setattr(cli_module, "_read_json"/"_emit_json"/
-# "RuntimeAdapterError", fake)`-style monkeypatch still resolves through this
-# module's own __dict__ for the callers below.
+# hyperloom.common.subprocess_bridge above; kept as module-level bindings so
+# any `setattr(cli_module, "_read_json"/"_emit_json"/"RuntimeAdapterError",
+# fake)`-style monkeypatch still resolves through this module's own __dict__.
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
@@ -173,6 +172,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         try:
             config.nodes = max(1, int(options["nodes"]))
         except (TypeError, ValueError):
+            # Invalid --nodes value; keep the existing default.
             pass
     # Opt out of the default inference-server health probe (heartbeat tests /
     # sandboxes auditing health out-of-band) without reconfiguring targets.
