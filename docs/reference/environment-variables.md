@@ -107,7 +107,7 @@ The following variables control the kernel optimization backend ladder.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `KERNEL_OPT_BACKEND_ORDER`     | Unset                         | Comma-separated override for the kernel-opt backend. Bare-metal defaults to `geak` (whole-pipeline GEAK). Use `forge` to opt into the forge backend; `geak_v3` remains available for per-kernel GEAK flows.                    |
+| `KERNEL_OPT_BACKEND_ORDER`     | Unset                         | Comma-separated override for the kernel-opt backend. Bare-metal defaults to `geak` (whole-pipeline GEAK). Use `forge` to opt into the forge backend.                    |
 | `KERNEL_OPT_MAX_PARALLEL`      | `8` (GPU-adaptive cap)        | Max parallel kernel-opt attempts per request (per-kernel race fan-out). The runtime caps this by visible GPUs and per-attempt GPU reservation when it can detect them.                                                                                                                            |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
 

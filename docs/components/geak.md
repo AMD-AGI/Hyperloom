@@ -130,9 +130,8 @@ For the full CLI reference and examples, see the
 
 GEAK is wired in as a kernel-rewrite backend of the kernel agent:
 
-- The orchestrator can run whole-pipeline GEAK with
-  `KERNEL_OPT_BACKEND_ORDER=geak`. The native per-kernel ladder uses
-  `forge,geak_v3` when that flow is selected.
+- The orchestrator runs whole-pipeline GEAK with
+  `KERNEL_OPT_BACKEND_ORDER=geak` (the bare-metal default).
 - `src/hyperloom/agents/kernel/tools/kernel_optimization.py` builds the GEAK
   task prompt, mapping the candidate's `source_type` to GEAK's `kernel_type`
   vocabulary and rendering the budget/shape metadata into the prompt. It does

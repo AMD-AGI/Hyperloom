@@ -166,7 +166,7 @@ def _build_fixture(sd: Path) -> None:
                         "arithmetic_intensity": 4.0,
                         "source_file": "/path/to/rmsnorm.py",
                         "reusable_native_kernel": True,
-                        "recommended_backends": ["forge", "geak_v3"],
+                        "recommended_backends": ["geak"],
                         "recommended_actions": ["run_optimization"],
                     },
                 ],
