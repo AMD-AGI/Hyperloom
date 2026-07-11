@@ -194,6 +194,13 @@ class KernelPhase(PhaseHandler):
         )
         # Capture explore + GEMM-tuning gains before inline GEAK targets the bottleneck.
         await self._maybe_reprofile_for_kernel()
+        # Autonomous kernel fusion (forge-fusion) sits between GEMM tuning and generic
+        # kernel-opt: it authors serving-validated fused kernels from the decode trace
+        # and hands a patch + env flags to integrate. Gated + non-blocking — a fusion
+        # failure just falls through to the generic kernel-opt batch below.
+        if self._fusion_required_before_kernel_opt():
+            await self._run_forge_fusion_after_gemm()
+            await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
@@ -1840,6 +1847,236 @@ class KernelPhase(PhaseHandler):
         if isinstance(result, dict) and not result.get("batch_mode"):
             self.shared_state.record_kernel_opt(result)
         self.shared_state.save(self.session_dir)
+
+    def _fusion_required_before_kernel_opt(self) -> bool:
+        """Gate the forge-fusion step in KERNEL entry.
+
+        Runs only when: not disabled by ``HYPERLOOM_SKIP_FUSION``, the framework is
+        fusion-eligible (sglang/vllm), a decode trace exists to discover from, and no
+        fusion already succeeded this session (idempotent re-entry).
+        """
+        import os
+
+        if str(os.environ.get("HYPERLOOM_SKIP_FUSION", "")).strip().lower() in ("1", "true", "yes", "on"):
+            return False
+        framework = str(getattr(self.shared_state, "framework", "") or "sglang").strip().lower()
+        if framework not in ("sglang", "vllm", "vllm-aiter"):
+            return False
+        trace = str(getattr(self.shared_state, "last_profile_trace", "") or "").strip()
+        if not trace:
+            log.info("KERNEL entry: skip forge-fusion (no decode trace yet)")
+            return False
+        last = getattr(self.shared_state, "last_fusion", None)
+        if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
+            return False
+        return True
+
+    async def _run_forge_fusion_after_gemm(self) -> None:
+        """Run autonomous kernel fusion (forge-fusion) after GEMM tuning."""
+        log.info("KERNEL entry: running forge-fusion (autonomous kernel fusion) after GEMM")
+        try:
+            from ..kernel.request_handlers import run_fusion_handler
+
+            result = await run_fusion_handler(
+                {"task_id": "kernel_entry_fusion", "reason": "kernel_entry_auto"},
+                session_dir=self.session_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry forge-fusion failed")
+            result = {
+                "status": "failed", "decision": "REVERT", "engine": "forge_fusion",
+                "error_class": exc.__class__.__name__, "error": repr(exc),
+            }
+        await self._handle_fusion_result(result)
+
+    async def _handle_fusion_result(self, result: dict) -> None:
+        """Record the forge-fusion result + surface it on the bus.
+
+        Stage 4 extends this to hand a KEPT fusion (source patch + env flags) to
+        ``integrate_handler`` for the real e2e re-baseline / adopt decision.
+        """
+        status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        try:
+            self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
+            pass
+        try:
+            await self.bus.append_and_seq(
+                Message.new(
+                    "kernel_agent", "orchestration", "response",
+                    {
+                        "in_reply_to": "", "kind": "run_fusion_done", "status": status,
+                        "result": result, "source": "kernel_entry_auto",
+                    },
+                    priority=1,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to post run_fusion_done bus message")
+        # Stage 4: a KEPT fusion (kernel-parity + serving-smoke validated) is handed
+        # to integrate for the real e2e re-baseline + adopt/revert decision.
+        if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
+            await self._integrate_fusion(result)
+
+    async def _integrate_fusion(self, result: dict) -> None:
+        """Hand a KEPT forge-fusion (source patch + env flags) to integrate for e2e adopt.
+
+        forge-fusion is NOT env-only (``source='forge_fusion'``), so integrate runs the
+        patch-apply path: it applies the fused-kernel source patch, sets the fusion env
+        flags on the re-baseline server, and KEEPs only when measured e2e throughput
+        clears the threshold. ``base_tput`` is filled from state by integrate_handler.
+        """
+        import os
+
+        from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
+
+        patch = str(result.get("patch") or "").strip()
+        target_file = str(result.get("source_file") or result.get("target_file") or "").strip()
+        kernel_repo = str(result.get("kernel_repo") or "").strip()
+        env_flags = result.get("env_flags") or {}
+        current_envs = {}
+        if isinstance(self.shared_state.current_best, dict):
+            current_envs = dict(self.shared_state.current_best.get("extra_envs") or {})
+        merged_envs = {**current_envs, **{str(k): str(v) for k, v in env_flags.items()}}
+        if not patch or not target_file:
+            log.info("KERNEL entry: fusion KEPT but missing patch/target_file; skip integrate")
+            return
+        integ = None
+        snapshot_dir = str(result.get("snapshot_dir") or "").strip()
+        if not snapshot_dir and patch.endswith(".patch") and kernel_repo:
+            try:
+                snapshot_dir = await asyncio.to_thread(
+                    materialize_unified_patch_snapshot,
+                    patch_path=patch,
+                    repo_root=kernel_repo,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("KERNEL entry fusion snapshot materialization failed")
+                integ = {
+                    "status": "failed", "decision": "REVERT",
+                    "error_class": exc.__class__.__name__, "error": repr(exc),
+                    "patch_path": patch, "target_file": target_file,
+                }
+        if integ is None:
+            try:
+                integ = await integrate_handler(
+                    {
+                        "task_id": "fusion_e2e",
+                        "kernel_id": "forge_fusion",
+                        "source": "forge_fusion",
+                        "patch_path": patch,
+                        "target_file": target_file,
+                        "kernel_repo": kernel_repo,
+                        "snapshot_dir": snapshot_dir,
+                        "extra_envs": merged_envs,
+                        "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
+                    },
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("KERNEL entry fusion integrate failed")
+                integ = {"status": "failed", "decision": "REVERT",
+                         "error_class": exc.__class__.__name__, "error": repr(exc)}
+        decision = str(integ.get("decision") or "").strip().upper() if isinstance(integ, dict) else "REVERT"
+        gain = integ.get("gain_pct") if isinstance(integ, dict) else None
+        log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
+        self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
+        try:
+            self.shared_state.last_fusion_integrate = integ
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await self.bus.append_and_seq(
+                Message.new(
+                    "kernel_agent", "orchestration", "response",
+                    {
+                        "in_reply_to": "", "kind": "fusion_integrate_done",
+                        "status": integ.get("status", "failed") if isinstance(integ, dict) else "failed",
+                        "decision": decision, "gain_pct": gain, "result": integ,
+                        "source": "kernel_entry_auto",
+                    },
+                    priority=1,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to post fusion_integrate_done bus message")
+
+    def _promote_fusion_integrate_keep(
+        self,
+        fusion_result: dict,
+        integrate_result: dict,
+        *,
+        extra_envs: dict[str, str] | None = None,
+    ) -> None:
+        """Promote a forge-fusion e2e KEEP into the main optimization stack."""
+        if not isinstance(fusion_result, dict) or not isinstance(integrate_result, dict):
+            return
+        if str(integrate_result.get("decision") or "").strip().upper() != "KEEP":
+            return
+        try:
+            new_tput = float(integrate_result.get("new_tput") or 0.0)
+            gain = float(integrate_result.get("gain_pct") or 0.0)
+        except (TypeError, ValueError):
+            return
+        if new_tput <= 0:
+            return
+
+        patch = str(fusion_result.get("patch") or integrate_result.get("patch_path") or "")
+        existing = {
+            str(item.get("patch_path") or "")
+            for item in (self.shared_state.optimization_stack or [])
+            if isinstance(item, dict) and item.get("action") == "fusion"
+        }
+        ts = datetime.now(timezone.utc).isoformat()
+        envs = dict(extra_envs or integrate_result.get("extra_envs") or fusion_result.get("env_flags") or {})
+        extra_args = str(integrate_result.get("extra_server_args") or "")
+        entry = {
+            "action": "fusion",
+            "variant_name": "forge_fusion",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "provenance": "forge_fusion",
+            "source": "kernel_entry_auto",
+            "tput": new_tput,
+            "gain_pct": gain,
+            "workspace": integrate_result.get("workspace"),
+            "patch_path": patch,
+            "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
+            "extra_envs": envs,
+            "extra_server_args": extra_args,
+            "kernel_speedup": fusion_result.get("kernel_speedup"),
+            "best_pattern": fusion_result.get("best_pattern"),
+            "ts": ts,
+        }
+        if patch not in existing:
+            self.shared_state.optimization_stack.append(entry)
+            self.shared_state.append_stack_gain_entry(
+                action="fusion",
+                variant_name="forge_fusion",
+                new_tput=new_tput,
+                extra_server_args=extra_args,
+                ts=ts,
+            )
+        self.shared_state.current_best = {
+            "action": "fusion",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "tput": new_tput,
+            "variant_name": "forge_fusion",
+            "workspace": integrate_result.get("workspace"),
+            "patch_path": patch,
+            "target_file": entry["target_file"],
+            "extra_envs": envs,
+            "extra_server_args": extra_args,
+        }
+        self.shared_state.cumulative_gain = gain
+        self.shared_state.cumulative_gain_validated = gain
+        self.shared_state.cumulative_gain_validated_ts = ts
+        self.shared_state.cumulative_gain_validated_stack_len = len(
+            self.shared_state.optimization_stack or []
+        )
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

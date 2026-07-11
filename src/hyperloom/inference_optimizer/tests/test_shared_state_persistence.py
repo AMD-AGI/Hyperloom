@@ -64,6 +64,8 @@ def test_save_load_round_trip(tmp_path):
         cumulative_gain=12.5,
         pruned_families=["deep_kernel"],
         current_best={"action": "backends", "tput": 2010.0},
+        last_fusion={"status": "complete", "kept": False},
+        last_fusion_integrate={"status": "ok", "decision": "KEEP"},
     )
     s.save(tmp_path)
     s2 = SharedState.load_or_init(tmp_path)
@@ -75,6 +77,8 @@ def test_save_load_round_trip(tmp_path):
     assert s2.cumulative_gain == 12.5
     assert s2.pruned_families == ["deep_kernel"]
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
+    assert s2.last_fusion == {"status": "complete", "kept": False}
+    assert s2.last_fusion_integrate == {"status": "ok", "decision": "KEEP"}
 
 
 def test_profile_osl_round_trip(tmp_path):
