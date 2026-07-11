@@ -54,7 +54,7 @@ def load_env_file(path: Path) -> dict[str, str]:
         env[key.strip()] = value.strip().strip('"').strip("'")
     # SAFE_API_KEY stays the primary source so the single-gateway setup is
     # unchanged; a split deploy (no SAFE_API_KEY) falls back to the per-provider
-    # key. GEAK/OOB speak the OpenAI protocol so they take the OpenAI-side key.
+    # key. GEAK speaks the OpenAI protocol so it takes the OpenAI-side key.
     openai_key = (
         env.get("SAFE_API_KEY")
         or env.get("OPENAI_API_KEY")
@@ -64,7 +64,6 @@ def load_env_file(path: Path) -> dict[str, str]:
     )
     if openai_key:
         env.setdefault("OPENAI_API_KEY", openai_key)
-        env.setdefault("OOB_API_KEY", openai_key)
         env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
@@ -81,7 +80,7 @@ def load_env_file(path: Path) -> dict[str, str]:
     if base_url:
         env.setdefault("OPENAI_BASE_URL", base_url)
         env.setdefault("ANTHROPIC_BASE_URL", base_url)
-        env.setdefault("OOB_BASE_URL", base_url)
+        env.setdefault("GEAK_BASE_URL", base_url)
         env.setdefault("LLM_API_BASE", base_url)
     return env
 

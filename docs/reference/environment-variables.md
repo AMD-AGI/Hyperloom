@@ -68,9 +68,8 @@ The following variables configure the OOB / Ray runtime's LLM endpoint.
 
 | Variable           | Required | Default | Description                                                                                                  |
 |--------------------|----------|---------|--------------------------------------------------------------------------------------------------------------|
-| `OOB_API_KEY`      | No       | Inherits `SAFE_API_KEY` | API key forwarded to the OOB / Ray runtime (preflight, kernel-agent tools).                         |
-| `OOB_BASE_URL`     | No       | Inherits resolved OpenAI-compatible gateway | OOB backend endpoint override.                                                 |
-| `LLM_API_BASE`     | No       | Inherits resolved OpenAI-compatible gateway | Generic LLM endpoint alias for OOB / GEAK-compatible tools.                    |
+| `LLM_GATEWAY_KEY`  | No       | Inherits `SAFE_API_KEY` | Generic LLM gateway key alias for tools that do not use provider-specific env vars directly.        |
+| `LLM_API_BASE`     | No       | Inherits resolved OpenAI-compatible gateway | Generic LLM endpoint alias for GEAK-compatible tools.                           |
 
 ---
 

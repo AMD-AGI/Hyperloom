@@ -170,7 +170,7 @@ test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
 bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
-If you set `GEAK_BASE_URL` or `OOB_BASE_URL` explicitly, confirm the value is
+If you set `GEAK_BASE_URL` or `LLM_API_BASE` explicitly, confirm the value is
 reachable from the worker runtime. Explicit endpoint overrides are preserved by
 design.
 
@@ -239,7 +239,7 @@ ingest it whole on session end.
 2. Re-run `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
 3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
-   gateway. If `GEAK_BASE_URL` or `OOB_BASE_URL` is set, confirm it points at a
+   gateway. If `GEAK_BASE_URL` or `LLM_API_BASE` is set, confirm it points at a
    routable endpoint for the worker runtime.
 
 ### Scenario D: Local KB store corrupted

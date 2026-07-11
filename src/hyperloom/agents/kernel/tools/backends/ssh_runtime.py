@@ -104,13 +104,11 @@ def _env_prologue() -> str:
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
-            "OOB_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
             "LLM_GATEWAY_KEY",
             "ANTHROPIC_BASE_URL",
-            "OOB_BASE_URL",
             "GEAK_BASE_URL",
             "LLM_API_BASE",
         )

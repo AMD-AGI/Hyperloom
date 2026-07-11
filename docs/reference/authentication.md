@@ -163,20 +163,20 @@ LLM base URL and API key are available (normally via the aliases above).
 Set `ROBUSTNESS_LLM_RCA_DISABLED=1` to force-disable it even when
 credentials are present.
 
-### GEAK / OOB endpoint overrides
+### GEAK / generic LLM endpoint overrides
 
 GEAK Ray workers may run in a network namespace that cannot reach the
-main gateway directly. By default `GEAK_BASE_URL` and `OOB_BASE_URL`
+main gateway directly. By default `GEAK_BASE_URL` and `LLM_API_BASE`
 inherit the resolved OpenAI-compatible gateway URL. Set them explicitly
 when you need a host-local reverse tunnel or another routable path:
 
 ```bash
 export GEAK_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
-export OOB_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
+export LLM_API_BASE=https://127.0.0.1:18444/api/v1/llm-proxy/v1
 ```
 
 Preflight preserves intentional operator overrides. If `GEAK_BASE_URL` or
-`OOB_BASE_URL` is set, Hyperloom treats it as deliberate and does not rewrite it.
+`LLM_API_BASE` is set, Hyperloom treats it as deliberate and does not rewrite it.
 Only set these variables when the target is reachable from the worker runtime.
 
 ---
@@ -246,8 +246,8 @@ At preflight, the inference optimizer CLI:
 
 - Resolves Anthropic and OpenAI base URLs.
 - Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
-- Fills unset alias env vars (`GEAK_*`, `OOB_*`, and so on).
-- Preserves explicit `GEAK_BASE_URL` / `OOB_BASE_URL` overrides for separate
+- Fills unset alias env vars (`GEAK_*`, `LLM_*`, and so on).
+- Preserves explicit `GEAK_BASE_URL` / `LLM_API_BASE` overrides for separate
   routable endpoints.
 
 **401 recovery:**
@@ -259,9 +259,8 @@ At preflight, the inference optimizer CLI:
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    configured upstream gateway.
 
-The `cursor` backend always bypasses your LLM gateway (Cursor's own
-issuer). GEAK uses `GEAK_API_KEY` / `GEAK_BASE_URL` (or the generated
-litellm config) directly.
+GEAK uses `GEAK_API_KEY` / `GEAK_BASE_URL` (or the generated litellm config)
+directly.
 
 ---
 
@@ -299,7 +298,7 @@ Yes, in split-entrypoint mode: set `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`
 
 In single-gateway mode they are derived from `SAFE_API_KEY` by
 `install.sh` and preflight. In split mode each side uses its own key.
-Set `GEAK_BASE_URL` / `OOB_BASE_URL` explicitly only when you need a
+Set `GEAK_BASE_URL` / `LLM_API_BASE` explicitly only when you need a
 separate routable endpoint.
 
 **Q: My organization rotates the LLM gateway key weekly. How?**

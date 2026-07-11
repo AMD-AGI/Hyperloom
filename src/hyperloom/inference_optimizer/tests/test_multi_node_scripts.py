@@ -1207,7 +1207,7 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
     from hyperloom.inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
     # Credentials present in the controller env (would previously fan out).
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OOB_API_KEY", "LLM_API_KEY"):
+    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY"):
         monkeypatch.setenv(k, f"secret-{k}")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")
 
@@ -1261,7 +1261,6 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
         "SAFE_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
-        "OOB_API_KEY",
         "LLM_API_KEY",
         "OPENAI_BASE_URL",
     ):

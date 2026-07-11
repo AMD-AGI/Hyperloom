@@ -44,7 +44,7 @@ configured upstream gateway.
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`).
-   If `GEAK_BASE_URL` or `OOB_BASE_URL` is set, confirm it points at a
+   If `GEAK_BASE_URL` or `LLM_API_BASE` is set, confirm it points at a
    routable endpoint for the worker runtime.
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.

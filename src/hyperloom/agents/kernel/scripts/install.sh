@@ -302,13 +302,6 @@ case "${GEAK_MODEL_NAME_VAL}" in
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
 esac
-# OOB_BASE_URL / OOB_API_KEY are the shared LLM-gateway aliases (GEAK/forge and
-# the ray_runtime fanout consume them). Derive from the canonical
-# OPENAI/ANTHROPIC gateway env; pair the key to its endpoint like GEAK does.
-OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
-OOB_API_KEY_VAL="${OOB_API_KEY:-$(_key_for_endpoint "$OOB_BASE_URL_VAL")}"
-[ -n "$OOB_API_KEY_VAL" ] || OOB_API_KEY_VAL="${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}"
-
 # install.sh always installs everything. A previous lazy
 # "install only the requested backend" scheme caused recurring
 # "missing dependency discovered at request time" issues, so the
@@ -1291,11 +1284,13 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  # Warn loudly if OOB_BASE_URL is empty — kernel-agent env would silently
+  local _openai_url="${_OPENAI_BASE_URL_VAL:-${_ANTHROPIC_BASE_URL_VAL:-${LLM_API_BASE:-${GEAK_BASE_URL_VAL:-}}}}"
+  local _gateway_key="${_OPENAI_KEY_VAL:-${_ANTHROPIC_KEY_VAL:-${GEAK_API_KEY_VAL:-${LLM_GATEWAY_KEY:-${LLM_API_KEY:-}}}}}"
+  # Warn loudly if no gateway URL is resolved — kernel-agent env would silently
   # lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to whatever
   # was in the operator's shell rc, defeating the point of this file.
-  if [ -z "${OOB_BASE_URL_VAL:-}" ]; then
-    warn "OOB_BASE_URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
+  if [ -z "${_openai_url:-}" ]; then
+    warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
   fi
   # Anthropic base URL: keep an explicit split-provider value as-is; only
   # derive from the OpenAI-style upstream (strip trailing /v1, the Anthropic
@@ -1303,14 +1298,14 @@ write_env_file() {
   local _anthropic_url=""
   if [ -n "${_ANTHROPIC_BASE_URL_VAL:-}" ]; then
     _anthropic_url="${_ANTHROPIC_BASE_URL_VAL}"
-  elif [ -n "${OOB_BASE_URL_VAL:-}" ]; then
-    _anthropic_url="${OOB_BASE_URL_VAL%/}"
+  elif [ -n "${_openai_url:-}" ]; then
+    _anthropic_url="${_openai_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
   fi
   # Per-side keys: a split deploy writes each provider its own key; a single
-  # gateway resolves both to the same OOB key so legacy behavior is preserved.
-  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-${OOB_API_KEY_VAL}}"
-  local _openai_key="${_OPENAI_KEY_VAL:-${OOB_API_KEY_VAL}}"
+  # gateway resolves both to the same key.
+  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-${_gateway_key}}"
+  local _openai_key="${_OPENAI_KEY_VAL:-${_gateway_key}}"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
@@ -1326,7 +1321,7 @@ write_env_file() {
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
-    [ -n "${OOB_BASE_URL_VAL:-}" ] && echo "export OPENAI_BASE_URL='${OOB_BASE_URL_VAL}'"
+    [ -n "${_openai_url:-}" ] && echo "export OPENAI_BASE_URL='${_openai_url}'"
     # Anthropic-side and OpenAI-side keys are written independently so a split
     # deploy (e.g. DeepSeek Anthropic API + native OpenAI) does not cross-send
     # the wrong provider's key. Gateway aliases keep the single-gateway key.
@@ -1335,13 +1330,11 @@ write_env_file() {
       echo "export ANTHROPIC_AUTH_TOKEN='${_anthropic_key}'"
     }
     [ -n "${_openai_key}" ] && echo "export OPENAI_API_KEY='${_openai_key}'"
-    [ -n "${OOB_API_KEY_VAL}" ] && {
-      echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export OOB_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export AMD_LLM_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export LLM_GATEWAY_KEY='${OOB_API_KEY_VAL}'"
+    [ -n "${_gateway_key}" ] && {
+      echo "export SAFE_API_KEY='${_gateway_key}'"
+      echo "export AMD_LLM_API_KEY='${_gateway_key}'"
+      echo "export LLM_GATEWAY_KEY='${_gateway_key}'"
     }
-    [ -n "${OOB_BASE_URL_VAL}" ] && echo "export OOB_BASE_URL='${OOB_BASE_URL_VAL}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup inference_optimizer optimize →
@@ -1490,16 +1483,18 @@ ensure_forge_claude_cli() {
     run npm config set prefix /usr/local
     run npm install -g @anthropic-ai/claude-code
   fi
-  # ~/.claude auth from the shared gateway env so the fellow authenticates.
-  if [ -n "$OOB_API_KEY_VAL" ]; then
+  # ~/.claude auth from existing provider / GEAK gateway env so the fellow authenticates.
+  local _claude_key="${_ANTHROPIC_KEY_VAL:-${SAFE_API_KEY:-${GEAK_API_KEY_VAL:-${_OPENAI_KEY_VAL:-}}}}"
+  if [ -n "$_claude_key" ]; then
     mkdir -p /root/.claude
-    local _anthropic_url="${OOB_BASE_URL_VAL%/}"
+    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${GEAK_BASE_URL_VAL:-${_OPENAI_BASE_URL_VAL:-}}}"
+    _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
     cat > /root/.claude/config.json <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
-  "primaryApiKey": "${OOB_API_KEY_VAL}",
+  "primaryApiKey": "${_claude_key}",
   "customApiUrl": "${_anthropic_url}"
 }
 EOF

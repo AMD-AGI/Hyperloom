@@ -694,7 +694,6 @@ def _preflight(
             "OPENAI_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
-            "OOB_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
@@ -743,13 +742,13 @@ def _preflight(
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         resolved_urls = (anthropic_url, openai_url)
 
-        # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
-        # gateway URL, but an INTENTIONAL operator override is preserved (#521:
+        # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway
+        # URL, but an INTENTIONAL operator override is preserved (#521:
         # GEAK runs in a separate network namespace reached via a host-local
         # reverse tunnel).
         gateway_url = openai_url or anthropic_url
         if gateway_url:
-            for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+            for alias in ("GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
                     # A genuine operator override is preserved, but a leftover

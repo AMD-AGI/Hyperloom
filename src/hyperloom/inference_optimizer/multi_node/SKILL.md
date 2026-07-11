@@ -274,8 +274,9 @@ After step 4 route all benchmark / Magpie traffic to
   wrap in `sleep` / `while true ...; sleep 60; done`.
 * **ADDENDUM-13** (credentials): `SAFE_API_URL` / `SAFE_API_KEY` must be
   in sandbox env at CLI start (Brain injects). CLI fans them out (plus
-  `OOB_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `*_BASE_URL`)
-  to RayJob env at `create-rayjob`. **Never pass keys on the command line.**
+  `GEAK_API_KEY` / `LLM_GATEWAY_KEY` / `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` / `*_BASE_URL`) to RayJob env at `create-rayjob`.
+  **Never pass keys on the command line.**
 * **ADDENDUM-02** (no Ray Python client in orchestration layer):
   `multi_node/cli.py` and `multi_node/_internal/` MUST use Ray Dashboard
   REST only — never `import ray` / `ray.init(address=...)` against the
@@ -381,8 +382,8 @@ default `--robustness-agent` was selected via
   The script (`multi_node/scripts/bootstrap.sh`) is repo-owned and
   should not be edited from the agent — failures usually point at one
   of: missing credentials in the RayJob env (verify the ADDENDUM-13
-  fan-out so `SAFE_API_KEY` / `OOB_API_KEY` / `*_BASE_URL` actually
-  reached the head pod), the BYOI image lacking a toolchain package,
+  fan-out so `SAFE_API_KEY` / `GEAK_API_KEY` / `LLM_GATEWAY_KEY` /
+  `*_BASE_URL` actually reached the head pod), the BYOI image lacking a toolchain package,
   or the head pod failing to reach an upstream package / model
   registry. Fix the root cause (env / image / network), then rerun;
   RayJob stays alive across the retry.
