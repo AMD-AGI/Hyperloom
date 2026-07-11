@@ -19,15 +19,13 @@ Hyperloom needs at most two classes of configuration:
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-- **Path / workspace layout** — for local mode, run
-   `src/hyperloom/inference_optimizer/assets/local_setup.sh` once (credentials and the
-   Hyperloom checkout are enough). It clones missing dependency repos under
-   `HYPERLOOM_OPEN_SOURCE_ROOT`, writes
-   `$USER_DATA_PATH/runtime/local-setup.env.sh`, and exports
-   `INFERENCEX_PATH`, `TRACELENS_ROOT`, and so on. You normally only set
-   `USER_DATA_PATH` (writable artifact root; default `/workspace/hyperloom`).
-   `REPO_ROOT` is auto-detected. Explicit overrides for dependency paths are
-   optional (see [Path environment](#path-environment)).
+- **Path / workspace layout** — for local mode, `install.sh` clones and
+   installs the open-source dependencies under `HYPERLOOM_OPEN_SOURCE_ROOT`
+   and writes `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. You normally only
+   set `USER_DATA_PATH` (writable artifact root; default
+   `/workspace/hyperloom`). `local_setup.sh` is only needed when you explicitly
+   request the forge backend; it clones private KernelForge and writes
+   `$USER_DATA_PATH/runtime/local-setup.env.sh` with `FORGE_PATH`.
 
 In the **single-gateway** setup, GEAK keys and Anthropic / OpenAI
 aliases are **derived** from `SAFE_API_KEY` and
@@ -184,20 +182,18 @@ Only set these variables when the target is reachable from the worker runtime.
 ## Path environment
 
 These are *not* secrets. In local mode you normally do not hand-export
-`INFERENCEX_PATH` or `TRACELENS_ROOT` — `local_setup.sh`
-clones them when missing and records the resolved paths in
-`local-setup.env.sh`. Before launching optimization, source that file:
+`INFERENCEX_PATH` or `TRACELENS_ROOT` — `install.sh` and its chained
+kernel-agent installer clone and pin the open-source checkouts when missing.
+Before launching optimization, source the kernel-agent env:
 
 ```bash
 export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-bash src/hyperloom/inference_optimizer/assets/local_setup.sh
-source "$USER_DATA_PATH/runtime/local-setup.env.sh"
+bash src/hyperloom/inference_optimizer/assets/install.sh
+source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
-`src/hyperloom/agents/kernel/scripts/install.sh` (invoked by preflight or manually) then
-installs runtime dependencies (Ray, GEAK, Magpie, and so on) and
-writes `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Source that too when
-driving kernel-agent tools directly.
+If `KERNEL_OPT_BACKEND_ORDER` explicitly contains `forge`, run
+`local_setup.sh` first and source `local-setup.env.sh` so `FORGE_PATH` is set.
 
 ### Workspace variables
 
@@ -205,7 +201,7 @@ driving kernel-agent tools directly.
 |------------------------|------------------|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
 | `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom`                           | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Replaces retired `WORKSPACE_PATH` / `INFERENCE_OPTIMIZER_SESSION_DIR`. |
 | `REPO_ROOT`            | rarely           | auto-detected from script location               | This Hyperloom checkout. Locates `.env`, skills, scripts.                                                        |
-| `LOCAL_SETUP_ENV`      | rarely           | `$USER_DATA_PATH/runtime/local-setup.env.sh`     | Output of `local_setup.sh`; source in every fresh shell before running the optimizer.                            |
+| `LOCAL_SETUP_ENV`      | rarely           | `$USER_DATA_PATH/runtime/local-setup.env.sh`     | Output of `local_setup.sh`; only needed when the forge backend is requested.                                    |
 | `KERNEL_AGENT_ENV`     | rarely           | `$USER_DATA_PATH/runtime/kernel-agent.env.sh`    | Output of `install.sh`; exports resolved paths and LLM aliases.                                                  |
 | `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (env files, GEAK config, Cortex KB bookkeeping).                                             |
 
@@ -214,18 +210,19 @@ driving kernel-agent tools directly.
 Open-source dependencies default under `HYPERLOOM_OPEN_SOURCE_ROOT`
 (`/opt/hyperloom/open-source-repos`), decoupled from `USER_DATA_PATH` so
 shared session storage does not collocate concurrent pods' clones.
-`local_setup.sh` also accepts `HYPERLOOM_DEPS_ROOT` (or `--deps-root`) as
-an alias and exports the resolved value as `HYPERLOOM_OPEN_SOURCE_ROOT`.
+`local_setup.sh` accepts `HYPERLOOM_DEPS_ROOT` (or `--deps-root`) as an alias
+for the private KernelForge checkout root and exports the resolved value as
+`HYPERLOOM_OPEN_SOURCE_ROOT` for same-shell `install.sh` invocations.
 
 Leave these variables unset unless you maintain your own checkouts. An
 explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for TraceLens, InferenceX, KernelForge, Magpie, and GEAK. Writable `/opt` required unless overridden. |
-| `FORGE_PATH`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge`                | KernelForge checkout root for the `forge` backend. `local_setup.sh` also exports `KERNEL_FORGE_ROOT` with the same value. |
-| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis.        |
-| `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; pinned to a fixed SHA on auto-clone. |
+| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for open-source deps (TraceLens, InferenceX, Magpie, GEAK) and optional KernelForge. Writable `/opt` required unless overridden. |
+| `FORGE_PATH`                 | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/KernelForge`                | KernelForge checkout root for the `forge` backend. `local_setup.sh` exports this and `KERNEL_FORGE_ROOT` when forge is requested. |
+| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; `install.sh` clones it when unset. |
+| `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (open-source-only)                                   | Internal TraceLens extension (roofline gap, MI355+ MAF). Hyperloom never clones it — set only when you maintain a checkout. |
 | `MAGPIE_PATH`                | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/Magpie`                    | Magpie benchmark wrappers; installed by `install.sh` when missing.                                                  |
 

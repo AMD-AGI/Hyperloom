@@ -10,7 +10,8 @@ The installer runs: base preflight â†’ optional SGLang/vLLM framework install â†
 
 - An AMD GPU host with **ROCm** runtime and a **ROCm-built torch** already installed (**MI300X / MI308X / MI325X / MI355X**; bare-metal preflight maps gfx942 uniformly to MI300X).
 - The ROCm user-space libraries, `hipcc` toolchain, torch HIP version, and framework wheel target must be aligned. For example, an `amd-sglang[rocm700]` stack needs ROCm 7.0 user-space libraries and headers on `LD_LIBRARY_PATH` / `ROCM_PATH`, even if the host kernel driver is older but compatible.
-- GitHub authentication and AMD-AGI repository access (the bundled `local_setup.sh` reuses it to clone dependency repos).
+- GitHub authentication for the Hyperloom checkout. AMD-AGI KernelForge access
+  is only required when you explicitly choose the `forge` kernel backend.
 
 ---
 
@@ -73,11 +74,14 @@ The installer and its chained runtime installers accept either the single-gatewa
 
 > To change the artifact directory (default `/workspace/hyperloom`), `export USER_DATA_PATH=...` in your shell before running the installer, or pass `--user-data-path`. The bare-metal installer reads `USER_DATA_PATH` from the shell environment, **not** from `.env` (only LLM credentials are read from `.env`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
 
-Bare-metal installs default `KERNEL_OPT_BACKEND_ORDER` to `geak_v3`, so they
-install and run GEAK without pulling forge's closed-source CLI dependency. To
-opt into forge on a bare-metal host, export an explicit backend order before
-running the installer, for example `KERNEL_OPT_BACKEND_ORDER=forge` or
-`KERNEL_OPT_BACKEND_ORDER=forge,geak_v3`.
+Bare-metal installs default `KERNEL_OPT_BACKEND_ORDER` to `geak_v3`. In that
+default mode the installer skips `local_setup.sh`; open-source dependencies
+(Magpie, InferenceX, TraceLens, GEAK) are handled by `install.sh` and its
+chained kernel-agent installer. To opt into forge on a bare-metal host, export
+an explicit backend order before running the installer, for example
+`KERNEL_OPT_BACKEND_ORDER=forge` or `KERNEL_OPT_BACKEND_ORDER=forge,geak_v3`.
+When `forge` is present, the installer runs `local_setup.sh` first to clone the
+private KernelForge checkout and export `FORGE_PATH`.
 
 ## 3. Run the bare-metal installer
 

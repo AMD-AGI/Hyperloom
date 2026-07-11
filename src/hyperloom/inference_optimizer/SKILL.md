@@ -53,9 +53,9 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{KernelForge,InferenceX,TraceLens[,TraceLens-internal]}/
-│       # TraceLens public is required; TraceLens-internal is optional and only
-│       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
+│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal],KernelForge?}/
+│       # Open-source deps are installed by install.sh; KernelForge is present
+│       # only when local_setup.sh was run for the forge backend.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -99,7 +99,9 @@ the session dir printed by the CLI.
 **Launcher rule:** do not hand-build, create, delete, or repair paths
 under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
 Those are workspace-shared assets owned by `install.sh`, including
-Magpie, GEAK, TraceLens mirrors, env files, and config. Manual edits
+Magpie, InferenceX, GEAK, TraceLens mirrors, env files, and config.
+KernelForge is the only checkout prepared by `local_setup.sh`, and only
+when the forge backend is requested. Manual edits
 there can corrupt another run's checkout. If install state looks wrong,
 rerun `install.sh` or follow the Recovery section; do not clone or clean
 the mirrors by hand.
@@ -323,6 +325,18 @@ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
+If you explicitly opt into the forge kernel backend, clone the private
+KernelForge checkout first and source the generated env so `install.sh` can
+find it:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge,geak_v3
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/local_setup.sh" --no-next-steps
+. "${LOCAL_SETUP_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh}"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+```
+
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
 first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
@@ -344,6 +358,11 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`) | `ensure_magpie` |
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
+
+`local_setup.sh` is not part of the default GEAK install path. It only clones
+the private KernelForge repo and writes `FORGE_PATH` / `KERNEL_FORGE_ROOT` when
+the forge backend is requested (bare-metal does this automatically when
+`KERNEL_OPT_BACKEND_ORDER` explicitly contains `forge`).
 
 Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
