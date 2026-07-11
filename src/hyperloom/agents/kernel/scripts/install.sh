@@ -1555,6 +1555,13 @@ write_env_file() {
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
+    # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
+    # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
+    _geak_claude_bin=""
+    for _c in "${HOME}/.local/bin/claude" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
+      if [ -n "${_c}" ] && [ -x "${_c}" ]; then _geak_claude_bin="${_c}"; break; fi
+    done
+    [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
     # Per-kernel GEAK (geak_v3) checkout for provenance / version detection.
     [ -n "${GEAK_V3_ROOT}" ] && echo "export GEAK_V3_ROOT='${GEAK_V3_ROOT}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
@@ -1585,9 +1592,8 @@ write_env_file() {
 
 # Clone the e2e optimizer ("geak"; GEAK@GEAK_v4, formerly PerfSkills) the same
 # way ensure_geak_v3 does: SHA pins use a shallow fetch-checkout; tags/branches
-# use git clone --branch. It is NOT pip-installed (it's a JS workflow dir invoked
-# via the Claude Code Workflow tool); we only need the checkout + the
-# claude_agent_sdk that its interface/run_e2e.py uses.
+# use git clone --branch. Not pip-installed (it's a JS workflow dir); after the
+# checkout we run GEAK's setup.sh (Claude Code CLI + py deps) plus claude_agent_sdk.
 ensure_geak() {
   log "ensuring e2e optimizer geak (GEAK@${GEAK_REF}, formerly PerfSkills)"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -1613,7 +1619,14 @@ ensure_geak() {
     fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    # interface/run_e2e.py prefers the python SDK (falls back to `claude -p`).
+    # GEAK's own installer: upgrades the Claude Code CLI to the dynamic Workflow
+    # floor (>= 2.1.177) and installs its py deps. Idempotent.
+    if [ -x "${GEAK_ROOT}/setup.sh" ]; then
+      run bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
+    else
+      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_oob"
+    fi
+    # setup.sh installs the CLI, not the SDK; run_e2e.py prefers the SDK.
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
     run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
       warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
