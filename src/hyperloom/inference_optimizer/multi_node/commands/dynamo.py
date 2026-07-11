@@ -164,7 +164,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     extra_labels = _parse_kv_list(args.extra_label)
     # Dynamo inference pods run sglang/vllm only; they never call an LLM/agent
     # endpoint, so no *_API_KEY / SAFE_API_KEY / *_BASE_URL is baked into their
-    # container env. GEAK/OOB kernel-opt agents (when used) receive credentials
+    # container env. Kernel-opt agents (when used) receive credentials
     # out-of-band over SSH at invocation time (ssh_runtime._env_prologue), so
     # dropping the credential fanout here does not affect them. Only operator
     # --extra-env values are forwarded.

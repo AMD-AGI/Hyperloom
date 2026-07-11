@@ -254,7 +254,7 @@ _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3")
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
-_DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs to do anything useful (and still
 # salvage partial artifacts). When less than this remains in the per-kernel
 # ladder budget, the ladder stops instead of launching a backend it cannot
@@ -3139,7 +3139,7 @@ def _optimization_budget_minutes(payload: dict) -> float:
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
-    generic_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
+    generic_budget = float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
     geak_budget = _geak_budget_minutes(payload)
     backend = str(payload.get("backends") or "").strip().lower()
     if backend == "geak_v3":

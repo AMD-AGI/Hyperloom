@@ -1559,8 +1559,7 @@ def _apply_fellow_env(env: dict) -> None:
 
     Mutates the given child-process env dict ONLY -- never the parent
     ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
-    proxy) cannot leak to sibling backends (claude/codex) that run in the same
-    orchestrator process after forge in the ladder. The forge-loop subprocess
+    proxy) cannot leak outside this forge attempt. The forge-loop subprocess
     inherits this env; inside it the fellow drives the claude CLI streaming
     transport. ``setdefault`` keeps operator overrides authoritative.
     """

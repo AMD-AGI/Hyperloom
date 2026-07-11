@@ -382,7 +382,7 @@ def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
     """Extract the run's LLM usage from a Kernel-Forge backend's stdout log.
 
     Kernel-Forge's autonomous loop drives the claude-agent-sdk in-process, so
-    (unlike GEAK/OOB) there is no single SDK ``usage`` envelope on stdout.
+    (unlike GEAK) there is no single SDK ``usage`` envelope on stdout.
     Instead ``forge_submit`` aggregates the per-query ``ResultMessage`` token
     spend (via Kernel-Forge's ``UsageAccumulator``) and prints one canonical
     marker line::

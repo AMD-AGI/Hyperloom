@@ -469,9 +469,9 @@ def parse_backends(backends: str) -> list[str]:
         backends (str): Comma-separated backend names (case-insensitive),
             e.g. ``"geak_v3,forge"``.
 
-        Returns:
+    Returns:
         list[str]: The normalized (lowercased, trimmed) backend names in the
-            order given.
+        order given.
 
     Raises:
         ValueError: When any backend is outside the allowed set
