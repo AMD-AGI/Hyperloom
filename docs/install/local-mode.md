@@ -130,7 +130,8 @@ bash src/hyperloom/inference_optimizer/assets/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
-Use this only if your environment has access to KernelForge.
+Only the forge backend requires KernelForge access. The standard LLM/runtime
+setup still happens through `install.sh`.
 
 ---
 

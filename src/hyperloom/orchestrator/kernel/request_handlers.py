@@ -3214,7 +3214,7 @@ def geak_selected(payload: dict | None = None) -> bool:
 def _kernel_ladder_budget_sec(payload: dict) -> int:
     """Total wall-clock budget for one kernel's whole backend ladder.
 
-    The ladder runs its backends sequentially (forge -> geak -> oob fallbacks),
+    The ladder runs its backends sequentially (forge -> geak_v3 fallback),
     each as a subprocess with its own timeout. Without a shared ceiling a
     backend that hangs to its hard timeout followed by a fallback running its
     full budget could roughly double a kernel's wall clock and overshoot the

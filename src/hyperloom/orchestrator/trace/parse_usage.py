@@ -331,10 +331,9 @@ def _summarize_tool_input(value: Any, *, limit: int = 240) -> str:
 
 
 def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
-    """Extract ``usage`` from ``oob run --json`` stdout.
+    """Extract usage from historical ``oob run --json`` stdout.
 
-    OOB emits a JSON document on stdout that already carries a ``usage``
-    block (see ``src/hyperloom/agents/kernel/tools/backends/oob_submit.py``). The exact
+    Retained for old traces that still contain OOB JSON envelopes. The exact
     envelope can vary, so we search defensively:
 
     1. parse the whole stdout as one JSON object and look for a top-level
@@ -342,7 +341,7 @@ def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
     2. failing that, scan line-by-line for the last JSON object carrying a
        ``usage`` block (covers JSONL-style streamed output).
 
-    OpenAI-style OOB has no prompt-cache split, so ``cache_*`` stay
+    Historical OpenAI-style OOB has no prompt-cache split, so ``cache_*`` stay
     ``None``. Returns ``None`` when nothing parseable is found.
 
     Args:

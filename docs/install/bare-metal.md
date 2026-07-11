@@ -82,7 +82,8 @@ installer:
 export KERNEL_OPT_BACKEND_ORDER=forge
 ```
 
-Use this only if your environment has access to KernelForge.
+Only the forge backend requires KernelForge access. The installer still
+performs the standard LLM/runtime setup for the selected backend.
 
 ## 3. Run the bare-metal installer
 
