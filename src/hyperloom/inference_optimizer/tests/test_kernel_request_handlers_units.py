@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -417,6 +418,263 @@ class TestForgeGemmHelperCoverage:
         state.last_trace_analyze = {"candidates_path": str(candidates)}
 
         assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    def test_forge_fusion_skip_guard_ignores_warm_replay_fusion_flags(self):
+        state = SharedState(
+            current_best={
+                "action": "warm_replay",
+                "engine": "",
+                "extra_envs": {
+                    "SGLANG_USE_AITER": "1",
+                    "ZAYA_FUSED_QK": "1",
+                    "ZAYA_FUSED_RESIDUAL": "1",
+                },
+            },
+        )
+
+        assert krh._active_forge_fusion_env_flags(state) == {}
+
+    def test_parse_forge_fusion_sentinel(self):
+        payload = {"status": "ok", "decision": "KEEP", "kept": True}
+        text = (
+            "noise\nFORGE_FUSION_RESULT_BEGIN\n"
+            + json.dumps(payload)
+            + "\nFORGE_FUSION_RESULT_END\n"
+        )
+
+        assert krh._parse_forge_fusion_sentinel(text) == payload
+        assert krh._parse_forge_fusion_sentinel("no marker") is None
+        assert (
+            krh._parse_forge_fusion_sentinel(
+                "FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END"
+            )
+            is None
+        )
+
+    def test_resolve_fusion_decode_trace_prefers_payload_and_newest(self, tmp_path):
+        state = SharedState()
+        state_dir = tmp_path / "state_trace"
+        payload_dir = tmp_path / "payload_trace"
+        state_dir.mkdir()
+        payload_dir.mkdir()
+        state_trace = state_dir / "old.trace.json.gz"
+        payload_old = payload_dir / "old.trace.json.gz"
+        payload_new = payload_dir / "new.trace.json"
+        state_trace.write_text("state", encoding="utf-8")
+        payload_old.write_text("old", encoding="utf-8")
+        payload_new.write_text("new", encoding="utf-8")
+        import os
+
+        os.utime(payload_old, (1, 1))
+        os.utime(payload_new, (10, 10))
+        state.last_profile_trace = str(state_dir)
+
+        assert krh._resolve_fusion_decode_trace(
+            state, {"trace_path": str(payload_dir)}
+        ) == str(payload_new)
+        assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
+        assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
+
+    def test_forge_fusion_available_by_path_and_import(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-fusion")
+        assert krh._forge_fusion_available() is True
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
+        assert krh._forge_fusion_available() is True
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        assert krh._forge_fusion_available() is False
+
+    def test_materialize_unified_patch_snapshot(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "model.py").write_text("old = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "add", "model.py"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "diff --git a/model.py b/model.py\n"
+            "index 5626abf..f6e7663 100644\n"
+            "--- a/model.py\n"
+            "+++ b/model.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2\n",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (snapshot / "model.py").read_text(encoding="utf-8") == "new = 2\n"
+
+    def test_materialize_unified_patch_snapshot_rejects_bad_inputs(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        patch = tmp_path / "empty.patch"
+        patch.write_text("", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="empty patch|no file operations"):
+            krh.materialize_unified_patch_snapshot(patch_path=patch, repo_root=repo)
+
+        with pytest.raises(FileNotFoundError):
+            krh.materialize_unified_patch_snapshot(
+                patch_path=tmp_path / "missing.patch",
+                repo_root=repo,
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_skips_when_current_best_is_forge_fusion(self, tmp_path, monkeypatch):
+        state = SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            current_best={
+                "action": "fusion",
+                "engine": "forge_fusion",
+                "extra_envs": {
+                    "ZAYA_FUSED_CCA_NORMALIZE_QK": "1",
+                    "ZAYA_FUSED_CCA_GROUPED_QK_MEANS": "1",
+                },
+            },
+        )
+        state.save(tmp_path)
+
+        def _should_not_check_available():
+            raise AssertionError("forge-fusion availability should not be checked")
+
+        monkeypatch.setattr(krh, "_forge_fusion_available", _should_not_check_available)
+        result = await krh._run_forge_fusion({}, session_dir=tmp_path)
+
+        assert result["status"] == "complete"
+        assert result["backend"] == "forge"
+        assert result["engine"] == "forge_fusion"
+        assert result["micro_decision"] == "already_active"
+        assert result["kept"] is False
+        assert result["requires_e2e_validation"] is False
+        assert result["active_env_flags"] == {
+            "ZAYA_FUSED_CCA_NORMALIZE_QK": "1",
+            "ZAYA_FUSED_CCA_GROUPED_QK_MEANS": "1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_success_writes_input_and_defaults(
+        self, tmp_path, monkeypatch
+    ):
+        trace_dir = tmp_path / "trace"
+        trace_dir.mkdir()
+        trace_file = trace_dir / "decode.trace.json.gz"
+        trace_file.write_text("{}", encoding="utf-8")
+        state = SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace_dir),
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(
+            krh,
+            "_kernel_agent_tool_path",
+            lambda name: tmp_path / "tools" / name,
+        )
+        calls: list[tuple[list[str], int]] = []
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            calls.append((cmd, timeout_sec))
+            result = {
+                "status": "ok",
+                "decision": "KEEP",
+                "kept": True,
+                "env_flags": {"ZAYA_FUSED_CCA_NORMALIZE_QK": "1"},
+            }
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n"
+                + json.dumps(result)
+                + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_fusion(
+            {"task_id": "fusion_task", "max_turns": 7, "timeout": 123},
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "ok"
+        assert result["backend"] == "forge"
+        assert result["engine"] == "forge_fusion"
+        assert result["workspace"] == str(tmp_path / "runs" / "fusion" / "fusion_task")
+        assert calls[0][1] == 123
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
+            .read_text(encoding="utf-8")
+        )
+        assert input_payload["trace_path"] == str(trace_file)
+        assert input_payload["model_path"] == "/models/zaya"
+        assert input_payload["max_turns"] == 7
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
+        state = SharedState(framework="sglang", model_path="/models/zaya")
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: False)
+        not_found = await krh._run_forge_fusion({}, session_dir=tmp_path)
+        assert not_found["error_class"] == "forge_fusion_not_found"
+
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        state.model_path = ""
+        state.save(tmp_path)
+        monkeypatch.delenv("MODEL_PATH", raising=False)
+        missing_model = await krh._run_forge_fusion({}, session_dir=tmp_path)
+        assert missing_model["error_class"] == "model_path_missing"
+
+        state.model_path = "/models/zaya"
+        state.last_profile_trace = ""
+        state.save(tmp_path)
+        missing_trace = await krh._run_forge_fusion({}, session_dir=tmp_path)
+        assert missing_trace["error_class"] == "decode_trace_missing"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_timeout_is_shaped(self, tmp_path, monkeypatch):
+        trace = tmp_path / "trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+
+        async def _timeout(cmd, *, timeout_sec):
+            raise subprocess.TimeoutExpired(cmd, timeout_sec)
+
+        monkeypatch.setattr(krh, "_run_subprocess", _timeout)
+
+        result = await krh._run_forge_fusion({"timeout": 60}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "subprocess_timeout"
+        assert result["backend"] == "forge"
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_requires_model_path(self, tmp_path, monkeypatch):
@@ -1868,6 +2126,56 @@ class TestTracelensRootResolution:
 
 
 class TestKernelOptArtifactBundleRecording:
+    def test_materialize_unified_patch_snapshot_for_forge_fusion_patch(self, tmp_path):
+        repo = tmp_path / "framework"
+        repo.mkdir()
+        (repo / "model.py").write_text("old = 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t",
+             "commit", "-qm", "base"],
+            check=True,
+        )
+        # forge-fusion exports after authoring, so the live tree is already dirty
+        # with final bytes. Snapshot materialization must still start from HEAD.
+        (repo / "model.py").write_text("new = 2\n", encoding="utf-8")
+        (repo / "model_fused.py").write_text("fused = True\n", encoding="utf-8")
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "\n".join(
+                [
+                    "diff --git a/model.py b/model.py",
+                    "--- a/model.py",
+                    "+++ b/model.py",
+                    "@@ -1 +1 @@",
+                    "-old = 1",
+                    "+new = 2",
+                    "diff --git a/model_fused.py b/model_fused.py",
+                    "new file mode 100644",
+                    "index 0000000..1111111",
+                    "--- /dev/null",
+                    "+++ b/model_fused.py",
+                    "@@ -0,0 +1 @@",
+                    "+fused = True",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snap = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+                snapshot_dir=tmp_path / "snapshot",
+            )
+        )
+
+        assert (snap / "model.py").read_text(encoding="utf-8") == "new = 2\n"
+        assert (snap / "model_fused.py").read_text(encoding="utf-8") == "fused = True\n"
+        assert (repo / "model.py").read_text(encoding="utf-8") == "new = 2\n"
+
     def test_record_kernel_opt_persists_best_artifact_bundle(self):
         state = SharedState()
         bundle = {
