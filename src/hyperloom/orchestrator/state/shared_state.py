@@ -697,6 +697,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Most recent forge-fusion run result and its e2e integrate result. These
+    # must be persisted so resume/re-entry does not rerun an already completed
+    # fusion loop or lose the adoption/revert audit.
+    last_fusion: dict[str, Any] = field(default_factory=dict)
+    last_fusion_integrate: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization dispatch skipped with no eligible kernels
     # (empty batch, no named kernel). Recorded honestly as a non-failure so the
     # breakdown can surface it; it is otherwise invisible in sbd (the result has
