@@ -275,6 +275,8 @@
     "last_consumed_escalate_hint_ts": "<volatile>",
     "last_cycle_bottleneck": "",
     "last_explore": {},
+    "last_fusion": {},
+    "last_fusion_integrate": {},
     "last_gemm_tuning": {},
     "last_kernel_opt": {},
     "last_kernel_opt_dispatch_skip": {},
