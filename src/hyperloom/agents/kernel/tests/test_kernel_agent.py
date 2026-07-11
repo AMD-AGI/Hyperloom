@@ -213,7 +213,6 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertEqual(dry_proc.returncode, 0)
         self.assertIn("TraceLens root not found", dry_proc.stderr)
-        # OOB install assertion removed: install.sh cleanup is a later step.
         self.assertIn("ensuring ray[default]==2.44.1", dry_proc.stdout)
 
     def test_new_environment_defaults_are_documented_in_tools(self) -> None:
@@ -233,9 +232,8 @@ class KernelAgentToolTests(unittest.TestCase):
         # Internal extension is opt-in: no default path.
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
         # GEAK has a dedicated root so moving it to pod-local storage does not
-        # implicitly move TraceLens/OOB via HYPERLOOM_ROOT.
+        # implicitly move TraceLens via HYPERLOOM_ROOT.
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
-        # OOB_ROOT install assertions removed: install.sh cleanup is a later step.
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
         # Assert the override pattern, not the exact pin, so ref bumps don't break this.

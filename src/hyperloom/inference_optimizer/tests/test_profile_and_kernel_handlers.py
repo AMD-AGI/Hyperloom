@@ -3460,7 +3460,7 @@ async def test_backend_ladder_forge_non_keep_yields_to_geak(
 
 @pytest.mark.asyncio
 async def test_backend_sequence_forge_keep_short_circuits(session_dir):
-    """Forge runs first and a KEEP short-circuits before GEAK/OOB.
+    """Forge runs first and a KEEP short-circuits before GEAK fallback.
 
     Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
     the short-circuit must inspect the KEEP slot instead of comparing the tuple
