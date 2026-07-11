@@ -18,7 +18,7 @@
 #       is pinned to an upstream-atomic commit)
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
-#   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
+#   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
 #      kernel-agent itself is the canonical owner of those — we just
 #      chain to it so users have a single entry point.
@@ -54,6 +54,7 @@ done
 # clone, source mirrors, and generated env / GEAK config all derive from
 # $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 DOTENV_LOADED_COUNT=0
 
@@ -114,14 +115,20 @@ _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repo
 # namespace (``src/hyperloom/agents/kernel``); the tools/scripts/skills
 # subdirectory layout underneath it is unchanged, so only this default
 # root needs to move (still overridable via $KERNEL_AGENT_ROOT).
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/kernel}"
+if [ "${HYPERLOOM_INSTALL_SOURCE:-}" = "wheel" ]; then
+  _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
+  KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
+  FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
+else
+  KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/kernel}"
+  FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/framework}"
+fi
 # tree-reform.MD P2.5: framework-agent was promoted from a sibling
 # ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
 # namespace (``src/hyperloom/agents/framework``); it no longer has its own
 # installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
 # package (still overridable) and the old chain_framework_agent() delegation
 # below is a no-op.
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/framework}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a *commit SHA* (not a branch name) so a fresh install is
 # deterministic and an upstream force-push / rebase cannot silently change
@@ -134,7 +141,7 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # post-refactor SHA: the upstream code is already atomic, so the in-place
 # patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
-# (mirrors GEAK_V3_REF in kernel-agent/scripts/install.sh).
+# (mirrors GEAK_V3_REF in src/hyperloom/agents/kernel/scripts/install.sh).
 # Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
 # diffusion benchmark framework (#51); the previous pin
 # (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
@@ -168,7 +175,7 @@ Installs:
     environment / .env (opt-in live trace push; skipped otherwise)
   - Magpie (cloned under the pod-local open-source repo tree by default)
   - Detects/exports INFERENCEX_PATH
-  - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
+  - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
     optimize-time, candidate discovery via `fa phase-discover`) is provided
@@ -234,7 +241,7 @@ run() {
 }
 
 # Clone a dependency pinned to $ref into $dir, mirroring the GEAK pin in
-# kernel-agent/scripts/install.sh. `git clone --branch` only accepts
+# src/hyperloom/agents/kernel/scripts/install.sh. `git clone --branch` only accepts
 # tags/branches, not raw SHAs, so a 7-40 hex char ref triggers a shallow
 # fetch-checkout dance instead (GitHub serves shallow SHA fetches via
 # uploadpack.allowReachableSHA1InWant=true). DRY_RUN / CHECK_ONLY are honoured
@@ -291,7 +298,7 @@ acquire_install_lock() {
   fi
 }
 
-# Preflight credential validation. Mirrors kernel-agent/scripts/install.sh:
+# Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
 # a usable setup needs at least one LLM base URL and at least one key. This
 # accepts either the AMD single-gateway pair or native split OpenAI/Anthropic.
 #
@@ -416,7 +423,7 @@ resolve_python() {
 resolve_python
 log "PYTHON=${PYTHON}"
 # Export PYTHON + prepend its bin dir so the chained kernel-agent installer's
-# bare `python3 -m pip ...` calls (kernel-agent/scripts/install.sh) land in
+# bare `python3 -m pip ...` calls (src/hyperloom/agents/kernel/scripts/install.sh) land in
 # the same interpreter. Otherwise PATH-only resolution can split the
 # installation across two different pythons.
 export PYTHON
@@ -543,6 +550,19 @@ fi
 
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
 ensure_inference_optimizer() {
+  if [ "${HYPERLOOM_INSTALL_SOURCE:-}" = "wheel" ]; then
+    log "ensuring inference_optimizer package + claude_agent_sdk extras (preinstalled wheel)"
+    "$PYTHON" - <<'PY' || die "hyperloom.inference_optimizer not importable from installed wheel"
+import hyperloom.inference_optimizer  # noqa: F401
+PY
+    if "$PYTHON" -c "import claude_agent_sdk" >/dev/null 2>&1; then
+      log "claude_agent_sdk OK"
+    else
+      warn "claude_agent_sdk not importable after wheel install (Coordinator will fail)"
+      [ "$CHECK_ONLY" -eq 1 ] || die "claude_agent_sdk missing"
+    fi
+    return 0
+  fi
   log "ensuring inference_optimizer package + claude_agent_sdk extras"
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "${REPO_ROOT}[test]"

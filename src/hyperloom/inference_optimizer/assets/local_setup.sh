@@ -7,6 +7,7 @@ set -euo pipefail
 
 DRY_RUN=0
 CHECK_ONLY=0
+PRINT_NEXT_STEPS=1
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
@@ -45,16 +46,17 @@ usage() {
   cat <<'EOF'
 Usage: src/hyperloom/inference_optimizer/assets/local_setup.sh [options]
 
-Bootstraps Local Mode from only a Hyperloom checkout plus credentials.
-It clones missing dependency repos and writes a local env file. Runtime
-dependency checks and installation remain owned by the Cursor agent via
-src/hyperloom/inference_optimizer/SKILL.md when optimization starts.
+Bootstraps dependency checkouts and writes a local env file. Bare-metal
+installs normally call this script from install_baremetal.sh before chaining
+the runtime installer.
 
 Options:
   --dry-run             Print planned actions without cloning or writing
   --check-only          Verify existing dependency checkouts, do not write env
   --deps-root PATH      Directory for dependency checkouts
-  --session-dir PATH    Session directory; defaults to $USER_DATA_PATH or /workspace/hyperloom
+  --user-data-path PATH Writable artifact root; defaults to $USER_DATA_PATH or /workspace/hyperloom
+  --session-dir PATH    Alias for --user-data-path (backward compatible)
+  --no-next-steps       Do not print the standalone launch prompt
   -h, --help            Show this help
 
 Advanced env overrides:
@@ -77,14 +79,15 @@ while [ "$#" -gt 0 ]; do
       shift
       HYPERLOOM_DEPS_ROOT="${1:-}"
       ;;
-    --session-dir)
-      [ "$#" -ge 2 ] || { echo "[local-setup] ERROR: --session-dir requires PATH" >&2; exit 2; }
+    --user-data-path|--session-dir)
+      [ "$#" -ge 2 ] || { echo "[local-setup] ERROR: $1 requires PATH" >&2; exit 2; }
       shift
       USER_DATA_PATH="${1:-}"
       HYPERLOOM_RUNTIME_DIR="${USER_DATA_PATH}/runtime"
       # Deps root stays pod-local and does NOT follow --session-dir.
       LOCAL_SETUP_ENV="${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh"
       ;;
+    --no-next-steps) PRINT_NEXT_STEPS=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[local-setup] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -134,6 +137,24 @@ credential_status() {
   warn "${name}: not set"
 }
 
+credential_is_set() {
+  local name="$1"
+  [ -n "${!name:-}" ] && return 0
+  [ -f "${REPO_ROOT}/.env" ] && grep -Eq "^[[:space:]]*(export[[:space:]]+)?${name}=" "${REPO_ROOT}/.env"
+}
+
+llm_credential_status() {
+  local has_url=0 has_key=0
+  { credential_is_set OPENAI_BASE_URL || credential_is_set ANTHROPIC_BASE_URL; } && has_url=1
+  { credential_is_set SAFE_API_KEY || credential_is_set OPENAI_API_KEY \
+    || credential_is_set ANTHROPIC_API_KEY || credential_is_set ANTHROPIC_AUTH_TOKEN; } && has_key=1
+  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
+    log "LLM credentials: usable base URL + key present"
+  else
+    warn "LLM credentials incomplete: need OPENAI_BASE_URL or ANTHROPIC_BASE_URL plus a matching API key"
+  fi
+}
+
 ensure_git_available() {
   if ! command -v git >/dev/null 2>&1; then
     die "git is required to clone Hyperloom dependency repositories"
@@ -149,8 +170,8 @@ clone_or_update() {
   # renamed into place only after both succeed, so a concurrent reader never
   # sees a half-cloned/unpinned $dest (#722). Used for TraceLens, whose path is
   # read live by trace_analyze. Keep in lockstep with the twin implementations:
-  # kernel-agent/scripts/install.sh (ensure_tracelens) and
-  # kernel-agent/tools/tracelens_analysis.py (_ensure_tracelens_checkout).
+  # src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens) and
+  # src/hyperloom/agents/kernel/tools/tracelens_analysis.py (_ensure_tracelens_checkout).
   local mode="${5:-}"
 
   if [ -d "${dest}/.git" ]; then
@@ -160,7 +181,7 @@ clone_or_update() {
     fi
     if [ -n "$ref" ]; then
       # Realign to $ref via the shallow SHA-aware fetch used by
-      # kernel-agent/scripts/install.sh (ensure_tracelens): `fetch origin <ref>`
+      # src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens): `fetch origin <ref>`
       # + detached FETCH_HEAD checkout works for both a branch name and a raw
       # commit SHA on a real (shallow) GitHub remote, unlike `checkout <sha>`
       # which needs the object already present locally (#722 / PR#789).
@@ -175,7 +196,7 @@ clone_or_update() {
   if [ -e "$dest" ]; then
     # atomic mode targets the installer-MANAGED default checkout (TraceLens,
     # read live by trace_analyze): a dir without .git is a half-done/crashed
-    # clone, so drop it and rebuild, matching kernel-agent/scripts/install.sh
+    # clone, so drop it and rebuild, matching src/hyperloom/agents/kernel/scripts/install.sh
     # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout).
     # Non-atomic deps keep the fail-fast guard so an operator path is never
     # silently wiped (#722 / PR#789).
@@ -306,7 +327,7 @@ _normalized_tracelens_root_value() {
 # trailing-slash / symlinked spelling of the default must not read as override.
 # Empty input yields empty output; unresolvable paths fall back to the trimmed
 # literal so a not-yet-cloned default still compares correctly (#722 / PR#789).
-# Keep in lockstep with the twin helper in kernel-agent/scripts/install.sh.
+# Keep in lockstep with the twin helper in src/hyperloom/agents/kernel/scripts/install.sh.
 _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
@@ -327,7 +348,7 @@ resolve_tracelens() {
   # default. The default path — even when re-exported into env/.env or spelled
   # out via TRACELENS_DEFAULT_ROOT — stays installer-managed so a stale checkout
   # is still realigned to TRACELENS_REF, not silently adopted (#722 / PR#789).
-  # Matches the path-based override test in kernel-agent/scripts/install.sh and
+  # Matches the path-based override test in src/hyperloom/agents/kernel/scripts/install.sh and
   # the handler/tool.
   _default_root="$(_canonicalize_path "${_open_source_root}/TraceLens")"
   _norm_root="$(_canonicalize_path "$(_normalized_tracelens_root_value)")"
@@ -496,8 +517,7 @@ main() {
   log "REPO_ROOT=${REPO_ROOT}"
   log "USER_DATA_PATH=${USER_DATA_PATH}"
   log "HYPERLOOM_DEPS_ROOT=${HYPERLOOM_DEPS_ROOT}"
-  credential_status SAFE_API_KEY
-  credential_status OPENAI_BASE_URL
+  llm_credential_status
   credential_status CURSOR_API_KEY || true
 
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -510,7 +530,11 @@ main() {
   resolve_tracelens
   write_local_env
 
-  print_next_steps
+  if [ "$PRINT_NEXT_STEPS" -eq 1 ]; then
+    print_next_steps
+  else
+    log "local setup complete"
+  fi
 }
 
 main "$@"

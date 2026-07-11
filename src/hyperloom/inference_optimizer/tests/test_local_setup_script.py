@@ -15,12 +15,15 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "local_setup.sh"
 IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 KA_INSTALL = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "scripts" / "install.sh"
+BAREMETAL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install_baremetal.sh"
 PREFLIGHT_KB = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "preflight_kb.sh"
 
 # The default that all installers fall back to when USER_DATA_PATH is unset.
 _DEFAULT_USER_DATA_PATH = "/workspace/hyperloom"
 # Substring of the loud fallback notice each script prints to stderr.
 _FALLBACK_WARNING = "USER_DATA_PATH not set"
+_CANONICAL_KERNEL_AGENT_ROOT = "src/hyperloom/agents/kernel"
+_CANONICAL_KERNEL_AGENT_INSTALL = f"{_CANONICAL_KERNEL_AGENT_ROOT}/scripts/install.sh"
 
 # Strip these host-leaked env vars so each test runs hermetically.
 _HOST_LEAK_VARS = (
@@ -54,6 +57,38 @@ def _clean_base_env() -> dict[str, str]:
     for var in _HOST_LEAK_VARS:
         run_env.pop(var, None)
     return run_env
+
+
+def test_skill_guidance_uses_in_tree_kernel_agent_paths() -> None:
+    """Agent-facing launch docs must not recreate the retired sibling checkout path."""
+    guidance_files = set(REPO_ROOT.rglob("SKILL.md"))
+    guidance_files.update((REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "references").glob("*.md"))
+    guidance_files.update((REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets").glob("*.example"))
+    assert guidance_files
+
+    offenders: list[str] = []
+    stale_fragments = (
+        "$REPO_ROOT/" + "kernel-agent",
+        "${REPO_ROOT}/" + "kernel-agent",
+        "kernel-agent" + "/scripts/install.sh",
+        "kernel-agent" + "/tools/",
+        "kernel-agent" + "/skills/",
+    )
+    for path in sorted(guidance_files):
+        text = path.read_text(encoding="utf-8")
+        if any(fragment in text for fragment in stale_fragments):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+
+    assert not offenders, "stale kernel-agent path guidance in: " + ", ".join(offenders)
+
+    inference_skill = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "SKILL.md"
+    kernel_skill = REPO_ROOT / "src" / "hyperloom" / "agents" / "kernel" / "SKILL.md"
+    setup_example = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "setup_env.sh.example"
+    assert _CANONICAL_KERNEL_AGENT_INSTALL in inference_skill.read_text(encoding="utf-8")
+    assert _CANONICAL_KERNEL_AGENT_INSTALL in kernel_skill.read_text(encoding="utf-8")
+    assert f'export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/{_CANONICAL_KERNEL_AGENT_ROOT}"' in setup_example.read_text(
+        encoding="utf-8"
+    )
 
 
 def _run_local_setup(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -331,7 +366,7 @@ def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path
 def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> None:
  # a MANAGED default checkout that exists but is NOT a git tree
     # (half-done/crashed clone, no .git) must be dropped and rebuilt+pinned via
-    # the atomic path, not abort. Mirrors kernel-agent/scripts/install.sh
+    # the atomic path, not abort. Mirrors src/hyperloom/agents/kernel/scripts/install.sh
     # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout);
     # previously clone_or_update die'd on "destination exists but is not a git
     # checkout" and local_setup.sh could not self-repair the default path.
@@ -573,7 +608,7 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "SAFE_API_KEY: set" in result.stdout
+    assert "LLM credentials: usable base URL + key present" in result.stdout
     assert secret not in result.stdout
     assert secret not in result.stderr
     assert not (tmp_path / "session" / "runtime" / "local-setup.env.sh").exists()
@@ -754,6 +789,16 @@ def test_install_does_not_reference_default_path_when_set(script: Path, tmp_path
     assert result.returncode == 0, result.stderr + result.stdout
     combined = result.stdout + result.stderr
     assert _DEFAULT_USER_DATA_PATH not in combined, combined
+
+
+def test_ka_install_repo_root_fallback_tracks_src_layout() -> None:
+    """The standalone kernel-agent installer must find the repo root from its in-tree path."""
+    text = KA_INSTALL.read_text(encoding="utf-8")
+    assert 'KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"' in text
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"' in text
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"' not in text
+    assert (KA_INSTALL.parent / "..").resolve() == REPO_ROOT / _CANONICAL_KERNEL_AGENT_ROOT
+    assert (KA_INSTALL.parent / "../../../../..").resolve() == REPO_ROOT
 
 
 @pytest.mark.parametrize(
@@ -1201,3 +1246,45 @@ def test_io_install_magpie_patch_strict_default_with_benign_no_op_soft() -> None
     assert "Magpie atomic-write patch skipped" in text, "missing benign no-op warn"
     # Boolean-ish parsing helper replaces the brittle numeric -eq test.
     assert 'is_falsy "${PATCH_MAGPIE:-1}"' in text
+
+
+def test_baremetal_wheel_check_only_first_run_succeeds(tmp_path: Path) -> None:
+    # Standalone wheel mode: a first-run --check-only (wheel not installed yet)
+    # must report the missing package and exit 0, not die trying to locate
+    # site-packages assets that do not exist yet.
+    fake_py = tmp_path / "fakepython"
+    # Stub interpreter: make `import hyperloom.inference_optimizer` (and its
+    # importlib.util.find_spec probe) look unavailable, so bootstrap_wheel_install
+    # takes the "package missing" path.
+    fake_py.write_text(
+        "#!/usr/bin/env bash\n"
+        "exec /usr/bin/env python3 -c '\n"
+        "import sys, runpy\n"
+        "code = sys.argv[1] if len(sys.argv) > 1 else \"\"\n"
+        "code = code.replace(\"hyperloom.inference_optimizer\", \"hyperloom._absent_io_\")\n"
+        "exec(compile(code, \"<stub>\", \"exec\"))\n"
+        "' \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+
+    env = _clean_base_env()
+    env["HYPERLOOM_INSTALL_SOURCE"] = "wheel"
+    env["INFERENCE_OPTIMIZER_FORCE_PYTHON"] = "1"
+    env["PYTHON"] = str(fake_py)
+    env["USER_DATA_PATH"] = str(tmp_path / "udp")
+
+    result = subprocess.run(
+        ["bash", str(BAREMETAL), "--check-only", "--skip-base-check", "--yes"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "cannot locate packaged assets" not in combined
+    assert "hyperloom.inference_optimizer missing" in combined
