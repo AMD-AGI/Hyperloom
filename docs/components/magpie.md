@@ -58,8 +58,8 @@ pip install -e .
 ```
 
 ```{note}
-Hyperloom installs Magpie for you during `install.sh` rather than via
-`src/hyperloom/inference_optimizer/assets/local_setup.sh`. `src/hyperloom/inference_optimizer/assets/install.sh` clones it (pinned to
+Hyperloom installs Magpie for you during `install.sh`.
+`src/hyperloom/inference_optimizer/assets/install.sh` clones it (pinned to
 `MAGPIE_REF`, default under `$MAGPIE_PATH`) and editable-installs it, while also
 applying the Hyperloom atomic benchmark-script patch when needed.
 `src/hyperloom/inference_optimizer/cli/preflight.py` can also clone + `pip install -e` Magpie on

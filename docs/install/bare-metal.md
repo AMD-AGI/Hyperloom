@@ -74,14 +74,15 @@ The installer and its chained runtime installers accept either the single-gatewa
 
 > To change the artifact directory (default `/workspace/hyperloom`), `export USER_DATA_PATH=...` in your shell before running the installer, or pass `--user-data-path`. The bare-metal installer reads `USER_DATA_PATH` from the shell environment, **not** from `.env` (only LLM credentials are read from `.env`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
 
-Bare-metal installs default `KERNEL_OPT_BACKEND_ORDER` to `geak_v3`. In that
-default mode the installer skips `local_setup.sh`; open-source dependencies
-(Magpie, InferenceX, TraceLens, GEAK) are handled by `install.sh` and its
-chained kernel-agent installer. To opt into forge on a bare-metal host, export
-an explicit backend order before running the installer, for example
-`KERNEL_OPT_BACKEND_ORDER=forge` or `KERNEL_OPT_BACKEND_ORDER=forge,geak_v3`.
-When `forge` is present, the installer runs `local_setup.sh` first to clone the
-private KernelForge checkout and export `FORGE_PATH`.
+Bare-metal installs use `KERNEL_OPT_BACKEND_ORDER=geak_v3` by default. To use
+the forge backend instead, export an explicit backend order before running the
+installer:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge,geak_v3
+```
+
+Use this only if your environment has access to KernelForge.
 
 ## 3. Run the bare-metal installer
 

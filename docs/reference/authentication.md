@@ -19,13 +19,11 @@ Hyperloom needs at most two classes of configuration:
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-- **Path / workspace layout** — for local mode, `install.sh` clones and
-   installs the open-source dependencies under `HYPERLOOM_OPEN_SOURCE_ROOT`
-   and writes `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. You normally only
-   set `USER_DATA_PATH` (writable artifact root; default
-   `/workspace/hyperloom`). `local_setup.sh` is only needed when you explicitly
-   request the forge backend; it clones private KernelForge and writes
-   `$USER_DATA_PATH/runtime/local-setup.env.sh` with `FORGE_PATH`.
+- **Path / workspace layout** — for local mode, run `install.sh` and source
+   `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. You normally only set
+   `USER_DATA_PATH` (writable artifact root; default `/workspace/hyperloom`).
+   If you explicitly request the forge backend, run `local_setup.sh` first and
+   source `$USER_DATA_PATH/runtime/local-setup.env.sh`.
 
 In the **single-gateway** setup, GEAK keys and Anthropic / OpenAI
 aliases are **derived** from `SAFE_API_KEY` and
@@ -210,8 +208,8 @@ If `KERNEL_OPT_BACKEND_ORDER` explicitly contains `forge`, run
 Open-source dependencies default under `HYPERLOOM_OPEN_SOURCE_ROOT`
 (`/opt/hyperloom/open-source-repos`), decoupled from `USER_DATA_PATH` so
 shared session storage does not collocate concurrent pods' clones.
-`local_setup.sh` accepts `HYPERLOOM_DEPS_ROOT` (or `--deps-root`) as an alias
-for the private KernelForge checkout root and exports the resolved value as
+`local_setup.sh` accepts `HYPERLOOM_DEPS_ROOT` (or `--deps-root`) for the
+optional forge setup and exports the resolved value as
 `HYPERLOOM_OPEN_SOURCE_ROOT` for same-shell `install.sh` invocations.
 
 Leave these variables unset unless you maintain your own checkouts. An

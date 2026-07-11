@@ -117,8 +117,7 @@ source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 - `SAFE_API_KEY` — your key from the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
 - `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). Use an absolute path pointing at any location with enough space.
 
-`install.sh` clones and installs the open-source dependencies (Magpie,
-InferenceX, TraceLens, GEAK) and writes `kernel-agent.env.sh`.
+When it finishes, source `kernel-agent.env.sh` before launching.
 
 If you explicitly run the forge kernel backend, prepare KernelForge before
 `install.sh`:
@@ -131,8 +130,7 @@ bash src/hyperloom/inference_optimizer/assets/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
-`local_setup.sh` only clones the private KernelForge checkout and exports
-`FORGE_PATH`; it no longer clones InferenceX or TraceLens.
+Use this only if your environment has access to KernelForge.
 
 ---
 

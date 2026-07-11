@@ -359,10 +359,9 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-`local_setup.sh` is not part of the default GEAK install path. It only clones
-the private KernelForge repo and writes `FORGE_PATH` / `KERNEL_FORGE_ROOT` when
-the forge backend is requested (bare-metal does this automatically when
-`KERNEL_OPT_BACKEND_ORDER` explicitly contains `forge`).
+Default GEAK installs do not run `local_setup.sh`. If `KERNEL_OPT_BACKEND_ORDER`
+explicitly contains `forge`, run `local_setup.sh --no-next-steps` and source
+`local-setup.env.sh` before `install.sh`.
 
 Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
