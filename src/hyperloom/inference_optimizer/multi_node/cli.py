@@ -32,7 +32,6 @@ from typing import Any
 from ..session.paths import mn_profile_trace_root
 from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
-from ._internal.env_safety import assert_env_key_shapes
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .state_paths import legacy_state_file, resolve_state_file, state_file_safe_to_read
@@ -710,7 +709,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     """
     state = _require_state("head_pod_ip")
 
-    # Source the env file, then verify ``ray`` is on PATH (head pod never invokes oob/claude/codex).
+    # Source the env file, then verify ``ray`` is on PATH.
     script = (
         "set -e; "
         "if [ -f /etc/profile.d/hyperloom-env.sh ]; "
@@ -2230,7 +2229,7 @@ def build_parser() -> argparse.ArgumentParser:
     # bootstrap
     sp = sub.add_parser(
         "bootstrap",
-        help="install OOB/CLI toolchain inside the RayJob via Ray Dashboard REST. "
+        help="install Hyperloom RayJob toolchain inside the RayJob via Ray Dashboard REST. "
         "Default: uses multi_node/scripts/bootstrap.sh from this checkout.",
     )
     sp.add_argument(
@@ -2246,7 +2245,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_bootstrap)
 
     # verify
-    sp = sub.add_parser("verify", help="confirm oob/claude/codex/ray are on PATH inside the RayJob")
+    sp = sub.add_parser("verify", help="confirm ray is on PATH inside the RayJob")
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_verify)

@@ -1450,7 +1450,7 @@ should_install_forge_backend() {
 
 # The forge backend drives the `claude` CLI inside its autonomous loop
 # (see forge_submit._apply_fellow_env), so it needs Node/npm, the claude npm
-# CLI, and ~/.claude auth even though the OOB backends are gone.
+# CLI, and ~/.claude auth even though claude/codex/cursor backends are gone.
 ensure_forge_claude_cli() {
   log "ensuring claude CLI for the forge backend"
   if [ "$CHECK_ONLY" -eq 1 ]; then

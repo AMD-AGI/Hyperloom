@@ -115,8 +115,8 @@ def ensure_fd_limit(
 def isolated_compile_cache_env(output_dir, base_env: Optional[dict] = None) -> dict:
     """Return an env dict with per-attempt JIT/compile cache dirs.
 
-    The kernel-opt parallel path runs the GEAK and OOB ladders at the same
-    time and both trigger aiter / triton / inductor compiles. aiter
+    The kernel-opt parallel path can run multiple backend attempts at the same
+    time and they trigger aiter / triton / inductor compiles. aiter
     (FileBaton) and triton self-serialize per cache *key*, so steady-state
     concurrent compiles are safe -- but a sibling killed on timeout can leave
     a stale lock, and an ``AITER_REBUILD=1`` import wipes the shared build dir

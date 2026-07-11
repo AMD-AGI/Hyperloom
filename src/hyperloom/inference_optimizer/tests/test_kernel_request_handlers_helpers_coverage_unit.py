@@ -89,9 +89,10 @@ def test_backend_order_explicit_payload(monkeypatch) -> None:
 
 def test_backend_order_env_alias(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # removed OOB backends are filtered out, leaving an empty ladder
+    # Removed OOB backends are filtered out; when nothing survives, fall back
+    # to the default ladder instead of running zero backend attempts.
     monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
-    assert krh._backend_order({}) == []
+    assert krh._backend_order({}) == ["forge", "geak_v3"]
 
 
 def test_backend_order_default_is_forge_geak(monkeypatch) -> None:

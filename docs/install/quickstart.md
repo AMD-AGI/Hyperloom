@@ -32,7 +32,7 @@ request access or open an issue in the
 
 Bind your [LLM Gateway](https://llm.amd.com/) key to
 [Hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/) to obtain your API
-key. This key provides access to TraceLens, GEAK, and OOB services.
+key. This key provides access to TraceLens and GEAK services.
 
 ## Start a run
 

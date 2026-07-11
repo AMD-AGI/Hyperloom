@@ -496,8 +496,7 @@ def parse_backends(backends: str) -> list[str]:
     if invalid:
         raise ValueError(
             f"unsupported backend(s): {', '.join(invalid)} "
-            f"(allowed: {sorted(allowed)}; the OOB backends "
-            "claude/codex/cursor were removed)"
+            f"(allowed: {sorted(allowed)}; claude/codex/cursor were removed)"
         )
     return parsed
 
@@ -507,7 +506,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 
     Policy: forge is the first-priority handoff (Kernel-Forge autonomous
     loop); GEAK follows as fallback when forge skips a candidate or misses
-    a KEEP. The OOB backends (claude/codex/cursor) were removed.
+    a KEEP. claude/codex/cursor were removed.
 
     When no benchmark/test harness is available, GEAK still attempts
     the rewrite but ``geak_without_benchmark=True`` is flagged so
@@ -542,7 +541,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
             # (e.g. KERNEL_OPT_BACKEND_ORDER=forge,geak,claude,codex) degrades to
             # the surviving backends instead of raising ValueError. 'geak' is the
             # whole-pipeline e2e delegate (coordinator-owned, not per-kernel);
-            # claude/codex/cursor are the removed OOB backends. An empty remainder
+            # claude/codex/cursor are removed backend tokens. An empty remainder
             # falls back to the default ladder.
             _dropped = {"geak", "claude", "codex", "cursor"}
             env_tokens = ",".join(
@@ -2821,15 +2820,14 @@ def invoke_backend(
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
     # ---------------------------------------------------------------------------
-    # Common test-command + before_kernel_opt rocprof — runs for ALL backends
-    # so every optimization attempt (GEAK, Claude, Codex, Cursor) gets the same
+    # Common test-command + before_kernel_opt rocprof — runs for all backends
+    # so every optimization attempt (GEAK / forge) gets the same
     # pre-optimization roofline snapshot without duplicating the logic.
     # ---------------------------------------------------------------------------
     cand_name = str(candidate.get("name") or "")
     is_multigpu_common = bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(cand_name)
-    # Derive a shared test_command that GEAK will use and rocprof will profile.
-    # OOB backends don't accept --test-command but we still want the rocprof
-    # snapshot, so we compute it here unconditionally.
+    # Derive a shared test_command that GEAK will use and rocprof will profile;
+    # forge also gets the same before-kernel snapshot from this shared setup.
     common_test_command = getattr(args, "test_command", "").strip()
     # When TraceLens attached an authoritative kernel_contract (collective /
     # attention) AND we have the exact traced shapes, do NOT hand GEAK a

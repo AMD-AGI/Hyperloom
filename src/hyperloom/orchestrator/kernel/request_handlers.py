@@ -3274,7 +3274,13 @@ def _backend_order(payload: dict) -> list[str]:
     # whole-pipeline e2e delegate) is intentionally absent: it is a phase-level
     # delegate (see ``geak_selected``), not a per-kernel backend.
     allowed = {"geak_v3", "forge"}
-    return [backend for backend in order if backend in allowed]
+    filtered = [backend for backend in order if backend in allowed]
+    if filtered:
+        return filtered
+    removed_oob = {"claude", "codex", "cursor"}
+    if any(backend in removed_oob for backend in order):
+        return list(_DEFAULT_KERNEL_BACKEND_ORDER)
+    return []
 
 
 def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
@@ -3774,7 +3780,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
     # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
     # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
-    # Claude/Codex/forge KEEP. Scoped to backend=="geak_v3" so OOB backends are byte-identical;
+    # forge KEEP. Scoped to backend=="geak_v3" so forge ranking stays byte-identical;
     # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
     _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
     try:
@@ -3914,7 +3920,7 @@ async def _run_kernel_backend_sequence(
     # Forge edits the live repo in-place (temp branch + per-file restore) and
     # must NOT race with other backends that read/write the same repo. Run it
     # sequentially first; if it KEEPs, short-circuit. Otherwise continue with
-    # the geak / oob parallel split on the remaining backends.
+    # the remaining backend ladder.
     forge_group = [b for b in order if b == "forge"]
     remaining = [b for b in order if b != "forge"]
     forge_best: dict | None = None

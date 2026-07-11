@@ -195,7 +195,7 @@ source "$USER_DATA_PATH/runtime/local-setup.env.sh"
 ```
 
 `src/hyperloom/agents/kernel/scripts/install.sh` (invoked by preflight or manually) then
-installs runtime dependencies (Ray, GEAK, OOB CLIs, Magpie, and so on) and
+installs runtime dependencies (Ray, GEAK, Magpie, and so on) and
 writes `$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Source that too when
 driving kernel-agent tools directly.
 

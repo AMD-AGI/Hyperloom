@@ -334,8 +334,8 @@ def main() -> int:
         type=float,
         default=60,
         help="Wall-clock budget per backend attempt in minutes "
-        "(default 60). Applies to claude/codex OOB "
-        "backends. Agents are told to early-exit as "
+        "(default 60). Applies to non-GEAK backends such as forge. "
+        "Agents are told to early-exit as "
         "soon as they hit >=1.50x with passing correctness; "
         "otherwise they iterate up to ~85%% of this budget "
         "and SIGTERM at 100%%.",

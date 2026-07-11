@@ -14,8 +14,7 @@ kernels, and extends [mini-SWE-agent](https://github.com/SWE-agent/mini-SWE-agen
 for its agent loop and environment tooling.
 
 Within Hyperloom, GEAK is one of the kernel-rewrite backends: when a hot kernel
-is identified, it is optimized asynchronously through GEAK (alongside the out-of-box (OOB)
-kernel-optimization path that uses Claude Code or OpenAI Codex). The kernel agent
+is identified, it is optimized asynchronously through GEAK. The kernel agent
 dispatches GEAK runs with placement precedence SSH (Dynamo multi-node) > Ray
 (when available) > direct CLI, so multiple candidates can be explored in
 parallel on the cluster's GPUs.
@@ -148,7 +147,7 @@ GEAK is wired in as a kernel-rewrite backend of the kernel agent:
   placement precedence `ssh (Dynamo multi-node) > ray (`run_via_ray`, when
   `ray_available()`) > direct CLI`. The Ray path pins `num_gpus`, remaps
   visible GPUs to logical IDs, and isolates per-attempt compile caches so a
-  co-running OOB ladder can't clobber artifacts.
+  co-running backend can't clobber artifacts.
 - `src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py` runs at install
   time to patch GEAK's bundled `mini_kernel_strategy_list.yaml`; it does not
   alter the runtime task prompt (that is built by
