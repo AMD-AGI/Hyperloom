@@ -1431,7 +1431,7 @@ ensure_geak() {
     if [ -x "${GEAK_ROOT}/setup.sh" ]; then
       run env -u REPO_ROOT bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
     else
-      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_oob"
+      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_forge_claude_cli"
     fi
     # setup.sh installs the CLI, not the SDK; run_e2e.py prefers the SDK.
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
