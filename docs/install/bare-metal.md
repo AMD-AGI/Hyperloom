@@ -41,7 +41,7 @@ launching an optimization; you do not need to locate it manually.
 
 ## 2. Configure LLM Credentials
 
-Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/OOB/kernel-agent configuration needs them later.
+Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/kernel-agent configuration needs them later.
 
 ```bash
 # Single gateway (default)
@@ -72,6 +72,12 @@ cp .env.template .env
 The installer and its chained runtime installers accept either the single-gateway pair or a split setup as long as at least one base URL and one API key are present.
 
 > To change the artifact directory (default `/workspace/hyperloom`), `export USER_DATA_PATH=...` in your shell before running the installer, or pass `--user-data-path`. The bare-metal installer reads `USER_DATA_PATH` from the shell environment, **not** from `.env` (only LLM credentials are read from `.env`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
+
+Bare-metal installs default `KERNEL_OPT_BACKEND_ORDER` to `geak_v3`, so they
+install and run GEAK without pulling forge's closed-source CLI dependency. To
+opt into forge on a bare-metal host, export an explicit backend order before
+running the installer, for example `KERNEL_OPT_BACKEND_ORDER=forge` or
+`KERNEL_OPT_BACKEND_ORDER=forge,geak_v3`.
 
 ## 3. Run the bare-metal installer
 

@@ -1211,6 +1211,7 @@ write_combined_env() {
     [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
     [ -n "${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-}" ] && printf 'export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=%q\n' "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX"
     [ -n "${KERNEL_AGENT_RAG_INDEX_STRICT:-}" ] && printf 'export KERNEL_AGENT_RAG_INDEX_STRICT=%q\n' "$KERNEL_AGENT_RAG_INDEX_STRICT"
+    [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && printf 'export KERNEL_OPT_BACKEND_ORDER=%q\n' "$KERNEL_OPT_BACKEND_ORDER"
     [ -n "${HYPERLOOM_INSTALL_SOURCE:-}" ] && printf 'export HYPERLOOM_INSTALL_SOURCE=%q\n' "$HYPERLOOM_INSTALL_SOURCE"
     [ -n "${HYPERLOOM_WHEEL:-}" ] && printf 'export HYPERLOOM_WHEEL=%q\n' "$HYPERLOOM_WHEEL"
     [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && printf 'export HYPERLOOM_WHEEL_REPO=%q\n' "$HYPERLOOM_WHEEL_REPO"
@@ -1299,6 +1300,7 @@ main() {
   local user_data runtime_dir local_env ka_env combined_env
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-/workspace/hyperloom}}"
   export USER_DATA_PATH="$user_data"
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak_v3}"
   # Honor the same override chain local_setup.sh / install.sh use so the
   # generated env files are located where those scripts actually write them.
   runtime_dir="${HYPERLOOM_RUNTIME_DIR:-${user_data}/runtime}"

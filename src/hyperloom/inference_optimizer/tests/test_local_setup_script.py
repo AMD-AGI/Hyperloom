@@ -788,6 +788,13 @@ def test_ka_install_repo_root_fallback_tracks_src_layout() -> None:
     assert (KA_INSTALL.parent / "../../../../..").resolve() == REPO_ROOT
 
 
+def test_baremetal_defaults_kernel_backend_order_to_geak() -> None:
+    """Bare-metal installs default to GEAK so closed-source forge is opt-in."""
+    text = BAREMETAL.read_text(encoding="utf-8")
+    assert 'export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak_v3}"' in text
+    assert 'printf \'export KERNEL_OPT_BACKEND_ORDER=%q\\n\' "$KERNEL_OPT_BACKEND_ORDER"' in text
+
+
 @pytest.mark.parametrize(
     "script",
     [IO_INSTALL, KA_INSTALL, SCRIPT, PREFLIGHT_KB],
