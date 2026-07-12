@@ -85,7 +85,7 @@ list** — they are needed in the *LLM model-name constraints* section below.
 
 ### 2. Build a combined CA bundle
 
-If the gateway uses an internal (for example AMD Corporate Root) CA, the job
+If the gateway uses an internal CA, the job
 still needs to reach **huggingface.co** and **github.com** over public TLS. A
 CA bundle containing only the internal certificate makes public TLS fail with
 `CERTIFICATE_VERIFY_FAILED`. Merge the system roots with the internal CA into a
