@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
+from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -413,19 +414,15 @@ class CriticAgentBackend:
                 from openai import AsyncOpenAI  # type: ignore[import-not-found]
             except ImportError as exc:  # pragma: no cover
                 raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-            # Codex review reasoning speaks the OpenAI protocol, so prefer the
-            # OpenAI-side key (split entrypoints); ANTHROPIC_AUTH_TOKEN is the
-            # single-gateway fallback.
-            api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-            if not api_key:
+            try:
+                kwargs = openai_client_kwargs()
+            except LLMConfigError as exc:
                 raise BackendError(
-                    "OPENAI_API_KEY / ANTHROPIC_AUTH_TOKEN not set "
-                    "(CriticAgentBackend cannot reach Codex for review reasoning)"
-                )
-            base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
-            kwargs: dict[str, Any] = {"api_key": api_key}
-            if base_url:
-                kwargs["base_url"] = base_url
+                    str(exc).replace(
+                        "OpenAI-compatible client",
+                        "CriticAgentBackend cannot reach Codex for review reasoning",
+                    )
+                ) from exc
             try:
                 import httpx
             except ImportError:

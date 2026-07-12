@@ -27,7 +27,9 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from hyperloom.common.llm_config import parse_custom_headers
 from .executors import (  # noqa: F401 - re-exported for callers/tests
     _NOOP_KINDS_KERNEL_ONLY,
     _REAL_EXECUTORS_FULL,
@@ -782,9 +784,7 @@ def _probe_llm_catalog(
             pass
 
     probe_url = base_url.rstrip("/") + "/models"
-    headers: dict[str, str] = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _catalog_probe_headers(base_url=base_url, api_key=api_key)
 
     delays = (0.0, *_CATALOG_RETRY_DELAYS_SEC)
     last_err: str = ""
@@ -821,7 +821,13 @@ def _probe_llm_catalog(
             last_err = f"JSON decode: {exc}"
             print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} returned non-JSON: {last_err}")
             continue
-        ids = {m["id"] for m in data.get("data") or [] if isinstance(m, dict) and isinstance(m.get("id"), str)}
+        ids: set[str] = set()
+        for model in data.get("data") or []:
+            if not isinstance(model, dict) or not isinstance(model.get("id"), str):
+                continue
+            model_id = model["id"]
+            ids.add(model_id)
+            ids.add(_catalog_compare_model_id(model_id))
         if not ids:
             last_err = "empty data[]"
             continue
@@ -829,6 +835,53 @@ def _probe_llm_catalog(
 
     print(f"Preflight: catalog probe exhausted {len(delays)} attempts ({last_err}); cannot validate model availability")
     return None
+
+
+def _catalog_probe_headers(*, base_url: str, api_key: str) -> dict[str, str]:
+    """Build headers for direct ``/models`` probes.
+
+    The Anthropic SDK supports ``ANTHROPIC_CUSTOM_HEADERS`` for gateways that
+    require subscription headers; the preflight catalog probe is a direct httpx
+    request, so it must apply the same env-specified headers itself.
+    """
+    headers = parse_custom_headers(os.environ.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
+        os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
+    )
+    lower_names = {name.lower() for name in headers}
+    if api_key and "authorization" not in lower_names:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if api_key and "ocp-apim-subscription-key" not in lower_names:
+        parts = urlsplit(base_url)
+        if parts.hostname == "llm-api.amd.com":
+            headers["Ocp-Apim-Subscription-Key"] = api_key
+    return headers
+
+
+def _catalog_compare_model_id(model_id: str) -> str:
+    """Normalize catalog IDs for preflight comparison only."""
+    text = str(model_id or "").strip()
+    lowered = text.lower()
+    if text.lower().startswith("claude-"):
+        return lowered.replace(".", "-")
+    return lowered
+
+
+def _codex_model_should_follow_claude() -> bool:
+    """True when the operator supplied only Anthropic config."""
+    return bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        and not (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    )
+
+
+def _claude_model_should_follow_codex() -> bool:
+    """True when the operator supplied only OpenAI-compatible config."""
+    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
+        return True
+    return bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        and not (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    )
 
 
 def _validate_and_resolve_claude_model(
@@ -864,7 +917,7 @@ def _validate_and_resolve_claude_model(
     allow_custom = os.environ.get(
         "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL",
         "",
-    ).strip().lower() in ("1", "true", "yes", "on")
+    ).strip().lower() in ("1", "true", "yes", "on") or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -924,14 +977,20 @@ def _validate_and_resolve_claude_model(
         # to the OpenAI side ONLY for a single-gateway deploy where both sides
         # resolve to the same endpoint.
         candidates: list[tuple[str, str]] = []
-        if anthropic_url:
-            candidates.append((anthropic_url, anthropic_key))
-        if openai_url and openai_url == anthropic_url:
-            # single gateway: same URL serves both; OpenAI key is a valid retry
-            candidates.append((openai_url, openai_key))
-        elif openai_url and not anthropic_url:
-            # pure single-gateway with only OPENAI_BASE_URL configured
-            candidates.append((openai_url, openai_key))
+        if _claude_model_should_follow_codex():
+            if openai_url:
+                candidates.append((openai_url, openai_key))
+            elif anthropic_url:
+                candidates.append((anthropic_url, anthropic_key))
+        else:
+            if anthropic_url:
+                candidates.append((anthropic_url, anthropic_key))
+            if openai_url and openai_url == anthropic_url:
+                # single gateway: same URL serves both; OpenAI key is a valid retry
+                candidates.append((openai_url, openai_key))
+            elif openai_url and not anthropic_url:
+                # pure single-gateway with only OPENAI_BASE_URL configured
+                candidates.append((openai_url, openai_key))
         seen_urls: set[str] = set()
         for cand_url, cand_key in candidates:
             if not cand_url or cand_url in seen_urls:
@@ -970,7 +1029,7 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    if chosen in catalog_ids:
+    if chosen in catalog_ids or _catalog_compare_model_id(chosen) in catalog_ids:
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
 
@@ -1439,10 +1498,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"errors={aiter_sweep['errors']}"
         )
 
+    claude_follows_codex = _claude_model_should_follow_codex()
+    if claude_follows_codex:
+        os.environ["INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"] = "1"
+        args.claude_model = args.codex_model
+    else:
+        os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
+
     resolved_urls = _preflight(args)
 
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
+    if claude_follows_codex:
+        args.claude_model = args.codex_model
+    codex_follows_claude = _codex_model_should_follow_claude()
     _validate_and_resolve_claude_model(args, resolved_urls)
+    if codex_follows_claude:
+        args.codex_model = args.claude_model
     # Codex smoke probes the OpenAI side independently (split entrypoints).
     _smoke_test_codex_model(args, resolved_urls)
 
