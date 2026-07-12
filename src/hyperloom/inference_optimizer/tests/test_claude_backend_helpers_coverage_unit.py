@@ -104,6 +104,58 @@ def test_conversation_session_accessors() -> None:
     assert b2.conversation_session_id is None
 
 
+def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
+    b = _backend(model="claude-opus-4-6")
+
+    opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
+
+    assert opts.kwargs["setting_sources"] == []
+    child_env = opts.kwargs["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://llm-api.amd.com/anthropic"
+    assert child_env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: sub-key"
+    assert child_env["ANTHROPIC_MODEL"] == "claude-opus-4-6"
+    assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-opus-4-6"
+
+
+def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeypatch) -> None:
+    for key in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "SAFE_API_KEY",
+        "LLM_GATEWAY_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    b = _backend(model="claude-opus-4-6")
+
+    opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
+
+    assert "env" not in opts.kwargs
+    assert "setting_sources" not in opts.kwargs
+
+
+def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
+    b = _backend(model="claude-opus-4-6")
+
+    opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
+
+    child_env = opts.kwargs["env"]
+    assert opts.kwargs["setting_sources"] == []
+    assert child_env["ANTHROPIC_API_KEY"] == "openai-key"
+    assert child_env["ANTHROPIC_AUTH_TOKEN"] == "openai-key"
+    assert child_env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: openai-key"
+
+
 # -- block helpers ---------------------------------------------------------
 def test_iter_blocks() -> None:
     assert ClaudeBackend._iter_blocks(_Msg(content=[1, 2])) == [1, 2]
