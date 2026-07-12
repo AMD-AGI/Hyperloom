@@ -36,18 +36,8 @@ _HOST_LEAK_VARS = (
     "FORGE_PATH",
     "KERNEL_FORGE_ROOT",
     "KERNEL_FORGE_PATH",
-    "INFERENCEX_REPO",
-    "INFERENCEX_REF",
-    "TRACELENS_REPO",
-    "TRACELENS_REF",
-    "OOB_SRC",
-    "INFERENCEX_PATH",
-    "TRACELENS_ROOT",
-    "TRACELENS_DEFAULT_ROOT",
-    "TRACELENS_INTERNAL_ROOT",
     "SAFE_API_KEY",
     "OPENAI_BASE_URL",
-    "CURSOR_API_KEY",
 )
 
 
@@ -130,17 +120,11 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     secret = "ak-secret-that-must-not-be-written"
     remotes = tmp_path / "remotes"
     forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
 
     result = _run_local_setup(
         tmp_path,
         env={
             "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
             "SAFE_API_KEY": secret,
         },
     )
@@ -152,451 +136,29 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
     assert f"export FORGE_PATH='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
     assert f"export KERNEL_FORGE_ROOT='{tmp_path / 'deps' / 'KernelForge'}'" in env_text
-    assert f"export OOB_SRC='{tmp_path / 'deps' / 'KernelForge' / 'OOB'}'" in env_text
-    assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
-    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
- # the env file must export the canonical open-source-root key so
+    assert "INFERENCEX_PATH" not in env_text
+    assert "TRACELENS_ROOT" not in env_text
+    # The env file must export the canonical open-source-root key so
     # install.sh / paths / handler / tool resolve the SAME default root.
     assert f"export HYPERLOOM_OPEN_SOURCE_ROOT='{tmp_path / 'deps'}'" in env_text
-    # Default is open-source-only: no internal extension.
-    assert "TRACELENS_INTERNAL_ROOT" not in env_text
-    assert "TL_EXTENSION" not in env_text
-    assert not (tmp_path / "deps" / "TraceLens-internal").exists()
-    assert "open-source-only" in result.stdout
     assert secret not in env_text
 
 
-def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> None:
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    internal_checkout = _git_repo(tmp_path / "existing" / "TraceLens-internal", {"README.md": "internal\n"})
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
-            "TRACELENS_INTERNAL_ROOT": str(internal_checkout),
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert f"export TRACELENS_INTERNAL_ROOT='{internal_checkout}'" in env_text
-    assert "export TL_EXTENSION='TraceLens_internal'" in env_text
-
-
-def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path) -> None:
-    # A non-existent TRACELENS_INTERNAL_ROOT must warn and fall back to OSS-only.
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
-            "TRACELENS_INTERNAL_ROOT": str(tmp_path / "nope" / "TraceLens-internal"),
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert "TRACELENS_INTERNAL_ROOT" not in env_text
-    assert "TL_EXTENSION" not in env_text
-    assert "falling back to open-source-only" in result.stderr
-
-
 def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
-    existing_oob = tmp_path / "existing" / "KernelForge" / "OOB"
-    existing_oob.mkdir(parents=True)
-    remotes = tmp_path / "remotes"
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+    existing_forge = tmp_path / "existing" / "KernelForge"
+    existing_forge.mkdir(parents=True)
 
     result = _run_local_setup(
         tmp_path,
         env={
-            "OOB_SRC": str(existing_oob),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
+            "FORGE_PATH": str(existing_forge),
         },
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
     env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert f"export OOB_SRC='{existing_oob}'" in env_text
+    assert f"export FORGE_PATH='{existing_forge}'" in env_text
     assert not (tmp_path / "deps" / "KernelForge").exists()
-
-
-def test_local_setup_ignores_stale_default_checkout_without_override(tmp_path: Path) -> None:
- # with no TRACELENS_ROOT / TRACELENS_DEFAULT_ROOT override,
-    # a stale pre-existing checkout outside the pod-local deps root must NOT be
-    # adopted — resolution goes to ${deps}/TraceLens via the /opt clone+pin path.
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    # A stale checkout that the old implicit /workspace/TraceLens default would
-    # have silently adopted.
-    stale = _git_repo(tmp_path / "stale" / "TraceLens", {"README.md": "stale\n"})
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
-    assert str(stale) not in env_text
-
-
-def test_local_setup_realigns_default_checkout_on_wrong_commit(tmp_path: Path) -> None:
- # an implicit-default checkout that already exists
-    # but sits on the WRONG commit must be fetched/checked out to TRACELENS_REF,
-    # not silently adopted at its stale SHA.
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    # TraceLens source with two commits; pin target is the second (HEAD).
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "v1\n"})
-    old_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    (tracelens_public / "README.md").write_text("v2\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tracelens_public), "commit", "-aqm", "v2"], check=True)
-    pin_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    # Pre-create the pod-local default checkout stuck on the OLD commit.
-    default_root = tmp_path / "deps" / "TraceLens"
-    default_root.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", str(tracelens_public), str(default_root)], check=True)
-    subprocess.run(["git", "-C", str(default_root), "checkout", "-q", old_sha], check=True)
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    head = subprocess.run(
-        ["git", "-C", str(default_root), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    assert head == pin_sha, f"default checkout not realigned: {head} != {pin_sha}"
-
-
-def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path: Path) -> None:
- # a historical `TRACELENS_ROOT=\` placeholder in .env
-    # must NOT be treated as an explicit override. After the placeholder is
-    # stripped, the implicit default checkout on a stale SHA must still be
-    # realigned to TRACELENS_REF (not adopted as-is).
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "v1\n"})
-    old_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    (tracelens_public / "README.md").write_text("v2\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tracelens_public), "commit", "-aqm", "v2"], check=True)
-    pin_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    # Pre-create the pod-local default checkout stuck on the OLD commit.
-    default_root = tmp_path / "deps" / "TraceLens"
-    default_root.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", str(tracelens_public), str(default_root)], check=True)
-    subprocess.run(["git", "-C", str(default_root), "checkout", "-q", old_sha], check=True)
-    # A REPO_ROOT whose .env carries the historical `\` placeholder.
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    (repo_root / ".env").write_text("TRACELENS_ROOT=\\\n", encoding="utf-8")
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "REPO_ROOT": str(repo_root),
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    head = subprocess.run(
-        ["git", "-C", str(default_root), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    assert head == pin_sha, f"default checkout not realigned despite placeholder: {head} != {pin_sha}"
-
-
-def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> None:
- # a MANAGED default checkout that exists but is NOT a git tree
-    # (half-done/crashed clone, no .git) must be dropped and rebuilt+pinned via
-    # the atomic path, not abort. Mirrors src/hyperloom/agents/kernel/scripts/install.sh
-    # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout);
-    # previously clone_or_update die'd on "destination exists but is not a git
-    # checkout" and local_setup.sh could not self-repair the default path.
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    _allow_sha_fetch(tracelens_public)
-    pin_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    # Pre-create the pod-local default checkout as an incomplete tree (no .git).
-    default_root = tmp_path / "deps" / "TraceLens"
-    default_root.mkdir(parents=True)
-    (default_root / "partial").write_text("half\n", encoding="utf-8")
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    # Rebuilt: now a real git checkout pinned to TRACELENS_REF, stale tree gone.
-    assert (default_root / ".git").exists()
-    assert not (default_root / "partial").exists()
-    head = subprocess.run(
-        ["git", "-C", str(default_root), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    assert head == pin_sha, f"incomplete default not rebuilt+pinned: {head} != {pin_sha}"
-
-
-def test_local_setup_realigns_default_checkout_when_env_holds_default_path(tmp_path: Path) -> None:
- # a prior run re-exports TRACELENS_ROOT=<default> into
-    # env/.env. That is NOT an operator override — a default checkout on a stale
-    # SHA must still be realigned to TRACELENS_REF, matching handler/tool/install.
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "v1\n"})
-    old_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    (tracelens_public / "README.md").write_text("v2\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tracelens_public), "commit", "-aqm", "v2"], check=True)
-    pin_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    default_root = tmp_path / "deps" / "TraceLens"
-    default_root.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", str(tracelens_public), str(default_root)], check=True)
-    subprocess.run(["git", "-C", str(default_root), "checkout", "-q", old_sha], check=True)
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-            # env carries the DEFAULT path (as a prior run persisted it), plus a
-            # trailing slash to exercise canonicalization — still not an override.
-            "TRACELENS_ROOT": str(default_root) + "/",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    head = subprocess.run(
-        ["git", "-C", str(default_root), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    assert head == pin_sha, f"default checkout in env not realigned: {head} != {pin_sha}"
-
-
-def _make_stale_default_checkout(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
-    """Build KernelForge/InferenceX remotes + a two-commit TraceLens remote, and
-    pre-create the pod-local default checkout stuck on the OLD commit. Returns
-    (forge, inferencex, tracelens_remote, default_root, pin_sha)."""
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "v1\n"})
-    old_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    (tracelens_public / "README.md").write_text("v2\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tracelens_public), "commit", "-aqm", "v2"], check=True)
-    pin_sha = subprocess.run(
-        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    default_root = tmp_path / "deps" / "TraceLens"
-    default_root.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", str(tracelens_public), str(default_root)], check=True)
-    subprocess.run(["git", "-C", str(default_root), "checkout", "-q", old_sha], check=True)
-    return forge, inferencex, tracelens_public, default_root, pin_sha
-
-
-def _head_sha(repo: Path) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-
-
-def test_local_setup_default_root_equal_to_default_still_realigns(tmp_path: Path) -> None:
- # an operator who spells TRACELENS_DEFAULT_ROOT as the
-    # pod-local default path (trailing slash to exercise canonicalization) must
-    # NOT be treated as an explicit override — a stale default checkout is still
-    # realigned to TRACELENS_REF.
-    forge, inferencex, tracelens_public, default_root, pin_sha = _make_stale_default_checkout(tmp_path)
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-            "TRACELENS_DEFAULT_ROOT": str(default_root) + "/",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    assert _head_sha(default_root) == pin_sha, "TRACELENS_DEFAULT_ROOT==default not realigned"
-
-
-def test_local_setup_dotenv_default_path_still_realigns(tmp_path: Path) -> None:
- # .env carrying the FULL default path (not the `\`
-    # placeholder) is still installer-managed — a stale default checkout must be
-    # realigned to TRACELENS_REF, not adopted at its old SHA.
-    forge, inferencex, tracelens_public, default_root, pin_sha = _make_stale_default_checkout(tmp_path)
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    (repo_root / ".env").write_text(f"TRACELENS_ROOT={default_root}\n", encoding="utf-8")
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "REPO_ROOT": str(repo_root),
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    assert _head_sha(default_root) == pin_sha, ".env default path not realigned"
-
-
-def test_local_setup_explicit_override_is_not_realigned(tmp_path: Path) -> None:
- # a NON-default operator override (TRACELENS_ROOT elsewhere) is
-    # operator-maintained — it is adopted as-is and must NOT be fetched/checked
-    # out to TRACELENS_REF (guards against widening the _explicit logic).
-    forge, inferencex, tracelens_public, _default_root, pin_sha = _make_stale_default_checkout(tmp_path)
-    override = tmp_path / "operator" / "TraceLens"
-    override.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", str(tracelens_public), str(override)], check=True)
-    # Pin override to the FIRST commit so it differs from TRACELENS_REF (pin_sha).
-    first_sha = subprocess.run(
-        ["git", "-C", str(override), "rev-list", "--max-parents=0", "HEAD"],
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    subprocess.run(["git", "-C", str(override), "checkout", "-q", first_sha], check=True)
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": pin_sha,
-            "TRACELENS_ROOT": str(override),
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    assert _head_sha(override) == first_sha, "explicit override must NOT be realigned"
-
-
-def test_local_setup_honours_explicit_tracelens_default_root(tmp_path: Path) -> None:
-    # Operators can still point TRACELENS_DEFAULT_ROOT at a pre-existing manual
-    # checkout; that path wins over the pod-local clone.
-    remotes = tmp_path / "remotes"
-    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    manual = _git_repo(tmp_path / "manual" / "TraceLens", {"README.md": "manual\n"})
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
-            "TRACELENS_DEFAULT_ROOT": str(manual),
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert f"export TRACELENS_ROOT='{manual}'" in env_text
-    assert not (tmp_path / "deps" / "TraceLens").exists()
-
-
-def test_local_setup_fails_for_missing_explicit_dependency_path(tmp_path: Path) -> None:
-    result = _run_local_setup(
-        tmp_path,
-        env={"OOB_SRC": str(tmp_path / "missing" / "OOB")},
-    )
-
-    assert result.returncode != 0
-    assert "OOB_SRC is set but does not exist" in result.stderr
 
 
 def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> None:
@@ -608,7 +170,6 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "LLM credentials: usable base URL + key present" in result.stdout
     assert secret not in result.stdout
     assert secret not in result.stderr
     assert not (tmp_path / "session" / "runtime" / "local-setup.env.sh").exists()
@@ -645,9 +206,6 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(session_dir / "runtime" / "open-source-repos") not in result.stdout
     assert str(expected_deps / "KernelForge") in result.stdout
-    assert str(expected_deps / "TraceLens") in result.stdout
-    assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3" in result.stdout
 
 
 def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:
@@ -676,18 +234,12 @@ def test_local_setup_custom_deps_root_env_exports_matching_open_source_root(tmp_
     # sourcing consumer (install/paths/handler/tool) resolves the SAME default.
     remotes = tmp_path / "remotes"
     forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
     custom_deps = tmp_path / "custom-deps"
     run_env = _clean_base_env()
     run_env.update(
         {
             "USER_DATA_PATH": str(tmp_path / "session"),
             "KERNEL_FORGE_REPO": str(forge),
-            "INFERENCEX_REPO": str(inferencex),
-            "INFERENCEX_REF": "HEAD",
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
         },
     )
     result = subprocess.run(
@@ -704,7 +256,7 @@ def test_local_setup_custom_deps_root_env_exports_matching_open_source_root(tmp_
     env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
     assert f"export HYPERLOOM_DEPS_ROOT='{custom_deps}'" in env_text
     assert f"export HYPERLOOM_OPEN_SOURCE_ROOT='{custom_deps}'" in env_text
-    assert f"export TRACELENS_ROOT='{custom_deps / 'TraceLens'}'" in env_text
+    assert f"export FORGE_PATH='{custom_deps / 'KernelForge'}'" in env_text
 
 
 def test_local_setup_exports_open_source_root_in_current_shell(tmp_path: Path) -> None:
@@ -799,6 +351,17 @@ def test_ka_install_repo_root_fallback_tracks_src_layout() -> None:
     assert 'REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"' not in text
     assert (KA_INSTALL.parent / "..").resolve() == REPO_ROOT / _CANONICAL_KERNEL_AGENT_ROOT
     assert (KA_INSTALL.parent / "../../../../..").resolve() == REPO_ROOT
+
+
+def test_baremetal_defaults_kernel_backend_order_to_geak() -> None:
+    """Bare-metal installs default to whole-pipeline GEAK so forge is opt-in."""
+    text = BAREMETAL.read_text(encoding="utf-8")
+    assert 'export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"' in text
+    assert 'printf \'export KERNEL_OPT_BACKEND_ORDER=%q\\n\' "$KERNEL_OPT_BACKEND_ORDER"' in text
+    assert "kernel_backend_order_includes_forge()" in text
+    assert "skipping local_setup.sh" in text
+    assert "forge backend requested" in text
+    assert 'if kernel_backend_order_includes_forge; then' in text
 
 
 @pytest.mark.parametrize(

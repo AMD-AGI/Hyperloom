@@ -22,10 +22,6 @@ if [ -n "${OPENAI_BASE_URL}" ]; then
     set_env_var "OPENAI_BASE_URL" "${OPENAI_BASE_URL}"
 fi
 
-if [ -n "${CURSOR_API_KEY}" ]; then
-    set_env_var "CURSOR_API_KEY" "${CURSOR_API_KEY}"
-fi
-
 TRACELENS_ROOT=${TRACELENS_ROOT:-"/opt/TraceLens"}
 set_env_var "TRACELENS_ROOT" "${TRACELENS_ROOT}"
 

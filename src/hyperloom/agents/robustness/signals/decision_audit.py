@@ -15,7 +15,7 @@ KEEP, G6 ci_metrics schema drift. These are audit, not recovery: no auto-delegat
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
@@ -59,9 +59,6 @@ class DecisionAuditConfig:
 
     min_keep_gain_pct: float = 1.0
     dispatch_bypass_pre_post_epsilon_pct: float = 0.5
-    oob_no_harness_markers: tuple[str, ...] = field(
-        default_factory=lambda: ("expected speedup", "expected ~", "expected:")
-    )
 
 
 def evaluate_decision_audit_signals(
@@ -100,10 +97,6 @@ def evaluate_decision_audit_signals(
     ci_metrics_path = audit.get("ci_metrics_path") or ""
     if isinstance(ci_metrics, dict):
         out.extend(_ci_metrics_symptoms(ci_metrics, ci_metrics_path))
-
-    oob_attempts = audit.get("oob_attempts") or []
-    if isinstance(oob_attempts, list):
-        out.extend(_oob_symptoms(oob_attempts, cfg))
 
     return out
 
@@ -476,72 +469,6 @@ def _g6_schema_drift(
             ),
         )
     ]
-
-
-# ---------------------------------------------------------------------------
-# OOB optimization_attempts.jsonl audit
-# ---------------------------------------------------------------------------
-
-
-def _oob_symptoms(
-    entries: list[dict[str, Any]],
-    cfg: DecisionAuditConfig,
-) -> list[Symptom]:
-    """G7: flag OOB attempts advertising unmeasured "expected speedup".
-
-    HIGH severity so downstream won't count them as ``kernels_optimized``.
-
-    Args:
-        entries: OOB ``optimization_attempts.jsonl`` entries.
-        cfg: Decision-audit configuration.
-
-    Returns:
-        Symptoms for offending entries, possibly empty.
-    """
-    out: list[Symptom] = []
-    by_kernel: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        microbench = entry.get("microbench_speedup")
-        if isinstance(microbench, (int, float)) and microbench > 0:
-            continue
-        report = str(entry.get("report_text") or "").lower()
-        if not any(m.lower() in report for m in cfg.oob_no_harness_markers):
-            continue
-        kernel_id = entry.get("kernel_id") or "unknown"
-        # Collapse offending entries per kernel_id to avoid inbox spam.
-        prior = by_kernel.get(str(kernel_id))
-        if prior is None or (entry.get("ts") or "") > (prior.get("ts") or ""):
-            by_kernel[str(kernel_id)] = entry
-    for kernel_id, entry in by_kernel.items():
-        out.append(
-            Symptom(
-                name="oob_no_harness",
-                severity=SymptomSeverity.HIGH,
-                summary=(
-                    f"OOB attempt on kernel_id={kernel_id!r} advertised "
-                    f"expected speedup but no microbench measurement "
-                    f"was recorded"
-                ),
-                evidence={
-                    "kernel_id": kernel_id,
-                    "backend": entry.get("backend"),
-                    "microbench_speedup": entry.get("microbench_speedup"),
-                    "ts": entry.get("ts"),
-                    "source_file": entry.get("source_file"),
-                    "report_text_head": (entry.get("report_text") or "")[:160],
-                },
-                subject={"kernel_id": kernel_id},
-                source="local",
-                suggestion=(
-                    "require OOB tasks to attach a microbench result "
-                    "(microbench_speedup > 0); reject expected-only "
-                    "reports and mark the attempt NO_HARNESS"
-                ),
-            )
-        )
-    return out
 
 
 __all__ = [

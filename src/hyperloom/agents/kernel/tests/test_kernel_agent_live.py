@@ -6,7 +6,7 @@
 Run with:
   KERNEL_AGENT_RUN_LIVE=1 \
   KERNEL_AGENT_ENV_FILE=/wekafs/xiaofei/AgentKernelArena/.env \
-  KERNEL_AGENT_LIVE_BACKENDS=geak,claude,codex,llm \
+  KERNEL_AGENT_LIVE_BACKENDS=geak_v3 \
   python3 -m unittest kernel-agent/tests/test_kernel_agent_live.py
 """
 
@@ -39,25 +39,21 @@ def load_dotenv(path: Path) -> dict[str, str]:
         value = value.strip().strip('"').strip("'")
         env[key.strip()] = value
     if "SAFE_API_KEY" in env:
-        env.setdefault("OOB_API_KEY", env["SAFE_API_KEY"])
         env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
         env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
         env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
         env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
-        env.setdefault("OOB_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
     if "AMD_API_KEY" in env:
         env.setdefault("AMD_LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("GEAK_API_KEY", env["AMD_API_KEY"])
     if "OPENAI_BASE_URL" in env:
         env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
-        env.setdefault("OOB_BASE_URL", env["OPENAI_BASE_URL"])
         env.setdefault("LLM_API_BASE", env["OPENAI_BASE_URL"])
     elif "ANTHROPIC_BASE_URL" in env:
         env.setdefault("OPENAI_BASE_URL", env["ANTHROPIC_BASE_URL"])
-        env.setdefault("OOB_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("LLM_API_BASE", env["ANTHROPIC_BASE_URL"])
     return env
 
@@ -143,7 +139,7 @@ class KernelAgentLiveTests(unittest.TestCase):
         )
         env = load_dotenv(env_file)
         env.setdefault("KERNEL_AGENT_LLM_MODEL", "claude4.7")
-        backends = os.environ.get("KERNEL_AGENT_LIVE_BACKENDS", "geak,claude,codex,llm")
+        backends = os.environ.get("KERNEL_AGENT_LIVE_BACKENDS", "geak_v3")
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

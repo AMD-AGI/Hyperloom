@@ -613,7 +613,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Disable the Kernel-agent entirely. The run will "
         "only do baseline + explore + sweep (pure "
-        "parameter search). Useful when GEAK/OOB/GPU "
+        "parameter search). Useful when GEAK/GPU "
         "compile env is unavailable or you just want the "
         "quick-win parameter path. Default: kernel enabled.",
     )
@@ -687,10 +687,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kernel-codex",
         action="store_true",
         default=True,
-        help="Use Codex backend for Kernel-agent (default — faster). Pass --kernel-claude to switch.",
+        help=(
+            "Use Codex for the Kernel-agent conversation backend (default — "
+            "faster). This does not select the forge/geak_v3 kernel rewrite "
+            "ladder; use KERNEL_OPT_BACKEND_ORDER for that. Pass --kernel-claude "
+            "to switch the conversation backend."
+        ),
     )
     opt.add_argument(
-        "--kernel-claude", action="store_false", dest="kernel_codex", help="Use Claude backend for Kernel-agent"
+        "--kernel-claude",
+        action="store_false",
+        dest="kernel_codex",
+        help=(
+            "Use Claude for the Kernel-agent conversation backend. This does not "
+            "select the forge/geak_v3 kernel rewrite ladder."
+        ),
     )
     # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.
     opt.add_argument(
@@ -1115,7 +1126,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "dispatch a candidate with no trace-anchored shape. Normally "
         "a shapeless candidate is rejected with a structured error so "
         "the run returns to ``trace_analyze`` instead of burning a "
-        "GEAK / OOB budget on an unanchored kernel. Env: "
+        "kernel-optimization budget on an unanchored kernel. Env: "
         "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
     )
     opt.add_argument(
