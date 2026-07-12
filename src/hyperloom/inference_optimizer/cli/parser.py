@@ -87,6 +87,39 @@ def _positive_int_arg(value: str) -> int:
     return parsed
 
 
+def _default_claude_model_env() -> str:
+    """Resolve the default Claude model from env."""
+    explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
+    if explicit:
+        return explicit
+    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
+        return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    if openai_url and not anthropic_url:
+        return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    return DEFAULT_CLAUDE_MODEL
+
+
+def _default_codex_model_env() -> str:
+    """Resolve the default Codex-style model from env.
+
+    When the operator only configured the Anthropic side, Codex-style JSON
+    roles run through the unified gateway with the same Claude model as
+    orchestration. This also overrides generated default ``CODEX_MODEL`` values
+    from setup env files. Explicit ``CODEX_MODEL`` keeps the historical
+    OpenAI-compatible behavior when an OpenAI base URL is configured.
+    """
+    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    if anthropic_url and not openai_url:
+        return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
+    explicit = (os.environ.get("CODEX_MODEL") or "").strip()
+    if explicit:
+        return explicit
+    return DEFAULT_CODEX_MODEL
+
+
 def _parse_conc_values(raw: str, *, source: str = "CONC") -> list[int]:
     """Parse a positive integer or comma ladder without mutating env."""
     text = str(raw or "").strip()
@@ -592,8 +625,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--max-ticks", type=int, default=None, help="Hard tick cap (None = unlimited; mostly for tests)")
     opt.add_argument("--tick-interval-sec", type=float, default=0.0, help="Sleep between ticks (0 = no sleep)")
-    opt.add_argument("--claude-model", type=str, default=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL))
-    opt.add_argument("--codex-model", type=str, default=os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL))
+    opt.add_argument("--claude-model", type=str, default=_default_claude_model_env())
+    opt.add_argument("--codex-model", type=str, default=_default_codex_model_env())
     opt.add_argument(
         "--allow-mm-text-fallback",
         action=argparse.BooleanOptionalAction,
