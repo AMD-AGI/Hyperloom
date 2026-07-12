@@ -15,11 +15,11 @@ real credentials or network.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -117,21 +117,10 @@ class CodexBackend:
         except ImportError as exc:  # pragma: no cover
             raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
 
-        api_key = (
-            os.environ.get(self.api_key_env)
-            or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        )
-        if not api_key:
-            raise BackendError(f"{self.api_key_env} not set in env (CodexBackend cannot auth)")
-        base_url = (
-            os.environ.get(self.base_url_env)
-            or os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("ANTHROPIC_BASE_URL")
-        )
-        kwargs: dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
+        try:
+            kwargs = openai_client_kwargs(api_key_env=self.api_key_env, base_url_env=self.base_url_env)
+        except LLMConfigError as exc:
+            raise BackendError(str(exc).replace("OpenAI-compatible client", "CodexBackend")) from exc
         self._client = AsyncOpenAI(**kwargs)
 
     # ------------------------------------------------------------------
