@@ -12,9 +12,8 @@ def test_rayjob_credential_fanout_is_always_empty():
         "SAFE_API_KEY": "secret-safe",
         "OPENAI_API_KEY": "secret-openai",
         "ANTHROPIC_API_KEY": "secret-anthropic",
-        "OOB_API_KEY": "secret-oob",
         "LLM_API_KEY": "secret-llm",
-        "OOB_BASE_URL": "https://oob.example",
+        "LLM_API_BASE": "https://llm.example",
     }
     assert rayjob_credential_fanout(env) == {}
     assert rayjob_credential_fanout() == {}

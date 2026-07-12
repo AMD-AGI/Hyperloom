@@ -1,4 +1,4 @@
-"""RayJob workload env credential forwarding (deprecated — use install-oob)."""
+"""RayJob workload env credential forwarding (deprecated — GEAK install)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ def rayjob_credential_fanout(environ: Mapping[str, str] | None = None) -> dict[s
     """Return workload env credentials for RayJob (always empty).
 
     RayJob inference pods no longer receive API keys via workload env.
-    OOB/GEAK credentials are delivered by :func:`install_oob_on_pods_best_effort`
-    using Ray Dashboard ``runtime_env`` (RayJob) or SSH stdin (Dynamo).
+    GEAK credentials are delivered by the provisioner install hook using Ray
+    Dashboard ``runtime_env`` (RayJob) or SSH stdin (Dynamo).
 
     Args:
         environ: Ignored; kept for backward-compatible call sites.

@@ -53,7 +53,7 @@ implemented in current scope.
 
 ## What framework-agent does NOT need
 
-- No NATS / PostgreSQL / Ray / TraceLens / GEAK / OOB dependency.
+- No NATS / PostgreSQL / Ray / TraceLens / GEAK dependency.
 - No coupling with kernel-agent / critic-agent / robustness-agent.
 
 LLM credentials, if used by callers running in Library mode, are owned

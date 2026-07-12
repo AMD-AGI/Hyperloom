@@ -19,15 +19,19 @@
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
-#      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
+#      bring-up, TraceLens, GEAK and LLM gateway env setup.
 #      kernel-agent itself is the canonical owner of those — we just
 #      chain to it so users have a single entry point.
 #
-# kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK, OOB
-# CLI auth files. inference_optimizer's install.sh owns Magpie /
+# kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK and
+# LLM gateway env. inference_optimizer's install.sh owns Magpie /
 # InferenceX / the inference_optimizer Python package itself. The two
 # are composable: kernel-agent works standalone; inference_optimizer
 # drags kernel-agent in via this script.
+#
+# Open-source deps (Magpie / InferenceX / TraceLens) are cloned here or by the
+# chained kernel-agent installer. local_setup.sh is reserved for the private
+# KernelForge checkout used by the forge backend.
 
 set -euo pipefail
 
@@ -176,7 +180,7 @@ Installs:
   - Magpie (cloned under the pod-local open-source repo tree by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
-    Node/npm, TraceLens, GEAK, and OOB CLI auth.
+    TraceLens, GEAK, and LLM gateway env.
   - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
     optimize-time, candidate discovery via `fa phase-discover`) is provided
     by this same editable install (tree-reform.MD P2.5 promoted
@@ -265,7 +269,7 @@ git_fetch_pinned() {
 }
 
 # Serialize concurrent installs that share one open-source checkout root
-# (Magpie / InferenceX, plus GEAK / OOB / TraceLens via the chained
+# (Magpie / InferenceX, plus GEAK / TraceLens via the chained
 # kernel-agent installer). With no lock, two installs race and corrupt each
 # other's half-cloned checkouts (observed: GEAK src/minisweagent/... missing,
 # repeated install failures). The lock lives in $_open_source_root (pod-local)
@@ -1150,7 +1154,7 @@ chain_kernel_agent() {
     warn "kernel-agent installer not found at $script"
     return 0
   fi
-  log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
+  log "delegating ray + TraceLens + GEAK + LLM gateway env to ${script}"
   export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_PATH HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
@@ -1172,7 +1176,7 @@ ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
-# InferenceX clones + the chained kernel-agent GEAK/OOB/TraceLens clones).
+# InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).
 acquire_install_lock
 ensure_magpie
 ensure_magpie_atomic_scripts_patch

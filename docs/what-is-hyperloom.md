@@ -25,8 +25,8 @@ iteratively rewriting code to maximize throughput on AMD GPUs.
    bottlenecks and roofline targets.
 - **Code optimization loop** — The core of Hyperloom. The agent explores
    candidates one change at a time: **Think → Implement → Benchmark → Decide**.
-   In parallel, hot kernels are optimized asynchronously using Kernel-Forge,
-   GEAK, and explicitly-enabled out-of-box (OOB) backends.
+   In parallel, hot kernels are optimized asynchronously using Kernel-Forge
+   and GEAK.
 - **Validated delivery** — Every change is correctness-gated before
    acceptance. When the loop exits, the runtime writes the final report,
    reproducible session artifacts, and `session_breakdown.json` for downstream
@@ -41,7 +41,7 @@ Hyperloom is composed of multiple tools, each documented on its own page:
 | [IntelliKit](components/intellikit.md) | Low-level GPU profiling primitives |
 | [Magpie](components/magpie.md) | Benchmark engine with trace-collection support |
 | [TraceLens](components/tracelens.md) | Agentic trace analysis and roofline targets |
-| KernelForge | Deterministic forge backend (first in the default kernel backend order) and OOB source checkout carrier |
+| KernelForge | Deterministic forge backend |
 | [GEAK](components/geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) |
 | [AgentKernelArena](components/agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking (not part of the default install or optimization loop) |
 

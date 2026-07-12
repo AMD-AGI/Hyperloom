@@ -469,8 +469,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
         kernel_id = payload["kernel_id"]
         backend = payload["backends"]
         calls.append((kernel_id, backend))
-        # k006 wins on Claude (short-circuit-after-KEEP); k003 stays PARTIAL to exhaust the ladder.
-        keep = kernel_id == "k006" and backend == "claude"
+        # k006 wins on geak_v3 (short-circuit-after-KEEP); k003 stays PARTIAL to exhaust the ladder.
+        keep = kernel_id == "k006" and backend == "geak_v3"
         speedup = 1.31 if keep else 1.0
         return {
             "status": "ok",
@@ -493,7 +493,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     result = await krh.run_optimization_handler(
         {
             "candidates_path": str(candidates),
-            "backend_order": "geak_v3,claude,codex",
+            "backend_order": "forge,geak_v3",
             "budget_minutes": 60,
             "max_parallel": 2,
         },
@@ -502,7 +502,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
     assert result["batch_mode"] is True
     assert result["batch_kernel_ids"] == ["k003", "k006"]
-    assert result["backend_order"] == ["geak_v3", "claude", "codex"]
+    assert result["backend_order"] == ["forge", "geak_v3"]
     assert result["kernel_id"] == "k006"
     assert result["proposal"]["decision"] == "KEEP"
     assert result["verification"]["micro_speedup"] == pytest.approx(1.31)
@@ -510,8 +510,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     by_kernel: dict[str, list[str]] = {}
     for kernel_id, backend in calls:
         by_kernel.setdefault(kernel_id, []).append(backend)
-    assert by_kernel["k003"] == ["geak_v3", "claude", "codex"]
-    assert by_kernel["k006"] == ["geak_v3", "claude"]
+    assert by_kernel["k003"] == ["forge", "geak_v3"]
+    assert by_kernel["k006"] == ["forge", "geak_v3"]
 
 
 # E — record_kernel_opt retires kernels stuck in PARTIAL (regression for the r24 custom_allreduce GEAK retry-loop that only retired on REVERT).

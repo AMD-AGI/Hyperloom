@@ -56,9 +56,8 @@ Cursor opens a new window attached to the running container. Open a workspace fo
 
 ### 3. Clone Hyperloom and configure credentials
 
-In the container, make sure GitHub authentication and AMD-AGI repository access
-are available — `local_setup.sh` reuses that access to clone dependency
-repositories. Then clone Hyperloom:
+In the container, make sure GitHub authentication is available, then clone
+Hyperloom:
 
 ```bash
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
@@ -105,26 +104,34 @@ in `.env`; shell exports still win over `.env`. For non-AMD gateways, model
 overrides, Cursor keys, and endpoint overrides, see
 [Authentication and credentials](../reference/authentication.md).
 
-### 4. Bootstrap dependency checkouts
+### 4. Install runtime dependencies
 
-Run `local_setup.sh` after credentials are available:
+Run `install.sh` after credentials are available:
 
 ```bash
 export USER_DATA_PATH=/workspace/hyperloom && mkdir -p "$USER_DATA_PATH"
-bash src/hyperloom/inference_optimizer/assets/local_setup.sh
+bash src/hyperloom/inference_optimizer/assets/install.sh
+source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
 - `SAFE_API_KEY` — your key from the [LLM Gateway](https://your-openai-compatible-gateway.example.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
-- `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). Use an absolute path pointing at any location with enough space (relative paths are not rejected by `local_setup.sh`, but an absolute path avoids ambiguity across the runtime).
+- `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). Use an absolute path pointing at any location with enough space.
 
-When it finishes, `local_setup.sh` prints the workspace path to open in Cursor, a prompt template to paste into Cursor Chat (it includes a `- Model: /path/to/your/model` line to fill in), and the env file to source before launch.
+When it finishes, source `kernel-agent.env.sh` before launching.
 
-> **Before the first launch**, you must also run the runtime installer and source
-> the kernel-agent env (per the SKILL IR-2 preflight): `local_setup.sh` only
-> clones dependencies. The prompt in
-> [Run a Hyperloom optimization](../how-to/optimize.md) already chains
-> `install.sh` + `source .../runtime/kernel-agent.env.sh`; follow it rather than
-> launching straight after Step 4.
+If you explicitly run the forge kernel backend, prepare KernelForge before
+`install.sh`:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge
+bash src/hyperloom/inference_optimizer/assets/local_setup.sh --no-next-steps
+source "$USER_DATA_PATH/runtime/local-setup.env.sh"
+bash src/hyperloom/inference_optimizer/assets/install.sh
+source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+```
+
+Only the forge backend requires KernelForge access. The standard LLM/runtime
+setup still happens through `install.sh`.
 
 ---
 
@@ -134,15 +141,15 @@ AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform 
 
 1. Create an Authoring Pod on Primus-SaFE Authoring and select an SGLang or vLLM image. On this platform, use the Harbor mirror prefix `harbor.<datacenter_name>.example-internal-host.invalid/proxy/primussafe/<image>:<tag>` (the internal mirror of the Docker Hub images above) — for example `.../proxy/primussafe/sglang:<tag>` or `.../proxy/primussafe/vllm-openai-rocm:<tag>`.
 2. When the Pod is ready, connect to it with Cursor Remote SSH (follow the connection instructions shown in the Primus-SaFE Authoring UI).
-3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-configure-credentials) and [Step 4](#4-bootstrap-dependency-checkouts) above to clone Hyperloom and run the bootstrap.
+3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-configure-credentials) and [Step 4](#4-install-runtime-dependencies) above to clone Hyperloom and install the runtime.
 
 ---
 
 ## Next Step
 
-After setup, open the Hyperloom workspace printed by `local_setup.sh` in Cursor.
-Then follow [Run a Hyperloom optimization](../how-to/optimize.md) to launch,
-monitor, or resume a run.
+After setup, open the Hyperloom checkout in Cursor. Then follow
+[Run a Hyperloom optimization](../how-to/optimize.md) to launch, monitor, or
+resume a run.
 
 For the optional AMD Quark quantization prelude, see [Quantization with AMD Quark](../how-to/quantization-quark.md).
 
@@ -170,7 +177,6 @@ For setups beyond the single-gateway default above, see [Authentication and cred
 
 - **Split Anthropic + OpenAI entrypoints** — [Split entrypoints](../reference/authentication.md#split-entrypoints-native-anthropic-openai)
 - **Non-AMD / self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd-self-hosted-gateway)
-- **Optional `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL`** — [Cursor SDK kernel-opt backend](../reference/authentication.md#cursor-api-key-cursor-sdk-kernel-opt-backend)
 - **Optional `TRACELENS_INTERNAL_ROOT`** — [Dependency checkout variables](../reference/authentication.md#dependency-checkout-variables)
 
 </details>

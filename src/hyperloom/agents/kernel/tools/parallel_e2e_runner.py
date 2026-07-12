@@ -54,7 +54,7 @@ def load_env_file(path: Path) -> dict[str, str]:
         env[key.strip()] = value.strip().strip('"').strip("'")
     # SAFE_API_KEY stays the primary source so the single-gateway setup is
     # unchanged; a split deploy (no SAFE_API_KEY) falls back to the per-provider
-    # key. GEAK/OOB speak the OpenAI protocol so they take the OpenAI-side key.
+    # key. GEAK speaks the OpenAI protocol so it takes the OpenAI-side key.
     openai_key = (
         env.get("SAFE_API_KEY")
         or env.get("OPENAI_API_KEY")
@@ -64,7 +64,6 @@ def load_env_file(path: Path) -> dict[str, str]:
     )
     if openai_key:
         env.setdefault("OPENAI_API_KEY", openai_key)
-        env.setdefault("OOB_API_KEY", openai_key)
         env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
@@ -81,7 +80,7 @@ def load_env_file(path: Path) -> dict[str, str]:
     if base_url:
         env.setdefault("OPENAI_BASE_URL", base_url)
         env.setdefault("ANTHROPIC_BASE_URL", base_url)
-        env.setdefault("OOB_BASE_URL", base_url)
+        env.setdefault("GEAK_BASE_URL", base_url)
         env.setdefault("LLM_API_BASE", base_url)
     return env
 
@@ -214,7 +213,7 @@ def run_one_attempt(
     """Run a single backend/replica kernel-optimization attempt.
 
     Args:
-        backend: Backend name to run (e.g. ``geak`` / ``oob``).
+        backend: Backend name to run (e.g. ``forge`` / ``geak_v3``).
         replica: Replica index within the backend's parallel fan-out.
         gpu_id: Logical GPU id assigned to this attempt (informational; Ray
             sets the visible-device env vars in workers).
@@ -250,8 +249,6 @@ def run_one_attempt(
         str(args.backend_budget_min),
         "--geak-budget-min",
         str(args.geak_budget_min),
-        "--oob-max-turns",
-        str(args.oob_max_turns),
         "--num-gpus",
         str(num_gpus),
     ]
@@ -263,7 +260,7 @@ def run_one_attempt(
         cmd.extend(["--test-harness-path", harness_path])
     started = time.time()
     # Match the backend-specific budget plus finalization grace.
-    _effective_budget_min = args.geak_budget_min if backend == "geak" else args.backend_budget_min
+    _effective_budget_min = args.geak_budget_min if backend == "geak_v3" else args.backend_budget_min
     try:
         result = run_json(cmd, env=local_env, timeout_s=int(_effective_budget_min * 60) + 360, log_path=log_path)
         status = "ok"
@@ -337,8 +334,8 @@ def main() -> int:
         type=float,
         default=60,
         help="Wall-clock budget per backend attempt in minutes "
-        "(default 60). Applies to claude/codex OOB "
-        "backends. Agents are told to early-exit as "
+        "(default 60). Applies to non-GEAK backends such as forge. "
+        "Agents are told to early-exit as "
         "soon as they hit >=1.50x with passing correctness; "
         "otherwise they iterate up to ~85%% of this budget "
         "and SIGTERM at 100%%.",
@@ -359,16 +356,10 @@ def main() -> int:
     parser.add_argument("--replicas-per-backend", type=int, default=2)
     parser.add_argument(
         "--backends",
-        default=None,
-        help="Comma list of agentic backends. Defaults to "
-        "'geak,claude,codex,cursor' when CURSOR_API_KEY is set, "
-        "otherwise 'geak,claude,codex' (cursor auto-skipped). "
-        "Pass an explicit value to force-include any backend "
-        "(missing keys will surface as 401 attempts). Note: "
-        "'llm' single-shot backend was removed (max_tokens=2048 "
-        "truncated >4KB kernels).",
+        default="forge,geak_v3",
+        help="Comma list of agentic backends (default 'forge,geak_v3'). "
+        "Pass an explicit value to force a specific subset.",
     )
-    parser.add_argument("--oob-max-turns", type=int, default=100)
     # Mirror kernel_optimization.py's default: 0.0 = unlimited (GEAK geak.yaml cost_limit: 0.).
     parser.add_argument(
         "--geak-cost-limit",
@@ -416,13 +407,6 @@ def main() -> int:
         help="Reuse a previous run's kernel_candidates.json instead of re-running the trace analysis.",
     )
     args = parser.parse_args()
-
-    # Auto-derive --backends: skip cursor from the default set when CURSOR_API_KEY is unset.
-    if args.backends is None:
-        if os.environ.get("CURSOR_API_KEY", "").strip():
-            args.backends = "geak,claude,codex,cursor"
-        else:
-            args.backends = "geak,claude,codex"
 
     workspace = Path(args.workspace_path)
     run_dir = workspace / "kernel-agent" / "runs" / args.session_id
@@ -527,10 +511,10 @@ def main() -> int:
         backends = [b.strip() for b in args.backends.split(",") if b.strip()]
         # GEAK is single-GPU only; drop it for per_task_gpus>=2 collectives (r20/r22). ALLOW_GEAK_MULTIGPU=1 bypasses.
         backends_dropped: list[str] = []
-        if per_task_gpus >= 2 and "geak" in backends and os.environ.get("ALLOW_GEAK_MULTIGPU") != "1":
-            backends = [b for b in backends if b != "geak"]
+        if per_task_gpus >= 2 and "geak_v3" in backends and os.environ.get("ALLOW_GEAK_MULTIGPU") != "1":
+            backends = [b for b in backends if b != "geak_v3"]
             backends_dropped.append(
-                "geak (multi-GPU collective unsupported by GEAK sub-agent ray nesting; set ALLOW_GEAK_MULTIGPU=1 to bypass)"
+                "geak_v3 (multi-GPU collective unsupported by GEAK sub-agent ray nesting; set ALLOW_GEAK_MULTIGPU=1 to bypass)"
             )
         max_concurrent = max(1, args.total_gpus // max(1, per_task_gpus))
         total_jobs = len(backends) * args.replicas_per_backend

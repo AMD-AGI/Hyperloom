@@ -26,7 +26,6 @@ def _build_args(**overrides) -> Namespace:
         "budget_minutes": 60,
         "target_platform": "MI355X",
         "geak_cost_limit": 5.0,
-        "oob_max_turns": 8,
         "dry_run": False,
         "extra_server_args": "",
     }

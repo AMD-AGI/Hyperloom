@@ -10,7 +10,8 @@ The installer runs: base preflight â†’ optional SGLang/vLLM framework install â†
 
 - An AMD GPU host with **ROCm** runtime and a **ROCm-built torch** already installed (**MI300X / MI308X / MI325X / MI355X**; bare-metal preflight maps gfx942 uniformly to MI300X).
 - The ROCm user-space libraries, `hipcc` toolchain, torch HIP version, and framework wheel target must be aligned. For example, an `amd-sglang[rocm700]` stack needs ROCm 7.0 user-space libraries and headers on `LD_LIBRARY_PATH` / `ROCM_PATH`, even if the host kernel driver is older but compatible.
-- GitHub authentication and AMD-AGI repository access (the bundled `local_setup.sh` reuses it to clone dependency repos).
+- GitHub authentication for the Hyperloom checkout. AMD-AGI KernelForge access
+  is only required when you explicitly choose the `forge` kernel backend.
 
 ---
 
@@ -41,7 +42,7 @@ launching an optimization; you do not need to locate it manually.
 
 ## 2. Configure LLM Credentials
 
-Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/OOB/kernel-agent configuration needs them later.
+Export one LLM credential setup before running the installer. The installer validates credentials up front because GEAK/kernel-agent configuration needs them later.
 
 ```bash
 # Single gateway (default)
@@ -72,6 +73,17 @@ cp .env.template .env
 The installer and its chained runtime installers accept either the single-gateway pair or a split setup as long as at least one base URL and one API key are present.
 
 > To change the artifact directory (default `/workspace/hyperloom`), `export USER_DATA_PATH=...` in your shell before running the installer, or pass `--user-data-path`. The bare-metal installer reads `USER_DATA_PATH` from the shell environment, **not** from `.env` (only LLM credentials are read from `.env`). See [Authentication and credentials](../reference/authentication.md) for credentials and [Path environment](../reference/authentication.md#path-environment) for path variables.
+
+Bare-metal installs use `KERNEL_OPT_BACKEND_ORDER=geak` by default. To use
+the forge backend instead, export an explicit backend order before running the
+installer:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge
+```
+
+Only the forge backend requires KernelForge access. The installer still
+performs the standard LLM/runtime setup for the selected backend.
 
 ## 3. Run the bare-metal installer
 

@@ -130,12 +130,12 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts)
     ssh_client.ssh_run_bash_with_env(
         "h",
         "echo body",
-        {"OOB_API_KEY": "secret-123"},
+        {"LLM_GATEWAY_KEY": "secret-123"},
         key_path="/k",
         known_hosts=known_hosts,
     )
     assert captured["argv"][-2:] == ["bash", "-s"]
-    assert "export OOB_API_KEY=secret-123" in captured["input"]
+    assert "export LLM_GATEWAY_KEY=secret-123" in captured["input"]
     assert "echo body" in captured["input"]
     assert "set -uo pipefail" in captured["input"]
     assert not any("secret-123" in a for a in captured["argv"])

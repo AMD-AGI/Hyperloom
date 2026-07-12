@@ -18,7 +18,6 @@ def _run_setup_env_script(tmp_path: Path, env: dict[str, str]) -> str:
             [
                 "SAFE_API_KEY=ak-placeholder",
                 "# OPENAI_BASE_URL=",
-                "# CURSOR_API_KEY=",
                 "# TRACELENS_ROOT=",
                 "USER_DATA_PATH=/workspace/hyperloom",
             ]
@@ -52,12 +51,10 @@ def test_setup_env_preserves_sed_replacement_metacharacters(tmp_path: Path) -> N
         {
             "SAFE_API_KEY": "ak-safe",
             "OPENAI_BASE_URL": r"https://gateway.example/v1?team=a&env=b|stage",
-            "CURSOR_API_KEY": "crsr_a&b",
             "TRACELENS_ROOT": r"/opt/Trace\Lens",
             "USER_DATA_PATH": "/workspace/hyperloom",
         },
     )
 
     assert r"OPENAI_BASE_URL=https://gateway.example/v1?team=a&env=b|stage" in text
-    assert "CURSOR_API_KEY=crsr_a&b" in text
     assert r"TRACELENS_ROOT=/opt/Trace\Lens" in text

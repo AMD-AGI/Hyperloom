@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``backends/ssh_runtime.py`` (Dynamo multi-node GEAK/OOB SSH).
+"""Unit tests for ``backends/ssh_runtime.py`` (Dynamo multi-node GEAK SSH).
 
 Guards the isolation switch (``ssh_placement_active``), the MN_SSH_* target
 resolution, the unconfigured-guard error contract, and the pod-stdout JSON

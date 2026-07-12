@@ -12,14 +12,14 @@
 # Phase 1b ROCm hotfix    — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 2  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
-# Phase 3  dep checkouts   — src/hyperloom/inference_optimizer/assets/local_setup.sh
-#                            (clone KernelForge/OOB, InferenceX, TraceLens)
-# Phase 4  runtime install — src/hyperloom/inference_optimizer/assets/install.sh
-#                            (io pkg, Magpie, InferenceX deps, forge-gemm-tune,
-#                             + chained kernel-agent: Ray/GEAK/OOB/TraceLens/
-#                             claude+codex+cursor CLIs; + framework-agent: fa)
-# Phase 5  combined env    — write runtime/hyperloom.env.sh
-# Phase 6  verify + print launch prompt
+# Phase 3  dependencies + runtime install
+#                          — if KERNEL_OPT_BACKEND_ORDER explicitly includes
+#                            forge: local_setup.sh clones private KernelForge
+#                          — install.sh installs open-source deps/runtime:
+#                            io pkg, Magpie, InferenceX deps, forge-gemm-tune,
+#                            chained kernel-agent Ray/GEAK/TraceLens, and fa
+# Phase 4  combined env  — write runtime/hyperloom.env.sh
+# Phase 5  verify + print launch prompt
 #
 # Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
@@ -759,6 +759,25 @@ if not is_rocm:
 PY
 }
 
+# Symlink the isolated-venv `vllm` console script into the shared venv's bin
+# dir. Magpie runs a bare `vllm serve` under a PATH that only lists the shared
+# bin; the symlink's target shebang still pins the isolated python, so the
+# shared env stays uncontaminated. Idempotent; non-fatal on failure.
+link_vllm_into_shared_bin() {
+  local base_py="$1" iso_py="$2" shared_bin iso_vllm
+  shared_bin="$(cd "$(dirname "$base_py")" 2>/dev/null && pwd)" || { warn "cannot resolve shared venv bin dir; skipping vllm symlink"; return 0; }
+  iso_vllm="${VLLM_VENV_ROOT}/bin/vllm"
+  [ -x "$iso_vllm" ] || { warn "isolated vllm not found at ${iso_vllm}; skipping symlink"; return 0; }
+  if [ "$shared_bin" = "$(cd "$(dirname "$iso_py")" 2>/dev/null && pwd)" ]; then
+    return 0
+  fi
+  if ln -sfnT "$iso_vllm" "${shared_bin}/vllm" 2>/dev/null || ln -sfn "$iso_vllm" "${shared_bin}/vllm" 2>/dev/null; then
+    log "linked isolated vllm into shared bin: ${shared_bin}/vllm -> ${iso_vllm}"
+  else
+    warn "failed to symlink ${iso_vllm} into ${shared_bin}; Magpie may not find 'vllm'"
+  fi
+}
+
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
@@ -858,6 +877,11 @@ PY
       die "vLLM isolated install failed. Try a VLLM_VERSION/VLLM_ROCM_VARIANT available from ${VLLM_ROCM_INDEX}."
     fi
     verify_vllm_rocm "$py" || die "vLLM isolated install completed but did not verify as a ROCm build"
+    # Isolated venv holds `vllm` only under $VLLM_VENV_ROOT/bin, but Magpie's
+    # benchmark wrapper runs a bare `vllm serve` with a YAML-fixed PATH that
+    # lists the shared venv bin only. Symlink the isolated vllm into the shared
+    # bin so `which vllm` resolves; its shebang keeps using the isolated python.
+    link_vllm_into_shared_bin "$base_py" "$py"
     log "vLLM framework install complete (isolated: ${VLLM_VENV_ROOT})"
     return 0
   fi
@@ -1211,6 +1235,7 @@ write_combined_env() {
     [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
     [ -n "${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-}" ] && printf 'export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=%q\n' "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX"
     [ -n "${KERNEL_AGENT_RAG_INDEX_STRICT:-}" ] && printf 'export KERNEL_AGENT_RAG_INDEX_STRICT=%q\n' "$KERNEL_AGENT_RAG_INDEX_STRICT"
+    [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && printf 'export KERNEL_OPT_BACKEND_ORDER=%q\n' "$KERNEL_OPT_BACKEND_ORDER"
     [ -n "${HYPERLOOM_INSTALL_SOURCE:-}" ] && printf 'export HYPERLOOM_INSTALL_SOURCE=%q\n' "$HYPERLOOM_INSTALL_SOURCE"
     [ -n "${HYPERLOOM_WHEEL:-}" ] && printf 'export HYPERLOOM_WHEEL=%q\n' "$HYPERLOOM_WHEEL"
     [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && printf 'export HYPERLOOM_WHEEL_REPO=%q\n' "$HYPERLOOM_WHEEL_REPO"
@@ -1237,6 +1262,20 @@ write_combined_env() {
   } > "$combined"
   chmod 600 "$combined"
   log "wrote ${combined}"
+}
+
+kernel_backend_order_includes_forge() {
+  local raw="${KERNEL_OPT_BACKEND_ORDER:-}" token
+  [ -z "$raw" ] && return 1
+  IFS=',' read -ra _kernel_backend_tokens <<< "$raw"
+  for token in "${_kernel_backend_tokens[@]}"; do
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [ "${token,,}" = "forge" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 print_next_steps() {
@@ -1282,10 +1321,8 @@ EOF
 main() {
   bootstrap_wheel_install
   if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
-    [ -f "$LOCAL_SETUP_SH" ] || warn "local_setup.sh not present locally (dry-run; wheel assets would be used after install)"
     [ -f "$INSTALL_SH" ] || warn "install.sh not present locally (dry-run; wheel assets would be used after install)"
   else
-    [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
     [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
   fi
   case "$FRAMEWORK_ENV" in
@@ -1299,6 +1336,7 @@ main() {
   local user_data runtime_dir local_env ka_env combined_env
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-/workspace/hyperloom}}"
   export USER_DATA_PATH="$user_data"
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
   # Honor the same override chain local_setup.sh / install.sh use so the
   # generated env files are located where those scripts actually write them.
   runtime_dir="${HYPERLOOM_RUNTIME_DIR:-${user_data}/runtime}"
@@ -1336,37 +1374,47 @@ main() {
 
   resolve_credentials
 
-  # Phase 3: dependency checkouts.
-  local ls_args=()
-  ls_args+=(--no-next-steps)
-  [ "$DRY_RUN" -eq 1 ] && ls_args+=(--dry-run)
-  [ "$CHECK_ONLY" -eq 1 ] && ls_args+=(--check-only)
-  [ -n "$DEPS_ROOT_ARG" ] && ls_args+=(--deps-root "$DEPS_ROOT_ARG")
-  log "Phase 3: local_setup.sh ${ls_args[*]}"
-  # In preview modes (check-only / dry-run) a sub-script probe failure must not
-  # abort the preview; only a real install aborts on local_setup.sh failure.
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    bash "$LOCAL_SETUP_SH" "${ls_args[@]}" || warn "local_setup.sh (preview) reported issues"
+  # Phase 3: dependency and runtime install. KernelForge is private and only
+  # needed when forge is explicitly requested; open-source deps are handled by
+  # install.sh and the chained kernel-agent installer below.
+  if kernel_backend_order_includes_forge; then
+    if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
+      [ -f "$LOCAL_SETUP_SH" ] || warn "local_setup.sh not present locally (dry-run; wheel assets would be used after install)"
+    else
+      [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
+    fi
+    local ls_args=()
+    ls_args+=(--no-next-steps)
+    [ "$DRY_RUN" -eq 1 ] && ls_args+=(--dry-run)
+    [ "$CHECK_ONLY" -eq 1 ] && ls_args+=(--check-only)
+    [ -n "$DEPS_ROOT_ARG" ] && ls_args+=(--deps-root "$DEPS_ROOT_ARG")
+    log "Phase 3: local_setup.sh ${ls_args[*]} (forge backend requested)"
+    # In preview modes (check-only / dry-run) a sub-script probe failure must not
+    # abort the preview; only a real install aborts on local_setup.sh failure.
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      bash "$LOCAL_SETUP_SH" "${ls_args[@]}" || warn "local_setup.sh (preview) reported issues"
+    else
+      bash "$LOCAL_SETUP_SH" "${ls_args[@]}"
+    fi
+
+    if [ -f "$local_env" ]; then
+      log "sourcing ${local_env}"
+      # shellcheck disable=SC1090
+      . "$local_env"
+    elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      die "expected ${local_env} after local_setup.sh but it is missing"
+    fi
   else
-    bash "$LOCAL_SETUP_SH" "${ls_args[@]}"
+    log "Phase 3: skipping local_setup.sh (KERNEL_OPT_BACKEND_ORDER=${KERNEL_OPT_BACKEND_ORDER}; forge not requested)"
   fi
 
-  if [ -f "$local_env" ]; then
-    log "sourcing ${local_env}"
-    # shellcheck disable=SC1090
-    . "$local_env"
-  elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    die "expected ${local_env} after local_setup.sh but it is missing"
-  fi
-
-  # Phase 4: runtime install. The GEAK e2e optimizer is always installed
-  # (whether it runs is chosen per-session via KERNEL_OPT_BACKEND_ORDER);
-  # Langfuse stays off unless HYPERLOOM_LANGFUSE_ENABLE is already set in the
-  # environment/.env.
+  # Runtime install. The GEAK e2e optimizer is always installed (whether it runs
+  # is chosen per-session via KERNEL_OPT_BACKEND_ORDER); Langfuse stays off
+  # unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env.
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)
-  log "Phase 4: install.sh ${in_args[*]}"
+  log "Phase 3: install.sh ${in_args[*]}"
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     bash "$INSTALL_SH" "${in_args[@]}" || warn "install.sh (preview) reported issues"
   else
@@ -1380,13 +1428,15 @@ main() {
     warn "expected ${ka_env} after install.sh but it is missing"
   fi
 
-  # Phase 5: combined env.
+  # Phase 4: combined env.
   write_combined_env "$combined_env" "$local_env" "$ka_env"
 
-  # Phase 6: verification pass.
+  # Phase 5: verification pass.
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    log "Phase 6: verifying (--check-only)"
-    bash "$LOCAL_SETUP_SH" --check-only || warn "local_setup.sh --check-only reported issues"
+    log "Phase 5: verifying (--check-only)"
+    if kernel_backend_order_includes_forge; then
+      bash "$LOCAL_SETUP_SH" --check-only || warn "local_setup.sh --check-only reported issues"
+    fi
     bash "$INSTALL_SH" --check-only || warn "install.sh --check-only reported issues"
   fi
 

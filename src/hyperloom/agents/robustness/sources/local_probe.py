@@ -2104,7 +2104,6 @@ _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
     # Optional internal extension; unset means open-source-only, not a degraded mount.
     ("TRACELENS_INTERNAL_ROOT", ""),
     ("INFERENCEX_PATH", ""),
-    ("OOB_SRC", ""),
 )
 
 

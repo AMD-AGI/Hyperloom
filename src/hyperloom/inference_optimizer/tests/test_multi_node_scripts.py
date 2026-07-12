@@ -86,14 +86,6 @@ def test_kill_remote_missing_pid_dir():
     assert out == {"killed": [], "stale": [], "missing": []}
 
 
-def test_install_oob_node_uses_flat_oob_src():
-    text = (_repo_root() / "multi_node" / "scripts" / "install_oob_node.sh").read_text(encoding="utf-8")
-    assert 'if [ -f "$OOB_SRC/pyproject.toml" ]; then' in text
-    assert 'OOB_INSTALL_SRC="$OOB_SRC"' in text
-    assert "$OOB_SRC/oob_cli/pyproject.toml" not in text
-    assert '$PIP install -q --no-cache-dir --break-system-packages "$OOB_INSTALL_SRC"' in text
-
-
 def test_kill_remote_non_digit_pid_file_removed(tmp_path):
     km = _load_script_module("km_test_nondigit", "kill_multinode.py")
     d = tmp_path / "pids"
@@ -942,48 +934,14 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
-def test_install_oob_skips_rayjob_when_oob_src_unset(tmp_path, monkeypatch):
+def test_install_kernel_tools_noop_for_rayjob(tmp_path, monkeypatch):
+    # kernel-tools install is Dynamo-only (GEAK); RayJob is a no-op.
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     sp = tmp_path / "s.json"
     sp.write_text('{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3"}', encoding="utf-8")
     sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    monkeypatch.delenv("OOB_SRC", raising=False)
-    assert mn_cli.install_oob_on_pods_best_effort() == 0
-
-
-def test_install_oob_rayjob_delegates_to_dashboard_helper(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text(
-        '{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3","ray_dashboard_token":"tok"}',
-        encoding="utf-8",
-    )
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    monkeypatch.setenv("OOB_SRC", "/weka/oob")
-    calls: list[str] = []
-
-    def _fake_install(state, *, oob_src, poll_interval, poll_timeout, print_logs=False):
-        calls.append(oob_src)
-        assert state["head_pod_ip"] == "10.1.2.3"
-        return 0
-
-    monkeypatch.setattr(mn_cli, "_rayjob_install_oob", _fake_install)
-    assert mn_cli.install_oob_on_pods_best_effort() == 0
-    assert calls == ["/weka/oob"]
-
-
-def test_install_kernel_tools_geak_noop_oob_runs_for_rayjob(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3"}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    monkeypatch.delenv("OOB_SRC", raising=False)
     assert mn_cli.install_kernel_tools_on_pods_best_effort() == 0
 
 
@@ -1249,7 +1207,7 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
     from hyperloom.inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
     # Credentials present in the controller env (would previously fan out).
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OOB_API_KEY", "LLM_API_KEY"):
+    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY"):
         monkeypatch.setenv(k, f"secret-{k}")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")
 
@@ -1303,7 +1261,6 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
         "SAFE_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
-        "OOB_API_KEY",
         "LLM_API_KEY",
         "OPENAI_BASE_URL",
     ):

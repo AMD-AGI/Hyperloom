@@ -53,9 +53,9 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{KernelForge,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
-│       # TraceLens public is required; TraceLens-internal is optional and only
-│       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
+│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal],KernelForge?}/
+│       # Open-source deps are installed by install.sh; KernelForge is present
+│       # only when local_setup.sh was run for the forge backend.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -99,7 +99,9 @@ the session dir printed by the CLI.
 **Launcher rule:** do not hand-build, create, delete, or repair paths
 under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
 Those are workspace-shared assets owned by `install.sh`, including
-Magpie, GEAK, OOB, TraceLens mirrors, env files, and config. Manual edits
+Magpie, InferenceX, GEAK, TraceLens mirrors, env files, and config.
+KernelForge is the only checkout prepared by `local_setup.sh`, and only
+when the forge backend is requested. Manual edits
 there can corrupt another run's checkout. If install state looks wrong,
 rerun `install.sh` or follow the Recovery section; do not clone or clean
 the mirrors by hand.
@@ -131,9 +133,8 @@ otherwise open-source-only; rehydration module — Hyperloom keeps no internal
 URL/path). See README Local Mode step 1. The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
 TraceLens is required by `_server_patcher`),
-`$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
-`/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
-`~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
+`/sgl-workspace/{aiter,sglang,vllm}/`,
+`~/.cache/amd-ai-devtool/semantic-index/`
 (GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
@@ -174,9 +175,9 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `trace_analyze` / `kernel_opt` fail; no live
+TraceLens/GEAK → `trace_analyze` / `kernel_opt` fail; no live
 Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
-first claude/codex call returns `401`. `install.sh --check-only` is a
+first kernel-opt gateway call returns `401`. `install.sh --check-only` is a
 *diagnostic*, never a substitute.
 
 **Resume carve-out.** `... optimize --resume` may skip install only when
@@ -324,6 +325,18 @@ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
+If you explicitly opt into the forge kernel backend, clone the private
+KernelForge checkout first and source the generated env so `install.sh` can
+find it:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/local_setup.sh" --no-next-steps
+. "${LOCAL_SETUP_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh}"
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+```
+
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
 first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
@@ -333,7 +346,7 @@ full inference optimizer session.
 
 The install phase always initializes the full Hyperloom runtime. Even if the
 user later passes `--no-kernel` at runtime, the installer still prepares
-kernel-agent / TraceLens / GEAK / OOB CLI auth; `--no-kernel` only means
+kernel-agent / TraceLens / GEAK; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
 `install.sh` installs everything in one shot (no `--with-*` flags to
@@ -346,6 +359,10 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
+Default GEAK installs do not run `local_setup.sh`. If `KERNEL_OPT_BACKEND_ORDER`
+explicitly contains `forge`, run `local_setup.sh --no-next-steps` and source
+`local-setup.env.sh` before `install.sh`.
+
 Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
@@ -355,8 +372,6 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
 | TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
-| Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
-| `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
 regenerated by `install.sh` and contains gateway URLs, auth aliases,
@@ -374,17 +389,16 @@ does not consume these.
 
 | Prompt field | Env name | Consumer |
 |---|---|---|
-| `OOB_SRC: <path>` | `$OOB_SRC` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_oob` |
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
 | `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (public) |
 | `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
-**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_V3_REPO` /
+**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$GEAK_ROOT` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
 `rsync -a` them into `$SESSION_DIR/vendor/<name>/` and override the matching
 env vars BEFORE running `install.sh`. Single-node WekaFS-mount setups (the
-production default) need none of this — `ensure_tracelens` / `ensure_oob`
-already handle the read-only-source case.
+production default) need none of this — `ensure_tracelens`
+already handles the read-only-source case.
 
 ### Step 1.5 — Write the advisory `model_arch` profile (best-effort)
 
@@ -546,8 +560,8 @@ submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
-aliases from `SAFE_API_KEY`, derive/override `ANTHROPIC_BASE_URL`, reset
-`~/.claude/config.json`, auto-`pip install` the SDKs / `ray` / `Magpie` /
+aliases from `SAFE_API_KEY`, derive/override `ANTHROPIC_BASE_URL`,
+auto-`pip install` the SDKs / `ray` / `Magpie` /
 `InferenceX`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the hard model gate
@@ -556,7 +570,7 @@ fallback}, probed against `<OPENAI_BASE_URL>/models`; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
 critic-agent runtime probe (`## Critic Backend Selection`).
 
-Don't manually pip-install SDKs, edit `~/.claude/config.json`, start Ray,
+Don't manually pip-install SDKs, start Ray,
 or `curl /v1/models` — `_preflight()` owns these. See `src/hyperloom/agents/kernel/SKILL.md`
 for the chained installer truth.
 
@@ -888,7 +902,6 @@ setsid nohup inference_optimizer --verbose optimize \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
-  --kernel-claude \
   --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"

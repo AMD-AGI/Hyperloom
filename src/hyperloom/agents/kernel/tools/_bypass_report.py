@@ -55,7 +55,7 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 }
 
 _UNKNOWN_BOUND = "\u2014"  # em dash, matching the golden "unknown bound" marker.
-_REUSABLE_BACKENDS = ["forge", "geak", "claude", "codex"]
+_REUSABLE_BACKENDS = ["forge", "geak"]
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
 _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound": "Memory-bound"}

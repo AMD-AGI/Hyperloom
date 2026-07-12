@@ -52,8 +52,7 @@ session dir printed by the CLI.
 
 Open-source dependencies are cloned pod-local, not under `runtime/`:
 `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/`
-contains Magpie, TraceLens, GEAK, and InferenceX. OOB is copied there from
-`$OOB_SRC` / `$HYPERLOOM_BUNDLE`.
+contains Magpie, TraceLens, GEAK, and InferenceX.
 
 **Launcher rule:** do not hand-build, create, delete, or repair paths under the
 pod-local open-source root or under `$USER_DATA_PATH/runtime/`. Those assets are
@@ -85,10 +84,7 @@ want a fully self-contained session:
   per-version
   `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under TraceLens is
   required by `_server_patcher`.
-- **OOB** — provided via `$OOB_SRC` / `$HYPERLOOM_BUNDLE` and copied into the
-  pod-local open-source root.
 - `/sgl-workspace/{aiter,sglang,vllm}/`
-- `~/.claude/config.json` + `~/.codex/auth.json`
 - `~/.cache/amd-ai-devtool/semantic-index/` (GEAK RAG embedding cache)
 - `/wekafs/hyperloom/geak-memory/memory.db` (GEAK cross-session memory)
 

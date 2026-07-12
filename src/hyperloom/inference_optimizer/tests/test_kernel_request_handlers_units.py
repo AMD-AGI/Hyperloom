@@ -790,10 +790,10 @@ class TestBackendOrder:
 
     def test_documented_kernel_opt_backends_env_is_case_normalized(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+        # tokens are lowercased/trimmed; the removed OOB backend (codex) is filtered out
         monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK_V3 , CoDeX ")
 
-        assert krh._backend_order({}) == ["geak_v3", "codex"]
+        assert krh._backend_order({}) == ["geak_v3"]
 
 
 # _candidate_env_allowed
@@ -1528,13 +1528,10 @@ class TestDefaultKernelBatchParallel:
 # ---------------------------------------------------------------------------
 # _should_parallelize_backends
 #
-# GPU-rich mode: race GEAK against the OOB ladder per kernel whenever the
-# node can fit ONE kernel's GEAK + OOB ladder side-by-side
-# (``visible_gpus >= 2 * per_task``). The decision is independent of
-# ``num_candidates`` -- batch width is throttled separately by the batch
-# handler's concurrency cap. Below ``2 * per_task`` there is no room for a
-# second ladder, so keep the sequential GEAK-first / OOB-fallback ladder.
-# Operators / tests can force the decision via payload or env.
+# With the ladder converged to forge + geak_v3 there is no second (OOB) ladder
+# to race, so backends never auto-parallelize regardless of GPU count. The flag
+# is False unless explicitly forced via payload ``parallel_backends`` or env
+# ``KERNEL_OPT_PARALLEL_BACKENDS``.
 # ---------------------------------------------------------------------------
 
 
@@ -1556,32 +1553,27 @@ class TestShouldParallelizeBackends:
         return _set
 
     @pytest.mark.parametrize(
-        "n_gpus, per_task, num_candidates, expected",
+        "n_gpus, per_task, num_candidates",
         [
-            # 1 GPU/task: need room for both ladders -> visible_gpus >= 2.
-            # The kernel count is irrelevant (batch width is capped elsewhere).
-            (8, 1, 3, True),  # 8 >= 2
-            (8, 1, 7, True),  # 8 >= 2 (kernel count no longer gates)
-            (8, 1, 100, True),  # 8 >= 2 even when candidates >> gpus
-            (2, 1, 1, True),  # 2 >= 2 boundary
-            (1, 1, 1, False),  # 1 < 2 -> no room for a second ladder
-            # Multi-GPU reservations: need room for TWO per_task backends.
-            (8, 4, 1, True),  # 8 >= 8 boundary
-            (8, 4, 5, True),  # 8 >= 8 (candidate count irrelevant)
-            (8, 8, 1, False),  # 8 < 16 -> can't fit a 2nd 8-GPU backend
-            (16, 8, 1, True),  # 16 >= 16
+            # No auto-parallelize regardless of GPU count: the OOB ladder that
+            # used to be raced against GEAK has been removed, so without an
+            # explicit override the decision is always sequential (False).
+            (8, 1, 3),
+            (8, 1, 100),
+            (2, 1, 1),
+            (1, 1, 1),
+            (16, 8, 1),
         ],
     )
-    def test_gpu_aware_threshold(
+    def test_no_auto_parallelize_without_override(
         self,
         patch_torch,
         n_gpus,
         per_task,
         num_candidates,
-        expected,
     ):
         patch_torch(n_gpus, per_task=per_task)
-        assert krh._should_parallelize_backends({}, num_candidates) is expected
+        assert krh._should_parallelize_backends({}, num_candidates) is False
 
     def test_non_positive_candidates_is_false(self, patch_torch):
         patch_torch(64, per_task=1)  # plenty of GPUs
@@ -1660,7 +1652,7 @@ class TestBatchParallelConcurrencyCap:
         # 8 visible GPUs, 1 GPU/task -> safe concurrency = 8 // (2*1) = 4.
         monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 8)
         monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", "1")  # per_task = 1
-        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
 
         state = {"in_flight": 0, "peak": 0}
 

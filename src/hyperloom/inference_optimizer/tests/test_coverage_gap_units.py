@@ -253,7 +253,6 @@ def test_provision_multi_node_rayjob_and_dynamo_stacks(tmp_path: Path, monkeypat
         {"rayjob_id": "wid-rj", "head_pod_ip": "10.0.0.2"},
     ])
     monkeypatch.setattr(mn_cli, "_load_state", lambda: next(loads))
-    monkeypatch.setattr(mn_cli, "install_oob_on_pods_best_effort", lambda: 0)
     monkeypatch.setattr(mn_env, "export_ray_address_to_os", lambda: os.environ.__setitem__("RAY_ADDRESS", "10.0.0.2:6379"))
     opt_mn._provision_multi_node_rayjob_stack(
         argparse.Namespace(
@@ -592,7 +591,7 @@ def test_dynamo_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
     ) == 0
 
 
-def test_dynamo_tracelens_geak_and_oob_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_dynamo_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.dynamo as dyn
 
     state = {
@@ -628,24 +627,7 @@ def test_dynamo_tracelens_geak_and_oob_install(monkeypatch: pytest.MonkeyPatch, 
         lambda *a, **kw: _Completed(returncode=0, stdout='{"status":"installed"}', stderr=""),
     )
     assert dyn.cmd_install_geak(argparse.Namespace(geak_src="", poll_timeout=5, print_logs=True)) == 0
-
-    monkeypatch.setenv("OOB_SRC", "/oob")
-    monkeypatch.setenv("SAFE_API_KEY", "safe-secret")
-    env_calls: list[dict] = []
-    monkeypatch.setattr(
-        dyn,
-        "_dynamo_ssh_bash_with_env",
-        lambda st, ip, script, env, **kw: env_calls.append(dict(env))
-        or _Completed(returncode=0, stdout='{"status":"skipped"}', stderr=""),
-    )
-    assert dyn.cmd_install_oob(argparse.Namespace(oob_src=None, poll_timeout=5, poll_interval=1, print_logs=False)) == 0
-    assert env_calls[0]["OOB_API_KEY"] == "safe-secret"
     assert saved == []
-
-    monkeypatch.setattr(dyn, "_load_state", lambda: {"backend": "rayjob"})
-    assert dyn.cmd_install_oob(argparse.Namespace(oob_src="/oob", poll_timeout=5, poll_interval=1, print_logs=False)) == dyn.EXIT_CONFIG_ERROR
-    monkeypatch.setattr(dyn, "_load_state", lambda: {"backend": "weird"})
-    assert dyn.cmd_install_oob(argparse.Namespace(oob_src="/oob", poll_timeout=5, poll_interval=1, print_logs=False)) == dyn.EXIT_CONFIG_ERROR
 
 
 def test_rayjob_create_reuse_and_failure_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1175,7 +1157,7 @@ def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypa
     mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
 
 
-def test_dynamo_install_timeout_failure_and_rayjob_oob(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dynamo_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.dynamo as dyn
 
     state = {
@@ -1200,27 +1182,6 @@ def test_dynamo_install_timeout_failure_and_rayjob_oob(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(dyn, "_dynamo_ssh_run_script", _geak_run)
     assert dyn.cmd_install_geak(argparse.Namespace(geak_src="/geak", poll_timeout=5, print_logs=False)) == 1
-
-    assert dyn.cmd_install_oob(argparse.Namespace(oob_src="", poll_timeout=5, poll_interval=1, print_logs=False)) == dyn.EXIT_CONFIG_ERROR
-
-    monkeypatch.setattr(dyn, "_load_state", lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"})
-    rayjob_calls: list[str] = []
-    monkeypatch.setattr(dyn._mn_cli, "_rayjob_install_oob", lambda state, **kw: rayjob_calls.append(kw["oob_src"]) or 0)
-    assert dyn.cmd_install_oob(argparse.Namespace(oob_src="/oob", poll_timeout=5, poll_interval=2, print_logs=True)) == 0
-    assert rayjob_calls == ["/oob"]
-
-    monkeypatch.setattr(dyn, "_load_state", lambda: dict(state))
-    monkeypatch.setenv("OOB_API_KEY", "explicit-oob")
-    oob_calls = {"n": 0}
-
-    def _oob_run(*_args, **_kwargs):
-        oob_calls["n"] += 1
-        if oob_calls["n"] == 1:
-            raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=1800)
-        return _Completed(returncode=0, stdout='{"status":"failed","reason":"npm"}', stderr="")
-
-    monkeypatch.setattr(dyn, "_dynamo_ssh_bash_with_env", _oob_run)
-    assert dyn.cmd_install_oob(argparse.Namespace(oob_src="/oob", poll_timeout=5, poll_interval=1, print_logs=True)) == 1
 
 
 def test_dynamo_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1376,7 +1337,6 @@ def test_cli_multi_node_remaining_error_branches(tmp_path: Path, monkeypatch: py
     ])
     monkeypatch.setattr(mn_cli, "cmd_create_rayjob", lambda ns: 0)
     monkeypatch.setattr(mn_cli, "_load_state", lambda: next(loads))
-    monkeypatch.setattr(mn_cli, "install_oob_on_pods_best_effort", lambda: 0)
     monkeypatch.setattr(mn_env, "export_ray_address_to_os", lambda: None)
     monkeypatch.setattr(opt_mn, "_replay_kernel_patches_for_multi_node", lambda args: None)
 

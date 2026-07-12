@@ -479,18 +479,17 @@ async def test_kernel_opt_no_progress_alert_only():
 
 
 async def test_critic_prune_stuck_falls_to_medium_alert():
-    """E4 / F4 — MEDIUM severity → alert only, no destructive action."""
+    """E4 — MEDIUM severity → alert only, no destructive action."""
     ladder = ActionLadder()
-    for name in ("critic_prune_stuck", "cursor_auth_storm"):
-        out = await ladder.decide(
-            [_sym(name, SymptomSeverity.MEDIUM, subject={})],
-            tick_index=0,
-            now_unix=1.0,
-        )
-        types = [i.type for i in out.intents]
-        assert IntentType.ALERT in types
-        assert IntentType.PRUNE_BRANCH not in types
-        assert IntentType.DELEGATE not in types
+    out = await ladder.decide(
+        [_sym("critic_prune_stuck", SymptomSeverity.MEDIUM, subject={})],
+        tick_index=0,
+        now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert IntentType.ALERT in types
+    assert IntentType.PRUNE_BRANCH not in types
+    assert IntentType.DELEGATE not in types
 
 
 async def test_model_gpu_infeasible_alert_only():
@@ -662,30 +661,6 @@ async def test_ci_metrics_baseline_zero_alert_only():
     assert IntentType.ALERT in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
     assert IntentType.PRUNE_BRANCH not in types
-
-
-async def test_oob_no_harness_alert_only():
-    ladder = ActionLadder()
-    out = await ladder.decide(
-        [
-            _sym(
-                "oob_no_harness",
-                SymptomSeverity.HIGH,
-                evidence={
-                    "kernel_id": "gemm_a8w8",
-                    "backend": "oob_claude",
-                    "microbench_speedup": None,
-                },
-                subject={"kernel_id": "gemm_a8w8"},
-            )
-        ],
-        tick_index=0,
-        now_unix=1.0,
-    )
-    types = [i.type for i in out.intents]
-    assert IntentType.ALERT in types
-    assert IntentType.PRUNE_BRANCH not in types
-    assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
 async def test_g_medium_signals_fall_to_diagnose_alert():

@@ -161,40 +161,6 @@ def test_unreachable_local_servers_do_not_resurrect_auth_proxy_signal():
 
 
 # ---------------------------------------------------------------------------
-# F4 — cursor_auth_storm
-# ---------------------------------------------------------------------------
-
-
-def test_f4_cursor_auth_storm_fires():
-    data = SourceData(
-        local_decision_audit={
-            "oob_attempts": [
-                {"kernel_id": "k1", "backend": "cursor", "report_text": "HTTP 401 Unauthorized: api key invalid"},
-                {"kernel_id": "k2", "backend": "cursor", "report_text": "Primus.00009: 401"},
-                {"kernel_id": "k3", "backend": "cursor", "report_text": "401: Unauthorized"},
-            ],
-        }
-    )
-    out = evaluate_kernel_pipeline_signals(_ctx(), data)
-    sym = next(s for s in out if s.name == "cursor_auth_storm")
-    assert sym.severity is SymptomSeverity.MEDIUM
-    assert sym.evidence["hit_count"] == 3
-
-
-def test_f4_silent_below_threshold():
-    data = SourceData(
-        local_decision_audit={
-            "oob_attempts": [
-                {"kernel_id": "k1", "backend": "cursor", "report_text": "401 Unauthorized"},
-                {"kernel_id": "k2", "backend": "cursor", "report_text": "completed"},
-            ],
-        }
-    )
-    out = evaluate_kernel_pipeline_signals(_ctx(), data)
-    assert all(s.name != "cursor_auth_storm" for s in out)
-
-
-# ---------------------------------------------------------------------------
 # F5 — kernel_opt_no_progress
 # ---------------------------------------------------------------------------
 

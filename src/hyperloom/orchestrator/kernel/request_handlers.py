@@ -248,15 +248,13 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Default ladder: forge first, then geak, then the OOB backends (claude,
-# codex, cursor). Cursor is key-gated and dropped from the auto-derived ladder
-# when CURSOR_API_KEY is unset (see _backend_order). An explicit
-# KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order)
-# still overrides this default as-is.
-_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3", "claude", "codex", "cursor")
+# Default ladder: forge first, then the per-kernel GEAK backend (geak_v3). An
+# explicit KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload
+# backend_order) still overrides this default as-is.
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3")
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
-_DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs to do anything useful (and still
 # salvage partial artifacts). When less than this remains in the per-kernel
 # ladder budget, the ladder stops instead of launching a backend it cannot
@@ -351,30 +349,19 @@ def _default_kernel_batch_parallel() -> int:
 
 
 def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
-    """Decide whether to race GEAK against the OOB ladder per kernel.
+    """Decide whether to run backend ladders in parallel per kernel.
 
-    Default policy ("GPU-aware"): enable whenever the node can run a single
-    kernel's GEAK *and* OOB ladder side-by-side, i.e.
-    ``visible_gpus >= 2 * per_task_gpus``. This is intentionally independent
-    of ``num_candidates`` -- batch width (how many kernels race at once) is
-    throttled separately by :func:`_run_optimization_batch`, which caps
-    concurrency to ``visible_gpus // (2 * per_task_gpus)`` so the per-kernel
-    before_kernel_opt rocprof (a pre-Ray subprocess NOT bound by the Ray GPU
-    lease) never overcommits the GPUs. Below ``2 * per_task`` there isn't
-    room for both ladders even for one kernel, so we keep the legacy
-    sequential ladder (GEAK first, OOB only as a fallback when GEAK misses a
-    KEEP).
-
-    Operators / tests can force the decision via payload
-    ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``
-    (truthy ``1/true/yes/on`` enables, anything else disables).
+    With the ladder converged to forge + geak_v3 there is no second (OOB)
+    ladder to race, so the auto-derived default is always sequential. Operators
+    / tests can still force the flag via payload ``parallel_backends`` or env
+    ``KERNEL_OPT_PARALLEL_BACKENDS`` (truthy ``1/true/yes/on`` enables).
 
     Args:
         payload: Request payload; ``parallel_backends`` may force the choice.
         num_candidates: Number of kernel candidates in this request.
 
     Returns:
-        ``True`` to race GEAK against the OOB ladder, else ``False``.
+        ``True`` only when explicitly forced on, else ``False``.
     """
     override = payload.get("parallel_backends")
     if override is None:
@@ -383,12 +370,7 @@ def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
             override = raw_env
     if override is not None:
         return str(override).strip().lower() in {"1", "true", "yes", "on"}
-    if num_candidates <= 0:
-        return False
-    n_gpus = _visible_gpu_count()
-    if not n_gpus or n_gpus <= 0:
-        return False
-    return n_gpus >= 2 * _per_task_gpus()
+    return False
 
 
 _CANDIDATE_ENV_KEYS = {
@@ -3147,9 +3129,8 @@ def _geak_budget_minutes(payload: dict) -> float:
 def _optimization_budget_minutes(payload: dict) -> float:
     """Wall-clock budget mirrored by the kernel_optimization.py wrapper.
 
-    Picks the OOB budget for Claude/Codex/Cursor, the GEAK budget for GEAK,
-    and the max of both for empty/multi-backend payloads (which may still run
-    GEAK first in the ladder).
+    Picks the GEAK budget for GEAK, and the max of the generic and GEAK budgets
+    for empty/multi-backend payloads (which may still run GEAK in the ladder).
 
     Args:
         payload (dict): Request payload carrying ``backends`` and optional
@@ -3158,15 +3139,13 @@ def _optimization_budget_minutes(payload: dict) -> float:
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
-    oob_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
+    generic_budget = float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
     geak_budget = _geak_budget_minutes(payload)
     backend = str(payload.get("backends") or "").strip().lower()
     if backend == "geak_v3":
         return geak_budget
-    if backend in {"claude", "codex", "cursor"}:
-        return oob_budget
-    # Empty / multi-backend payloads may still run GEAK first in the ladder.
-    return max(oob_budget, geak_budget)
+    # Empty / multi-backend payloads may still run GEAK in the ladder.
+    return max(generic_budget, geak_budget)
 
 
 def _optimization_wrapper_timeout_sec(payload: dict) -> int:
@@ -3235,7 +3214,7 @@ def geak_selected(payload: dict | None = None) -> bool:
 def _kernel_ladder_budget_sec(payload: dict) -> int:
     """Total wall-clock budget for one kernel's whole backend ladder.
 
-    The ladder runs its backends sequentially (forge -> geak -> oob fallbacks),
+    The ladder runs its backends sequentially (forge -> geak_v3 fallback),
     each as a subprocess with its own timeout. Without a shared ceiling a
     backend that hangs to its hard timeout followed by a fallback running its
     full budget could roughly double a kernel's wall clock and overshoot the
@@ -3276,37 +3255,32 @@ def _backend_order(payload: dict) -> list[str]:
     4. The built-in forge-first default ladder.
 
     All backend names are normalized to lowercase before filtering, so
-    values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
-    lowercase equivalents.  Unknown backends are silently dropped, and
-    ``cursor`` is removed from the auto-derived ladder when
-    ``CURSOR_API_KEY`` is unset (explicit orders are respected as-is).
+    values like ``"GEAK"`` or ``"Forge"`` are treated the same as their
+    lowercase equivalents.  Unknown backends are silently dropped.
 
     Args:
         payload (dict): Request payload that may carry ``backend_order``.
 
     Returns:
         list[str]: The filtered, ordered backend names (subset of
-            ``{"claude", "codex", "cursor", "geak_v3"}``).
+            ``{"geak_v3", "forge"}``).
     """
     order = _raw_kernel_backend_order(payload)
-    if order:
-        explicit = True
-    else:
+    if not order:
         # Ignore legacy payload["backends"]; the default ladder (forge first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
-        explicit = False
-    # `forge` (Kernel-Forge autonomous-loop backend) is first in
-    # _DEFAULT_KERNEL_BACKEND_ORDER; keep it in `allowed` so it survives the
-    # filter for both the default and any explicit backend_order.  `geak`
-    # (the whole-pipeline e2e delegate) is intentionally absent: it is a
-    # phase-level delegate (see ``geak_selected``), not a per-kernel backend,
-    # so it is dropped here. The per-kernel backend is ``geak_v3``.
-    allowed = {"claude", "codex", "cursor", "geak_v3", "forge"}
-    selected = [backend for backend in order if backend in allowed]
-    # Drop cursor from the auto-derived ladder when CURSOR_API_KEY is unset (explicit order still wins).
-    if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
-        selected = [b for b in selected if b != "cursor"]
-    return selected
+    # `forge` (Kernel-Forge autonomous-loop backend) and the per-kernel GEAK
+    # backend ``geak_v3`` are the only per-kernel backends. Bare ``geak`` (the
+    # whole-pipeline e2e delegate) is intentionally absent: it is a phase-level
+    # delegate (see ``geak_selected``), not a per-kernel backend.
+    allowed = {"geak_v3", "forge"}
+    filtered = [backend for backend in order if backend in allowed]
+    if filtered:
+        return filtered
+    removed_oob = {"claude", "codex", "cursor"}
+    if any(backend in removed_oob for backend in order):
+        return list(_DEFAULT_KERNEL_BACKEND_ORDER)
+    return []
 
 
 def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
@@ -3806,7 +3780,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
     # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
     # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
-    # Claude/Codex/forge KEEP. Scoped to backend=="geak_v3" so OOB backends are byte-identical;
+    # forge KEEP. Scoped to backend=="geak_v3" so forge ranking stays byte-identical;
     # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
     _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
     try:
@@ -3841,9 +3815,8 @@ async def _run_backend_ladder(
 
     Returns ``(best, attempts)`` where ``best`` is the strongest result by
     :func:`_kernel_result_rank` and ``attempts`` is the ordered per-backend
-    attempt log. Stops at the first KEEP so a clean GEAK KEEP still
-    short-circuits *its own* ladder and OOB fallbacks (claude -> codex ->
-    cursor) only fire when an earlier backend misses a KEEP.
+    attempt log. Stops at the first KEEP so a clean KEEP short-circuits the
+    ladder and later backends only fire when an earlier one misses a KEEP.
 
     When ``deadline`` (a :func:`time.monotonic` timestamp) is given, the ladder
     enforces the per-kernel budget: each backend's subprocess timeout is capped
@@ -3920,27 +3893,17 @@ async def _run_kernel_backend_sequence(
     session_dir: Path,
     parallel_backends: bool = False,
 ) -> HandlerResult:
-    """Optimize one kernel across the backend ladder.
+    """Optimize one kernel across the backend ladder (forge, then geak_v3).
 
-    Two modes:
-
-    * **Sequential (default)** -- the legacy ladder. Walk
-      ``_backend_order`` (GEAK first), stopping at the first KEEP. OOB
-      (claude/codex/cursor) only runs as a fallback when GEAK misses a
-      KEEP.
-    * **Parallel (``parallel_backends=True``)** -- GPU-rich mode chosen by
-      :func:`_should_parallelize_backends` at the batch layer. Race GEAK
-      against the OOB ladder concurrently and keep the stronger result by
-      :func:`_kernel_result_rank`, so we no longer short-circuit on GEAK's
-      first KEEP when there are spare GPUs to let OOB chase a higher
-      speedup. Falls back to sequential when GEAK or every OOB backend is
-      absent from the ladder (nothing to race).
+    forge runs first and in-place; if it KEEPs we short-circuit. Otherwise the
+    remaining ladder (geak_v3) runs, stopping at the first KEEP.
 
     Args:
         base_payload: The base request payload shared by every backend.
         candidate: The kernel candidate to optimize.
         session_dir: Session directory for workspace and state.
-        parallel_backends: When ``True``, race GEAK against the OOB ladder.
+        parallel_backends: Retained for signature compatibility; unused now
+            that the ladder is a single forge/geak_v3 sequence.
 
     Returns:
         The strongest ``HandlerResult`` across the backends tried.
@@ -3957,7 +3920,7 @@ async def _run_kernel_backend_sequence(
     # Forge edits the live repo in-place (temp branch + per-file restore) and
     # must NOT race with other backends that read/write the same repo. Run it
     # sequentially first; if it KEEPs, short-circuit. Otherwise continue with
-    # the geak / oob parallel split on the remaining backends.
+    # the remaining backend ladder.
     forge_group = [b for b in order if b == "forge"]
     remaining = [b for b in order if b != "forge"]
     forge_best: dict | None = None
@@ -3977,37 +3940,8 @@ async def _run_kernel_backend_sequence(
             best = forge_best
             attempts = forge_attempts
 
-    geak_group = [b for b in remaining if b == "geak_v3"]
-    oob_group = [b for b in remaining if b != "geak_v3"]
-
-    if best is not None:
-        pass
-    elif parallel_backends and geak_group and oob_group:
-        (geak_best, geak_attempts), (oob_best, oob_attempts) = await asyncio.gather(
-            _run_backend_ladder(
-                base_payload,
-                candidate,
-                kernel_id,
-                geak_group,
-                session_dir=session_dir,
-                deadline=ladder_deadline,
-            ),
-            _run_backend_ladder(
-                base_payload,
-                candidate,
-                kernel_id,
-                oob_group,
-                session_dir=session_dir,
-                deadline=ladder_deadline,
-            ),
-        )
-        attempts = forge_attempts + geak_attempts + oob_attempts
-        best = max(
-            (r for r in (geak_best, oob_best) if r is not None),
-            key=_kernel_result_rank,
-            default=None,
-        )
-    else:
+    # forge KEEP short-circuits; otherwise run the remaining ladder (geak_v3).
+    if best is None:
         best, attempts = await _run_backend_ladder(
             base_payload,
             candidate,
@@ -4279,17 +4213,13 @@ async def _run_optimization_batch(
     # forge is in the backend ladder.
     if "forge" in _backend_order(payload):
         max_parallel = 1
-    # GPU-rich mode: when the node can fit a kernel's GEAK + OOB ladder
-    # side-by-side (see :func:`_should_parallelize_backends`), race them per
-    # kernel and keep the stronger result instead of short-circuiting on
-    # GEAK's first KEEP.
+    # parallel_backends is off by default now that the ladder is a single
+    # forge/geak_v3 sequence; only an explicit override enables it (see
+    # :func:`_should_parallelize_backends`).
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
-    # Each parallel-backends kernel launches TWO before_kernel_opt rocprof
-    # subprocesses (one per ladder) *before* entering Ray, so they are NOT
-    # bound by the Ray GPU lease. Cap concurrent kernels to
-    # ``visible_gpus // (2 * per_task)`` so those pre-Ray profilers (and the
-    # 2 * per_task Ray tasks that follow) stay within the real GPU budget
-    # instead of overcommitting it.
+    # When forced on, keep the legacy GPU-budget halving so a kernel that
+    # launches two before_kernel_opt rocprof subprocesses *before* entering Ray
+    # (NOT bound by the Ray GPU lease) stays within the real GPU budget.
     if parallel_backends:
         n_gpus = _visible_gpu_count()
         per_task = _per_task_gpus()

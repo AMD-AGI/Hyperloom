@@ -25,8 +25,8 @@ log = logging.getLogger(__name__)
 def _ensure_forge_on_path() -> str:
     """Make `kernel_agents` (Kernel-Forge) importable from $FORGE_PATH.
 
-    Mirrors how the OOB backend is located via OOB_PATH: read $FORGE_PATH
-    (also accepts $KERNEL_FORGE_ROOT / $KERNEL_FORGE_PATH), resolve the dir
+    Read $FORGE_PATH (also accepts $KERNEL_FORGE_ROOT / $KERNEL_FORGE_PATH),
+    resolve the dir
     that actually contains the `kernel_agents` package (the repo root, its
     `src/`, or the package dir itself) and prepend it to sys.path. When the
     env var is unset, do nothing and rely on an installed `kernel_agents`
@@ -1491,7 +1491,7 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
 
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
                 gpu_ids: str = "", skipped: bool = False) -> dict:
-    """Shape the result like oob_submit/geak_submit return dicts.
+    """Shape the result like geak_submit return dicts.
 
     ``skipped=True`` marks a forge self-skip: forge bailed before any real
     optimization attempt (unsupported source type, repo not a clean git
@@ -1559,8 +1559,7 @@ def _apply_fellow_env(env: dict) -> None:
 
     Mutates the given child-process env dict ONLY -- never the parent
     ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
-    proxy) cannot leak to sibling backends (claude/codex) that run in the same
-    orchestrator process after forge in the ladder. The forge-loop subprocess
+    proxy) cannot leak outside this forge attempt. The forge-loop subprocess
     inherits this env; inside it the fellow drives the claude CLI streaming
     transport. ``setdefault`` keeps operator overrides authoritative.
     """

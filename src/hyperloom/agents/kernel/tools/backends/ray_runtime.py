@@ -115,8 +115,8 @@ def ensure_fd_limit(
 def isolated_compile_cache_env(output_dir, base_env: Optional[dict] = None) -> dict:
     """Return an env dict with per-attempt JIT/compile cache dirs.
 
-    The kernel-opt parallel path runs the GEAK and OOB ladders at the same
-    time and both trigger aiter / triton / inductor compiles. aiter
+    The kernel-opt parallel path can run multiple backend attempts at the same
+    time and they trigger aiter / triton / inductor compiles. aiter
     (FileBaton) and triton self-serialize per cache *key*, so steady-state
     concurrent compiles are safe -- but a sibling killed on timeout can leave
     a stale lock, and an ``AITER_REBUILD=1`` import wipes the shared build dir
@@ -311,12 +311,6 @@ SAFE_ENV_KEYS = (
     "ANTHROPIC_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
-    "OOB_API_KEY",
-    "OOB_BASE_URL",
-    "OOB_LOCAL",
-    "OOB_HOME",
-    "CURSOR_API_KEY",
-    "CURSOR_DEFAULT_MODEL",
     "AMD_API_KEY",
     "AMD_LLM_API_KEY",
     "LLM_GATEWAY_KEY",
@@ -374,8 +368,8 @@ def safe_runtime_env() -> dict:
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
     # Key derivation source. SAFE_API_KEY stays the primary so the single-gateway
     # setup is unchanged; a split deploy (no SAFE_API_KEY) falls back to the
-    # per-provider key instead. GEAK/OOB speak the OpenAI protocol (their base
-    # URL derives from OPENAI_BASE_URL below), so they take the OpenAI-side key.
+    # per-provider key instead. GEAK speaks the OpenAI protocol (its base
+    # URL derives from OPENAI_BASE_URL below), so it takes the OpenAI-side key.
     openai_key = (
         env.get("SAFE_API_KEY")
         or env.get("OPENAI_API_KEY")
@@ -384,7 +378,6 @@ def safe_runtime_env() -> dict:
     )
     if openai_key:
         env.setdefault("OPENAI_API_KEY", openai_key)
-        env.setdefault("OOB_API_KEY", openai_key)
         env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
@@ -404,7 +397,6 @@ def safe_runtime_env() -> dict:
     if base_url:
         env.setdefault("ANTHROPIC_BASE_URL", base_url)
         env.setdefault("OPENAI_BASE_URL", base_url)
-        env.setdefault("OOB_BASE_URL", base_url)
         env.setdefault("GEAK_BASE_URL", base_url)
         env.setdefault("LLM_API_BASE", base_url)
     if "AMD_LLM_API_KEY" not in env and "AMD_API_KEY" in env:

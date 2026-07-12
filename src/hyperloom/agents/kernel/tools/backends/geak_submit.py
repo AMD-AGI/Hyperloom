@@ -201,7 +201,7 @@ def run_via_ray(
             if cuda_vis:
                 _os.environ["HIP_VISIBLE_DEVICES"] = cuda_vis
             gpu_ids = cuda_vis or "0"
-        # Per-attempt compile caches so a co-running OOB ladder can't clobber
+        # Per-attempt compile caches so a co-running backend can't clobber
         # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
         for _var, _sub in (
             ("TRITON_CACHE_DIR", "triton"),

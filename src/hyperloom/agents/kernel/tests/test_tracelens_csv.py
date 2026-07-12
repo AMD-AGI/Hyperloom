@@ -400,12 +400,8 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         is False
     )
     assert tla.is_reusable_native_kernel(candidate) is True
-    # Without CURSOR_API_KEY: recommendation excludes cursor (auto-skip).
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex"]
-    # With CURSOR_API_KEY: cursor is appended to the recommendation tail.
-    monkeypatch.setenv("CURSOR_API_KEY", "crsr_test_dummy")
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex", "cursor"]
+    # Ladder converged to forge then GEAK; OOB backends (claude/codex/cursor) removed.
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
 
 
 def test_recommend_backends_includes_geak_for_python_source():
@@ -416,7 +412,7 @@ def test_recommend_backends_includes_geak_for_python_source():
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
 
 
 def test_recommend_backends_includes_geak_for_unknown_source():
@@ -427,11 +423,11 @@ def test_recommend_backends_includes_geak_for_unknown_source():
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
 
 
 def test_recommend_backends_geak_precedes_llm_backends():
-    """Invariant: forge leads, GEAK precedes the claude/codex LLM backends."""
+    """Invariant: forge leads, then the per-kernel GEAK backend."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -440,7 +436,6 @@ def test_recommend_backends_geak_precedes_llm_backends():
     }
     ladder = tla.recommend_backends(candidate)
     assert ladder[:2] == ["forge", "geak_v3"], f"forge then GEAK must lead the ladder, got {ladder}"
-    assert ladder.index("geak_v3") < ladder.index("claude"), ladder
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -2631,7 +2626,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
             "skip_reason": "",
             "gpu_pct": 12.5,
             "tracelens_pitem_rank": 1,
-            "recommended_backends": ["geak_v3", "claude", "codex"],
+            "recommended_backends": ["forge", "geak_v3"],
         },
         {
             "kernel_id": "k002",
@@ -2674,7 +2669,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
     assert "source file" in aten_entry["skip_reason"]
     # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
-    assert summary["tasks"][0]["recommended_backends"] == ["geak_v3", "claude", "codex"]
+    assert summary["tasks"][0]["recommended_backends"] == ["forge", "geak_v3"]
 
 
 def test_build_audit_summary_handles_empty_input():

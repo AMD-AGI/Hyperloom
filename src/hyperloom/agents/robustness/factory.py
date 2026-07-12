@@ -282,7 +282,6 @@ def build_reactor_components(
             pending_count_threshold=(config.kernel_pipeline_pending_count_threshold),
             min_pending_ticks=config.kernel_pipeline_min_pending_ticks,
             min_geak_sigterm_attempts=(config.kernel_pipeline_min_geak_sigterm_attempts),
-            min_cursor_401_hits=(config.kernel_pipeline_min_cursor_401_hits),
             min_kernels_with_no_progress=(config.kernel_pipeline_min_kernels_with_no_progress),
         ),
         state_integrity_config=StateIntegrityConfig(

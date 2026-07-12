@@ -3753,8 +3753,7 @@ def _finalize_candidates(
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     """Recommend a backend ladder for a reusable native kernel.
 
-    Orders forge first, then GEAK, then the claude/codex LLM backends
-    (cursor appended only when CURSOR_API_KEY is set).
+    Orders forge first, then the per-kernel GEAK backend (geak_v3).
 
     Args:
         candidate: The hot-kernel candidate dict.
@@ -3772,12 +3771,10 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # forge then the per-kernel GEAK backend (geak_v3); append cursor only when
-    # CURSOR_API_KEY is provisioned. Uses ``geak_v3`` (not ``geak``) because the
-    # per-kernel ladder token was renamed when the e2e optimizer took over ``geak``;
-    # parse_backends/choose_backends reject bare ``geak`` on the per-kernel path.
-    cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
-    return ["forge", "geak_v3", "claude", "codex"] + cursor_tail
+    # forge then the per-kernel GEAK backend (geak_v3). Uses ``geak_v3`` (not
+    # ``geak``) because parse_backends/choose_backends reject bare ``geak`` on
+    # the per-kernel path.
+    return ["forge", "geak_v3"]
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
