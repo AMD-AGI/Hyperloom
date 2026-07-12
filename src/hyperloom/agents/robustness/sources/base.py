@@ -90,7 +90,7 @@ class SourceData:
     # ``coordinator`` {recorded_pid, alive, pid_file}.
     local_state_integrity: dict[str, Any] = field(default_factory=dict)
     # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for
-    # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH / OOB_SRC), ``tracelens_cli``.
+    # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)

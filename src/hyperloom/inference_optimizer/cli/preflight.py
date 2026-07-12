@@ -426,10 +426,9 @@ def _check_tracelens_root_exists() -> None:
 
 
 def _check_node_claude_cli() -> None:
-    """WARN-only presence check for bundled agent CLIs (node/claude/codex) and ``@cursor/sdk``.
+    """WARN-only presence check for bundled agent CLIs (node/claude/codex).
 
-    SDKs fall back to direct HTTP when CLIs are absent, so this is informational. @cursor/sdk is a Node
-    library probed via ``require.resolve`` against ``$(npm root -g)`` since ``shutil.which`` would miss it.
+    SDKs fall back to direct HTTP when CLIs are absent, so this is informational.
     """
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
     if missing:
@@ -438,31 +437,6 @@ def _check_node_claude_cli() -> None:
             f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
             f"Run src/hyperloom/agents/kernel/scripts/install.sh to bring them in."
         )
-    # @cursor/sdk presence — probe via Node since it's a library, not a CLI.
-    if shutil.which("node") is not None and shutil.which("npm") is not None:
-        try:
-            npm_root = subprocess.run(
-                ["npm", "root", "-g"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            global_modules = (npm_root.stdout or "").strip()
-            probe = subprocess.run(
-                ["node", "-e", "require.resolve('@cursor/sdk')"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env={**os.environ, "NODE_PATH": global_modules} if global_modules else None,
-            )
-            if probe.returncode != 0:
-                print(
-                    "Preflight: WARNING — @cursor/sdk not resolvable; cursor "
-                    "backend will fail to start. Run src/hyperloom/agents/kernel/"
-                    "scripts/install.sh to install it globally via npm."
-                )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            print("Preflight: WARNING — could not probe @cursor/sdk presence; cursor backend may be unavailable.")
 
 
 def _emit_preflight_diagnostics(
@@ -720,7 +694,6 @@ def _preflight(
             "OPENAI_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
-            "OOB_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
@@ -769,13 +742,13 @@ def _preflight(
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         resolved_urls = (anthropic_url, openai_url)
 
-        # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
-        # gateway URL, but an INTENTIONAL operator override is preserved (#521:
+        # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway
+        # URL, but an INTENTIONAL operator override is preserved (#521:
         # GEAK runs in a separate network namespace reached via a host-local
         # reverse tunnel).
         gateway_url = openai_url or anthropic_url
         if gateway_url:
-            for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+            for alias in ("GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
                     # A genuine operator override is preserved, but a leftover

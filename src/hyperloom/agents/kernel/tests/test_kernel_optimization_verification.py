@@ -47,7 +47,7 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
     return {
         "status": "completed",
         "attempt_id": "a1",
-        "backend": "claude",
+        "backend": "geak_v3",
         "optimized_path": str(artifact or "/tmp/optimized.hip"),
         "backend_paths": paths,
     }
@@ -183,7 +183,7 @@ def test_build_prompt_includes_structured_shape_contract():
         "input_shapes": [{"call_num": 48, "shape": shape}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="codex")
+    prompt = ko.build_prompt(candidate, _args(), backend="geak_v3")
 
     assert "when `benchmark_shape_cases` is present" in prompt
     assert '"benchmark_shape_cases"' in prompt
@@ -207,7 +207,7 @@ def test_build_prompt_omits_structured_shape_cases_without_program_output():
         "shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="codex")
+    prompt = ko.build_prompt(candidate, _args(), backend="geak_v3")
     metadata_json = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     metadata = json.loads(metadata_json)
 
@@ -922,7 +922,7 @@ def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
 
 def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
     """Fenced CU in stdout log is surfaced via the `.log` route, labelled ``extracted_code_block`` (not ``source_file``)."""
-    log_path = tmp_path / "claude-c0ffee_stdout.log"
+    log_path = tmp_path / "geak_v3-c0ffee_stdout.log"
     log_path.write_text(
         "Here is the final optimized kernel:\n"
         "```cuda\n"
@@ -937,8 +937,8 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
     )
     attempt = {
         "status": "completed",
-        "attempt_id": "claude-c0ffee",
-        "backend": "claude",
+        "attempt_id": "geak_v3-c0ffee",
+        "backend": "geak_v3",
         "optimized_path": str(log_path),
         "backend_paths": {},
     }
@@ -1389,7 +1389,7 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
     log_path.write_text("", encoding="utf-8")
 
     result = ko.run_attempt(
-        "claude",
+        "geak_v3",
         args=args,
         candidate={"kernel_id": "k001", "name": "k", "source_file": "/tmp/k.cu"},
         run_dir=run_dir,

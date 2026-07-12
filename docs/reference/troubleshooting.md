@@ -44,7 +44,7 @@ configured upstream gateway.
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://your-openai-compatible-gateway.example.com/v1`).
-   If `GEAK_BASE_URL` or `OOB_BASE_URL` is set, confirm it points at a
+   If `GEAK_BASE_URL` or `LLM_API_BASE` is set, confirm it points at a
    routable endpoint for the worker runtime.
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
@@ -111,7 +111,7 @@ venv rebuild.
 though the node has free GPUs.
 
 **Cause**: Ray was started with `--num-gpus=0` (or omitted, which
-defaults to 0 on some images). GEAK and OOB submit tasks with
+defaults to 0 on some images). GEAK submits tasks with
 `num_gpus>=1` and will wait indefinitely.
 
 **Fix**:
@@ -292,33 +292,6 @@ auto-re-cloned and fails fast once `/tmp` is reaped.
    set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
    SHA pin, no self-heal), so you own keeping it present and on the right
    ref.
-
----
-
-## Cursor backend gets HTTP 401 (separate from the AMD gateway creds)
-
-**Symptom**: The OOB `cursor` backend specifically returns 401 even
-though `claude` / `codex` work fine.
-
-**Cause**: `CURSOR_API_KEY` is missing or invalid. The Cursor backend
-talks to Cursor's own gateway, **not** the AMD primus-safe gateway,
-and requires a separate `crsr_...` key.
-
-**Fix**:
-
-* If you don't have a Cursor account: do not include `cursor` in an explicit
-  `KERNEL_OPT_BACKEND_ORDER`. The auto-derived default drops `cursor` when
-  `CURSOR_API_KEY` is unset and continues with `forge,geak,claude,codex`.
-  If you explicitly requested `--backends cursor` and don't have a key, remove
-  the flag.
-* If you do have a Cursor account:
-  ```bash
-  export CURSOR_API_KEY=crsr_...
-  bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"   # picks up the new key
-  ```
-
-See [Hyperloom authentication and credentials](authentication.md) §3 for the Cursor key
-specifics.
 
 ---
 
