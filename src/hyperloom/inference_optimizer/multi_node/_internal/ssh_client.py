@@ -245,8 +245,8 @@ def ssh_run_bash_with_env(
 
     The env (which may include credentials) is prepended as shell-quoted
     ``export`` lines and the whole script is piped over SSH **stdin** — so
-    secrets never appear in argv or on the pod's disk. Used by the OOB pod
-    install (needs OOB_API_KEY / OOB_BASE_URL).
+    secrets never appear in argv or on the pod's disk. Used by the pod-side
+    tool installs (credentials passed via env).
 
     Args:
         host: The target host/IP.

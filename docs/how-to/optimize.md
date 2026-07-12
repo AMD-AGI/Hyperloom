@@ -17,8 +17,8 @@ This topic assumes you have already completed installation. If you haven't:
 
 ## Launch from Cursor (Local Mode)
 
-Open the workspace printed by `local_setup.sh` in Cursor, then paste the
-following prompt into Cursor Chat, filling in your workload details:
+Open the Hyperloom workspace in Cursor, then paste the following prompt into
+Cursor Chat, filling in your workload details:
 
 ```{note}
 The prompt includes `install.sh`. This is intentional: Cursor runs in its own
@@ -43,7 +43,6 @@ Optimize inference for this workload:
 - Budget: 24 hours
 
 Before launch, run exactly:
-source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
 bash src/hyperloom/inference_optimizer/assets/install.sh
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
@@ -52,6 +51,11 @@ Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
 2. Monitor the process every 300s until the optimization is complete or failed.
 ```
+
+If you explicitly set `KERNEL_OPT_BACKEND_ORDER` to include `forge`, first run
+`local_setup.sh --no-next-steps` and source
+`/path/to/hyperloom-run/runtime/local-setup.env.sh` so `FORGE_PATH` points at
+KernelForge.
 
 | Field | Meaning | How to choose |
 |-------|---------|---------------|

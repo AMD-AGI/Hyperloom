@@ -55,12 +55,12 @@ python -m pytest tests/ -v
 ```
 
 ```{note}
-Hyperloom resolves the public checkout via `TRACELENS_ROOT`. `src/hyperloom/inference_optimizer/assets/local_setup.sh`
-can clone or update the checkout and write it into `local-setup.env.sh`; the
-runtime installation is performed by `src/hyperloom/inference_optimizer/assets/install.sh`,
-which chains into `src/hyperloom/agents/kernel/scripts/install.sh` and editable-installs the
-checkout. When `TRACELENS_ROOT` is unset, the installer clones the public repo
-under the pod-local open-source checkout root
+Hyperloom resolves the public checkout via `TRACELENS_ROOT`. Runtime
+installation is performed by `src/hyperloom/inference_optimizer/assets/install.sh`,
+which chains into `src/hyperloom/agents/kernel/scripts/install.sh`; that
+installer clones, pins, and editable-installs the checkout. When
+`TRACELENS_ROOT` is unset, the installer clones the public repo under the
+pod-local open-source checkout root
 (`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}`).
 The optional internal extension (roofline gap / MI355+ MAF data) is enabled by
 setting `TRACELENS_INTERNAL_ROOT`; leave it unset for the open-source-only

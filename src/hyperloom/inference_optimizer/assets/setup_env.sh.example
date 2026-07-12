@@ -23,9 +23,6 @@ export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 # export TRACELENS_ROOT=/path/to/your/TraceLens
 # Optional internal extension; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
-# OOB now ships inside the KernelForge checkout ($FORGE_PATH/OOB); derive it
-# from the forge path so a separate OOB path no longer needs to be provided.
-export OOB_SRC="${OOB_SRC:-${FORGE_PATH:-/wekafs/KernelForge}/OOB}"
 # INFERENCEX_PATH and MAGPIE_PATH default under
 # ${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/.
 # Override only if you share Magpie / InferenceX checkouts across sessions.
