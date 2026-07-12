@@ -759,6 +759,25 @@ if not is_rocm:
 PY
 }
 
+# Symlink the isolated-venv `vllm` console script into the shared venv's bin
+# dir. Magpie runs a bare `vllm serve` under a PATH that only lists the shared
+# bin; the symlink's target shebang still pins the isolated python, so the
+# shared env stays uncontaminated. Idempotent; non-fatal on failure.
+link_vllm_into_shared_bin() {
+  local base_py="$1" iso_py="$2" shared_bin iso_vllm
+  shared_bin="$(cd "$(dirname "$base_py")" 2>/dev/null && pwd)" || { warn "cannot resolve shared venv bin dir; skipping vllm symlink"; return 0; }
+  iso_vllm="${VLLM_VENV_ROOT}/bin/vllm"
+  [ -x "$iso_vllm" ] || { warn "isolated vllm not found at ${iso_vllm}; skipping symlink"; return 0; }
+  if [ "$shared_bin" = "$(cd "$(dirname "$iso_py")" 2>/dev/null && pwd)" ]; then
+    return 0
+  fi
+  if ln -sfnT "$iso_vllm" "${shared_bin}/vllm" 2>/dev/null || ln -sfn "$iso_vllm" "${shared_bin}/vllm" 2>/dev/null; then
+    log "linked isolated vllm into shared bin: ${shared_bin}/vllm -> ${iso_vllm}"
+  else
+    warn "failed to symlink ${iso_vllm} into ${shared_bin}; Magpie may not find 'vllm'"
+  fi
+}
+
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
@@ -858,6 +877,11 @@ PY
       die "vLLM isolated install failed. Try a VLLM_VERSION/VLLM_ROCM_VARIANT available from ${VLLM_ROCM_INDEX}."
     fi
     verify_vllm_rocm "$py" || die "vLLM isolated install completed but did not verify as a ROCm build"
+    # Isolated venv holds `vllm` only under $VLLM_VENV_ROOT/bin, but Magpie's
+    # benchmark wrapper runs a bare `vllm serve` with a YAML-fixed PATH that
+    # lists the shared venv bin only. Symlink the isolated vllm into the shared
+    # bin so `which vllm` resolves; its shebang keeps using the isolated python.
+    link_vllm_into_shared_bin "$base_py" "$py"
     log "vLLM framework install complete (isolated: ${VLLM_VENV_ROOT})"
     return 0
   fi
