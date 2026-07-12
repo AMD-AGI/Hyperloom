@@ -467,15 +467,15 @@ def parse_backends(backends: str) -> list[str]:
 
     Args:
         backends (str): Comma-separated backend names (case-insensitive),
-            e.g. ``"geak_v3,claude"``.
+            e.g. ``"geak_v3,forge"``.
 
     Returns:
         list[str]: The normalized (lowercased, trimmed) backend names in the
-            order given.
+        order given.
 
     Raises:
         ValueError: When any backend is outside the allowed set
-            (``geak_v3``, ``claude``, ``codex``, ``cursor``).
+            (``geak_v3``, ``forge``).
     """
     raw = str(backends or "").strip()
     # Defense-in-depth (Hyperloom#601): an upstream dispatch slip can hand us
@@ -488,17 +488,15 @@ def parse_backends(backends: str) -> list[str]:
         raw = raw[1:-1].replace("'", "").replace('"', "")
     parsed = [b.strip().lower() for b in raw.split(",") if b.strip()]
     # `forge` is the Kernel-Forge autonomous-loop backend; it is first in the
-    # default ladder (choose_backends) and falls through to geak_v3/claude/codex
-    # when it skips a non-triton candidate or misses a KEEP. See
+    # default ladder (choose_backends) and falls through to geak_v3 when it
+    # skips a non-triton candidate or misses a KEEP. See
     # claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md.
-    allowed = {"geak_v3", "claude", "codex", "cursor", "forge"}
+    allowed = {"geak_v3", "forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
         raise ValueError(
             f"unsupported backend(s): {', '.join(invalid)} "
-            f"(allowed: {sorted(allowed)}; the 'llm' single-shot "
-            "backend was removed because max_tokens=2048 truncates "
-            "any non-trivial kernel)"
+            f"(allowed: {sorted(allowed)}; claude/codex/cursor were removed)"
         )
     return parsed
 
@@ -506,10 +504,9 @@ def parse_backends(backends: str) -> list[str]:
 def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     """Select the backend ladder for a kernel-opt run.
 
-    Policy (#144 last comment Layer 1, broadened): every kernel
-    Claude/Codex can rewrite, GEAK can rewrite too. Include GEAK in
-    every default ladder, FIRST (high-priority handoff) — Claude/Codex
-    follow as fallbacks if GEAK times out or rejects.
+    Policy: forge is the first-priority handoff (Kernel-Forge autonomous
+    loop); GEAK follows as fallback when forge skips a candidate or misses
+    a KEEP. claude/codex/cursor were removed.
 
     When no benchmark/test harness is available, GEAK still attempts
     the rewrite but ``geak_without_benchmark=True`` is flagged so
@@ -529,7 +526,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     Returns:
         tuple[list[str], dict[str, Any]]: The selected backend ladder and a
             notes dict describing the selection (benchmark availability,
-            ``geak_without_benchmark`` flag, cursor key presence, etc.).
+            ``geak_without_benchmark`` flag, etc.).
     """
     user_backends = parse_backends(args.backends)
     # Honor the coordinator's KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS env
@@ -540,25 +537,24 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if not user_backends:
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
-            # 'geak' is the whole-pipeline e2e phase-level delegate owned by the
-            # coordinator, not a per-kernel backend; drop it so a geak-only order
-            # does not crash parse_backends here (this subprocess only runs on the
-            # native per-kernel path, which the coordinator skips for the GEAK
-            # e2e optimizer). An empty remainder falls back to the default ladder.
+            # Drop tokens parse_backends no longer accepts so a legacy env
+            # (e.g. KERNEL_OPT_BACKEND_ORDER=forge,geak,claude,codex) degrades to
+            # the surviving backends instead of raising ValueError. 'geak' is the
+            # whole-pipeline e2e delegate (coordinator-owned, not per-kernel);
+            # claude/codex/cursor are removed backend tokens. An empty remainder
+            # falls back to the default ladder.
+            _dropped = {"geak", "claude", "codex", "cursor"}
             env_tokens = ",".join(
-                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak"
+                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() not in _dropped
             )
             if env_tokens:
                 user_backends = parse_backends(env_tokens)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
-    # Skip cursor from auto-selected defaults when CURSOR_API_KEY is unset (explicit --backends still wins).
-    cursor_key_present = bool(os.environ.get("CURSOR_API_KEY", "").strip())
     notes: dict[str, Any] = {
         "user_specified_backends": bool(user_backends),
         "benchmark_available": benchmark_available,
         "geak_without_benchmark": False,
-        "cursor_key_present": cursor_key_present,
     }
 
     if user_backends:
@@ -574,14 +570,10 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         return [], notes
 
     # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
-    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK,
-    # then the OOB backends (claude, codex, cursor). Cursor is dropped here when
-    # CURSOR_API_KEY is unset (explicit --backends / env still wins). Without a
-    # benchmark GEAK still attempts but flags geak_without_benchmark=True so KEEP
-    # gates know confidence is reduced.
-    selected = ["forge", "geak_v3", "claude", "codex"]
-    if cursor_key_present:
-        selected.append("cursor")
+    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK.
+    # Without a benchmark GEAK still attempts but flags geak_without_benchmark=True
+    # so KEEP gates know confidence is reduced.
+    selected = ["forge", "geak_v3"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -2725,33 +2717,12 @@ def _restore_env(previous: dict[str, str | None]) -> None:
             os.environ[key] = value
 
 
-def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
-    """Return the per-attempt output directory for an OOB run.
-
-    Args:
-        session_id: Session identifier for the run.
-        prompt_file: Prompt file whose stem scopes the attempt directory.
-
-    Returns:
-        The created ``.../oob/<session_id>/<prompt_stem>`` directory.
-    """
-    # Per-attempt, mirroring _geak_output_dir. A session-level dir would let
-    # concurrent OOB attempts share artifacts AND the per-attempt compile
-    # caches (isolated_compile_cache_env keys off output_dir), reintroducing
-    # the stale-lock / cache-clobber race this scoping is meant to avoid.
-    out = _kernel_agent_root() / "oob" / session_id / prompt_file.stem
-    out.mkdir(parents=True, exist_ok=True)
-    return out
-
-
 def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
     """Return the per-attempt output directory for a Forge run.
 
-    Mirrors _oob_output_dir but scopes Forge artifacts under their own
-    ``forge/`` root instead of the legacy ``oob/`` directory, so the Forge
-    backend's outputs (forge_loop.log, forge_experiments/, optimization_report,
-    optimized_versions/) are not confusingly nested under a sibling backend's
-    name.
+    Per-attempt (mirrors _geak_output_dir) so Forge artifacts (forge_loop.log,
+    forge_experiments/, optimization_report, optimized_versions/) are scoped
+    under their own ``forge/`` root.
 
     Args:
         session_id: Session identifier for the run.
@@ -2849,15 +2820,14 @@ def invoke_backend(
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
     # ---------------------------------------------------------------------------
-    # Common test-command + before_kernel_opt rocprof — runs for ALL backends
-    # so every optimization attempt (GEAK, Claude, Codex, Cursor) gets the same
+    # Common test-command + before_kernel_opt rocprof — runs for all backends
+    # so every optimization attempt (GEAK / forge) gets the same
     # pre-optimization roofline snapshot without duplicating the logic.
     # ---------------------------------------------------------------------------
     cand_name = str(candidate.get("name") or "")
     is_multigpu_common = bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(cand_name)
-    # Derive a shared test_command that GEAK will use and rocprof will profile.
-    # OOB backends don't accept --test-command but we still want the rocprof
-    # snapshot, so we compute it here unconditionally.
+    # Derive a shared test_command that GEAK will use and rocprof will profile;
+    # forge also gets the same before-kernel snapshot from this shared setup.
     common_test_command = getattr(args, "test_command", "").strip()
     # When TraceLens attached an authoritative kernel_contract (collective /
     # attention) AND we have the exact traced shapes, do NOT hand GEAK a
@@ -2887,8 +2857,6 @@ def invoke_backend(
         _geak_output_dir(args.session_id, prompt_file)
         if backend == "geak_v3"
         else _forge_output_dir(args.session_id, prompt_file)
-        if backend == "forge"
-        else _oob_output_dir(args.session_id, prompt_file)
     )
     # HL builds a harness only for backends that lack their own preprocess stage
     # (forge/OOB). GEAK owns harness construction in its preprocess_v3 orchestrator
@@ -3003,32 +2971,6 @@ def invoke_backend(
                             task=best_task,
                             patch_path=best_patch_path,
                         )
-            return result
-        if backend in {"claude", "codex", "cursor"}:
-            oob = _import_backend("oob_submit")
-            out_dir = _oob_output_dir(args.session_id, prompt_file)
-            is_multigpu = bool((candidate or {}).get("is_multigpu"))
-            if is_multigpu:
-                keep = [f for f in bench_files if not Path(f).name.startswith("test_")]
-                extras = keep[:3]
-            else:
-                extras = bench_files[:3]
-            result = oob.submit(
-                agent=backend,
-                prompt_file=prompt_file,
-                output_dir=out_dir,
-                source_file=source_file,
-                max_turns=args.oob_max_turns,
-                timeout_s=timeout_s,
-                num_gpus=num_gpus,
-                prefer_ray=prefer_ray,
-                extra_files=extras,
-                kernel_repo=kernel_repo,
-            )
-            result["output_dir"] = str(out_dir)
-            if common_test_command:
-                result["test_command"] = common_test_command
-            _merge_rocprof_before(result, rocprof_before)
             return result
         if backend == "forge":
             # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
@@ -4472,7 +4414,7 @@ def main() -> int:
         "--budget-minutes",
         type=float,
         default=60.0,
-        help="Per-attempt wall-clock budget for claude/codex OOB backends. GEAK uses --geak-budget-min.",
+        help="Per-attempt wall-clock budget for forge. GEAK uses --geak-budget-min.",
     )
     # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 180 min (3h).
     # 180 matches GEAK's OWN full-mode budget (config budgets.full.total_s=10800s);
@@ -4495,7 +4437,6 @@ def main() -> int:
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
-    parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
     # GEAK cost limit: yaml cost_limit:0. (unlimited) isn't honoured by the sub-agent path
     # (falls back to $3.0); the only working lever is GEAK's -l/--cost-limit CLI option.
     # Default 0.0 to match GEAK's geak.yaml; pin a cap via $HYPERLOOM_GEAK_COST_LIMIT / --geak-cost-limit.
