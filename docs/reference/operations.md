@@ -81,6 +81,11 @@ preserve is `session_breakdown.json` (1–10 MB; see
 
 ## Kubernetes layout
 
+```{seealso}
+To run the same workload under a batch scheduler instead of Kubernetes, see
+[Run Hyperloom on Slurm](slurm/index.md).
+```
+
 Hyperloom does not ship its own Helm chart. Recommended layout for
 self-hosters:
 

@@ -68,6 +68,8 @@ subtrees:
     title: session_breakdown.json
   - file: reference/operations.md
     title: Operations
+  - file: reference/slurm/index.md
+    title: Run on Slurm
   - file: reference/upgrade.md
     title: Upgrade
 
