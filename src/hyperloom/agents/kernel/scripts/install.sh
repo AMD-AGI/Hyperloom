@@ -5,8 +5,8 @@
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
-#   - Node.js/npm for claude/codex CLIs and @cursor/sdk
 #   - TraceLens editable install + CLI verification
+#   - GEAK per-kernel + e2e optimizer backends
 #
 # The installer prepares all kernel-agent backends in one pass.
 
@@ -39,7 +39,7 @@ done
 # (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so
 # KERNEL_AGENT_ROOT is one level up and REPO_ROOT is five levels up).
 # Operator-provided read-only inputs
-# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, OOB_SRC, HYPERLOOM_BUNDLE,
+# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, HYPERLOOM_BUNDLE,
 # GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) may stay outside USER_DATA_PATH.
 # The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
 # like Magpie/InferenceX so its env path is safe across pods.
@@ -146,8 +146,7 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-int
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
    || [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${ANTHROPIC_BASE_URL:-}" ] \
-   || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] \
-   || [ -z "${CURSOR_API_KEY:-}" ]; then
+   || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
   if [ -f "$REPO_ROOT/.env" ]; then
     _snap_safe="${SAFE_API_KEY-}"
     _snap_url="${OPENAI_BASE_URL-}"
@@ -155,7 +154,6 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
-    _snap_cursor="${CURSOR_API_KEY-}"
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
@@ -166,9 +164,8 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
-    [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
     unset _snap_safe _snap_url _snap_openai_key _snap_anthropic_url
-    unset _snap_anthropic_key _snap_anthropic_token _snap_cursor
+    unset _snap_anthropic_key _snap_anthropic_token
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
@@ -199,21 +196,6 @@ GEAK_REPO="${GEAK_REPO:-${GEAK_V3_REPO}}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-main}"
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-# --- OOB source resolution (BEGIN: kept in sync with test_oob_src_default) ---
-# OOB now ships inside the KernelForge checkout ($FORGE_PATH/OOB), so derive
-# the OOB source from the forge path instead of requiring a separate OOB path
-# to be injected by the caller (the legacy DEFAULT_OOB_PATH env). An explicit
-# OOB_SRC is still honoured as an operator override. Honour the same forge-root
-# aliases as the forge backend (src/hyperloom/agents/kernel/tools/backends/forge_submit.py),
-# and fall back to the legacy bundle layout only when no forge path is provided.
-_forge_root="${FORGE_PATH:-${KERNEL_FORGE_ROOT:-${KERNEL_FORGE_PATH:-}}}"
-if [ -n "${_forge_root}" ]; then
-  OOB_SRC="${OOB_SRC:-${_forge_root%/}/OOB}"
-else
-  OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
-fi
-# --- OOB source resolution (END) ---
-OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
 # endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
@@ -283,10 +265,6 @@ KERNEL_AGENT_SKIP_MODEL_LOAD_VAL="${KERNEL_AGENT_SKIP_MODEL_LOAD:-0}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
-CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
-# Orchestration model; left empty when unset so runtime env is not polluted
-# and the CLI default applies.
-CLAUDE_MODEL_VAL="${CLAUDE_MODEL:-}"
 # Split-provider aware per-side credentials. Anthropic side keeps its own
 # base URL/key; OpenAI side keeps its own. Single-gateway deploys still fall
 # back to SAFE_API_KEY + OPENAI_BASE_URL so behavior is unchanged.
@@ -306,7 +284,7 @@ _key_for_endpoint() {
   fi
   printf '%s' "${SAFE_API_KEY:-${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}}"
 }
-# GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
+# GEAK uses the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # Pair the GEAK key to its endpoint so a split deploy never sends the wrong
@@ -324,28 +302,14 @@ case "${GEAK_MODEL_NAME_VAL}" in
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
 esac
-OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
-# Pair the OOB key to its endpoint (same split-provider rule as GEAK).
-OOB_API_KEY_VAL="${OOB_API_KEY:-$(_key_for_endpoint "$OOB_BASE_URL_VAL")}"
-[ -n "$OOB_API_KEY_VAL" ] || OOB_API_KEY_VAL="${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}}}"
-# Cursor SDK key. Independent issuer (Cursor account, prefix `crsr_...`); never
-# inherit from SAFE_API_KEY / OOB_API_KEY because those address the AMD gateway.
-# Leave empty if the operator has not provisioned a Cursor key — the cursor
-# backend will surface the missing key clearly at run time.
-CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
-CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
-
 # install.sh always installs everything. A previous lazy
 # "install only the requested backend" scheme caused recurring
-# "missing dependency discovered at request time" issues — when the
-# resident skill triggered a kernel-opt that needed claude/codex but
-# install.sh had only brought up GEAK, the CLI auth files were missing
-# and every request 401'd. Per user direction: "kernel-agent skills do
-# not differentiate, just install everything".
+# "missing dependency discovered at request time" issues, so the
+# installer brings up every kernel-agent backend in one pass.
 CHECK_ONLY=0
 DRY_RUN=0
 # Optional build-time escape hatch: skip Ray daemon startup while still
-# installing Ray itself and all downstream dependencies (TraceLens/GEAK/OOB).
+# installing Ray itself and all downstream dependencies (TraceLens/GEAK).
 # Useful in Docker image builds where launching background daemons is fragile.
 case "${SKIP_RAY_START:-0}" in
   1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
@@ -357,9 +321,8 @@ Usage: install.sh [options]
 
 Always installs:
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
-  Node.js/npm, GEAK CLI/config, the GEAK e2e whole-pipeline optimizer,
-  OOB + claude/codex CLI auth, and LLM gateway env/auth (claude/codex
-  CLIs talk to the gateway directly).
+  GEAK CLI/config, the GEAK e2e whole-pipeline optimizer,
+  and LLM gateway env/auth.
 
 Options:
   --check-only       Verify current environment, do not install
@@ -371,8 +334,8 @@ Environment (optional):
   SKIP_RAY_START=1                      Skip `ray start --head` during install (default 0).
                                         Installs ray/click but defers daemon startup to runtime.
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
-                                        Set 0 to skip — useful for claude-only kernel-opt or CPU-only
-                                        sandboxes where BGE-large embedding takes ~1.5h.
+                                        Set 0 to skip — useful for CPU-only sandboxes where BGE-large
+                                        embedding takes ~1.5h.
   KERNEL_AGENT_RAG_INDEX_STRICT=1       Fail install when the RAG index build fails (default warns).
   KERNEL_AGENT_SKIP_MODEL_LOAD=1        Alias to skip model/index loading at install time.
                                         Equivalent to KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0.
@@ -405,7 +368,7 @@ verify_die() {
 # URL and at least one key; single-gateway and split OpenAI/Anthropic are valid.
 #
 # Strict mode by design: no bypass env var. The chained installer
-# steps (GEAK config, OOB CLI auth) all need real credentials, so an
+# steps (GEAK config) all need real credentials, so an
 # install without them cannot finish anyway. The only downgrade path
 # is --check-only / --dry-run, which is for introspection only and
 # does not actually install.
@@ -467,7 +430,7 @@ run() {
 
 # Serialize concurrent installs that share one $USER_DATA_PATH. Installs
 # pointed at the same data root share the auto-cloned dependency checkouts —
-# GEAK / OOB / TraceLens trees below. With no lock, two installs race and
+# GEAK / TraceLens trees below. With no lock, two installs race and
 # corrupt each other's half-cloned trees. The lock lives in $_open_source_root
 # (pod-local) so it tracks exactly what it guards: same-root installs serialize,
 # but separate pod-local roots never block each other. We hold an flock on
@@ -586,9 +549,8 @@ PY
 # for-cuda-graph-profile` is silently never injected → graph-replayed
 # kernels stay opaque, exactly what #194 §5 was trying to fix.
 #
-# Apt-installing here is the cheap, framework-agnostic safety net: it's
-# the same install path the existing `ensure_node` helper takes for
-# Node.js, so it carries no new failure modes.
+# Apt-installing here is the cheap, framework-agnostic safety net for the
+# TraceLens server patcher, so it carries no new failure modes.
 ensure_patch_tools() {
   log "ensuring git + patch (required by src/hyperloom/inference_optimizer/_server_patcher fuzzy-fallback path)"
   local need_git=0 need_patch=0
@@ -670,57 +632,6 @@ ensure_moreutils() {
     return 0
   fi
   command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
-}
-
-ensure_node() {
-  log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
-  if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
-    log "node: $(command -v node) ($(node --version 2>/dev/null || echo unknown))"
-    log "npm: $(command -v npm) ($(npm --version 2>/dev/null || echo unknown))"
-    return 0
-  fi
-
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "node/npm missing; claude/codex CLI install would be skipped"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would install Node.js 20 from NodeSource because node/npm is missing"
-    return 0
-  fi
-  if ! command -v apt-get >/dev/null 2>&1; then
-    verify_die "node/npm missing and apt-get is unavailable; install Node.js 20 manually"
-    return 0
-  fi
-  if ! command -v curl >/dev/null 2>&1; then
-    log "curl missing; installing curl/ca-certificates before NodeSource setup"
-    apt-get update >/dev/null
-    apt-get -y install ca-certificates curl gnupg >/dev/null
-  fi
-
-  log "installing Node.js 20 from NodeSource"
-  apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm >/dev/null 2>&1 || true
-  local ns_url="https://deb.nodesource.com/setup_20.x"
-  local ns_sha="2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be"
-  local ns_script="/tmp/nodesource_setup_20.x"
-  if ! curl -fsSL "$ns_url" -o "$ns_script"; then
-    verify_die "NodeSource setup download failed; cannot install Node.js/npm for claude/codex CLIs"
-    return 0
-  fi
-  if ! echo "${ns_sha}  ${ns_script}" | sha256sum -c - >/dev/null 2>&1; then
-    verify_die "NodeSource setup SHA256 mismatch; aborting Node.js/npm install"
-    return 0
-  fi
-  if ! bash "$ns_script" >/dev/null 2>&1; then
-    verify_die "NodeSource setup failed; cannot install Node.js/npm for claude/codex CLIs"
-    return 0
-  fi
-  if ! apt-get -y install nodejs >/dev/null; then
-    verify_die "nodejs install failed; claude/codex CLI install cannot proceed"
-    return 0
-  fi
-  command -v node >/dev/null 2>&1 || verify_die "node CLI not found after nodejs install"
-  npm --version >/dev/null 2>&1 || verify_die "npm not usable after nodejs install"
 }
 
 ensure_ray() {
@@ -1001,14 +912,14 @@ ensure_tracelens() {
     export TRACELENS_ROOT
     return 0
   fi
-  # Read-only source guard (mirrors the OOB cp -r pattern). When
+  # Read-only source guard. When
   # $TRACELENS_INTERNAL_ROOT is on a read-only mount (the WekaFS default), pip
   # install -e fails because it must write *.egg-info into the source
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
   # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
-  # ${GEAK_V3_ROOT} / ${OOB_ROOT}) lets both
+  # ${GEAK_V3_ROOT}) lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
   # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
@@ -1367,118 +1278,19 @@ ensure_rag_index() {
   warn "Set KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0 to skip or KERNEL_AGENT_RAG_INDEX_STRICT=1 to fail."
 }
 
-ensure_oob() {
-  log "ensuring OOB backend"
-  local oob_install_src=""
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "$(dirname "${OOB_ROOT}")"
-  fi
-  if ! command -v oob >/dev/null 2>&1; then
-    if [ -d "$OOB_SRC" ]; then
-      if [ -f "${OOB_SRC}/pyproject.toml" ]; then
-        oob_install_src="$OOB_SRC"
-      fi
-      if [ -z "$oob_install_src" ]; then
-        warn "OOB source has no pyproject.toml at $OOB_SRC"
-      else
-        if [ -d "${OOB_ROOT}" ] && [ ! -f "${OOB_ROOT}/pyproject.toml" ]; then
-          log "removing stale OOB install root without pyproject.toml: ${OOB_ROOT}"
-          run rm -rf "${OOB_ROOT}"
-        fi
-        if [ ! -d "${OOB_ROOT}" ]; then
-          run cp -r "$oob_install_src" "${OOB_ROOT}"
-        fi
-        if [ -f "${OOB_ROOT}/requirements.txt" ]; then
-          run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${OOB_ROOT}/requirements.txt"
-        fi
-        run python3 -m pip install -q --no-cache-dir --break-system-packages "${OOB_ROOT}"
-      fi
-    else
-      warn "OOB source not found: $OOB_SRC"
-    fi
-  else
-    log "oob already installed: $(command -v oob)"
-  fi
-
-  if ! command -v npm >/dev/null 2>&1; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      log "would install claude/codex npm CLIs after Node.js/npm is installed"
-      ensure_llm_auth_files
-      return 0
-    fi
-    verify_die "npm not found; ensure_node must run before ensure_oob"
-    return 0
-  fi
-  if ! command -v claude >/dev/null 2>&1; then
-    run npm config set prefix /usr/local
-    run npm install -g @anthropic-ai/claude-code
-  fi
-  if ! command -v codex >/dev/null 2>&1; then
-    run npm config set prefix /usr/local
-    run npm install -g @openai/codex@0.100.0
-  fi
-  # @cursor/sdk is a Node library (not a CLI), used by OOB's cursor backend
-  # via `node -e "import '@cursor/sdk'"`. We always install it globally so
-  # the OOB cursor path works without per-pod npm setup. Use `require.resolve`
-  # against the global root to avoid a redundant install when present.
-  if ! NODE_PATH="$(npm root -g 2>/dev/null || true)" \
-       node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
-    run npm config set prefix /usr/local
-    run npm install -g @cursor/sdk
-  fi
-
-  ensure_llm_auth_files
-}
-
-ensure_llm_auth_files() {
-  log "ensuring LLM/OOB auth files"
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    return
-  fi
-  if [ -z "$OOB_API_KEY_VAL" ]; then
-    warn "OOB/Anthropic API key not set; auth files not written"
-    return
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would write /root/.claude/config.json and /root/.codex/auth.json"
-    return
-  fi
-  mkdir -p /root/.claude /root/.codex
-  # The Anthropic SDK appends /v1 itself, so strip a trailing /v1 from
-  # the OpenAI-style upstream URL when writing customApiUrl.
-  local _anthropic_url="${OOB_BASE_URL_VAL%/}"
-  _anthropic_url="${_anthropic_url%/v1}"
-  cat > /root/.claude/config.json <<EOF
-{
-  "theme": "dark",
-  "hasCompletedOnboarding": true,
-  "primaryApiKey": "${OOB_API_KEY_VAL}",
-  "customApiUrl": "${_anthropic_url}"
-}
-EOF
-  chmod 600 /root/.claude/config.json
-  # Codex 0.100.0 reads ~/.codex/auth.json before env and does not fall
-  # back when OPENAI_API_KEY is empty; write the real key for direct auth.
-  cat > /root/.codex/auth.json <<EOF
-{
-  "auth_mode": "apikey",
-  "OPENAI_API_KEY": "${OOB_API_KEY_VAL}"
-}
-EOF
-  chmod 600 /root/.codex/auth.json
-}
-
 # Write a pod-local kernel-agent env file users should source so subsequent CLI calls
 # (and Ray workers via runtime_env) pick up the upstream gateway URLs.
 write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  # Warn loudly if OOB_BASE_URL is empty — kernel-agent env would silently
+  local _openai_url="${_OPENAI_BASE_URL_VAL:-${_ANTHROPIC_BASE_URL_VAL:-${LLM_API_BASE:-${GEAK_BASE_URL_VAL:-}}}}"
+  local _gateway_key="${_OPENAI_KEY_VAL:-${_ANTHROPIC_KEY_VAL:-${GEAK_API_KEY_VAL:-${LLM_GATEWAY_KEY:-${LLM_API_KEY:-}}}}}"
+  # Warn loudly if no gateway URL is resolved — kernel-agent env would silently
   # lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to whatever
   # was in the operator's shell rc, defeating the point of this file.
-  if [ -z "${OOB_BASE_URL_VAL:-}" ]; then
-    warn "OOB_BASE_URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
+  if [ -z "${_openai_url:-}" ]; then
+    warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
   fi
   # Anthropic base URL: keep an explicit split-provider value as-is; only
   # derive from the OpenAI-style upstream (strip trailing /v1, the Anthropic
@@ -1486,14 +1298,14 @@ write_env_file() {
   local _anthropic_url=""
   if [ -n "${_ANTHROPIC_BASE_URL_VAL:-}" ]; then
     _anthropic_url="${_ANTHROPIC_BASE_URL_VAL}"
-  elif [ -n "${OOB_BASE_URL_VAL:-}" ]; then
-    _anthropic_url="${OOB_BASE_URL_VAL%/}"
+  elif [ -n "${_openai_url:-}" ]; then
+    _anthropic_url="${_openai_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
   fi
   # Per-side keys: a split deploy writes each provider its own key; a single
-  # gateway resolves both to the same OOB key so legacy behavior is preserved.
-  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-${OOB_API_KEY_VAL}}"
-  local _openai_key="${_OPENAI_KEY_VAL:-${OOB_API_KEY_VAL}}"
+  # gateway resolves both to the same key.
+  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-${_gateway_key}}"
+  local _openai_key="${_OPENAI_KEY_VAL:-${_gateway_key}}"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
@@ -1509,7 +1321,7 @@ write_env_file() {
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
-    [ -n "${OOB_BASE_URL_VAL:-}" ] && echo "export OPENAI_BASE_URL='${OOB_BASE_URL_VAL}'"
+    [ -n "${_openai_url:-}" ] && echo "export OPENAI_BASE_URL='${_openai_url}'"
     # Anthropic-side and OpenAI-side keys are written independently so a split
     # deploy (e.g. DeepSeek Anthropic API + native OpenAI) does not cross-send
     # the wrong provider's key. Gateway aliases keep the single-gateway key.
@@ -1518,18 +1330,11 @@ write_env_file() {
       echo "export ANTHROPIC_AUTH_TOKEN='${_anthropic_key}'"
     }
     [ -n "${_openai_key}" ] && echo "export OPENAI_API_KEY='${_openai_key}'"
-    [ -n "${OOB_API_KEY_VAL}" ] && {
-      echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export OOB_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export AMD_LLM_API_KEY='${OOB_API_KEY_VAL}'"
-      echo "export LLM_GATEWAY_KEY='${OOB_API_KEY_VAL}'"
+    [ -n "${_gateway_key}" ] && {
+      echo "export SAFE_API_KEY='${_gateway_key}'"
+      echo "export AMD_LLM_API_KEY='${_gateway_key}'"
+      echo "export LLM_GATEWAY_KEY='${_gateway_key}'"
     }
-    [ -n "${OOB_BASE_URL_VAL}" ] && echo "export OOB_BASE_URL='${OOB_BASE_URL_VAL}'"
-    # Cursor backend env. Only export CURSOR_API_KEY if the operator already
-    # provided one via env or .env; do not synthesise from SAFE_API_KEY (the
-    # Cursor account is a separate issuer).
-    [ -n "${CURSOR_API_KEY_VAL}" ] && echo "export CURSOR_API_KEY='${CURSOR_API_KEY_VAL}'"
-    [ -n "${CURSOR_DEFAULT_MODEL_VAL}" ] && echo "export CURSOR_DEFAULT_MODEL='${CURSOR_DEFAULT_MODEL_VAL}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup inference_optimizer optimize →
@@ -1571,8 +1376,6 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_STORE_PATH_VAL}" ] && echo "export GEAK_MEMORY_STORE_PATH='${GEAK_MEMORY_STORE_PATH_VAL}'"
     [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
-    [ -n "${CLAUDE_MODEL_VAL}" ] && echo "export CLAUDE_MODEL='${CLAUDE_MODEL_VAL}'"
-    [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
     [ -n "${HYPERLOOM_ROCPROF_COMPUTE_PATH:-}" ] && echo "export HYPERLOOM_ROCPROF_COMPUTE_PATH='${HYPERLOOM_ROCPROF_COMPUTE_PATH}'"
     # GEAK scoring / profiler / shape knobs. These are read by GEAK itself (the
     # Ray actor), but the optimize CLI sources THIS file and its env replaces the
@@ -1628,7 +1431,7 @@ ensure_geak() {
     if [ -x "${GEAK_ROOT}/setup.sh" ]; then
       run env -u REPO_ROOT bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
     else
-      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_oob"
+      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_forge_claude_cli"
     fi
     # setup.sh installs the CLI, not the SDK; run_e2e.py prefers the SDK.
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
@@ -1639,6 +1442,62 @@ ensure_geak() {
     fi
   else
     log "check-only: skipping e2e optimizer sdk installation"
+  fi
+}
+
+# The forge backend drives the `claude` CLI inside its autonomous loop
+# (see forge_submit._apply_fellow_env), so it needs Node/npm, the claude npm
+# CLI, and ~/.claude auth even though claude/codex/cursor backends are gone.
+ensure_forge_claude_cli() {
+  log "ensuring claude CLI for the forge backend"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    command -v claude >/dev/null 2>&1 || warn "claude CLI missing; forge backend will fail to drive its fellow"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install Node.js/npm + @anthropic-ai/claude-code and write ~/.claude/config.json"
+    return 0
+  fi
+  # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
+  if ! command -v npm >/dev/null 2>&1; then
+    if ! command -v apt-get >/dev/null 2>&1; then
+      warn "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
+      return 0
+    fi
+    command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
+    log "installing Node.js 20 from NodeSource"
+    local ns_script="/tmp/nodesource_setup_20.x"
+    if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
+       && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
+       && bash "$ns_script" >/dev/null 2>&1; then
+      apt-get -y install nodejs >/dev/null || warn "nodejs install failed; forge claude CLI unavailable"
+    else
+      warn "NodeSource setup failed; forge claude CLI unavailable"
+      return 0
+    fi
+  fi
+  if command -v npm >/dev/null 2>&1 && ! command -v claude >/dev/null 2>&1; then
+    run npm config set prefix /usr/local
+    run npm install -g @anthropic-ai/claude-code
+  fi
+  # ~/.claude auth from existing provider / GEAK gateway env so the fellow authenticates.
+  local _claude_key="${_ANTHROPIC_KEY_VAL:-${SAFE_API_KEY:-${GEAK_API_KEY_VAL:-${_OPENAI_KEY_VAL:-}}}}"
+  if [ -n "$_claude_key" ]; then
+    mkdir -p /root/.claude
+    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${GEAK_BASE_URL_VAL:-${_OPENAI_BASE_URL_VAL:-}}}"
+    _anthropic_url="${_anthropic_url%/}"
+    _anthropic_url="${_anthropic_url%/v1}"
+    cat > /root/.claude/config.json <<EOF
+{
+  "theme": "dark",
+  "hasCompletedOnboarding": true,
+  "primaryApiKey": "${_claude_key}",
+  "customApiUrl": "${_anthropic_url}"
+}
+EOF
+    chmod 600 /root/.claude/config.json
+  else
+    warn "gateway API key not set; ~/.claude/config.json not written (forge fellow auth may fail)"
   fi
 }
 
@@ -1661,13 +1520,11 @@ PY
   else
     warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
   fi
-  for tool in geak oob claude codex; do
-    if command -v "$tool" >/dev/null 2>&1; then
-      log "found ${tool}: $(command -v "$tool")"
-    else
-      warn "${tool} not found"
-    fi
-  done
+  if command -v geak >/dev/null 2>&1; then
+    log "found geak: $(command -v geak)"
+  else
+    warn "geak not found"
+  fi
   for tool in git patch; do
     if command -v "$tool" >/dev/null 2>&1; then
       log "found ${tool}: $(command -v "$tool")"
@@ -1675,18 +1532,6 @@ PY
       warn "${tool} not found (TraceLens server patcher will fail-soft without it)"
     fi
   done
-  # @cursor/sdk is a library, not a CLI; verify via require.resolve.
-  if NODE_PATH="$(npm root -g 2>/dev/null || true)" \
-     node -e "require.resolve('@cursor/sdk')" >/dev/null 2>&1; then
-    log "found @cursor/sdk in $(npm root -g 2>/dev/null || echo '?')"
-  else
-    warn "@cursor/sdk not installed (cursor backend will fail to start)"
-  fi
-  if [ -n "$CURSOR_API_KEY_VAL" ]; then
-    log "CURSOR_API_KEY: set"
-  else
-    warn "CURSOR_API_KEY not set; cursor backend will 401 if invoked"
-  fi
   if [ -d "${GEAK_V3_ROOT}/.git" ]; then
     log "per-kernel GEAK (geak_v3) ref: $(git -C "${GEAK_V3_ROOT}" describe --tags --always 2>/dev/null || echo unknown)"
   else
@@ -1721,25 +1566,23 @@ main() {
     mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
   fi
   ensure_python
-  ensure_node
   ensure_patch_tools
   ensure_moreutils
   ensure_ray
   ensure_ray_started
   # Hold the install lock for the whole source-mutating region (TraceLens /
-  # GEAK / OOB clones + mirrors). System-package steps above (apt/pip)
+  # GEAK clones + mirrors). System-package steps above (apt/pip)
   # do not touch source-mirrors, so they stay outside the lock.
   acquire_install_lock
   ensure_tracelens
 
-  # Always install the per-kernel GEAK backend; ensure_oob also calls ensure_llm_auth_files.
+  # Always install the per-kernel GEAK backend.
   ensure_geak_v3
-  # The GEAK e2e whole-pipeline optimizer is installed by default; opt out with
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
+  ensure_forge_claude_cli
   ensure_rag_index
-  ensure_oob
   write_env_file
 
   report_status

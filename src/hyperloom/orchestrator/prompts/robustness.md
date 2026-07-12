@@ -86,8 +86,8 @@ The reactor pipeline (M1) on each tick:
 | **C** Pre-launch feasibility | `signals/preflight.py` | `model_gpu_infeasible`, `amdahl_kernel_ceiling_low`, `cold_start_budget_exhausted` |
 | **D** Server log patterns | `signals/local_health.py` | `log_error_pattern` (22 patterns — see `_DEFAULT_LOG_ERROR_PATTERNS`) |
 | **E** Critic health | `signals/critic_health.py` | `critic_kb_outage`, `critic_unavailable_streak`, `critic_prune_stuck`, `critic_runtime_stuck` |
-| **F** Kernel pipeline | `signals/kernel_pipeline.py` | `ray_pending_starvation`, `geak_budget_starvation`, `cursor_auth_storm`, `kernel_opt_no_progress` |
-| **G** Decision audit | `signals/decision_audit.py` | `empty_patch_kept`, `decision_threshold_violated`, `kernel_dispatch_bypassed`, `kernel_negative_delta_kept`, `ci_metrics_baseline_zero`, `ci_metrics_schema_drift`, `oob_no_harness` |
+| **F** Kernel pipeline | `signals/kernel_pipeline.py` | `ray_pending_starvation`, `geak_budget_starvation`, `kernel_opt_no_progress` |
+| **G** Decision audit | `signals/decision_audit.py` | `empty_patch_kept`, `decision_threshold_violated`, `kernel_dispatch_bypassed`, `kernel_negative_delta_kept`, `ci_metrics_baseline_zero`, `ci_metrics_schema_drift` |
 | **H** Time budget | `signals/budget.py` | `budget_strategy_drift`, `budget_burn_no_gain`, `deadline_warning`, `deadline_imminent`, `deadline_hard_cutoff` |
 | **I** State integrity | `signals/state_integrity.py` | `state_json_corrupt`, `coordinator_wal_bloat`, `stale_lease`, `inbox_bloat`, `coordinator_zombie` |
 | **J** External deps | `signals/external_deps.py` | `gateway_auth_outage`, `wekafs_degraded`, `tracelens_cli_missing` |

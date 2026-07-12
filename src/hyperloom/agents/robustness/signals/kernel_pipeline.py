@@ -6,8 +6,6 @@
   ``min_pending_ticks`` consecutive ticks (cluster quota ledger wedged).
 * **F2 ``geak_budget_starvation``** — same kernel_id's GEAK attempt SIGTERM'd across
   ``min_geak_sigterm_attempts`` rows; budget too short for ``select_patch``.
-* **F4 ``cursor_auth_storm``** — ``backend=cursor`` + 401 marker across
-  ``min_cursor_401_hits`` rows (``--backends cursor`` without ``CURSOR_API_KEY``).
 * **F5 ``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids land
   all backend attempts on PARTIAL/REVERT (no KEEP); prune kernel_opt toward params/sweep.
 """
@@ -33,14 +31,6 @@ _GEAK_SIGTERM_MARKERS: tuple[str, ...] = (
     "killed by deadline",
 )
 
-# "cursor authentication failed" markers (401 / unauthorized).
-_CURSOR_AUTH_MARKERS: tuple[str, ...] = (
-    "401",
-    "unauthorized",
-    "authentication failed",
-    "primus.00009",
-)
-
 
 @dataclass
 class KernelPipelineConfig:
@@ -51,8 +41,6 @@ class KernelPipelineConfig:
     min_pending_ticks: int = 3
     # F2 — same kernel_id has GEAK backend SIGTERM'd this many times.
     min_geak_sigterm_attempts: int = 2
-    # F4 — cursor 401 marker count threshold.
-    min_cursor_401_hits: int = 3
     # F5 — kernel_ids with no PARTIAL→KEEP progression across the
     # recent oob_attempts window.
     min_kernels_with_no_progress: int = 3
@@ -244,70 +232,6 @@ def _geak_budget_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# F4 — Cursor 401 storm
-# ---------------------------------------------------------------------------
-
-
-def _cursor_auth_storm_symptoms(
-    data: SourceData,
-    cfg: KernelPipelineConfig,
-) -> list[Symptom]:
-    """F4: fire ``cursor_auth_storm`` when the cursor backend hits repeated 401s.
-
-    Args:
-        data (SourceData): Collected source data including the decision-audit
-            ``oob_attempts``.
-        cfg (KernelPipelineConfig): Tunables (provides the 401-hit threshold).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``cursor_auth_storm`` symptom
-            once the threshold is reached, otherwise an empty list.
-    """
-    audit = data.local_decision_audit
-    if not isinstance(audit, dict):
-        return []
-    attempts = audit.get("oob_attempts") or []
-    if not isinstance(attempts, list):
-        return []
-    hits: list[dict[str, Any]] = []
-    for entry in attempts:
-        if not isinstance(entry, dict):
-            continue
-        backend = str(entry.get("backend") or "").lower()
-        if "cursor" not in backend:
-            continue
-        report = str(entry.get("report_text") or "").lower()
-        if not any(m in report for m in _CURSOR_AUTH_MARKERS):
-            continue
-        hits.append(entry)
-    if len(hits) < cfg.min_cursor_401_hits:
-        return []
-    return [
-        Symptom(
-            name="cursor_auth_storm",
-            severity=SymptomSeverity.MEDIUM,
-            summary=(
-                f"cursor backend returned 401/auth-failed on "
-                f"{len(hits)} attempts (>= {cfg.min_cursor_401_hits}); "
-                f"CURSOR_API_KEY likely missing or revoked"
-            ),
-            evidence={
-                "hit_count": len(hits),
-                "threshold": cfg.min_cursor_401_hits,
-                "kernel_ids": list({str(h.get("kernel_id") or "") for h in hits})[:5],
-            },
-            subject={"backend": "cursor"},
-            source="local",
-            suggestion=(
-                "drop cursor from --backends until CURSOR_API_KEY is "
-                "rotated; the auto-skip path only kicks in when the "
-                "env var is unset, not when explicit user override is in play"
-            ),
-        )
-    ]
-
-
-# ---------------------------------------------------------------------------
 # F5 — Kernel-opt no-progress
 # ---------------------------------------------------------------------------
 
@@ -430,7 +354,7 @@ def evaluate_kernel_pipeline_signals(
     *,
     config: KernelPipelineConfig | None = None,
 ) -> list[Symptom]:
-    """Evaluate the stateless kernel-pipeline signals (F2 / F4 / F5).
+    """Evaluate the stateless kernel-pipeline signals (F2 / F5).
 
     F1 is stateful and lives in :class:`RayPendingDetector`.
 
@@ -445,7 +369,6 @@ def evaluate_kernel_pipeline_signals(
     cfg = config or KernelPipelineConfig()
     out: list[Symptom] = []
     out.extend(_geak_budget_symptoms(data, cfg))
-    out.extend(_cursor_auth_storm_symptoms(data, cfg))
     out.extend(_kernel_opt_no_progress_symptoms(data, cfg))
     return out
 
