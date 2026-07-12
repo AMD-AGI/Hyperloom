@@ -108,6 +108,18 @@ _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "SlashCommand",
 )
 
+_CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_CUSTOM_HEADERS",
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+)
+
 
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
@@ -555,12 +567,13 @@ class ClaudeBackend:
         if resume_session_id:
             # Resume an existing session by id (claude-agent-sdk >= 0.2).
             kwargs["resume"] = resume_session_id
+        self._apply_sdk_env_options(kwargs)
         if self.raw_completion:
             # Single text turn: no MCP tools, all built-ins disallowed.
             kwargs["allowed_tools"] = []
             kwargs["disallowed_tools"] = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
             kwargs["stderr"] = self._stderr_sink
-            return self.sdk_options_cls(**kwargs)
+            return self._instantiate_options(kwargs)
         # Drop the bare "emit_intent" name (CLI rejects unregistered names);
         # the MCP-qualified form is what wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
@@ -584,6 +597,40 @@ class ClaudeBackend:
         # Capture CLI stderr so failures are diagnosable.
         kwargs["stderr"] = self._stderr_sink
         return self._instantiate_options(kwargs)
+
+    def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
+        """Pin Claude Code subprocess auth to the current Hyperloom env.
+
+        Claude Code also reads ``~/.claude`` settings/config by default. That is
+        fine for a local interactive login, but it can override a run's
+        gateway headers and API URL. When a Hyperloom process has explicit
+        Anthropic/gateway env, pass that env to the SDK subprocess and disable
+        settings sources so the run is hermetic.
+        """
+        if not any((os.environ.get(key) or "").strip() for key in _CLAUDE_GATEWAY_SIGNAL_KEYS):
+            return
+
+        child_env = dict(os.environ)
+        fallback_key = (
+            child_env.get("ANTHROPIC_AUTH_TOKEN")
+            or child_env.get("ANTHROPIC_API_KEY")
+            or child_env.get("OPENAI_API_KEY")
+            or child_env.get("SAFE_API_KEY")
+            or child_env.get("LLM_GATEWAY_KEY")
+            or ""
+        )
+        if fallback_key:
+            child_env.setdefault("ANTHROPIC_API_KEY", fallback_key)
+            child_env.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+        if "ANTHROPIC_CUSTOM_HEADERS" not in child_env and child_env.get("OPENAI_CUSTOM_HEADERS"):
+            child_env["ANTHROPIC_CUSTOM_HEADERS"] = child_env["OPENAI_CUSTOM_HEADERS"]
+        if self.model:
+            child_env.setdefault("ANTHROPIC_MODEL", self.model)
+            child_env.setdefault("ANTHROPIC_SMALL_FAST_MODEL", self.model)
+        # Keep the subprocess environment compact enough for debugging while
+        # preserving PATH/HOME/PYTHONPATH and all non-secret run metadata.
+        kwargs["env"] = child_env
+        kwargs["setting_sources"] = []
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
         """Build options, dropping ``resume`` if the SDK can't accept it.
