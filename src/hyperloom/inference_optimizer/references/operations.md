@@ -8,7 +8,7 @@ optimizer session. Keep `$USER_DATA_PATH` as the workspace root and learn
 
 Credentials must already be in the shell environment: `SAFE_API_KEY` and
 `OPENAI_BASE_URL`. Optional source-root overrides are local only:
-`OOB_SRC`, `INFERENCEX_PATH`, `TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
+`INFERENCEX_PATH`, `TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
 
 ```bash
 export REPO_ROOT="$(pwd)"
@@ -65,7 +65,7 @@ Then run the outer launcher preflight (IR-1):
 "$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH"
 ```
 
-Do not manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
+Do not manually pip-install SDKs, start Ray, or
 `curl /v1/models` unless debugging a failed preflight. `_preflight()` and
 `install.sh` own those repairs.
 
@@ -99,7 +99,6 @@ setsid nohup inference_optimizer --verbose optimize \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
-  --kernel-claude \
   --launch-info-file "$LAUNCH_INFO_FILE" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"

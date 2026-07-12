@@ -62,7 +62,7 @@ def stub_install_steps(monkeypatch, tmp_path):
 def clean_url_env(monkeypatch):
     """Strip URL env vars and fully restore os.environ afterwards.
 
-    ``_preflight`` writes alias vars (OOB_API_KEY/GEAK_*/…) directly into
+    ``_preflight`` writes alias vars (GEAK_*/LLM_*/…) directly into
     ``os.environ``; monkeypatch cannot roll those back, so snapshot and
     restore the whole environ to stop cross-test leakage.
     """
@@ -72,13 +72,11 @@ def clean_url_env(monkeypatch):
     for var in (
         "ANTHROPIC_BASE_URL",
         "OPENAI_BASE_URL",
-        "OOB_BASE_URL",
         "GEAK_BASE_URL",
         "LLM_API_BASE",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "OPENAI_API_KEY",
-        "OOB_API_KEY",
         "GEAK_API_KEY",
         "LLM_API_KEY",
         "AMD_LLM_API_KEY",
@@ -119,14 +117,13 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
         "OPENAI_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
-        "OOB_API_KEY",
         "GEAK_API_KEY",
         "LLM_API_KEY",
         "AMD_LLM_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
     # Base-url aliases start unset -> default to the resolved gateway.
-    for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+    for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         monkeypatch.delenv(name, raising=False)
 
     config_dir = tmp_path / ".claude"
@@ -148,14 +145,15 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
         "OPENAI_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
-        "OOB_API_KEY",
         "GEAK_API_KEY",
         "LLM_API_KEY",
         "AMD_LLM_API_KEY",
     ):
         assert cli.os.environ[name] == "new-safe-key"
-    for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+    for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         assert cli.os.environ[name] == resolved[1]
+    assert "_".join(("OOB", "API", "KEY")) not in cli.os.environ
+    assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
 
     config_text = (config_dir / "config.json").read_text(encoding="utf-8")
     assert '"primaryApiKey": "new-safe-key"' in config_text
@@ -176,7 +174,7 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     # User-set provider keys for a true dual entrypoint.
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
-    for name in ("ANTHROPIC_AUTH_TOKEN", "OOB_API_KEY", "GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY"):
+    for name in ("ANTHROPIC_AUTH_TOKEN", "GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
     resolved = cli._preflight()
@@ -212,13 +210,13 @@ def test_preflight_claude_config_uses_explicit_anthropic_key_over_safe(
     assert '"customApiUrl": "https://api.anthropic.com"' in config_text
 
 
-def test_preflight_anthropic_only_backfills_oob_geak_aliases(
+def test_preflight_anthropic_only_backfills_geak_aliases(
     monkeypatch,
     tmp_path,
     clean_url_env,
     stub_install_steps,
 ):
-    """Anthropic-only entry still backfills OOB/GEAK/LLM_API_BASE from the resolved URL."""
+    """Anthropic-only entry still backfills GEAK/LLM_API_BASE from the resolved URL."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -229,8 +227,9 @@ def test_preflight_anthropic_only_backfills_oob_geak_aliases(
 
     # OpenAI/Codex side reuses the Anthropic URL when no OpenAI URL is set.
     assert resolved == ("https://api.anthropic.com", "https://api.anthropic.com")
-    for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+    for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         assert cli.os.environ[name] == "https://api.anthropic.com"
+    assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
 
 
 def test_preflight_preserves_operator_geak_tunnel_url(
@@ -239,7 +238,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     clean_url_env,
     stub_install_steps,
 ):
-    """An operator-pinned GEAK/OOB tunnel URL survives preflight.
+    """An operator-pinned GEAK tunnel URL survives preflight.
 
     GEAK runs in a separate network namespace that cannot reach the gateway
     directly; the operator points GEAK_BASE_URL at the host-local reverse
@@ -254,7 +253,6 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     )
     tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
     monkeypatch.setenv("GEAK_BASE_URL", tunnel)
-    monkeypatch.setenv("OOB_BASE_URL", tunnel)
     # LLM_API_BASE left unset → should default to the gateway.
 
     resolved = cli._preflight()
@@ -262,9 +260,9 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     gateway = resolved[1]
     # Operator tunnel preserved.
     assert cli.os.environ["GEAK_BASE_URL"] == tunnel
-    assert cli.os.environ["OOB_BASE_URL"] == tunnel
     # Unset alias still defaults to the gateway.
     assert cli.os.environ["LLM_API_BASE"] == gateway
+    assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
 
 
 def test_preflight_rewrites_stale_proxy_even_when_operator_set(

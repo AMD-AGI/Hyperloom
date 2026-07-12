@@ -223,7 +223,6 @@ class Config:
     kernel_pipeline_pending_count_threshold: int = 1
     kernel_pipeline_min_pending_ticks: int = 3
     kernel_pipeline_min_geak_sigterm_attempts: int = 2
-    kernel_pipeline_min_cursor_401_hits: int = 3
     kernel_pipeline_min_kernels_with_no_progress: int = 3
     # Auto-append inference server health URL to ``health_probe_targets`` so
     # sglang SIGSTOP fires a symptom. 127.0.0.1:8888 = Magpie wrapper default.

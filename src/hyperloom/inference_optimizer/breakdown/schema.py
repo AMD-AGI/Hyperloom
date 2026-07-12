@@ -473,13 +473,13 @@ class KernelMetadata(TypedDict, total=False):
 
 
 class Invocation(TypedDict, total=False):
-    """One backend invocation for one kernel (same shape for GEAK/OOB; ``backend`` distinguishes)."""
+    """One backend invocation for one kernel; ``backend`` identifies the engine."""
 
     kernel_id: str
     attempt_id: str
     run_id: str
     ts: str
-    backend: str  # geak / claude / codex
+    backend: str  # forge / geak_v3 / historical backend names
     model: str | None
     kernel_metadata: KernelMetadata
     prompt_path: str | None
@@ -558,7 +558,7 @@ class OptimizedKernel(TypedDict, total=False):
 
     Attributes:
         kernel_id (str): Kernel identifier.
-        backend (str): Winning backend (``geak`` / ``claude`` / ``codex``, best-of).
+        backend (str): Winning backend (for example ``forge`` / ``geak_v3``, best-of).
         total_attempts (int): Total optimization attempts.
         successful_attempts (int): Attempts that succeeded.
         best_micro_speedup (float | None): Best micro-benchmark speedup, or None.
@@ -568,7 +568,7 @@ class OptimizedKernel(TypedDict, total=False):
     """
 
     kernel_id: str
-    backend: str  # geak / claude / codex (best-of)
+    backend: str  # forge / geak_v3 / historical backend names (best-of)
     total_attempts: int
     successful_attempts: int
     best_micro_speedup: float | None
@@ -1358,7 +1358,7 @@ class PhaseBreakdown(TypedDict, total=False):
     framework: PhaseBreakdownFramework  # PRELUDE → FRAMEWORK_AGENT → EXPLORE
     explore: PhaseBreakdownExplore
     kernel: PhaseBreakdownKernel
-    # GEMM_TUNING bucketed separately from source-level GEAK/OOB rewrite gain.
+    # GEMM_TUNING is bucketed separately from source-level kernel rewrite gain.
     gemm_tuning: PhaseBreakdownGemmTuning
     sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
     close: PhaseBreakdownExplore  # usually 0

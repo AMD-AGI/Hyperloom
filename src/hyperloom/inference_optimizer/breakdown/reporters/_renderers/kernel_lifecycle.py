@@ -87,7 +87,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the kernel-lifecycle section as a single per-kernel table.
 
     Emits one row per detected kernel with its full optimization
-    lifecycle (selection, GEAK/OOB attempts, adoption, final decision),
+    lifecycle (selection, backend attempts, adoption, final decision),
     splitting long-tail unselected kernels into a collapsible block. The
     section is marked skipped when no kernels were detected.
 
