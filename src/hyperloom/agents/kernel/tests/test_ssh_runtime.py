@@ -58,7 +58,7 @@ def test_ssh_unconfigured_returns_error_when_host_or_key_missing(monkeypatch):
 
 
 def test_extract_last_json_simple_object():
-    assert ssh_runtime._extract_last_json('{"returncode": 0}') == {"returncode": 0}
+    assert ssh_runtime.extract_last_json('{"returncode": 0}') == {"returncode": 0}
 
 
 def test_extract_last_json_skips_leading_log_noise_and_keeps_nested():
@@ -67,20 +67,20 @@ def test_extract_last_json_skips_leading_log_noise_and_keeps_nested():
         "another line\n"
         '{"returncode": 0, "gpu_ids": "0,1", "nested": {"a": 1, "b": [2, 3]}}\n'
     )
-    out = ssh_runtime._extract_last_json(text)
+    out = ssh_runtime.extract_last_json(text)
     assert out["returncode"] == 0
     assert out["nested"] == {"a": 1, "b": [2, 3]}
 
 
 def test_extract_last_json_picks_last_object_when_multiple():
     text = '{"first": 1}\nmid\n{"second": 2}'
-    assert ssh_runtime._extract_last_json(text) == {"second": 2}
+    assert ssh_runtime.extract_last_json(text) == {"second": 2}
 
 
 def test_extract_last_json_none_on_empty_or_no_brace_or_malformed():
-    assert ssh_runtime._extract_last_json("") is None
-    assert ssh_runtime._extract_last_json("no json here") is None
-    assert ssh_runtime._extract_last_json('{"a": }') is None  # invalid JSON
+    assert ssh_runtime.extract_last_json("") is None
+    assert ssh_runtime.extract_last_json("no json here") is None
+    assert ssh_runtime.extract_last_json('{"a": }') is None  # invalid JSON
 
 
 # -- GEAK pod-runner defaults ----
@@ -119,7 +119,7 @@ def _run_geak_pod_runner(tmp_path, extra_env):
          "--num-gpus", "1", "--timeout-s", "30"],
         capture_output=True, text=True, env=env, timeout=60,
     )
-    return ssh_runtime._extract_last_json(proc.stdout) or {}
+    return ssh_runtime.extract_last_json(proc.stdout) or {}
 
 
 def test_geak_pod_runner_defaults_to_kernel_target_and_skip_profile(tmp_path):
