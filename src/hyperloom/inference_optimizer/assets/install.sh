@@ -135,7 +135,7 @@ fi
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit instead of the default branch. Operators can
 # re-pin with MAGPIE_REF=<tag|sha>.
-MAGPIE_REF="${MAGPIE_REF:-3941f0d6427b8a8d877de18a2c460dea51ec383b}"
+MAGPIE_REF="${MAGPIE_REF:-0171222c532db6fc5cb174667db66e34f1d9dd98}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at the same Magpie checkout. A single var keeps
 # the installer and runtime in lockstep; setting it never silently falls back to
