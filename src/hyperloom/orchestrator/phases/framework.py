@@ -2450,19 +2450,40 @@ class FrameworkPhase(PhaseHandler):
                 # raw apply). Same-framework candidates (incl. kernel-level pr_intel
                 # repos with no framework mapping) are untouched, so same-framework audit
                 # behaviour is unchanged. Set the env to 0/false/no/off to fully revert.
-                origin_fw = ""
-                if os.environ.get("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "1").strip().lower() not in (
-                    "0",
-                    "false",
-                    "no",
-                    "off",
-                ):
-                    origin_fw = self._framework_agent_repo_url_origin_framework(repo_url)
+                cross_on = os.environ.get(
+                    "FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "1"
+                ).strip().lower() not in ("0", "false", "no", "off")
+                origin_fw = (
+                    self._framework_agent_repo_url_origin_framework(repo_url)
+                    if cross_on
+                    else ""
+                )
                 for c in repo_cands:
                     if not isinstance(c, dict):
                         continue
-                    if origin_fw and origin_fw != framework and not c.get("framework"):
-                        c["framework"] = origin_fw
+                    if cross_on:
+                        # Derive the origin from the candidate's OWN repo first:
+                        # fa phase-discover defaults `framework` to the session
+                        # framework even for cross-repo pr_intel candidates, so
+                        # only filling blanks (the prior behaviour) left a sglang
+                        # PR surfaced under a vllm session mis-tagged as vllm and
+                        # audited as same-framework — never routed to the cross-
+                        # framework port. Override when the candidate's repo maps
+                        # to a known framework different from the session's. Fall
+                        # back to the queried repo_url's origin when the candidate
+                        # carries no repo. Kernel repos (aiter/triton/rccl) resolve
+                        # to "" and are left untouched, so same-framework audit
+                        # behaviour is unchanged.
+                        cand_repo = str(c.get("repo") or "").strip()
+                        cand_origin = (
+                            self._framework_agent_repo_url_origin_framework(cand_repo)
+                            if cand_repo
+                            else origin_fw
+                        )
+                        if cand_origin and cand_origin != framework:
+                            c["framework"] = cand_origin
+                        elif origin_fw and origin_fw != framework and not c.get("framework"):
+                            c["framework"] = origin_fw
                     merged_candidates.append(c)
         if not any_call_ok:
             failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
