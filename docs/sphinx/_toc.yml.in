@@ -16,8 +16,6 @@ subtrees:
   entries:
   - file: install/quickstart.md
     title: Quickstart — hosted UI
-  - file: install/local-mode.md
-    title: Quickstart — local mode
   - file: install/bare-metal.md
     title: Quickstart — bare metal
 

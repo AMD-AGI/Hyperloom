@@ -30,8 +30,7 @@
 # drags kernel-agent in via this script.
 #
 # Open-source deps (Magpie / InferenceX / TraceLens) are cloned here or by the
-# chained kernel-agent installer. local_setup.sh is reserved for the private
-# KernelForge checkout used by the forge backend.
+# chained kernel-agent installer.
 
 set -euo pipefail
 

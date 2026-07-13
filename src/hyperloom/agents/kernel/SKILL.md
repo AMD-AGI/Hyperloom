@@ -275,9 +275,8 @@ When **not** to merge:
 
 TraceLens runs through its CLI and its own skill. The **public** repo is the
 required base; the **internal** repo is an **optional** rehydration-module
-extension. Install the public repo inside the GPU container before Hyperloom
-bootstrap (see README Local Mode step 1); install the internal repo only if you
-need the internal extension:
+extension. The Hyperloom setup flow installs the public repo; install the
+internal repo only if you need the internal extension:
 
 ```bash
 # Required: public repo
