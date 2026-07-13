@@ -15,9 +15,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso
 
 
 log = logging.getLogger(__name__)
@@ -52,15 +53,6 @@ from .request_models import (
 )
 from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp with microsecond precision.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 # Proposal-payload keys that carry environment-variable / CLI-arg levers as
@@ -1149,7 +1141,7 @@ class DecisionReviewer:
             self.session_memory.append_decision(
                 req.session_id,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(timespec="microseconds"),
                     "target_proposal_msg_id": target,
                     "verdict": verdict,
                     "reasoning": item.get("reasoning"),
@@ -1222,7 +1214,7 @@ class DecisionReviewer:
         self.session_memory.append_decision(
             req.session_id,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(timespec="microseconds"),
                 "decision_review": decision_review,
             },
         )
