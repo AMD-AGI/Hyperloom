@@ -7,17 +7,17 @@
 # base (ROCm runtime + a ROCm-built torch + a serving framework). For bare-metal
 # installs, the script can optionally install SGLang or vLLM ROCm framework layers.
 #
-# Phase 0  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
-# Phase 1  framework       — optional bare-metal SGLang/vLLM install
-# Phase 1b ROCm hotfix    — install ROCclr HIP runtime + roctracer profiler fix
-# Phase 2  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
+# Phase 1  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
+# Phase 2  framework       — optional bare-metal SGLang/vLLM install
+# Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
+# Phase 4  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
-# Phase 3  dependencies + runtime install
+# Phase 5  dependencies + runtime install
 #                          — install.sh installs open-source deps/runtime:
 #                            io pkg, Magpie, InferenceX deps,
 #                            chained kernel-agent Ray/GEAK/TraceLens, and fa
-# Phase 4  combined env  — write runtime/hyperloom.env.sh
-# Phase 5  verify + print launch prompt
+# Phase 6  combined env  — write runtime/hyperloom.env.sh
+# Phase 7  verify + print launch prompt
 #
 # Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
@@ -90,7 +90,7 @@ Options:
   --openai-base-url URL  LLM gateway endpoint; overrides env / .env
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
   --deps-root PATH       Directory for auto-cloned dependency checkouts
-  --frameworks LIST      Comma list to verify in Phase 0 (default: sglang,vllm)
+  --frameworks LIST      Comma list to verify in Phase 1 (default: sglang,vllm)
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
@@ -99,7 +99,7 @@ Options:
   --vllm-venv-root PATH  Isolated vLLM venv path (default:
                          /opt/hyperloom/vllm-venv).
   --require-frameworks   Treat a missing requested framework as fatal
-  --skip-base-check      Skip Phase 0 base preflight
+  --skip-base-check      Skip Phase 1 base preflight
   --check-only           Verify only; do not clone/install/mutate
   --dry-run              Print planned actions without cloning/installing/writing
   --yes, -y              Non-interactive; fail fast on missing credentials
@@ -275,7 +275,7 @@ DETECTED_GPU="MI300X"
 
 base_preflight() {
   local rc=0
-  log "Phase 0: base preflight"
+  log "Phase 1: base preflight"
 
   local os_name=""
   [ -r /etc/os-release ] && os_name="$(. /etc/os-release 2>/dev/null; echo "${NAME:-} ${VERSION_ID:-}")"
@@ -360,7 +360,7 @@ PY
   done
 
   [ "$rc" -ne 0 ] && die "base preflight failed. Fix the items above, or pass --skip-base-check to override."
-  log "Phase 0: base preflight OK"
+  log "Phase 1: base preflight OK"
 }
 
 # Return the shared dependency root used for bare-metal framework sources.
@@ -553,7 +553,7 @@ print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )"
 
-  log "Phase 1: installing SGLang ROCm framework layer"
+  log "Phase 2: installing SGLang ROCm framework layer"
   log "framework python: ${py}"
   log "AITER_ROOT=${aiter_root}"
   if [ -n "$AITER_REF" ]; then
@@ -703,7 +703,7 @@ PY
     *) package_spec="vllm==${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" ;;
   esac
 
-  log "Phase 1: installing vLLM ROCm framework layer"
+  log "Phase 2: installing vLLM ROCm framework layer"
   log "framework env: ${FRAMEWORK_ENV}"
   log "framework python: ${py}"
   [ "$FRAMEWORK_ENV" = "isolated" ] && log "VLLM_VENV_ROOT=${VLLM_VENV_ROOT}"
@@ -805,7 +805,7 @@ PY
 # Dispatch the optional bare-metal framework installer.
 install_requested_framework() {
   case "$INSTALL_FRAMEWORK" in
-    none) log "Phase 1: framework install skipped (--install-framework none)" ;;
+    none) log "Phase 2: framework install skipped (--install-framework none)" ;;
     sglang) install_sglang_framework ;;
     vllm) install_vllm_framework ;;
   esac
@@ -961,7 +961,7 @@ apply_rocm_profiler_hotfix() {
   local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
   local extract_dir backup_dir hip_lib tracer_lib
 
-  log "Phase 1b: applying ROCm profiler hotfix"
+  log "Phase 3: applying ROCm profiler hotfix"
   log "ROCM_PROFILER_HOTFIX_ASSET=${ROCM_PROFILER_HOTFIX_ASSET}"
 
   [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
@@ -1041,7 +1041,7 @@ upsert_dotenv_var() {
 # inference_optimizer/cli.py::_validate_credentials: a usable endpoint needs at
 # least one base URL and at least one key, so SAFE_API_KEY is no longer mandatory.
 resolve_credentials() {
-  log "Phase 2: credentials"
+  log "Phase 4: credentials"
   local safe_key openai_key anthropic_key anthropic_token openai_url anthropic_url
   local dv_safe dv_openai_key dv_anthropic_key dv_anthropic_token dv_openai_url dv_anthropic_url
   local has_url=0 has_key=0
@@ -1233,7 +1233,7 @@ main() {
   fi
 
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then
-    warn "skipping Phase 0 base preflight (--skip-base-check)"
+    warn "skipping Phase 1 base preflight (--skip-base-check)"
     DETECTED_GPU="$(detect_gpu_label "$(command -v rocminfo >/dev/null 2>&1 && rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)")"
   else
     base_preflight
@@ -1253,7 +1253,7 @@ main() {
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)
-  log "Phase 3: install.sh ${in_args[*]}"
+  log "Phase 5: install.sh ${in_args[*]}"
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     bash "$INSTALL_SH" "${in_args[@]}" || warn "install.sh (preview) reported issues"
   else
@@ -1267,12 +1267,12 @@ main() {
     warn "expected ${ka_env} after install.sh but it is missing"
   fi
 
-  # Phase 4: combined env.
+  # Phase 6: combined env.
   write_combined_env "$combined_env" "$ka_env"
 
-  # Phase 5: verification pass.
+  # Phase 7: verification pass.
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    log "Phase 5: verifying (--check-only)"
+    log "Phase 7: verifying (--check-only)"
     bash "$INSTALL_SH" --check-only || warn "install.sh --check-only reported issues"
   fi
 
