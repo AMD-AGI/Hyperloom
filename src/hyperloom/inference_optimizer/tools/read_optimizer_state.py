@@ -9,10 +9,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
 import sys
 from typing import Any
+
+from hyperloom.common.jsonio import read_json
 
 
 SUMMARY_KEYS = (
@@ -24,18 +25,6 @@ SUMMARY_KEYS = (
     "last_trace_analyze",
     "last_sweep",
 )
-
-
-def _load_json(path: pathlib.Path) -> dict[str, Any]:
-    """Load and parse a JSON file into a dict.
-
-    Args:
-        path: The JSON file to read.
-
-    Returns:
-        The parsed JSON object as a dict.
-    """
-    return json.loads(path.read_text())
 
 
 def _format_lifecycle_event(event: dict[str, Any]) -> str:
@@ -86,11 +75,11 @@ def main() -> int:
         return 2
 
     if manifest_path.is_file():
-        manifest = _load_json(manifest_path)
+        manifest = read_json(manifest_path, require_dict=True, strict=True)
         print("session_id:", manifest.get("session_id"))
     print("session_dir:", session_dir)
 
-    state = _load_json(state_path)
+    state = read_json(state_path, require_dict=True, strict=True)
     for key in SUMMARY_KEYS:
         print(f"{key}: {state.get(key)}")
     print("explore_last_round:", state.get("explore_search", {}).get("last_round"))

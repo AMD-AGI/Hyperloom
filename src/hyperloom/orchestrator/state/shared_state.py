@@ -1119,7 +1119,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             dict[str, Any]: The normalized ``explore_search`` ledger with all
                 required keys defaulted and live history folded in.
         """
-        from ..actions.executors._grid_runner import variant_fingerprint as _fp
+        from ..actions.executors._canonical_fingerprint import canonical_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)

@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+
 
 # Category vocabulary. Per-kernel outcome bucket; closed set (new categories
 # require a schema_version bump).
@@ -1011,18 +1013,17 @@ def _find_highest_impact_missed(
 def _to_float(v: Any) -> float | None:
     """Coerce a value to a 4-decimal float, or ``None`` on failure.
 
+    Wraps :func:`hyperloom.common.coerce.to_float` (rejects bool/None/dirty
+    input) and rounds the result to 4 decimals for the forensic report.
+
     Args:
         v: Arbitrary value to convert.
 
     Returns:
         The rounded float, or ``None`` if it cannot be parsed.
     """
-    if v is None:
-        return None
-    try:
-        return round(float(v), 4)
-    except (TypeError, ValueError):
-        return None
+    parsed = to_float(v)
+    return round(parsed, 4) if parsed is not None else None
 
 
 __all__ = [
