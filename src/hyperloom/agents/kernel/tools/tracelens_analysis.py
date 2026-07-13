@@ -4674,9 +4674,8 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     double-check under the lock, then clone into a temp sibling and atomically
     rename into place so a partial clone is never observed.
 
-    Keep this temp-clone+pin+atomic-rename in lockstep with the twin
-    implementations: src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens) and
-    src/hyperloom/inference_optimizer/assets/local_setup.sh (clone_or_update "atomic").
+    Keep this temp-clone+pin+atomic-rename in lockstep with
+    src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens).
     """
     tl_root = Path(tl_root)
     if _tracelens_checkout_complete(tl_root):
