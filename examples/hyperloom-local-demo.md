@@ -51,6 +51,7 @@ All logs for this run live under one timestamped directory in the repo root:
 # Run from the Hyperloom repo root.
 export DEMO_OUT="output/sglang-hyperloom-date-$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$DEMO_OUT"
+chmod 777 "$DEMO_OUT" 
 echo "Demo logs will be saved under: $(pwd)/$DEMO_OUT"
 ```
 
@@ -224,6 +225,7 @@ none, copy the host machine's `.ssh` into the container and re-test:
 ```bash
 docker exec hyperloom-local bash -lc 'ls /root/.ssh/id_* 2>/dev/null || echo "no ssh key in container"'
 docker cp ~/.ssh hyperloom-local:/root/          # copy host keys -> container /root/.ssh
+docker exec hyperloom-local bash -lc 'chown root:root -R  /root/.ssh'
 ```
 
 > **Agent:** print the results as the table below. If **any** repo is still
@@ -304,11 +306,10 @@ container (interactive shell so `/root/.bashrc` is loaded), confirm the account
 works and list the models it can use:
 
 ```bash
-docker exec hyperloom-local bash -ic '
-curl -sS -m 30 "$ANTHROPIC_BASE_URL/v1/models" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "x-api-key: $ANTHROPIC_API_KEY" \
-  ${ANTHROPIC_CUSTOM_HEADERS:+-H "$ANTHROPIC_CUSTOM_HEADERS"}'
+docker exec \
+  -e ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  hyperloom-local bash -lc 'curl -sS -m 30 "$ANTHROPIC_BASE_URL/v1/models" -H "anthropic-version: 2023-06-01" -H "x-api-key: $ANTHROPIC_API_KEY"'
 ```
 
 > **Agent:**
@@ -360,10 +361,10 @@ container (interactive shell so `/root/.bashrc` is loaded), confirm the account
 works and list its models:
 
 ```bash
-docker exec hyperloom-local bash -ic '
-curl -sS -m 30 "$OPENAI_BASE_URL/models" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  ${OPENAI_CUSTOM_HEADERS:+-H "$OPENAI_CUSTOM_HEADERS"}'
+docker exec \
+  -e OPENAI_BASE_URL="$OPENAI_BASE_URL" \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  hyperloom-local bash -lc 'curl -sS -m 30 "$OPENAI_BASE_URL/v1/models" -H "Authorization: Bearer $OPENAI_API_KEY"'
 ```
 
 (For the personal endpoint the correct models path is `/v1/models`; add the
@@ -420,7 +421,7 @@ cp .env.template .env
 # straight from the container environment you configured in Step 2c (written to
 # /root/.bashrc) — nothing is hardcoded here. The UNQUOTED heredoc expands each
 # $VAR inside the container; -w keeps the write in this bind-mounted repo root.
-docker exec -w "$(pwd)" hyperloom-local bash -ic 'cat >> .env <<EOF
+cat >> .env <<EOF
 
 # --- Hyperloom demo settings ---
 # Opt out of the AMD-only orchestration-model gate: the /models catalog probe
@@ -440,7 +441,7 @@ export CODEX_MODEL="$CODEX_MODEL"
 # SGLang serving port — pick one that is free on this host (default 8888 is
 # often already taken, e.g. by an observability agent).
 export PORT=8899
-EOF'
+EOF
 
 # Runtime workspace for THIS run: <repo>/output/sglang-hyperloom-date-XXXX/workspace.
 # Use an absolute path and replace the template's USER_DATA_PATH in place (do not
@@ -464,7 +465,7 @@ Create the workspace and run the setup script **inside the container** (it uses
 the container's git + the SSH keys from Step 2b to clone the dependency repos):
 
 ```bash
-docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc '
+docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e KERNEL_FORGE_REPO="git@github.com:AMD-AGI/KernelForge.git" hyperloom-local bash -lc '
   mkdir -p "$USER_DATA_PATH"
   bash src/hyperloom/inference_optimizer/assets/local_setup.sh
 '
@@ -601,6 +602,7 @@ Step 1, TP = GPU count, and the values from the 4c prompt), not the literals
 shown:
 
 ```bash
+chmod -R 777 src && \
 docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e MODEL_PATH="$MODEL_PATH" hyperloom-local bash -lc '
   set -e
   . "$USER_DATA_PATH/runtime/local-setup.env.sh"
