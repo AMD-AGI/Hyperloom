@@ -1479,11 +1479,9 @@ class BaselineExecutor:
     ) -> bool:
         """Whether baseline double-run is enabled.
 
-        Controlled by the explicit ``--baseline-double-run`` CLI flag, which is
-        persisted into SharedState on fresh launches. Internal callers may pass
-        ``task.params["baseline_double_run"]`` for focused tests or debug runs.
-        Environment variables intentionally do not participate so stale shell
-        state cannot silently turn on the expensive double-run path.
+        Public CLI/env controls are intentionally unsupported. Internal callers
+        may pass ``task.params["baseline_double_run"]`` for focused tests or
+        debug runs, or set the session state directly.
 
         Returns:
             ``True`` only when the task params or session state opt in.

@@ -1238,15 +1238,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "Default on; pass ``--no-target-advisory`` to disable. Env: "
         "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
     )
-    opt.add_argument(
-        "--baseline-double-run",
-        dest="baseline_double_run",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Run baseline in cold+hot double-run mode: first round boots the "
-        "server and is discarded, second round reuses the hot server as the "
-        "baseline. Default off; enable explicitly with --baseline-double-run.",
-    )
     # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC
     # values, output to reports/conc_sweep_summary.json (see orchestrator/conc_sweep.py). Bounded by
     # --conc-sweep-total-budget-sec; skip conditions short-circuit. Disable via --no-enable-conc-sweep.

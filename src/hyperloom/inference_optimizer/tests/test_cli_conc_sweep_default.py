@@ -59,10 +59,10 @@ def test_cli_no_flag_overrides_truthy_env(monkeypatch: pytest.MonkeyPatch):
     assert ns.enable_conc_sweep is False
 
 
-def test_cli_default_disables_baseline_double_run(monkeypatch: pytest.MonkeyPatch):
+def test_cli_exposes_no_baseline_double_run_field(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)
     ns = _parse()
-    assert ns.baseline_double_run is False
+    assert not hasattr(ns, "baseline_double_run")
 
 
 @pytest.mark.parametrize("val", ["1", "true", "yes", "on", "TRUE", "On"])
@@ -72,16 +72,18 @@ def test_cli_ignores_env_var_for_baseline_double_run(
 ):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", val)
     ns = _parse()
-    assert ns.baseline_double_run is False
+    assert not hasattr(ns, "baseline_double_run")
 
 
-def test_cli_baseline_double_run_flag_enables(monkeypatch: pytest.MonkeyPatch):
+def test_cli_rejects_baseline_double_run_flag(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
-    ns = _parse("--baseline-double-run")
-    assert ns.baseline_double_run is True
+    with pytest.raises(SystemExit) as exc_info:
+        _parse("--baseline-double-run")
+    assert exc_info.value.code == 2
 
 
-def test_cli_no_baseline_double_run_flag_stays_false(monkeypatch: pytest.MonkeyPatch):
+def test_cli_rejects_no_baseline_double_run_flag(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
-    ns = _parse("--no-baseline-double-run")
-    assert ns.baseline_double_run is False
+    with pytest.raises(SystemExit) as exc_info:
+        _parse("--no-baseline-double-run")
+    assert exc_info.value.code == 2
