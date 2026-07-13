@@ -833,7 +833,7 @@ async def test_on_enter_sweep_idempotent_on_reentry(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
-    """If conc_sweep enqueue raises, the hook records evidence and returns."""
+    """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated DB outage")
@@ -849,6 +849,28 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert "simulated DB outage" in evidence["auto_conc_sweep_error"]
     # No task was enqueued.
     assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
+    assert coord.shared_state.save_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_none_records_terminal_skip(coord, monkeypatch):
+    """If the enqueue helper returns None, SWEEP records a terminal skip."""
+
+    async def _none(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _none)
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_conc_sweep_error"] == "enqueue_returned_none"
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_returned_none"
 
 
 @pytest.mark.asyncio

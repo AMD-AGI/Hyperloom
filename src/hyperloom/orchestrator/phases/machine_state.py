@@ -1760,7 +1760,7 @@ def exit_normal_sweep(
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
         cs_status = str(last_conc.get("status") or "").lower()
-        if cs_status in ("succeeded", "partial", "completed", "skipped"):
+        if cs_status in ("succeeded", "partial", "completed", "skipped", "failed"):
             return "conc_sweep_done", {"conc_sweep_status": cs_status}
     remaining = phase_budget_remaining_seconds(
         state,

@@ -73,10 +73,16 @@ class SweepPhase(PhaseHandler):
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
             )
-            self._record_phase_entry_evidence(auto_conc_sweep_error=repr(exc)[:240])
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="enqueue_failed",
+                auto_conc_sweep_error=repr(exc)[:240],
+            )
             return
         if task is None:
-            self._record_phase_entry_evidence(auto_conc_sweep_error="enqueue_returned_none")
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="enqueue_returned_none",
+                auto_conc_sweep_error="enqueue_returned_none",
+            )
             return
         log.info(
             "SWEEP entry (from=%s): auto-enqueued conc_sweep task=%s (concs=%s total_budget_sec=%s)",

@@ -1093,8 +1093,8 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     assert reason == "conc_sweep_done", reason
     assert evidence.get("conc_sweep_status") == "succeeded"
 
-    # Skipped also counts as "done" (action ran to its terminal decision).
-    for terminal in ("partial", "completed", "skipped"):
+    # Skipped/failed also count as "done" (action reached a terminal decision).
+    for terminal in ("partial", "completed", "skipped", "failed"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
         assert result is not None and result[0] == "conc_sweep_done", terminal
