@@ -2069,6 +2069,21 @@ async def _probe_gateway_health(
     api_key = os.environ.get("SAFE_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    # AMD LLM gateway auth: the /models catalog is gated by an APIM
+    # subscription-key header (Ocp-Apim-Subscription-Key), not Bearer. Mirror the
+    # exact header the real claude/codex CLIs send (OPENAI_CUSTOM_HEADERS /
+    # ANTHROPIC_CUSTOM_HEADERS, formatted "Name: value") so this health probe
+    # reflects the gateway's real reachability instead of a false 401 that would
+    # trip J1 gateway_auth_outage and escalate an otherwise-healthy run.
+    for _hdr_env in ("OPENAI_CUSTOM_HEADERS", "ANTHROPIC_CUSTOM_HEADERS"):
+        _raw = os.environ.get(_hdr_env, "").strip()
+        if not _raw or ":" not in _raw:
+            continue
+        _name, _, _value = _raw.partition(":")
+        _name = _name.strip()
+        _value = _value.strip()
+        if _name and _name not in headers:
+            headers[_name] = _value
     timeout = httpx.Timeout(max(0.5, float(timeout_s)))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
