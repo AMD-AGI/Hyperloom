@@ -75,6 +75,7 @@ claude = [
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
+hyperloom = "hyperloom.inference_optimizer.cli.setup:main"
 # tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
 # (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
 # keep resolving after promotion into the single ``hyperloom`` distribution.
@@ -98,6 +99,11 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 # package_dir mapping; both are now expressed here and setup.py is deleted).
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.data-files]
+".agents/skills/hyperloom-setup" = [
+    "src/hyperloom/inference_optimizer/agent_skills/hyperloom-setup/SKILL.md",
+]
 
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
