@@ -793,12 +793,24 @@ def _preflight(
         )
         print("Preflight: ray installed OK")
 
-    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_PATH override; auto-clones if missing).
-    check = subprocess.run(
-        [magpie_python, "-c", "import Magpie"],
-        capture_output=True,
+    # 2. Magpie — the benchmark engine the Magpie backend shells out to
+    # ($MAGPIE_PATH override; auto-clones if missing). Skipped when the active
+    # benchmark backend does not need Magpie (e.g. bypass).
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        resolve_backend_name as _resolve_active_backend_name,
     )
-    if check.returncode != 0:
+    _magpie_backend_active = _resolve_active_backend_name() == "magpie"
+    if not _magpie_backend_active:
+        print(
+            f"Preflight: benchmark backend is "
+            f"{_resolve_active_backend_name()!r}; skipping Magpie install/import"
+        )
+    check = (
+        subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
+        if _magpie_backend_active
+        else None
+    )
+    if _magpie_backend_active and check is not None and check.returncode != 0:
         magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_env_explicit = bool(magpie_env)
         if magpie_env:
