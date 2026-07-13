@@ -121,21 +121,6 @@ class LocalRecipeStoreError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _utc_now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Matches the central server's ``created_at`` / ``updated_at``
-    precision (microsecond resolution with an explicit UTC offset) so
-    timestamps written locally compare byte-wise the same way the
-    server's do.
-
-    Returns:
-        str: Current UTC time formatted as an ISO-8601 string with
-            microsecond precision and an explicit offset.
-    """
-    return now_iso(timespec="microseconds")
-
-
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomically write ``payload`` as JSON via a tmp-file + rename.
 
@@ -579,7 +564,7 @@ class LocalRecipeStore:
         recipe_dir.mkdir(parents=True, exist_ok=True)
         lock = _CidLock(self._lock_path(canonical_id))
         with lock:
-            now = _utc_now_iso()
+            now = now_iso(timespec="microseconds")
             live = _read_json(self._live_path(canonical_id))
             created = live is None
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
@@ -855,8 +840,8 @@ class LocalRecipeStore:
           can't satisfy the bound).
         * ``updated_since``: ISO-8601 string compared lexically (UTC
           ISO-8601 sorts byte-wise the same as chronologically as
-          long as the offset is constant, which our ``_utc_now_iso``
-          guarantees).
+          long as the offset is constant, which our microsecond-precision
+          ``now_iso`` timestamps guarantee).
         * ``order_by``: strict whitelist of 6 values, matches the
           server constant. Anything else raises ValueError.
         * ``limit``: ``[1, 1000]`` clamp.
@@ -987,7 +972,7 @@ class LocalRecipeStore:
         with lock:
             existing = _list_jsonl(attempts_path)
             next_id = len(existing) + 1
-            stamped_at = attempt_at or _utc_now_iso()
+            stamped_at = attempt_at or now_iso(timespec="microseconds")
             attempt = Attempt(
                 id=next_id,
                 recipe_canonical_id=canonical_id,

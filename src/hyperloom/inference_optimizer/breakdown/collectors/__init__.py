@@ -53,7 +53,6 @@ from .sessions import (
     _extract_framework_args as _extract_framework_args,
     _read_invocation_envs as _read_invocation_envs,
     _detect_image_for_session as _detect_image_for_session,
-    _utc_now_iso as _utc_now_iso,
     _close_phase_stop_reason as _close_phase_stop_reason,
     _should_use_close_stop_reason as _should_use_close_stop_reason,
     _collect_recovery as _collect_recovery,

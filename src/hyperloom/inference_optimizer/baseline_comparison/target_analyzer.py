@@ -42,15 +42,6 @@ from .types import BaselinePoint, BaselineQuery, BaselineSummary
 LLM_AUTHORED_SOURCE = "llm_authored"
 
 
-def _iso_utc_now() -> str:
-    """Return the current UTC time as a second-precision ISO string.
-
-    Returns:
-        str: Timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ``.
-    """
-    return now_iso(timespec="seconds", z_suffix=True)
-
-
 def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
     """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo.
 
@@ -281,7 +272,7 @@ def analyze(
         isl=int(isl or 0),
         osl=int(osl or 0),
     )
-    now = _iso_utc_now()
+    now = now_iso(timespec="seconds", z_suffix=True)
 
     def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
         """Persist and return a no-data summary (skipped / no_match cases)."""

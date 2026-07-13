@@ -242,17 +242,6 @@ def _dispatch_multinode_revert(
     }
 
 
-def _now() -> str:
-    """Return the current UTC timestamp as an ISO8601 string.
-
-    Delegates to :func:`_io_utils.utc_now`.
-
-    Returns:
-        str: The current UTC time formatted as an ISO8601 string.
-    """
-    return utc_now()
-
-
 def _safe_name(value: str) -> str:
     """Sanitize a filename component to a safe, short identifier.
 
@@ -832,7 +821,7 @@ def _invalidate_aiter_jit_build(
         "status": "ok",
         "src": str(jit_build),
         "backup_path": str(backup_path),
-        "moved_at": _now(),
+        "moved_at": utc_now(),
     }
 
 
@@ -1017,7 +1006,7 @@ def _invalidate_aiter_cpp_itfs_cache(
         "build_dir": str(build_dir),
         "module_names": module_names,
         "scope": scope,
-        "invalidated_at": _now(),
+        "invalidated_at": utc_now(),
         "invalidated_unix": time.time(),
     }
     if not build_dir.exists():
@@ -1421,7 +1410,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001
                 mn_revert = {"status": "failed", "error": str(exc)}
 
-    reverted_at = _now()
+    reverted_at = utc_now()
     manifest["status"] = "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
@@ -1579,7 +1568,7 @@ def apply_kernel_patch(
             "compiled": strategy["compiled"],
             "root": strategy["root"],
         },
-        "created_at": _now(),
+        "created_at": utc_now(),
     }
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1733,7 +1722,7 @@ def apply_kernel_patch(
             }
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = _now()
+    manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:
@@ -1858,7 +1847,7 @@ def _apply_kernel_patch_snapshot(
         "descriptors": descriptors,
         "artifacts": artifacts,
         "strategy": {"compiled": compiled, "root": str(repo_root)},
-        "created_at": _now(),
+        "created_at": utc_now(),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
@@ -1983,7 +1972,7 @@ def _apply_kernel_patch_snapshot(
         rebuild = rebuild_records[-1] if rebuild_records else rebuild
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = _now()
+    manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:
