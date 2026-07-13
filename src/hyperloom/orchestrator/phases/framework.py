@@ -3499,13 +3499,40 @@ class FrameworkPhase(PhaseHandler):
         grid: list[dict[str, Any]] = []
         seen_names: set[str] = set()
 
-        def _add(name: str, args: str, envs: dict[str, str], note: str) -> None:
+        def _controls(raw: Any) -> dict[str, Any]:
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                value = raw.get(key)
+                if isinstance(value, str):
+                    vals = [value.strip()] if value.strip() else []
+                elif isinstance(value, (list, tuple, set)):
+                    vals = [str(v).strip() for v in value if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    out[key] = vals
+            mode = str(raw.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                out["args_mode"] = "replace"
+            return out
+
+        def _add(
+            name: str,
+            args: str,
+            envs: dict[str, str],
+            note: str,
+            controls: dict[str, Any] | None = None,
+        ) -> None:
             nm = (name or "").strip()
             if not nm or nm in seen_names:
                 return
+            controls = dict(controls or {})
             # A variant with neither a server-arg nor an env override has
-            # nothing for the restart to apply; drop it.
-            if not args and not envs:
+            # nothing for the restart to apply unless it removes inherited
+            # args/envs.
+            if not args and not envs and not controls:
                 return
             seen_names.add(nm)
             grid.append(
@@ -3513,6 +3540,7 @@ class FrameworkPhase(PhaseHandler):
                     "name": nm,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": provenance,
                     "note": (note or "")[:200],
                 }
@@ -3535,6 +3563,7 @@ class FrameworkPhase(PhaseHandler):
                 args,
                 envs,
                 str(raw.get("note") or raw.get("provenance") or ""),
+                _controls(raw),
             )
 
         # ``explicit_grid=[]`` means the caller harvested an empty set --
@@ -3737,6 +3766,9 @@ class FrameworkPhase(PhaseHandler):
             fp = canonical_fingerprint(
                 str(v.get("extra_args") or v.get("extra_server_args") or ""),
                 dict(v.get("extra_envs") or {}),
+                remove_args=v.get("remove_args"),
+                unset_envs=v.get("unset_envs"),
+                args_mode=str(v.get("args_mode") or "append"),
             )
             if fp in tested:
                 continue
@@ -3973,7 +4005,21 @@ class FrameworkPhase(PhaseHandler):
                 if isinstance(envs_raw, dict)
                 else {}
             )
-            if not args and not envs:
+            controls: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                raw = p.get(key)
+                if isinstance(raw, str):
+                    vals = [raw.strip()] if raw.strip() else []
+                elif isinstance(raw, (list, tuple, set)):
+                    vals = [str(v).strip() for v in raw if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    controls[key] = vals
+            mode = str(p.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                controls["args_mode"] = "replace"
+            if not args and not envs and not controls:
                 continue
             name = str(p.get("name") or "").strip() or f"framework-config-{i}"
             out.append(
@@ -3981,6 +4027,7 @@ class FrameworkPhase(PhaseHandler):
                     "name": name,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": "framework_agent:config",
                     "note": str(p.get("reason") or "")[:200],
                 }

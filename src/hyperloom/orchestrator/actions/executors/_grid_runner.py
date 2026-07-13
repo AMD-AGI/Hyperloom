@@ -47,7 +47,7 @@ from ._grid_base import (
 )
 from ._grid_server_args import (
     server_args_env_name as server_args_env_name,
-    merge_server_args as merge_server_args,
+    compose_server_args as compose_server_args,
     compact_json_server_args as compact_json_server_args,
     _SPACE_VALUE_FLAGS as _SPACE_VALUE_FLAGS,
     _MULTI_VALUE_FLAGS as _MULTI_VALUE_FLAGS,
@@ -556,13 +556,19 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    combined = merge_server_args(
-        str(envs.get(extra_args_env, "")),
-        base_extra_args,
-        variant.extra_server_args,
+    combined = compose_server_args(
+        inherited_args=str(envs.get(extra_args_env, "")),
+        base_extra_args=base_extra_args,
+        variant_extra_args=variant.extra_server_args,
+        remove_args=getattr(variant, "remove_args", []),
+        args_mode=getattr(variant, "args_mode", "append"),
     )
     if combined:
         envs[extra_args_env] = _shell_safe_dedupe(combined)
+    elif extra_args_env in envs:
+        envs.pop(extra_args_env, None)
+    for k in getattr(variant, "unset_envs", []) or []:
+        envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
@@ -1281,16 +1287,21 @@ async def run_grid(
             # across variants within one run.
             await restart_server_for_round(
                 extra_server_args=_shell_safe_dedupe(
-                    merge_server_args(
-                        base_extra_args,
-                        variant.extra_server_args,
+                    compose_server_args(
+                        base_extra_args=base_extra_args,
+                        variant_extra_args=variant.extra_server_args,
+                        remove_args=getattr(variant, "remove_args", []),
+                        args_mode=getattr(variant, "args_mode", "append"),
                     )
                 ),
                 # Per-variant env overrides (e.g. MORI_* MoE-dispatch
                 # tuning) so server-side env knobs proposed by specialists
                 # actually take effect on the restarted sglang. Empty dict
                 # for arg-only variants → forwarded as a no-op.
-                extra_env=dict(variant.extra_envs),
+                extra_env={
+                    **{str(k): "" for k in getattr(variant, "unset_envs", []) or []},
+                    **dict(variant.extra_envs),
+                },
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
