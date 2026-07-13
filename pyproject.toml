@@ -380,7 +380,8 @@ omit = [
     "ci/publish_artifacts.py",
     "ci/build_candidates.py",
     "ci/build_production_hf_pool.py",
-    # In-tree CLI test scripts / live smoke scripts (treated as test files).
+    # In-tree test support / CLI test scripts / live smoke scripts.
+    "ci/conftest.py",
     "ci/test_*.py",
 ]
 
