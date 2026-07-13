@@ -1132,8 +1132,6 @@ write_combined_env() {
     [ -n "${SGLANG_ROCM_EXTRA:-}" ] && printf 'export SGLANG_ROCM_EXTRA=%q\n' "$SGLANG_ROCM_EXTRA"
     [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && printf 'export SGLANG_ROCM_PYPI_VERSION=%q\n' "$SGLANG_ROCM_PYPI_VERSION"
     [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
-    [ -n "${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-}" ] && printf 'export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=%q\n' "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX"
-    [ -n "${KERNEL_AGENT_RAG_INDEX_STRICT:-}" ] && printf 'export KERNEL_AGENT_RAG_INDEX_STRICT=%q\n' "$KERNEL_AGENT_RAG_INDEX_STRICT"
     [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && printf 'export KERNEL_OPT_BACKEND_ORDER=%q\n' "$KERNEL_OPT_BACKEND_ORDER"
     [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && printf 'export HYPERLOOM_WHEEL_REPO=%q\n' "$HYPERLOOM_WHEEL_REPO"
     [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && printf 'export HYPERLOOM_WHEEL_TAG=%q\n' "$HYPERLOOM_WHEEL_TAG"
