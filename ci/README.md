@@ -16,7 +16,6 @@ ci/
 ├── prompt_template.md       # Prompt template sent to the Claw Agent
 ├── inferenceX_models.yaml   # InferenceX API model name mapping
 ├── AB_TEST.md               # A/B test usage guide (for GEAK/TraceLens and related teams)
-├── test_claw_flow.py        # End-to-end Claw API test script
 ├── requirements.txt         # Python dependencies
 └── README.md
 ```

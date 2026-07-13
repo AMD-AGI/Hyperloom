@@ -73,7 +73,7 @@ jobs:
           week_str  = now.strftime("%B %d, %Y")
           repo_name = repo.split("/")[-1]
           repo_url  = f"https://github.com/{repo}/issues"
-          
+
           def label_value(labels, prefix):
               vals = sorted({
                   n.split(":", 1)[1].strip()

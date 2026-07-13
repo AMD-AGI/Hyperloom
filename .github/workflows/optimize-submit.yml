@@ -33,15 +33,15 @@ name: SaFE Optimize Submit
 
 on:
   # No schedule of its own: this is the shared EXECUTION ENGINE. The per-pool
-  # scheduler shells (optimize-sub100-part1 / -part2 / -part3) own the cron
+  # scheduler shells (optimize-sub100-part1 / -part2) own the cron
   # schedules and trigger this workflow via the GitHub API with their pool file,
   # batch slice, batch_size (= max_parallel) and max_hours. Manual runs go
   # straight through workflow_dispatch.
   workflow_dispatch:
     # ⚠️ HARD LIMIT: GitHub allows at most 25 top-level `inputs` for a
     # workflow_dispatch event (raised from 10 on 2025-12-04). Exceeding it makes
-    # the workflow fail to parse, so EVERY dispatch (optimize-tiny,
-    # optimize-gte100, manual, API) returns HTTP 422 and no models are submitted.
+    # the workflow fail to parse, so EVERY dispatch (scheduled pool, manual, API)
+    # returns HTTP 422 and no models are submitted.
     # This block currently defines exactly 25 inputs — DO NOT add a 26th. To add
     # a new knob, drop/merge an existing input first (e.g. derive it from another
     # input as the job timeout is derived from max_hours below). Refs:
@@ -530,11 +530,11 @@ jobs:
       # Per-model perf-leaderboard publish. Fires AS SOON AS this matrix job
       # finishes its single model, so the dashboard updates continuously
       # instead of waiting for the whole 60-model batch to settle. The
-      # post_perf_runs.py script idempotently upserts by unique_key, so a
-      # re-dispatched model just refreshes its row instead of creating a dup.
+      # The sbd-ingester publish path upserts by session/task identity, so a
+      # re-dispatched model refreshes its row instead of creating a duplicate.
       #
-      # Schema-aware: post_perf_runs.py auto-detects V2 (with phase_timeline),
-      # V1-flat, and universal schemas via import_session_breakdown's
+      # Schema-aware: import_session_breakdown auto-detects V2 (with phase_timeline),
+      # V1-flat, and universal schemas via its
       # `looks_like_*` predicates and transforms them with
       # transform_to_session_summary_v2 before POSTing.
       #

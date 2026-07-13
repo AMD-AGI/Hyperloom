@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Batch-index rotation for the gte100 dispatcher (optimize-gte100.yml).
+"""Batch-index rotation for production-pool dispatcher workflows.
 
 The pool is larger than one batch, so each scheduled fire runs ONE batch and the
 batch index advances over time to sweep the whole pool, wrapping at the end.
@@ -20,11 +20,7 @@ when each fire is ``max_hours`` apart:
     is dispatched twice.
   * cron slower than max_hours: some slots are never hit -> batches are skipped.
 This is NOT robust to arbitrary cron changes — it is robust to the ANCHOR
-shifting, not to the period. gte100 deliberately pairs a 12h cron with
-max_hours=12 (and optimize-submit a 6h cron with max_hours=6); if you change one,
-change the other to match. NOTE: gte100 dispatches with
-exclude_active_workflows=false, so it has NO de-dup safety net — a period/
-max_hours mismatch will actually double-submit a batch.
+shifting, not to the period. If you change one, change the other to match.
 
 CLI (used by the workflow):
     python3 batch_rotate.py --count N --batch-size B --max-hours H \

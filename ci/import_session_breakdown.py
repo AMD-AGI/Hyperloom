@@ -753,8 +753,8 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         "isl": dims["isl"],
         "osl": dims["osl"],
         "conc": dims["conc"],
-        # post_perf_runs.py's build_body rejects incomplete/baseline-failed
-        # sessions, so anything POSTed is effectively a successful run.
+        # The perf publish path rejects incomplete/baseline-failed sessions, so
+        # anything POSTed is effectively a successful run.
         "status": "success",
         "version": truncate(code_rev, 64),
         "unique_key": truncate(derive_unique_key(model_name, image), 128),
