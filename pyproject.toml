@@ -371,6 +371,7 @@ omit = [
     # cli.py and the kernel-agent tool CLIs. Each is exercised end-to-end by
     # the live optimize-submit workflow, not unit tests.
     "ci/optimize_submit.py",
+    "ci/optimize_submit_lib/*.py",
     "ci/orchestrator.py",
     "ci/import_session_breakdown.py",
     "ci/claw_client.py",
