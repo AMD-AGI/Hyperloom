@@ -431,7 +431,8 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
                         parts.append(f"# {rej.relative_to(framework_root)}\n{content}")
                     rej.unlink(missing_ok=True)
             except OSError:
-                pass
+                # Best-effort scan: skip unreadable/racing .rej files silently.
+                continue
     except Exception:  # noqa: BLE001
         log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
     return "\n\n".join(parts)

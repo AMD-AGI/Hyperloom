@@ -410,10 +410,9 @@ def test_apply_feedback_success_returns_none_feedback(tmp_path):
     backup_root = tmp_path / "bak"
 
     result = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
-    if len(result) == 4:
-        ok, err, backups, feedback = result
-    else:
+    if len(result) != 4:
         pytest.skip("unexpected return length")
+    ok, err, backups, feedback = result
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
     assert feedback is None, "successful apply must return None feedback"

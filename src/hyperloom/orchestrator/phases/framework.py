@@ -1741,7 +1741,6 @@ class FrameworkPhase(PhaseHandler):
             if not cand_id:
                 log.warning("_enqueue_author_specialist: perf_framework missing cand_id")
                 return ""
-            batch_id = str(candidate.get("batch_id") or "")
             # Look up original audit from the specialist task params if available.
             audit: dict[str, Any] = {}
             if specialist_task_id:

@@ -82,7 +82,9 @@ def atomic_write_bytes(
             if fsync:
                 _best_effort_fsync(fh)
         if mode is not None:
-            os.chmod(tmp, mode)
+            # Strip group/other bits: written files may hold sensitive payloads,
+            # so never expose them beyond the owner regardless of caller intent.
+            os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
         with suppress(OSError):
@@ -125,7 +127,9 @@ def atomic_write_text(
             if fsync:
                 _best_effort_fsync(fh)
         if mode is not None:
-            os.chmod(tmp, mode)
+            # Strip group/other bits: written files may hold sensitive payloads,
+            # so never expose them beyond the owner regardless of caller intent.
+            os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
         with suppress(OSError):

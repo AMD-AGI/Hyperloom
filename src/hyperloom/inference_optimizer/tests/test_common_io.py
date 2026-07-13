@@ -40,7 +40,8 @@ def test_atomic_write_json_ensure_ascii_false_and_mode(tmp_path):
         mode=0o640,
     )
     assert p.read_text(encoding="utf-8") == '{\n  "msg": "你好"\n}'
-    assert stat.S_IMODE(p.stat().st_mode) == 0o640
+    # Group/other bits are stripped: a requested 0o640 is clamped to owner-only.
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
 
 def test_atomic_write_text_mode(tmp_path):
