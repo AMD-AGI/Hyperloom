@@ -1377,7 +1377,6 @@ _RAYJOB_COMPAT_EXPORTS = frozenset(
         "_checkpoint_create_rayjob_state",
         "_write_rayjob_meta",
         "ray_gcs_address",
-        "_credential_fanout",
         "_is_safe_get_workload_404",
         "_summarize_workload_failure",
         "_find_head_pod_ip",

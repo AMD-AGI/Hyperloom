@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import now_iso
 
 from ._common import (
     _benchmark_report_candidates,
@@ -482,15 +483,6 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     return None
 
 
-def _utc_now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string.
-
-    Returns:
-        str: e.g. ``"2026-06-02T18:29:00+00:00"``.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
     """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored).
 
@@ -643,7 +635,7 @@ def collect_session(
         stop_reason = close_stop_reason
     ended_at_utc = ""
     if stop_reason:
-        ended_at_utc = _iso_z(close_ts) if close_ts else _utc_now_iso()
+        ended_at_utc = _iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
     elapsed_min: float | None = None
     if start_ts:
         try:
