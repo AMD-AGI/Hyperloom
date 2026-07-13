@@ -9,7 +9,7 @@ Remote servers cannot reach `llm-api.amd.com` directly. This guide sets up a loc
 ## Prerequisites
 
 - Claude Code access via AMD gateway (subscription key)
-- SSH access to the remote server (`root@45.76.23.123`)
+- SSH access to the remote server (`root@<REMOTE_SERVER_IP>`)
 - Python 3 on your local machine (WSL or Mac/Linux)
 
 ---
@@ -110,11 +110,11 @@ if __name__ == "__main__":
 
 ## Step 3 — SSH config (local machine)
 
-Assume your remote server's IP is `45.76.23.123` and you log in as `root` (change these to your own). There is no jumpbox, so connect directly. Add this host entry to `~/.ssh/config`, including the reverse tunnel line:
+Assume your remote server's IP is `<REMOTE_SERVER_IP>` and you log in as `root` (change these to your own). There is no jumpbox, so connect directly. Add this host entry to `~/.ssh/config`, including the reverse tunnel line:
 
 ```
 Host llm-remote
-    HostName 45.76.23.123               # <-- your remote server IP
+    HostName <REMOTE_SERVER_IP>               # <-- your remote server IP
     User root                           # <-- your remote login user
     StrictHostKeyChecking no
     RemoteForward 8080 localhost:8080   # <-- tunnels remote:8080 → local:8080
@@ -184,7 +184,7 @@ Every time you want to use Claude Code on the remote:
    python3 ~/llm-proxy.py 8080
    ```
 
-2. **New terminal (on the same local machine)** — SSH in using the `llm-remote` alias. This is what opens the reverse tunnel, so you must use the alias (not `ssh root@45.76.23.123`) and run it from the machine where the proxy is running. Keep this session open:
+2. **New terminal (on the same local machine)** — SSH in using the `llm-remote` alias. This is what opens the reverse tunnel, so you must use the alias (not `ssh root@<REMOTE_SERVER_IP>`) and run it from the machine where the proxy is running. Keep this session open:
    ```bash
    ssh llm-remote
    ```
@@ -209,7 +209,7 @@ With that running, any Claude session on the remote (host or container) will rea
 
 ## Troubleshooting
 
-**`Unable to connect to API (ConnectionRefused)` on the remote** — the remote's `localhost:8080` has nothing behind it: the reverse tunnel isn't up in the session you're using (or the local proxy died). The most common cause is connecting without the tunnel — e.g. `ssh root@45.76.23.123` instead of `ssh llm-remote`, or from a machine that isn't running the proxy. Fix it by connecting with `ssh llm-remote` from the local machine, or by starting a dedicated tunnel on the local machine that stays up regardless of how you open the remote shell:
+**`Unable to connect to API (ConnectionRefused)` on the remote** — the remote's `localhost:8080` has nothing behind it: the reverse tunnel isn't up in the session you're using (or the local proxy died). The most common cause is connecting without the tunnel — e.g. `ssh root@<REMOTE_SERVER_IP>` instead of `ssh llm-remote`, or from a machine that isn't running the proxy. Fix it by connecting with `ssh llm-remote` from the local machine, or by starting a dedicated tunnel on the local machine that stays up regardless of how you open the remote shell:
 
 ```bash
 ssh -N -f -o ServerAliveInterval=30 llm-remote

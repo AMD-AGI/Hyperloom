@@ -583,7 +583,10 @@ You are ready to run Hyperloom. The optimization loop
 <https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/optimization-loop.md>
 
 Launch by following [`docs/how-to/optimize.md`](../docs/how-to/optimize.md).
-Inside the container, re-run `install.sh` (IR-2), source the env files, then
+Inside the container, re-run `install.sh` (IR-2) **with a raised file-descriptor
+limit — run `ulimit -Sn 65536` first** (the install and the optimizer open many
+files; the default soft limit can cause "too many open files" errors), source
+the env files, then
 start `inference_optimizer optimize` in the background (`setsid nohup` — the run
 is long). Both the Claude and Codex accounts were wired up in Step 2c, so drive
 the kernel agent with Claude (`--kernel-claude`) and run the **real** critic —
@@ -602,6 +605,7 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e MODEL_PATH="$MODEL_PATH" hype
   set -e
   . "$USER_DATA_PATH/runtime/local-setup.env.sh"
   set -a; . ./.env; set +a
+  ulimit -Sn 65536                                                  # raise fd limit (avoid "too many open files")
   bash src/hyperloom/inference_optimizer/assets/install.sh          # IR-2 (idempotent)
   . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
   # Real critic-agent: reviews with CODEX_MODEL (from .env) over the OpenAI/Unified gateway.
