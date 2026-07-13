@@ -114,19 +114,17 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
-# tree-reform.MD P2.5: kernel-agent was promoted from a sibling
-# ``kernel-agent/`` checkout into the in-tree ``hyperloom`` src-layout
-# namespace (``src/hyperloom/agents/kernel``); the tools/scripts/skills
-# subdirectory layout underneath it is unchanged, so only this default
-# root needs to move (still overridable via $KERNEL_AGENT_ROOT).
-if [ "${HYPERLOOM_INSTALL_SOURCE:-}" = "wheel" ]; then
-  _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
-  KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
-  FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
-else
-  KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/kernel}"
-  FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/framework}"
+# tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
+# package tree in both source and pip-installed layouts. A missing pyproject at
+# REPO_ROOT means setup is running from a pip --target workspace rather than a
+# source checkout, so the editable self-install step below is skipped.
+_hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
+HYPERLOOM_PACKAGED_INSTALL=0
+if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
+  HYPERLOOM_PACKAGED_INSTALL=1
 fi
+KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
+FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
 # tree-reform.MD P2.5: framework-agent was promoted from a sibling
 # ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
 # namespace (``src/hyperloom/agents/framework``); it no longer has its own
@@ -554,8 +552,8 @@ fi
 
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
 ensure_inference_optimizer() {
-  if [ "${HYPERLOOM_INSTALL_SOURCE:-}" = "wheel" ]; then
-    log "ensuring inference_optimizer package + claude_agent_sdk extras (preinstalled wheel)"
+  if [ "$HYPERLOOM_PACKAGED_INSTALL" -eq 1 ]; then
+    log "ensuring inference_optimizer package + claude_agent_sdk extras (packaged install)"
     "$PYTHON" - <<'PY' || die "hyperloom.inference_optimizer not importable from installed wheel"
 import hyperloom.inference_optimizer  # noqa: F401
 PY
@@ -590,12 +588,6 @@ _forge_gemm_tune_candidates() {
   [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
   [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
   [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
-  # Local sibling worktree / checkout fallbacks.
-  printf '%s\n' \
-    "${REPO_ROOT%/}/../KernelForge/src/forge_gemm_tune" \
-    "${REPO_ROOT%/}/../KernelForge/forge_gemm_tune" \
-    "${REPO_ROOT%/}/../wt-forge-gemm-tune/src/forge_gemm_tune" \
-    "${REPO_ROOT%/}/../wt-forge-gemm-tune/forge_gemm_tune"
 }
 
 _resolve_forge_gemm_tune_root() {
@@ -636,7 +628,11 @@ ensure_forge_gemm_tune() {
         ;;
     esac
   else
-    warn "forge-gemm-tune source not found; forge GEMM tuning will fail unless preinstalled. Set FORGE_PATH or FORGE_GEMM_TUNE_ROOT."
+    if "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1; then
+      log "forge-gemm-tune import OK"
+    else
+      log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
+    fi
   fi
 }
 

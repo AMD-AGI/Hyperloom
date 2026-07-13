@@ -1155,6 +1155,28 @@ write_combined_env() {
   } > "$combined"
   chmod 600 "$combined"
   log "wrote ${combined}"
+
+  upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
+  [ -n "${PYTHON:-}" ] && upsert_dotenv_var PYTHON "$PYTHON"
+  [ -n "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ] && upsert_dotenv_var INFERENCE_OPTIMIZER_FORCE_PYTHON "$INFERENCE_OPTIMIZER_FORCE_PYTHON"
+  [ -n "${VIRTUAL_ENV:-}" ] && upsert_dotenv_var VIRTUAL_ENV "$VIRTUAL_ENV"
+  [ -n "${ROCM_PATH:-}" ] && upsert_dotenv_var ROCM_PATH "$ROCM_PATH"
+  [ -n "${HIP_PATH:-}" ] && upsert_dotenv_var HIP_PATH "$HIP_PATH"
+  [ -n "${SGLANG_ROCM_EXTRA:-}" ] && upsert_dotenv_var SGLANG_ROCM_EXTRA "$SGLANG_ROCM_EXTRA"
+  [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && upsert_dotenv_var SGLANG_ROCM_PYPI_VERSION "$SGLANG_ROCM_PYPI_VERSION"
+  [ -n "${AITER_REF:-}" ] && upsert_dotenv_var AITER_REF "$AITER_REF"
+  [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && upsert_dotenv_var KERNEL_OPT_BACKEND_ORDER "$KERNEL_OPT_BACKEND_ORDER"
+  [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_REPO "$HYPERLOOM_WHEEL_REPO"
+  [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
+  [ -n "${HYPERLOOM_ENV_FILE:-}" ] && upsert_dotenv_var HYPERLOOM_ENV_FILE "$HYPERLOOM_ENV_FILE"
+  [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
+  [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
+  upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
+    upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
+    upsert_dotenv_var VLLM_PYTHON "${VLLM_VENV_ROOT}/bin/python"
+  fi
+  log "updated ${DOTENV} with bare-metal runtime env"
 }
 
 print_next_steps() {
