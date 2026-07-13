@@ -279,8 +279,13 @@ def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
-def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
-    # DeepSeek-V4 currently fails sglang ModelConfig validation during server init.
+def test_detect_deepseek_v4_now_recognized(tmp_path):
+    # deepseek-ai DeepSeek-V4-*: the current stack (transformers 5.12.1 +
+    # vLLM 0.24.0 rocm723) supports it — transformers CONFIG_MAPPING contains
+    # "deepseek_v4", AutoConfig resolves DeepseekV4Config, and vLLM's
+    # ModelRegistry registers + lazily loads DeepseekV4ForCausalLM (and
+    # DeepSeekV4MTPModel). It was removed from the unrecognized blocklist, so a
+    # plain text DeepSeek-V4 config is no longer fail-fasted by the gate.
     m = tmp_path / "deepseek_v4"
     _write_config(
         m,
@@ -289,7 +294,7 @@ def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
         max_position_embeddings=1048576,
     )
     reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "not recognized" in reason
+    assert reason is None
 
 
 def test_detect_glm_moe_dsa_now_recognized(tmp_path):
