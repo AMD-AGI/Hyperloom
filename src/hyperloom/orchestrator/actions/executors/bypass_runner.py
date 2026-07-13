@@ -3,14 +3,18 @@
 """Bypass benchmark runner (CLI).
 
 Drop-in alternative to ``python -m Magpie -v benchmark ... --run-mode local``.
-It accepts the same CLI flags and the same environment contract, reuses the
-InferenceX benchmark scripts (the same source Magpie drives), and writes a
+It accepts the same CLI flags and the same environment contract, and writes a
 Magpie-compatible workspace + ``benchmark_report.json`` so Hyperloom's
 executors and collectors consume bypass runs unchanged.
 
-Scope (Stage 2a): single-node ``--run-mode local`` for sglang/vllm/atom,
-including the optional ``RUN_EVAL`` accuracy pass that the InferenceX scripts
-already implement. Docker/Ray/scriptable/profile-specific handling is deferred.
+Execution is orchestrated in Python (no shell scripts): start the framework
+server, wait for HTTP readiness, run the InferenceX benchmark client, then
+optionally run lm-eval. This depends on the InferenceX checkout (benchmark
+client + lm-eval), but NOT on the Magpie repository.
+
+Scope: single-node ``--run-mode local`` for sglang/vllm/atom, plus the
+optional ``RUN_EVAL`` accuracy pass. Docker/Ray/scriptable/server-lifecycle and
+richer analysis are deferred.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -27,164 +31,54 @@ from typing import Any
 
 import yaml
 
+from . import bypass_engine
 from . import bypass_report
 
-# Magpie-generic benchmark scripts shipped in the Magpie checkout. Reused as-is
-# so bypass and Magpie resolve to the same InferenceX-driven benchmark.
-_MAGPIE_SCRIPTS_SUBDIR = ("scripts", "benchmark")
-# InferenceX native script prefixes by framework (mirror Magpie).
-_NATIVE_PREFIX = {"sglang": "dsr1", "vllm": "gptoss"}
+_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
-def _resolve_inferencex_path(bench: dict[str, Any]) -> str:
-    """Resolve the InferenceX checkout path.
+def _as_int(value: Any, default: int) -> int:
+    """Coerce to int, tolerating None/str; return default on failure."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
-    Precedence mirrors what Hyperloom already pins: explicit YAML value, then
-    ``MAGPIE_INFERENCEX_PATH``, then ``INFERENCEX_PATH``.
 
-    Args:
-        bench: The ``benchmark`` section of the config.
+def _as_float(value: Any, default: float) -> float:
+    """Coerce to float, tolerating None/str; return default on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-    Returns:
-        The resolved InferenceX path (may be empty if unresolved).
-    """
-    return (
-        str(bench.get("inferencex_path") or "").strip()
-        or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
-        or os.environ.get("INFERENCEX_PATH", "").strip()
+
+def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
+    """Whether RUN_EVAL requests an accuracy pass (env then YAML envs)."""
+    raw = os.environ.get("RUN_EVAL")
+    if raw is None:
+        raw = str(bench_envs.get("RUN_EVAL", "false"))
+    return str(raw).strip().lower() not in _FALSE_VALUES
+
+
+def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str]:
+    """Return the framework's extra server args as a token list."""
+    key = {"sglang": "EXTRA_SGLANG_ARGS", "vllm": "EXTRA_VLLM_ARGS", "atom": "EXTRA_ATOM_ARGS"}.get(
+        framework, ""
     )
+    raw = str(os.environ.get(key) or bench_envs.get(key) or "").strip()
+    if not raw:
+        return []
+    import shlex
 
-
-def _resolve_magpie_scripts_dir() -> Path | None:
-    """Locate the Magpie generic benchmark scripts dir via ``MAGPIE_PATH``.
-
-    Returns:
-        The scripts dir when present, else None.
-    """
-    magpie_path = os.environ.get("MAGPIE_PATH", "").strip()
-    if not magpie_path:
-        return None
-    scripts = Path(magpie_path, "Magpie", *_MAGPIE_SCRIPTS_SUBDIR)
-    return scripts if scripts.is_dir() else None
-
-
-def _sync_scripts(inferencex_path: Path) -> None:
-    """Copy Magpie generic scripts into ``InferenceX/benchmarks`` (atomic).
-
-    Best-effort and idempotent; no-op when the Magpie scripts dir is absent.
-
-    Args:
-        inferencex_path: InferenceX checkout root.
-    """
-    scripts = _resolve_magpie_scripts_dir()
-    if scripts is None:
-        return
-    target = inferencex_path / "benchmarks"
-    target.mkdir(parents=True, exist_ok=True)
-    for script in scripts.glob("*.sh"):
-        dst = target / script.name
-        tmp = dst.with_suffix(dst.suffix + ".tmp")
-        shutil.copy2(script, tmp)
-        os.chmod(tmp, 0o755)
-        os.replace(tmp, dst)
-
-
-def _find_script(benchmarks_dir: Path, name: str) -> Path | None:
-    """Find ``name`` in ``benchmarks_dir`` (top-level first, then recursive)."""
-    top = benchmarks_dir / name
-    if top.exists():
-        return top
-    for match in benchmarks_dir.rglob(name):
-        if match.is_file():
-            return match
-    return None
-
-
-def _resolve_script(bench: dict[str, Any], inferencex_path: Path, runner_type: str) -> str:
-    """Resolve the benchmark script path relative to InferenceX (3-tier).
-
-    Mirrors Magpie: explicit benchmark_script, then native
-    ``{prefix}_{precision}_{runner}.sh``, then generic ``{framework}_{runner}.sh``.
-
-    Args:
-        bench: The ``benchmark`` section of the config.
-        inferencex_path: InferenceX checkout root.
-        runner_type: Resolved runner type (e.g. mi300x).
-
-    Returns:
-        The script path relative to the InferenceX root.
-
-    Raises:
-        FileNotFoundError: When no suitable script is found.
-    """
-    benchmarks_dir = inferencex_path / "benchmarks"
-    framework = str(bench.get("framework") or "").lower()
-    precision = str(bench.get("precision") or "").lower()
-
-    explicit = str(bench.get("benchmark_script") or "").strip()
-    if explicit:
-        found = _find_script(benchmarks_dir, explicit)
-        if not found:
-            raise FileNotFoundError(f"benchmark_script not found: {explicit}")
-        return str(found.relative_to(inferencex_path))
-
-    prefix = _NATIVE_PREFIX.get(framework)
-    if prefix and precision:
-        native = f"{prefix}_{precision}_{runner_type}.sh"
-        found = _find_script(benchmarks_dir, native)
-        if found:
-            return str(found.relative_to(inferencex_path))
-
-    generic = f"{framework}_{runner_type}.sh"
-    if (benchmarks_dir / generic).exists():
-        return f"benchmarks/{generic}"
-
-    raise FileNotFoundError(
-        f"No benchmark script for framework={framework} precision={precision} "
-        f"runner={runner_type} under {benchmarks_dir}"
-    )
-
-
-def _build_env(bench: dict[str, Any], runner_type: str, workspace: Path) -> dict[str, str]:
-    """Build the subprocess env, mirroring Magpie's local benchmark contract.
-
-    The parent process env is inherited; the benchmark YAML's ``model`` /
-    ``precision`` / ``envs`` win, plus the RESULT/SERVER/PROFILE wiring the
-    InferenceX scripts expect.
-
-    Args:
-        bench: The ``benchmark`` section of the config.
-        runner_type: Resolved runner type.
-        workspace: Per-run workspace directory.
-
-    Returns:
-        The environment mapping for the benchmark subprocess.
-    """
-    env = os.environ.copy()
-    env["MODEL"] = str(bench.get("model") or env.get("MODEL", ""))
-    if bench.get("precision"):
-        env["PRECISION"] = str(bench["precision"])
-    for key, value in (bench.get("envs") or {}).items():
-        env[str(key).upper()] = str(value)
-    env["RUNNER_TYPE"] = runner_type
-    env["RESULT_FILENAME"] = "inferencex_result"
-    env["RESULT_DIR"] = str(workspace)
-    env["MAGPIE_RUN_PHASE"] = "all"
-    env["SERVER_LOG"] = str(workspace / "server.log")
-
-    profiler = (bench.get("profiler") or {}).get("torch_profiler") or {}
-    if profiler.get("enabled"):
-        trace_dir = workspace / "torch_trace"
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        env["PROFILE"] = "1"
-        env["VLLM_TORCH_PROFILER_DIR"] = str(trace_dir)
-        env["SGLANG_TORCH_PROFILER_DIR"] = str(trace_dir)
-        env["ATOM_TORCH_PROFILER_DIR"] = str(trace_dir)
-    return env
+    try:
+        return shlex.split(raw)
+    except ValueError:
+        return raw.split()
 
 
 def run_benchmark(config_path: Path, output_dir: Path) -> int:
-    """Run one local benchmark by reusing the InferenceX scripts.
+    """Run one local benchmark via Python orchestration.
 
     Args:
         config_path: Materialized benchmark config YAML.
@@ -197,52 +91,169 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
     bench = cfg.get("benchmark") or {}
     framework = str(bench.get("framework") or "sglang").lower()
     model = str(bench.get("model") or os.environ.get("MODEL", ""))
-    timeout_s = float(bench.get("timeout_seconds") or 3600.0)
+    bench_envs = dict(bench.get("envs") or {})
+    timeout_s = _as_float(bench.get("timeout_seconds"), 3600.0)
 
-    inferencex_path = _resolve_inferencex_path(bench)
-    if not inferencex_path or not Path(inferencex_path).is_dir():
+    if framework not in bypass_engine.SERVER_FRAMEWORKS:
+        _emit_failure(output_dir, framework, model, f"unsupported framework: {framework!r}")
+        return 2
+
+    inferencex_root = bypass_engine.resolve_inferencex_root(bench)
+    if not inferencex_root or not Path(inferencex_root).is_dir():
         _emit_failure(
             output_dir, framework, model,
-            f"InferenceX path not resolvable/usable: {inferencex_path!r}",
+            f"InferenceX path not resolvable/usable: {inferencex_root!r}",
         )
-        return 2
-    inferencex_root = Path(inferencex_path).resolve()
-
-    runner_type = str(bench.get("runner_type") or os.environ.get("RUNNER_TYPE") or "mi300x").lower()
-
-    _sync_scripts(inferencex_root)
-    try:
-        script_rel = _resolve_script(bench, inferencex_root, runner_type)
-    except FileNotFoundError as exc:
-        _emit_failure(output_dir, framework, model, str(exc))
         return 2
 
     workspace = bypass_report.create_workspace(output_dir, framework)
     _snapshot_config(workspace, cfg)
-    env = _build_env(bench, runner_type, workspace)
 
-    cmd = ["bash", "-c", f"cd {inferencex_root} && bash {script_rel}"]
-    start = time.time()
+    tp = _as_int(os.environ.get("TP") or bench_envs.get("TP"), 1)
+    conc = _as_int(os.environ.get("CONC") or bench_envs.get("CONC"), 32)
+    isl = _as_int(os.environ.get("ISL") or bench_envs.get("ISL"), 1024)
+    osl = _as_int(os.environ.get("OSL") or bench_envs.get("OSL"), 512)
+    rrr = _as_float(os.environ.get("RANDOM_RANGE_RATIO") or bench_envs.get("RANDOM_RANGE_RATIO"), 0.5)
+    max_model_len = os.environ.get("MAX_MODEL_LEN") or bench_envs.get("MAX_MODEL_LEN")
+    max_model_len_i = _as_int(max_model_len, 0) or None
+    port = _as_int(os.environ.get("PORT") or bench_envs.get("PORT"), bypass_engine.DEFAULT_PORT)
+
+    profiler = (bench.get("profiler") or {}).get("torch_profiler") or {}
+    profile = bool(profiler.get("enabled"))
+    profile_dir = str(workspace / "torch_trace") if profile else None
+    if profile_dir:
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+    server_log = workspace / "server.log"
+    server_env = _server_env(profile, profile_dir)
+    extra_args = _tokenize_extra_args(bench_envs, framework)
+
     try:
-        proc = subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=timeout_s,
+        server_cmd = bypass_engine.build_server_command(
+            framework=framework,
+            model=model,
+            tp=tp,
+            port=port,
+            max_model_len=max_model_len_i,
+            extra_args=extra_args,
+            profile_dir=profile_dir,
         )
-        returncode = proc.returncode
-        _save_logs(workspace, proc.stdout or "", proc.stderr or "")
-    except subprocess.TimeoutExpired as exc:
-        _save_logs(workspace, getattr(exc, "stdout", "") or "", getattr(exc, "stderr", "") or "")
-        _write_report(workspace, framework, model, False, start, [f"benchmark timed out after {timeout_s}s"])
-        return 124
+    except ValueError as exc:
+        _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
+        return 2
+
+    start = time.time()
+    server_proc = _launch_server(server_cmd, server_env, server_log)
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        ready = bypass_engine.wait_for_server_ready(base_url, timeout_s=timeout_s)
+        if not ready:
+            _write_report(workspace, framework, model, False, start, ["server did not become ready"])
+            return 1
+
+        client_cmd = bypass_engine.build_client_command(
+            inferencex_root=inferencex_root,
+            python_exe=sys.executable,
+            model=model,
+            base_url=base_url,
+            isl=isl,
+            osl=osl,
+            conc=conc,
+            random_range_ratio=rrr,
+            result_dir=str(workspace),
+            result_filename="inferencex_result",
+            profile=profile,
+            trust_remote_code=True,
+        )
+        rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
+
+        if rc == 0 and _run_eval_enabled(bench_envs):
+            eval_cmd = bypass_engine.build_eval_command(
+                python_exe=sys.executable,
+                model=model,
+                base_url=base_url,
+                conc=conc,
+                out_dir=str(workspace / "lm_eval"),
+            )
+            # Eval failure must not sink a healthy throughput measurement; the
+            # accuracy gate degrades to "no result" when results*.json is absent.
+            _run_subprocess(eval_cmd, timeout_s, workspace, "eval")
+    finally:
+        _terminate_server(server_proc)
 
     raw = _load_raw_result(workspace)
-    success = returncode == 0 and raw is not None
+    success = rc == 0 and raw is not None
     errors: list[str] = []
-    if returncode != 0:
-        errors.append(f"benchmark process exited {returncode}")
+    if rc != 0:
+        errors.append(f"benchmark client exited {rc}")
     if raw is None:
         errors.append("inferencex_result.json not produced")
     _write_report(workspace, framework, model, success, start, errors, raw=raw)
-    return 0 if success else (returncode or 1)
+    return 0 if success else (rc or 1)
+
+
+def _server_env(profile: bool, profile_dir: str | None) -> dict[str, str]:
+    """Build the server subprocess env (inherits parent + profiler dirs)."""
+    env = os.environ.copy()
+    if profile and profile_dir:
+        env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
+        env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
+        env["ATOM_TORCH_PROFILER_DIR"] = profile_dir
+    return env
+
+
+def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> subprocess.Popen:
+    """Launch the server in its own session, redirecting logs to server.log."""
+    log_fh = open(server_log, "w", encoding="utf-8")  # noqa: SIM115 - closed on terminate
+    return subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+
+def _terminate_server(proc: subprocess.Popen | None) -> None:
+    """Best-effort teardown of the server process group."""
+    if proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=30)
+    except Exception:  # noqa: BLE001
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str) -> int:
+    """Run a client/eval subprocess, appending logs; return its exit code."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _append_log(workspace, tag, "", f"{tag} timed out after {timeout_s}s")
+        return 124
+    _append_log(workspace, tag, proc.stdout or "", proc.stderr or "")
+    return proc.returncode
+
+
+def _append_log(workspace: Path, tag: str, stdout: str, stderr: str) -> None:
+    """Persist a subprocess's stdout/stderr for debugging (best-effort)."""
+    try:
+        if stdout:
+            (workspace / f"{tag}_stdout.log").write_text(stdout, encoding="utf-8")
+        if stderr:
+            (workspace / f"{tag}_stderr.log").write_text(stderr, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _snapshot_config(workspace: Path, cfg: dict[str, Any]) -> None:
@@ -265,17 +276,6 @@ def _load_raw_result(workspace: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
-
-
-def _save_logs(workspace: Path, stdout: str, stderr: str) -> None:
-    """Persist benchmark stdout/stderr for debugging (best-effort)."""
-    try:
-        if stdout:
-            (workspace / "benchmark_stdout.log").write_text(stdout, encoding="utf-8")
-        if stderr:
-            (workspace / "benchmark_stderr.log").write_text(stderr, encoding="utf-8")
-    except OSError:
-        pass
 
 
 def _write_report(
@@ -301,10 +301,17 @@ def _write_report(
     bypass_report.write_report(workspace, report)
 
 
-def _emit_failure(output_dir: Path, framework: str, model: str, error: str) -> None:
+def _emit_failure(
+    output_dir: Path,
+    framework: str,
+    model: str,
+    error: str,
+    *,
+    workspace: Path | None = None,
+) -> None:
     """Emit a failing report + workspace for a pre-launch error."""
-    workspace = bypass_report.create_workspace(output_dir, framework)
-    _write_report(workspace, framework, model, False, time.time(), [error])
+    ws = workspace or bypass_report.create_workspace(output_dir, framework)
+    _write_report(ws, framework, model, False, time.time(), [error])
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

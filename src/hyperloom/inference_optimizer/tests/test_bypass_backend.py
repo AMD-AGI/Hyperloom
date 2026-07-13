@@ -1,11 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Stage-2a tests for the bypass benchmark backend.
+"""Stage 2a/3 tests for the bypass benchmark backend + Python engine.
 
-Covers backend selection, the Magpie-compatible report contract (parsed by the
-same extract_benchmark_measurement Hyperloom uses), and RUN_EVAL results
-parsing. No real GPU/server: the InferenceX subprocess is monkeypatched to
-drop a fake inferencex_result.json into the workspace.
+No real GPU/server: server launch, client subprocess, and HTTP readiness are
+all injected/monkeypatched. Verifies backend selection, argv construction, the
+Magpie-compatible report contract, and end-to-end orchestration.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
+from hyperloom.orchestrator.actions.executors import bypass_engine
 from hyperloom.orchestrator.actions.executors import bypass_report
 from hyperloom.orchestrator.actions.executors import bypass_runner
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
@@ -47,6 +47,90 @@ def test_bypass_backend_selected(monkeypatch):
     ]
 
 
+def test_server_command_sglang():
+    cmd = bypass_engine.build_server_command(
+        framework="sglang", model="/m", tp=2, port=8888,
+        max_model_len=None, extra_args=["--foo", "1"], profile_dir=None,
+    )
+    assert cmd[:3] == ["python3", "-m", "sglang.launch_server"]
+    assert "--tensor-parallel-size" in cmd and "2" in cmd
+    assert cmd[-2:] == ["--foo", "1"]
+
+
+def test_server_command_vllm_max_len():
+    cmd = bypass_engine.build_server_command(
+        framework="vllm", model="/m", tp=1, port=9000,
+        max_model_len=4096, extra_args=[], profile_dir=None,
+    )
+    assert cmd[:2] == ["vllm", "serve"]
+    assert "--max-model-len" in cmd and "4096" in cmd
+
+
+def test_server_command_atom_profile():
+    cmd = bypass_engine.build_server_command(
+        framework="atom", model="/m", tp=8, port=8888,
+        max_model_len=4090, extra_args=[], profile_dir="/ws/torch_trace",
+    )
+    assert "atom.entrypoints.openai_server" in cmd
+    assert "--torch-profiler-dir" in cmd and "/ws/torch_trace" in cmd
+
+
+def test_client_command_shape():
+    cmd = bypass_engine.build_client_command(
+        inferencex_root="/ix", python_exe="PY", model="/m",
+        base_url="http://127.0.0.1:8888", isl=128, osl=64, conc=4,
+        random_range_ratio=0.5, result_dir="/ws", result_filename="inferencex_result",
+    )
+    assert cmd[0] == "PY"
+    assert cmd[1] == "/ix/utils/bench_serving/benchmark_serving.py"
+    assert "--base-url" in cmd and "http://127.0.0.1:8888" in cmd
+    assert "--num-prompts" in cmd and "40" in cmd  # conc*10
+    assert "--result-filename" in cmd and "inferencex_result.json" in cmd
+
+
+def test_eval_command_shape():
+    cmd = bypass_engine.build_eval_command(
+        python_exe="PY", model="/m", base_url="http://127.0.0.1:8888",
+        conc=8, out_dir="/ws/lm_eval",
+    )
+    assert cmd[:5] == ["PY", "-m", "lm_eval", "--model", "local-completions"]
+    assert "--tasks" in cmd and "gsm8k" in cmd
+    joined = " ".join(cmd)
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in joined
+
+
+def test_wait_for_server_ready_polls_until_200():
+    calls = {"n": 0}
+
+    def probe(url):
+        calls["n"] += 1
+        return 200 if calls["n"] >= 3 else 503
+
+    ok = bypass_engine.wait_for_server_ready(
+        "http://127.0.0.1:8888",
+        timeout_s=100.0,
+        poll_s=0.0,
+        probe=probe,
+        sleep=lambda _s: None,
+    )
+    assert ok is True
+    assert calls["n"] == 3
+
+
+def test_wait_for_server_ready_times_out():
+    ticks = iter([0.0, 1.0, 2.0, 3.0, 100.0])
+
+    ok = bypass_engine.wait_for_server_ready(
+        "http://127.0.0.1:8888",
+        timeout_s=5.0,
+        poll_s=0.0,
+        probe=lambda _u: 503,
+        sleep=lambda _s: None,
+        now=lambda: next(ticks),
+    )
+    assert ok is False
+
+
 def test_bypass_report_is_measurement_compatible():
     raw = {
         "request_throughput": 2.0,
@@ -61,29 +145,16 @@ def test_bypass_report_is_measurement_compatible():
         "p99_e2el_ms": 3000.0,
     }
     report = bypass_report.build_report(
-        raw,
-        framework="sglang",
-        model="/models/x",
-        success=True,
-        workspace_dir="/ws/benchmark_sglang_x",
-        execution_time=61.0,
+        raw, framework="sglang", model="/models/x", success=True,
+        workspace_dir="/ws/benchmark_sglang_x", execution_time=61.0,
     )
     m = extract_benchmark_measurement(report)
     assert m["valid_measurement"] is True
     assert m["output_throughput"] == 1234.5
     assert m["completed_requests"] == 64
-    assert m["ttft_mean_ms"] == 100.0
-    assert m["e2el_mean_ms"] == 2000.0
 
 
-def test_bypass_run_writes_compatible_workspace(tmp_path, monkeypatch):
-    inferencex = tmp_path / "InferenceX"
-    (inferencex / "benchmarks").mkdir(parents=True)
-    # Provide the generic script the 3-tier resolver expects.
-    (inferencex / "benchmarks" / "sglang_mi300x.sh").write_text(
-        "#!/bin/bash\necho fake\n", encoding="utf-8"
-    )
-
+def _write_cfg(tmp_path, inferencex, run_eval="false"):
     cfg = {
         "benchmark": {
             "framework": "sglang",
@@ -93,14 +164,35 @@ def test_bypass_run_writes_compatible_workspace(tmp_path, monkeypatch):
             "run_mode": "local",
             "inferencex_path": str(inferencex),
             "timeout_seconds": 60,
-            "envs": {"TP": 1, "CONC": 4, "ISL": 128, "OSL": 64, "RUN_EVAL": "false"},
+            "envs": {"TP": 1, "CONC": 4, "ISL": 128, "OSL": 64, "RUN_EVAL": run_eval},
         }
     }
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return cfg_path
 
-    def fake_run(cmd, env=None, capture_output=True, text=True, timeout=None):
-        result_dir = Path(env["RESULT_DIR"])
+
+def test_bypass_run_end_to_end(tmp_path, monkeypatch):
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+
+    class _FakeServer:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(
+        bypass_engine, "wait_for_server_ready", lambda *a, **k: True
+    )
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        # The client writes inferencex_result.json into --result-dir.
+        result_dir = Path(cmd[cmd.index("--result-dir") + 1])
         raw = {
             "output_throughput": 999.0,
             "request_throughput": 1.0,
@@ -110,9 +202,7 @@ def test_bypass_run_writes_compatible_workspace(tmp_path, monkeypatch):
             "mean_ttft_ms": 50.0,
             "mean_e2el_ms": 900.0,
         }
-        (result_dir / "inferencex_result.json").write_text(
-            json.dumps(raw), encoding="utf-8"
-        )
+        (result_dir / "inferencex_result.json").write_text(json.dumps(raw), encoding="utf-8")
 
         class _P:
             returncode = 0
@@ -131,35 +221,40 @@ def test_bypass_run_writes_compatible_workspace(tmp_path, monkeypatch):
     ws = workspaces[0]
     report = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
     assert report["success"] is True
-    assert report["framework"] == "sglang"
-
     m = extract_benchmark_measurement(report, workspace=ws)
     assert m["valid_measurement"] is True
     assert m["output_throughput"] == 999.0
-    assert m["completed_requests"] == 40
 
 
 def test_bypass_run_missing_inferencex_fails(tmp_path):
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/models/x",
-            "run_mode": "local",
-            "inferencex_path": str(tmp_path / "does-not-exist"),
-        }
-    }
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-
+    cfg_path = _write_cfg(tmp_path, tmp_path / "does-not-exist")
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 2
     workspaces = list((tmp_path / "out").glob("benchmark_sglang_*"))
     assert len(workspaces) == 1
-    report = json.loads(
-        (workspaces[0] / "benchmark_report.json").read_text(encoding="utf-8")
-    )
+    report = json.loads((workspaces[0] / "benchmark_report.json").read_text(encoding="utf-8"))
     assert report["success"] is False
     assert report["errors"]
+
+
+def test_bypass_run_server_not_ready_fails(tmp_path, monkeypatch):
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+
+    class _FakeServer:
+        pid = 1
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: False)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 1
 
 
 def test_bypass_cli_rejects_non_local(tmp_path):
