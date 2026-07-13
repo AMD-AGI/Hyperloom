@@ -397,53 +397,6 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
     return True
 
 
-def _record_model_field_matches(rec: SubmissionRecord, model_field: str) -> bool:
-    """Compare a JSON model field with a SubmissionRecord conservatively.
-
-    Args:
-        rec (SubmissionRecord): Record supplying the allowed model names.
-        model_field (str): The model id read from a result JSON.
-
-    Returns:
-        bool: True when ``model_field`` normalizes to one of the record's
-        allowed names.
-    """
-    observed = _norm_token(str(model_field or ""))
-    if not observed:
-        return False
-    allowed = {
-        _norm_token((rec.model or "").split("/")[-1]),
-        _norm_token((rec.model or "").replace("/", "-")),
-        _norm_token((rec.model_path or "").rstrip("/\\").split("/")[-1]),
-        _norm_token(rec.display_name or ""),
-    }
-    allowed.discard("")
-    return observed in allowed or _norm_token(str(model_field).split("/")[-1]) in allowed
-
-
-def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
-    """Derive plausible per-model directory basenames for a record.
-
-    Args:
-        rec (SubmissionRecord): The record supplying model path / id / display
-            name candidates.
-
-    Returns:
-        list[str]: De-duplicated basename candidates, in priority order.
-    """
-    names: list[str] = []
-    for value in (
-        rec.model_path or "",
-        (rec.model or "").replace("/", "-"),
-        (rec.model or "").split("/")[-1],
-        rec.display_name or "",
-    ):
-        name = str(value or "").strip().rstrip("/\\").split("/")[-1]
-        if name and name not in names:
-            names.append(name)
-    return names
-
-
 def _json_positive_perf(data: dict) -> bool:
     """Report whether a breakdown JSON has positive baseline AND optimized perf.
 

@@ -63,11 +63,15 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from optimize_submit_lib import artifacts as _artifacts
+from optimize_submit_lib import artifact_paths as _artifact_paths
+from optimize_submit_lib import backfill as _backfill
 from optimize_submit_lib import config as _config
+from optimize_submit_lib import delivery as _delivery
 from optimize_submit_lib import detect as _detect
 from optimize_submit_lib import flow as _flow
 from optimize_submit_lib import hf_client as _hf_client
 from optimize_submit_lib import manifest as _manifest
+from optimize_submit_lib import nfs_collect as _nfs_collect
 from optimize_submit_lib import records as _records
 from optimize_submit_lib import safe_client as _safe_client
 
@@ -77,6 +81,10 @@ for _module in (
     _detect,
     _safe_client,
     _records,
+    _artifact_paths,
+    _delivery,
+    _backfill,
+    _nfs_collect,
     _artifacts,
     _flow,
     _manifest,
@@ -85,16 +93,48 @@ for _module in (
 
 log = logging.getLogger("optimize-submit")
 
+_FACADE_SYNC_MODULES = (
+    _config,
+    _hf_client,
+    _detect,
+    _safe_client,
+    _records,
+    _artifact_paths,
+    _delivery,
+    _backfill,
+    _nfs_collect,
+    _artifacts,
+    _flow,
+    _manifest,
+)
+_FACADE_SYNC_SKIP = {
+    "wait_and_collect_one",
+    "process_completion",
+}
 
-def _sync_artifact_facade_overrides() -> None:
-    """Keep legacy monkeypatches on optimize_submit.* visible to artifacts."""
-    _artifacts._wait_for_nfs_session_delivery = globals()["_wait_for_nfs_session_delivery"]
+
+def _sync_facade_overrides() -> None:
+    """Keep legacy monkeypatches on optimize_submit.* visible to implementation modules."""
+    facade = globals()
+    for module in _FACADE_SYNC_MODULES:
+        for name in list(vars(module)):
+            if name.startswith("__") or name in _FACADE_SYNC_SKIP or name not in facade:
+                continue
+            value = facade[name]
+            if getattr(module, name) is not value:
+                setattr(module, name, value)
 
 
 def wait_and_collect_one(*args, **kwargs):
     """Compatibility wrapper for tests/importers that monkeypatch facade hooks."""
-    _sync_artifact_facade_overrides()
+    _sync_facade_overrides()
     return _artifacts.wait_and_collect_one(*args, **kwargs)
+
+
+def process_completion(*args, **kwargs):
+    """Compatibility wrapper for completion processing through the facade."""
+    _sync_facade_overrides()
+    return _artifacts.process_completion(*args, **kwargs)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────

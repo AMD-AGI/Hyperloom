@@ -21,6 +21,14 @@ DEFAULT_ARTIFACT_PATTERNS = (
     "ci_report.md",
 )
 
+# Files required for a run to count as "delivered". The NFS fallback scans
+# these suffixes; a miss triggers the wekafs rescue path.
+_KEY_RESULT_SUFFIXES: tuple[str, ...] = (
+    "optimization_report.md",
+    "ci_metrics.json",
+    "session_breakdown.json",
+)
+
 
 def _is_wanted_artifact(path: str, all_artifacts: bool) -> bool:
     if all_artifacts:
