@@ -479,7 +479,7 @@ def parse_backends(backends: str) -> list[str]:
     """
     raw = str(backends or "").strip()
     # Defense-in-depth (Hyperloom#601): an upstream dispatch slip can hand us
-    # the repr() of a Python list (e.g. "['geak_v3']" or "['geak_v3', 'claude']")
+    # the repr() of a Python list (e.g. "['geak_v3']" or "['geak_v3', 'forge']")
     # instead of a bare comma-joined string. Recover the inner tokens so a
     # serialization mistake at the call site does not reject an otherwise-valid
     # backend with the self-contradictory "unsupported backend(s): ['geak_v3']".
@@ -496,7 +496,7 @@ def parse_backends(backends: str) -> list[str]:
     if invalid:
         raise ValueError(
             f"unsupported backend(s): {', '.join(invalid)} "
-            f"(allowed: {sorted(allowed)}; claude/codex/cursor were removed)"
+            f"(allowed: {sorted(allowed)})"
         )
     return parsed
 
@@ -506,7 +506,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 
     Policy: forge is the first-priority handoff (Kernel-Forge autonomous
     loop); GEAK follows as fallback when forge skips a candidate or misses
-    a KEEP. claude/codex/cursor were removed.
+    a KEEP.
 
     When no benchmark/test harness is available, GEAK still attempts
     the rewrite but ``geak_without_benchmark=True`` is flagged so
@@ -530,22 +530,15 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     """
     user_backends = parse_backends(args.backends)
     # Honor the coordinator's KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS env
-    # when no explicit --backends was passed: the single-kernel subprocess used to
-    # ignore it and fall back to the full default ladder, so a forge-only run
-    # (KERNEL_OPT_BACKEND_ORDER=forge) still fired geak/claude/codex. Mirror the
-    # handler's _backend_order precedence here so the subprocess agrees.
+    # when no explicit --backends was passed, mirroring the handler's
+    # _backend_order precedence so the single-kernel subprocess agrees.
     if not user_backends:
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
-            # Drop tokens parse_backends no longer accepts so a legacy env
-            # (e.g. KERNEL_OPT_BACKEND_ORDER=forge,geak,claude,codex) degrades to
-            # the surviving backends instead of raising ValueError. 'geak' is the
-            # whole-pipeline e2e delegate (coordinator-owned, not per-kernel);
-            # claude/codex/cursor are removed backend tokens. An empty remainder
-            # falls back to the default ladder.
-            _dropped = {"geak", "claude", "codex", "cursor"}
+            # 'geak' is the whole-pipeline e2e delegate (coordinator-owned, not
+            # per-kernel), so drop it here; parse_backends validates the rest.
             env_tokens = ",".join(
-                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() not in _dropped
+                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak"
             )
             if env_tokens:
                 user_backends = parse_backends(env_tokens)
@@ -1804,7 +1797,7 @@ def build_prompt(
         "  matching the kernel name (e.g. `aiter::gemm_a16w16` →\n"
         "  `aiter/ops/triton/gemm/basic/gemm_a16w16.py`) and optimize THAT Triton\n"
         "  kernel. This is how a 1.30x+ speedup is typically achieved on ASM-backed\n"
-        "  kernels (claude r19 pattern).\n"
+        "  kernels.\n"
         "\n"
         "How to do A/B benchmarking WITHOUT rebuilding aiter (which is forbidden):\n"
         "(option 1) TRITON path (preferred when available). If you took priority 0,\n"
@@ -1841,8 +1834,8 @@ def build_prompt(
         "    # then time both with torch.cuda.Event for speedup\n"
         "    ```\n"
         "  This is the ONLY way to A/B an ASM-backed C++ kernel without\n"
-        "  rebuilding aiter (which is forbidden). Codex tends to skip this\n"
-        "  and write `speedup: N/A` — DO NOT do that.\n"
+        "  rebuilding aiter (which is forbidden). Do NOT skip this\n"
+        "  and write `speedup: N/A`.\n"
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
@@ -2791,7 +2784,7 @@ def invoke_backend(
     gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (oob).
 
     Args:
-        backend (str): Backend name to run (e.g. ``geak``, ``claude``).
+        backend (str): Backend name to run (e.g. ``geak``, ``forge``).
         prompt_file (Path): File containing the rendered optimization prompt.
         source_file (str): Path to the kernel source to be rewritten.
         args (argparse.Namespace): Parsed CLI args carrying backend settings.
@@ -2803,7 +2796,7 @@ def invoke_backend(
             tails, gpu_ids, elapsed_s, cmd, and optional optimized_path /
             cli_workspace).
     """
-    # GEAK needs more wall-clock than claude/codex; full mode -> 180min (3h) matches
+    # GEAK needs a long wall-clock budget; full mode -> 180min (3h) matches
     # GEAK's own budget so the subprocess timeout doesn't kill it mid-round before it
     # finalizes a deployable artifact (which would also skip the combined-E2E A/B).
     if backend == "geak_v3":
@@ -3115,8 +3108,8 @@ def run_attempt(
                 report = Path(cli_workspace) / "optimization_report.md"
                 if report.exists():
                     backend_paths["partial_report"] = str(report)
-            # /home/user/ rescue: claude sometimes writes to ~/optimized_versions/ instead of the
-            # workspace; surface fresh files there when the workspace's optimized_versions/ is empty.
+            # /home/user/ rescue: the optimizer subprocess sometimes writes to ~/optimized_versions/
+            # instead of the workspace; surface fresh files there when the workspace's is empty.
             home_opt = Path("/home/user/optimized_versions")
             if (
                 cli_workspace

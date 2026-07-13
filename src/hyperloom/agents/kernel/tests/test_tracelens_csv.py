@@ -400,7 +400,7 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         is False
     )
     assert tla.is_reusable_native_kernel(candidate) is True
-    # Ladder converged to forge then GEAK; OOB backends (claude/codex/cursor) removed.
+    # Ladder converged to forge then GEAK.
     assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
 
 
