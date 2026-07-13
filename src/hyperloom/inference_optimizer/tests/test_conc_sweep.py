@@ -1093,11 +1093,18 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     assert reason == "conc_sweep_done", reason
     assert evidence.get("conc_sweep_status") == "succeeded"
 
-    # Skipped/failed also count as "done" (action reached a terminal decision).
-    for terminal in ("partial", "completed", "skipped", "failed"):
+    # Skipped also counts as "done" (action reached a terminal decision).
+    for terminal in ("partial", "completed", "skipped"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
         assert result is not None and result[0] == "conc_sweep_done", terminal
+
+    _State.last_conc_sweep = {"status": "failed"}
+    result = exit_normal_sweep(_State())
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_failed"
+    assert evidence.get("conc_sweep_status") == "failed"
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
