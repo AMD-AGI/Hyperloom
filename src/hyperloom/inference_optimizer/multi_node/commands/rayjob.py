@@ -29,7 +29,6 @@ from typing import Any
 from ...session.paths import mn_profile_trace_root
 from .._internal import safe_client, ray_dashboard, workload_spec
 from .._internal.log import info, warn
-from .._internal.rayjob_credentials import rayjob_credential_fanout
 
 import logging
 log = logging.getLogger(__name__)
@@ -40,29 +39,6 @@ def _mn_cli():
 
     return mn_cli
 
-
-def _state_file():
-    return _mn_cli()._state_file()
-
-
-def _load_state():
-    return _mn_cli()._load_state()
-
-
-def _save_state(state: dict[str, Any]) -> None:
-    _mn_cli()._save_state(state)
-
-
-def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
-    return _mn_cli()._parse_kv_list(values)
-
-
-def _short_poll(**kwargs):
-    return _mn_cli()._short_poll(**kwargs)
-
-
-def _poll_timeout_from_args(args: argparse.Namespace) -> int:
-    return _mn_cli()._poll_timeout_from_args(args)
 
 # SaFE read-after-write lag: GET /workloads/{id} may 404 briefly post-create.
 _SAFE_GET_WORKLOAD_404_GRACE_S = 30.0
@@ -86,7 +62,7 @@ def _checkpoint_create_rayjob_state(
         args (argparse.Namespace): Parsed ``create-rayjob`` args (supplies
             ``nodes`` / ``gpus_per_node`` / ``image``).
     """
-    prev = _load_state()
+    prev = _mn_cli()._load_state()
     old = (prev.get("rayjob_id") or "").strip()
     state: dict[str, Any] = dict(prev)
     if old and old != wid:
@@ -109,8 +85,8 @@ def _checkpoint_create_rayjob_state(
         state.setdefault("head_pod_ip", "")
         state.setdefault("ray_dashboard_url", "")
     state.setdefault("ray_address", "")
-    _save_state(state)
-    info(f"checkpointed rayjob_id={wid} to {_state_file()}")
+    _mn_cli()._save_state(state)
+    info(f"checkpointed rayjob_id={wid} to {_mn_cli()._state_file()}")
 
 def _write_rayjob_meta(
     *,
@@ -174,10 +150,6 @@ def ray_gcs_address(head_pod_ip: str) -> str:
     if not ip:
         return ""
     return f"{ip}:6379"
-
-def _credential_fanout() -> dict[str, str]:
-    """Backward-compat alias for :func:`rayjob_credential_fanout`."""
-    return rayjob_credential_fanout()
 
 def _is_safe_get_workload_404(exc: BaseException) -> bool:
     """Check whether an exception is a transient SaFE GET-workload 404.
@@ -304,8 +276,8 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         TransientFailure: If polling times out before the workload is
             Running.
     """
-    extra_env = _parse_kv_list(args.extra_env)
-    extra_labels = _parse_kv_list(args.extra_label)
+    extra_env = _mn_cli()._parse_kv_list(args.extra_env)
+    extra_labels = _mn_cli()._parse_kv_list(args.extra_label)
     pending_dashboard_token: str | None = None
 
     # ownerId: --owner-id > $WORKLOAD_ID (the sandbox workload, for SaFE GC
@@ -340,7 +312,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         # Idempotency guard: reuse a state ``rayjob_id`` that's still
         # non-terminal in SaFE (--recreate forces a fresh workload).
         wid: str | None = None
-        existing = _load_state()
+        existing = _mn_cli()._load_state()
         prior_wid = (existing.get("rayjob_id") or "").strip()
         if prior_wid and not getattr(args, "recreate", False):
             try:
@@ -367,7 +339,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
 
         if wid is None:
             pending_dashboard_token = secrets.token_urlsafe(32)
-            env = {**_credential_fanout(), **extra_env}
+            env = dict(extra_env)
             env["RAY_DASHBOARD_TOKEN"] = pending_dashboard_token
             body = workload_spec.build_rayjob_workload_body(
                 workspace=workspace,
@@ -415,13 +387,13 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
                 summary = f"phase={phase}"
                 return wl, summary
 
-            workload = _short_poll(
+            workload = _mn_cli()._short_poll(
                 label=f"workload {wid}",
                 fetch=_fetch,
                 is_ok=lambda w: w.get("phase") in _TERMINAL_OK_PHASES,
                 is_fail=lambda w: w.get("phase") in _TERMINAL_FAIL_PHASES,
                 interval_s=args.poll_interval,
-                timeout_s=_poll_timeout_from_args(args),
+                timeout_s=_mn_cli()._poll_timeout_from_args(args),
                 failure_diag=_summarize_workload_failure,
                 quiet_fetch_error_grace_s=_SAFE_GET_WORKLOAD_404_GRACE_S,
                 is_quiet_fetch_error=_is_safe_get_workload_404,
@@ -433,7 +405,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
                     "another sync. Re-run create-rayjob to refresh."
                 )
 
-    merged = dict(_load_state())
+    merged = dict(_mn_cli()._load_state())
     prior_token = str(merged.get("ray_dashboard_token") or "").strip()
     if pending_dashboard_token:
         prior_token = pending_dashboard_token
@@ -456,7 +428,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
             },
         }
     )
-    _save_state(merged)
-    info(f"state written to {_state_file()}")
+    _mn_cli()._save_state(merged)
+    info(f"state written to {_mn_cli()._state_file()}")
     print(json.dumps(merged, indent=2, sort_keys=True))
     return 0

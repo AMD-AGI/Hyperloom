@@ -15,11 +15,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import io as _common_io
-
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import kernel_row_matches  # noqa: E402
+from _io_utils import atomic_write_json, kernel_row_matches, safe_float  # noqa: E402
 
 sys.path.pop(0)
 
@@ -35,14 +33,6 @@ FP_METRICS = (
     "MFMA FLOPs (F8)",
 )
 SATURATION_PCT = 60.0
-
-
-def _safe_float(value: str) -> float | None:
-    """Parse a string to float, returning ``None`` on failure."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _bound_type(bound: str) -> str:
@@ -130,8 +120,8 @@ class RocprofRooflineAnalyzer:
                 parts = [p.strip() for p in line.split("│")]
                 if len(parts) < 6:
                     continue
-                value = _safe_float(parts[3])
-                peak = _safe_float(parts[5])
+                value = safe_float(parts[3], default=None)
+                peak = safe_float(parts[5], default=None)
                 if value is None or peak is None:
                     continue
                 rates[parts[2]] = (value, peak, parts[4])
@@ -160,7 +150,7 @@ class RocprofRooflineAnalyzer:
                 parts = [p.strip() for p in line.split("│")]
                 if len(parts) < 5:
                     continue
-                value = _safe_float(parts[3])
+                value = safe_float(parts[3], default=None)
                 if value is None:
                     continue
                 metric_name = parts[2]
@@ -181,14 +171,14 @@ class RocprofRooflineAnalyzer:
             if "│" in line and "17.1.5" in line:
                 parts = [p.strip() for p in line.split("│")]
                 if len(parts) >= 4:
-                    value = _safe_float(parts[3])
+                    value = safe_float(parts[3], default=None)
                     if value is not None:
                         return value
         for line in self.content.splitlines():
             if "│" in line and ("2.1.23" in line or "2.1.24" in line):
                 parts = [p.strip() for p in line.split("│")]
                 if len(parts) >= 6:
-                    value = _safe_float(parts[5])
+                    value = safe_float(parts[5], default=None)
                     if value is not None:
                         return value
         return None
@@ -387,19 +377,6 @@ def build_text_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write JSON atomically via a temp file and rename.
-
-    tree-reform.MD §7/P2.1: delegates to
-    :func:`hyperloom.common.io.atomic_write_json`.
-    """
-    _common_io.atomic_write_json(path, data, trailing_newline=True)
-
-
-# Shared row-vs-target-kernel matcher (see _io_utils.kernel_row_matches).
-_kernel_name_matches = kernel_row_matches
-
-
 def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") -> dict[str, Any]:
     """Project the matching result row into a ``kernel_roofline.json`` row."""
     rows = payload.get("results") if isinstance(payload, dict) else None
@@ -408,7 +385,7 @@ def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") ->
     first = None
     if target_kernel:
         for row in rows:
-            if isinstance(row, dict) and _kernel_name_matches(row, target_kernel):
+            if isinstance(row, dict) and kernel_row_matches(row, target_kernel):
                 first = row
                 break
         if first is None:
@@ -612,7 +589,7 @@ def enrich_kernel_roofline_sidecar(
                 "error": error or "unknown",
                 "results": [],
             }
-            _atomic_write_json(out_json, payload)
+            atomic_write_json(out_json, payload)
             out_txt.write_text(f"rocprof_roofline failed: {error}\n", encoding="utf-8")
             row["rocprof_roofline"] = {
                 "before_kernel_opt": {
@@ -635,7 +612,7 @@ def enrich_kernel_roofline_sidecar(
                 "rocprof_output_path": str(analyzer.output_path),
             }
         )
-        _atomic_write_json(out_json, payload)
+        atomic_write_json(out_json, payload)
         out_txt.write_text(analyzer.content + "\n" + build_text_report(payload), encoding="utf-8")
 
         row_payload = _project_payload_to_row(payload, target_kernel=target_kernel)
@@ -662,7 +639,7 @@ def enrich_kernel_roofline_sidecar(
 
     if summary["matched"]:
         sidecar["source"] = "tracelens_analysis+rocprof_roofline"
-    _atomic_write_json(sidecar_p, sidecar)
+    atomic_write_json(sidecar_p, sidecar)
     summary["status"] = "ok"
     return summary
 

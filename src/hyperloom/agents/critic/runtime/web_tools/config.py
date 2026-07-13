@@ -40,37 +40,6 @@ def _env(name: str, default: str = "") -> str:
     return val if val is not None else default
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Read a boolean environment variable.
-
-    Args:
-        name (str): Environment variable name.
-        default (bool): Value returned when the variable is unset.
-
-    Returns:
-        bool: True when the value is one of ``1/true/yes/on`` (case-
-        insensitive); otherwise False or ``default`` when unset.
-
-    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_bool`.
-    """
-    return env_bool(name, default)
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer environment variable.
-
-    Args:
-        name (str): Environment variable name.
-        default (int): Value returned when unset, blank, or unparseable.
-
-    Returns:
-        int: The parsed integer, or ``default``.
-
-    tree-reform.MD §7/P2.1: delegates to :func:`hyperloom.common.env.env_int`.
-    """
-    return env_int(name, default)
-
-
 def _parse_csv(raw: str) -> tuple[str, ...]:
     """Split a comma-separated string into trimmed, lowercased items.
 
@@ -148,31 +117,31 @@ class WebToolsConfig:
             if p in KNOWN_PROVIDERS and p not in {"disabled", provider}
         )
         return cls(
-            critic_web_tools_enabled=_env_bool("CRITIC_WEB_TOOLS_ENABLED", False),
-            critic_web_max_tool_turns=max(1, _env_int("CRITIC_WEB_MAX_TOOL_TURNS", 4)),
+            critic_web_tools_enabled=env_bool("CRITIC_WEB_TOOLS_ENABLED", False),
+            critic_web_max_tool_turns=max(1, env_int("CRITIC_WEB_MAX_TOOL_TURNS", 4)),
             search_provider=provider,
             search_fallback=fallback,
             search_domain_denylist=_parse_csv(_env("WEB_SEARCH_DOMAIN_DENYLIST", "")),
-            search_max_results_cap=max(1, _env_int("WEB_SEARCH_MAX_RESULTS_CAP", 10)),
+            search_max_results_cap=max(1, env_int("WEB_SEARCH_MAX_RESULTS_CAP", 10)),
             search_rate_limit_per_min=max(
                 1,
-                _env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
+                env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
             ),
             tavily_api_key=_env("TAVILY_API_KEY", ""),
             serper_api_key=_env("SERPER_API_KEY", ""),
             brave_api_key=_env("BRAVE_API_KEY", ""),
-            fetch_enabled=_env_bool("WEB_FETCH_ENABLED", False),
-            fetch_max_bytes=max(1024, _env_int("WEB_FETCH_MAX_BYTES", 10 * 1024 * 1024)),
+            fetch_enabled=env_bool("WEB_FETCH_ENABLED", False),
+            fetch_max_bytes=max(1024, env_int("WEB_FETCH_MAX_BYTES", 10 * 1024 * 1024)),
             fetch_max_output_chars=max(
                 1024,
-                _env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
+                env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
             ),
-            fetch_timeout_s=max(1, _env_int("WEB_FETCH_TIMEOUT_S", 60)),
+            fetch_timeout_s=max(1, env_int("WEB_FETCH_TIMEOUT_S", 60)),
             fetch_domain_denylist=_parse_csv(_env("WEB_FETCH_DOMAIN_DENYLIST", "")),
-            fetch_cache_ttl_s=max(0, _env_int("WEB_FETCH_CACHE_TTL_S", 15 * 60)),
+            fetch_cache_ttl_s=max(0, env_int("WEB_FETCH_CACHE_TTL_S", 15 * 60)),
             fetch_cache_max_entries=max(
                 1,
-                _env_int("WEB_FETCH_CACHE_MAX_ENTRIES", 256),
+                env_int("WEB_FETCH_CACHE_MAX_ENTRIES", 256),
             ),
         )
 
