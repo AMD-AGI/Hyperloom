@@ -10,12 +10,12 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from hyperloom.common.coerce import to_float as _coerce_float
+from hyperloom.common.jsonio import read_json, read_jsonl
 from hyperloom.common.timeutil import iso_z as _common_iso_z
 
 
@@ -35,13 +35,9 @@ def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
     """
     if path is None:
         return None
-    try:
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"failed to parse {path}: {exc!r}")
+    if not path.exists():
         return None
+    return read_json(path, default=None, on_error=lambda exc: warnings.append(f"failed to parse {path}: {exc!r}"))
 
 
 def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:
@@ -60,22 +56,12 @@ def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, A
     """
     if path is None or not path.exists():
         return []
-    out: list[dict[str, Any]] = []
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as exc:
-                warnings.append(f"malformed jsonl line in {path}: {exc!r}")
-                continue
-            if isinstance(entry, dict):
-                out.append(entry)
-    except OSError as exc:
-        warnings.append(f"failed to read {path}: {exc!r}")
-    return out
+
+    def _warn(exc: BaseException) -> None:
+        prefix = "failed to read" if isinstance(exc, OSError) else "malformed jsonl line in"
+        warnings.append(f"{prefix} {path}: {exc!r}")
+
+    return read_jsonl(path, require_dict=True, skip_malformed=True, on_error=_warn)
 
 
 def _to_float(value: Any) -> float | None:
