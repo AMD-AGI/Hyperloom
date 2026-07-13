@@ -472,7 +472,8 @@ def _format_grid_injection_hint(name: str) -> str | None:
         return (
             "GRID INPUT (v0.8 M3, REQUIRED): emit "
             "`delegate{action_name='explore', params={grid: [{name, "
-            "extra_args, extra_envs, provenance, kb_evidence?, "
+            "extra_args, extra_envs, remove_args?, unset_envs?, "
+            "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
@@ -491,7 +492,11 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "research_lane scales with the 2 x visible GPU ceiling). The "
             "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
-            "(args, envs) collapses to the same row."
+            "(args, envs, remove_args, unset_envs, args_mode) collapses "
+            "to the same row. Use remove_args / unset_envs to test whether "
+            "operator-pinned base flags or envs are harmful; use "
+            "args_mode='replace' only when the variant is intended to run "
+            "without inherited server args."
         )
     if name == "sweep":
         return (
@@ -720,10 +725,14 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   dead flag; `-0.3%` just needs a different value).",
         "4. **Mine flags** — when winners are empty, pull untested boolean",
         "   toggles from `discovered_flags.<framework>.backend_flags`.",
+        "5. **Ablate harmful base config** — when a user/base flag or env may",
+        "   be slowing the workload, emit a variant with `remove_args` and/or",
+        "   `unset_envs` instead of only adding more knobs.",
         "",
         "Variant identity is content-based: the executor fingerprints",
-        "`(sorted extra_server_args, sorted extra_envs)`, so renaming a",
-        "tested variant does NOT bypass dedup — change the actual args/envs.",
+        "`(sorted extra_server_args, sorted extra_envs, remove_args,",
+        "unset_envs, args_mode)`, so renaming a tested variant does NOT",
+        "bypass dedup — change the actual args/envs/removals.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
         "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",

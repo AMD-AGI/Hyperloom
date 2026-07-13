@@ -1298,9 +1298,24 @@ class ExplorePhase(PhaseHandler):
             args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
             envs_raw = p.get("extra_envs")
             envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
+            controls: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                raw = p.get(key)
+                if isinstance(raw, str):
+                    vals = [raw.strip()] if raw.strip() else []
+                elif isinstance(raw, (list, tuple, set)):
+                    vals = [str(v).strip() for v in raw if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    controls[key] = vals
+            mode = str(p.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                controls["args_mode"] = "replace"
             # Drop entries with neither a server-arg nor an env override —
-            # nothing for the restart to apply (e.g. research-only items).
-            if not args and not envs:
+            # nothing for the restart to apply (e.g. research-only items)
+            # unless the entry removes inherited args/envs.
+            if not args and not envs and not controls:
                 continue
             name = str(p.get("name") or "").strip() or (f"{domain or 'specialist'}-{task.task_id[:8]}-{i}")
             grid.append(
@@ -1308,6 +1323,7 @@ class ExplorePhase(PhaseHandler):
                     "name": name,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": f"specialist:{domain}" if domain else "specialist",
                     "note": str(p.get("reason") or "")[:200],
                 }
