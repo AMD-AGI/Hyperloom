@@ -20,6 +20,8 @@ subtrees:
     title: Quickstart — local mode
   - file: install/bare-metal.md
     title: Quickstart — bare metal
+  - file: install/slurm.md
+    title: Quickstart — Slurm
 
 - caption: Components
   entries:
@@ -68,8 +70,6 @@ subtrees:
     title: session_breakdown.json
   - file: reference/operations.md
     title: Operations
-  - file: reference/slurm/index.md
-    title: Run on Slurm
   - file: reference/upgrade.md
     title: Upgrade
 

@@ -22,6 +22,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Hosted UI quickstart </install/quickstart>`
     * :doc:`Local Mode quickstart </install/local-mode>`
     * :doc:`Bare-metal quickstart </install/bare-metal>`
+    * :doc:`Slurm quickstart </install/slurm>`
 
   .. grid-item-card:: Components
 
@@ -41,7 +42,6 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
     * :doc:`Troubleshooting </reference/troubleshooting>`
-    * :doc:`Run on Slurm </reference/slurm/index>`
 
 To contribute to the documentation, see `Contributing to Hyperloom <https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md>`_.
 
