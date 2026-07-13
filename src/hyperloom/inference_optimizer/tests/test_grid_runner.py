@@ -669,6 +669,41 @@ def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     assert cfg["benchmark"]["runner_type"] == "mi300x"
 
 
+def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = (
+        "--enable-prefix-caching --max-num-seqs 512 --attention-backend aiter"
+    )
+    cfg["benchmark"]["envs"]["SGLANG_ENABLE_FOO"] = "1"
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="--enable-bar --block-size 128",
+        variant=GridVariant(
+            "without_user_foo",
+            "--max-num-seqs 256",
+            {"SGLANG_KEEP": "1"},
+            remove_args=["--enable-prefix-caching", "--attention-backend"],
+            unset_envs=["SGLANG_ENABLE_FOO"],
+        ),
+        output_subdir=tmp_path / "without_user_foo",
+    )
+
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--enable-prefix-caching" not in args
+    assert "--attention-backend" not in args
+    assert "aiter" not in args
+    assert "--enable-bar" in args
+    assert "--block-size 128" in args
+    assert "--max-num-seqs 256" in args
+    assert envs["SGLANG_KEEP"] == "1"
+    assert "SGLANG_ENABLE_FOO" not in envs
+
+
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}

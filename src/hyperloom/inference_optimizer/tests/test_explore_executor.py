@@ -1394,3 +1394,25 @@ def test_grid_variants_from_payload_coerces_list_extra_args():
     assert "[" not in by_name["list_args"].extra_server_args
     assert by_name["str_args"].extra_server_args == "--block-size 64"
     assert by_name["tuple_server_args"].extra_server_args == "--distributed-executor-backend mp"
+
+
+def test_grid_variants_from_payload_carries_removal_controls():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    payload = [
+        {
+            "name": "without_cache",
+            "remove_args": "--enable-prefix-caching",
+            "unset_envs": ["SGLANG_ENABLE_FOO"],
+            "args_mode": "replace",
+            "extra_args": "--max-num-seqs 256",
+        }
+    ]
+
+    variant = _grid_variants_from_payload(payload)[0]
+    assert variant.remove_args == ["--enable-prefix-caching"]
+    assert variant.unset_envs == ["SGLANG_ENABLE_FOO"]
+    assert variant.args_mode == "replace"
+    assert variant.extra_server_args == "--max-num-seqs 256"
