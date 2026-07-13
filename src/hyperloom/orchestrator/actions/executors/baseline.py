@@ -1324,10 +1324,14 @@ class BaselineExecutor:
         # Fix: run TWICE against the SAME persistent server via Magpie's
         # ``server_lifecycle`` reuse — round 1 boots + pays cold costs,
         # round 2 re-attaches to the hot server and is the clean baseline.
-        # Eligibility (else single round): double-run env enabled,
+        # Eligibility (else single round): double-run explicitly requested,
         # single-node, benchmark script is a Magpie built-in, profiler off.
         lifecycle = self._resolve_lifecycle_params(materialized_config_path)
-        double_run = self._double_run_enabled() and lifecycle["eligible"]
+        double_run_requested = self._double_run_enabled(
+            params=params,
+            ctx_extra=extra,
+        )
+        double_run = double_run_requested and lifecycle["eligible"]
 
         common = {
             "timeout_sec": timeout_sec,
@@ -1341,7 +1345,7 @@ class BaselineExecutor:
         }
 
         if not double_run:
-            if self._double_run_enabled() and not lifecycle["eligible"]:
+            if double_run_requested and not lifecycle["eligible"]:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
@@ -1467,22 +1471,44 @@ class BaselineExecutor:
             if applied_patches and _pre_patch_sha:
                 _revert_patches(patch_target, _pre_patch_sha)
 
-    @staticmethod
-    def _double_run_enabled() -> bool:
+    def _double_run_enabled(
+        self,
+        *,
+        params: dict[str, Any] | None = None,
+        ctx_extra: dict[str, Any] | None = None,
+    ) -> bool:
         """Whether baseline double-run is enabled.
 
-        Controlled by ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN`` and the CLI
-        ``--baseline-double-run`` flag, defaulting off so baseline pays the cold
-        start only once unless the operator explicitly requests cold+hot
-        measurement.
+        Controlled by the explicit ``--baseline-double-run`` CLI flag, which is
+        persisted into SharedState on fresh launches. Internal callers may pass
+        ``task.params["baseline_double_run"]`` for focused tests or debug runs.
+        Environment variables intentionally do not participate so stale shell
+        state cannot silently turn on the expensive double-run path.
 
         Returns:
-            ``True`` when the env var is set to a truthy value.
+            ``True`` only when the task params or session state opt in.
         """
-        return os.environ.get(
-            "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN",
-            "0",
-        ).strip().lower() in ("1", "true", "yes", "on")
+        params = params or {}
+        if "baseline_double_run" in params:
+            return _is_truthy(params.get("baseline_double_run"))
+
+        extra = ctx_extra or {}
+        state = extra.get("shared_state") or self.shared_state
+        if state is not None:
+            return bool(getattr(state, "baseline_double_run", False))
+
+        try:
+            from ...state.shared_state import SharedState
+
+            session_dir = Path(str(extra.get("session_dir") or self.session_dir))
+            state = SharedState.load_or_init(session_dir)
+            return bool(getattr(state, "baseline_double_run", False))
+        except Exception:  # noqa: BLE001 - keep baseline fallback single-round.
+            log.debug(
+                "baseline_executor: could not resolve baseline_double_run from session state",
+                exc_info=True,
+            )
+            return False
 
     def _resolve_lifecycle_params(
         self,

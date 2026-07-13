@@ -450,6 +450,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Opt-in baseline cold+hot double-run. Controlled by the explicit
+    # ``--baseline-double-run`` CLI flag on fresh launches; environment
+    # variables must not silently flip this expensive path.
+    baseline_double_run: bool = False
     # Discarded first-round tput from the baseline cold-start double-run.
     # Kept only for audit/debugging; conclusion fields and gain math use the
     # hot measure-round value in ``baseline_tput``.

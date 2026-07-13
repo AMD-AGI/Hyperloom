@@ -113,24 +113,29 @@ def _cold_then_hot_fake_run(captured: list | None = None):
     return fake_run, state
 
 
-def _executor(base: Path, tmp_path: Path) -> BaselineExecutor:
+def _executor(
+    base: Path,
+    tmp_path: Path,
+    *,
+    baseline_double_run: bool = False,
+) -> BaselineExecutor:
     return BaselineExecutor(
         magpie_python="/opt/venv/bin/python",
         default_config_path=base,
         session_dir=tmp_path,
+        shared_state=SimpleNamespace(baseline_double_run=baseline_double_run),
     )
 
 
 def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
     """The opt-in double-run reports the HOT second-round throughput."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -190,6 +195,35 @@ def test_baseline_single_round_by_default(tmp_path, monkeypatch):
     assert state["calls"] == 1
     assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
     assert "warmup_round_tput" not in result
+    assert "server_lifecycle" not in captured[0]["benchmark"]
+
+
+def test_baseline_env_var_no_longer_enables_double_run(tmp_path, monkeypatch):
+    """The expensive double-run is CLI/state controlled, not environment controlled."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 1
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
@@ -301,7 +335,6 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
 
 def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
     """A failed warmup round returns immediately and does NOT run a second round."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -311,7 +344,7 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
         state["calls"] += 1
         return subprocess.CompletedProcess(cmd, 1, "", "boom: server crashed")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -794,14 +827,13 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
 
 def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
     """Atom baseline engages the lifecycle double-run like vllm/sglang."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="atom")
     output_dir = tmp_path / "ws"
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -825,7 +857,6 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
 
 def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
     """The overtime-kill anchor must reflect round 1's FULL run, not round 2's reuse time."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -844,7 +875,7 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
         _fake_workspace(slot, tput=tput)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -874,7 +905,6 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     metadata), pre-start cleanup must (a) unlink stale pid/json without
     sending signals to potentially-recycled PIDs, and (b) invoke
     _kill_stale_servers() to reap the zombie listener."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -888,7 +918,7 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -929,7 +959,6 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
 def test_pre_start_cleanup_no_kill_when_port_free(tmp_path, monkeypatch):
     """When the port is NOT occupied (no zombie), _kill_stale_servers must
     NOT fire — avoids killing unrelated servers sharing the pod."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -943,7 +972,7 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path, monkeypatch):
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -984,7 +1013,6 @@ def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path, monkeypatch):
     server. File preservation is covered by the direct pre-start test below;
     this full double-run path later removes files in final teardown.
     """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -999,7 +1027,7 @@ def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path, monkeypatch):
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -1072,7 +1100,6 @@ def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
 def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
     """The pre-start cleanup is best-effort: a raising _kill_stale_servers()
     must not abort the run — the double-run proceeds and still succeeds."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1082,7 +1109,7 @@ def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypat
 
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),

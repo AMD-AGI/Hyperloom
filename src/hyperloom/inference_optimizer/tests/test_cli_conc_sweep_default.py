@@ -66,22 +66,22 @@ def test_cli_default_disables_baseline_double_run(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.parametrize("val", ["1", "true", "yes", "on", "TRUE", "On"])
-def test_cli_env_var_enables_baseline_double_run(
+def test_cli_ignores_env_var_for_baseline_double_run(
     monkeypatch: pytest.MonkeyPatch,
     val: str,
 ):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", val)
     ns = _parse()
-    assert ns.baseline_double_run is True
+    assert ns.baseline_double_run is False
 
 
-def test_cli_baseline_double_run_flag_overrides_false_env(monkeypatch: pytest.MonkeyPatch):
+def test_cli_baseline_double_run_flag_enables(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     ns = _parse("--baseline-double-run")
     assert ns.baseline_double_run is True
 
 
-def test_cli_no_baseline_double_run_flag_overrides_true_env(monkeypatch: pytest.MonkeyPatch):
+def test_cli_no_baseline_double_run_flag_stays_false(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     ns = _parse("--no-baseline-double-run")
     assert ns.baseline_double_run is False

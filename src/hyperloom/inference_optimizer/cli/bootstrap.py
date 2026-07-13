@@ -266,6 +266,7 @@ def _seed_shared_state(
         ),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
+        baseline_double_run=bool(getattr(args, "baseline_double_run", False)),
         cumulative_gain=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
