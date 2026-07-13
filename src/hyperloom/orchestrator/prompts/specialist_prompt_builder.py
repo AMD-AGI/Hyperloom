@@ -1752,6 +1752,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "name": "<unique-in-round>",
                             "extra_args": "--example-flag value",
                             "extra_envs": {"EXAMPLE_ENV": "1"},
+                            "remove_args": ["--harmful-base-flag"],
+                            "unset_envs": ["HARMFUL_BASE_ENV"],
+                            "args_mode": "append",
                             "reason": "why this might help the gap",
                             "atomic": False,
                             "kb_evidence": [],
@@ -1774,7 +1777,16 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Field contract:",
         "",
-        "- ``proposal_set`` items reuse the explore variant schema.",
+        (
+            "- ``proposal_set`` items reuse the explore variant schema: "
+            "``extra_args`` / ``extra_envs`` add or override knobs, "
+            "``remove_args`` removes inherited server flags before appending, "
+            "``unset_envs`` removes inherited env vars before applying "
+            "``extra_envs``, and ``args_mode='replace'`` runs without "
+            "inherited server args. Use removal fields when a user/base "
+            "knob may be harmful; do not simulate deletion by adding an "
+            "unrelated flag."
+        ),
         (
             "- ``atomic`` (bool, default false): set ``true`` when this "
             "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
