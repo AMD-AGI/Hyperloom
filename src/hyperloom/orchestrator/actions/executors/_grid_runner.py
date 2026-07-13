@@ -34,6 +34,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
 )
+from .benchmark_backend import build_benchmark_command
 
 # Cohesive clusters live in sibling modules; re-exported here so the module
 # namespace + monkeypatch surface is intact.
@@ -833,19 +834,11 @@ def _run_magpie(
     # ``harvest_leaked_artifacts`` covers wrappers that ignore these vars.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-    cmd = [
-        magpie_python,
-        "-m",
-        "Magpie",
-        "-v",
-        "benchmark",
-        "--benchmark-config",
-        str(config_path),
-        "--output-dir",
-        str(output_dir),
-        "--run-mode",
-        "local",
-    ]
+    cmd = build_benchmark_command(
+        python_exe=magpie_python,
+        config_path=config_path,
+        output_dir=output_dir,
+    )
     # run_with_session_kill launches Magpie in its own POSIX session and tears
     # down the whole descendant tree on every exit path. See
     # ``_subprocess_kill.py``.
