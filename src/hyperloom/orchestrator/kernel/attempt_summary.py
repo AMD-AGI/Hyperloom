@@ -179,8 +179,8 @@ FIELD_GLOSSARY: dict[str, str] = {
     "bound_type": ("Whether the kernel is limited by memory bandwidth (memory-bound) or compute (compute-bound)."),
     "compile_passed": (
         "True only if at least one backend in the ladder produced a "
-        "usable patch. False means the whole geak->claude->codex "
-        "ladder failed to produce any compiled artifact."
+        "usable patch. False means the whole backend ladder "
+        "failed to produce any compiled artifact."
     ),
     "backend_ladder": (
         "Per-backend outcome of the kernel-agent dispatch. "
@@ -948,7 +948,7 @@ def _build_top_takeaways(
     if ladder_all >= 1:
         out.append(
             f"Dominant failure mode: kernel-agent backend ladder "
-            f"(geak/claude/codex) failed completely for {ladder_all} "
+            f"(geak/forge) failed completely for {ladder_all} "
             "kernel(s) — no backend produced a usable patch. Inspect "
             "kernel-agent toolchain (build env, backend availability)."
         )
