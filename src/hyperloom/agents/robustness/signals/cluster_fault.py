@@ -96,8 +96,8 @@ def _fault_to_symptom(
     name = str(entry.get("name") or "")
     monitor_id = str(entry.get("monitor_id") or "")
     node = str(entry.get("node_name") or "")
-    affected_workloads = _coerce_int(entry.get("affected_workload_count"))
-    affected_gpus = _coerce_int(entry.get("affected_gpu_count"))
+    affected_workloads = to_int(entry.get("affected_workload_count"), default=0)
+    affected_gpus = to_int(entry.get("affected_gpu_count"), default=0)
     auto_repair = bool(entry.get("auto_repair"))
 
     severity = _severity_for(
@@ -178,18 +178,6 @@ def _suggestion(phase: str, severity: SymptomSeverity, auto_repair: bool) -> str
     if auto_repair:
         return "auto-repair in progress; observe and re-evaluate next tick"
     return "monitor the fault; alert orchestration if it persists"
-
-
-def _coerce_int(raw: Any) -> int:
-    """Coerce a raw value to a non-bool int, defaulting to 0.
-
-    Args:
-        raw (Any): The raw value (int, float, numeric string, or other).
-
-    Returns:
-        int: The integer value, or 0 when it is a bool or cannot be parsed.
-    """
-    return to_int(raw, default=0)
 
 
 __all__ = ["ClusterFaultConfig", "evaluate_cluster_fault_signals"]

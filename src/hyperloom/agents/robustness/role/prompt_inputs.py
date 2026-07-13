@@ -324,27 +324,27 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         if key == "session_id":
             snapshot.session_id = "" if head == "(unset)" else head
         elif key == "baseline_tput":
-            snapshot.baseline_tput = _coerce_float(head)
+            snapshot.baseline_tput = to_float(head, default=0.0)
         elif key == "cumulative_gain":
-            snapshot.cumulative_gain = _coerce_float(head.rstrip("%"))
+            snapshot.cumulative_gain = to_float(head.rstrip("%"), default=0.0)
         elif key == "cumulative_gain_validated":
             # Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``; take the leading number.
             head_clean = head.rstrip("%")
             for sep in (" ", "%"):
                 head_clean = head_clean.split(sep, 1)[0]
-            snapshot.cumulative_gain_validated = _coerce_float(head_clean)
+            snapshot.cumulative_gain_validated = to_float(head_clean, default=0.0)
         elif key == "crash_count":
-            snapshot.crash_count = _coerce_int(head)
+            snapshot.crash_count = to_int(head, default=0)
         elif key == "current_action":
             snapshot.current_action = "" if head == "(idle)" else head
         elif key == "tick":
-            snapshot.tick = _coerce_int(head)
+            snapshot.tick = to_int(head, default=0)
         elif key == "stop_reason":
             snapshot.stop_reason = "" if head == "(none)" else head
         elif key == "optimization_stack":
             snapshot.optimization_stack_size = _count_optimization_stack(head)
         elif key == "kernel_opt_attempts_count":
-            snapshot.kernel_opt_attempts_count = _coerce_int(head)
+            snapshot.kernel_opt_attempts_count = to_int(head, default=0)
         elif key == "has_keep_pending_integrate":
             snapshot.has_keep_pending_integrate = head.lower() == "true"
         elif key in _EXPLORE_FAMILY_KEYS:
@@ -397,9 +397,9 @@ def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
         match = _TIME_BUDGET_LINE_RE.match(raw)
         if not match:
             continue
-        snapshot.elapsed_minutes = _coerce_float(match.group("elapsed"))
-        snapshot.remaining_minutes = _coerce_float(match.group("remaining"))
-        snapshot.budget_minutes = _coerce_float(match.group("budget"))
+        snapshot.elapsed_minutes = to_float(match.group("elapsed"), default=0.0)
+        snapshot.remaining_minutes = to_float(match.group("remaining"), default=0.0)
+        snapshot.budget_minutes = to_float(match.group("budget"), default=0.0)
         snapshot.closing_phase = match.group("closing") == "True"
         return
 
@@ -438,16 +438,6 @@ def _split_double_space(value: str) -> str:
         The value trimmed at the first double-space boundary.
     """
     return value.split("  ", 1)[0].strip()
-
-
-def _coerce_float(value: str) -> float:
-    """Parse a string into a float, defaulting to ``0.0`` on failure."""
-    return to_float(value, default=0.0)
-
-
-def _coerce_int(value: str) -> int:
-    """Parse a string into an int, defaulting to ``0`` on failure."""
-    return to_int(value, default=0)
 
 
 # ---------------------------------------------------------------------------

@@ -113,7 +113,7 @@ def _collect_last_seen(
     for item in inbox:
         if item.from_agent not in _TRACKED_AGENTS:
             continue
-        ts = _coerce_unix(item.payload.get("ts") if isinstance(item.payload, dict) else None)
+        ts = to_unix(item.payload.get("ts") if isinstance(item.payload, dict) else None)
         if ts is None:
             continue
         prev = last.get(item.from_agent)
@@ -124,7 +124,7 @@ def _collect_last_seen(
         agent = str(ev.get("agent", "")).strip()
         if agent not in _TRACKED_AGENTS:
             continue
-        ts = _coerce_unix(ev.get("ts") or ev.get("timestamp"))
+        ts = to_unix(ev.get("ts") or ev.get("timestamp"))
         if ts is None:
             continue
         prev = last.get(agent)
@@ -132,23 +132,6 @@ def _collect_last_seen(
             last[agent] = ts
 
     return last
-
-
-def _coerce_unix(value: Any) -> float | None:
-    """Coerce a timestamp value to unix seconds.
-
-    Accepts numeric epoch seconds or an ISO-8601 string (``Z`` suffix
-    tolerated), falling back to parsing the string as a float. Bools are
-    rejected. Delegates to :func:`hyperloom.common.coerce.to_unix`.
-
-    Args:
-        value (Any): The raw timestamp value.
-
-    Returns:
-        float | None: Unix seconds, or ``None`` when the value cannot be
-            interpreted as a timestamp.
-    """
-    return to_unix(value)
 
 
 __all__ = ["StallConfig", "evaluate_stall_signals"]

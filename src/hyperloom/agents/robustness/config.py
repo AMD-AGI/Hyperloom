@@ -304,12 +304,12 @@ class Config:
         server_url = await _probe_robustness_server()
         llm_base_url, llm_api_key = _discover_llm_credentials()
         workload_uid = _discover_workload_uid()
-        disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
-        enable_cluster_pod_metrics = _env_bool(
+        disable_local_probe = env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
+        enable_cluster_pod_metrics = env_bool(
             "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
             False,
         )
-        nodes = _env_int("ROBUSTNESS_NODES", 1)
+        nodes = env_int("ROBUSTNESS_NODES", 1)
 
         config = cls(
             session_dir=session_dir,
@@ -438,35 +438,3 @@ def _discover_workload_uid() -> str:
     return ""
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Read a boolean configuration value from the environment.
-
-    Args:
-        name: Name of the environment variable to read.
-        default: Value to return when the variable is unset.
-
-    Returns:
-        ``True`` when the variable is set to one of ``1``, ``true``, ``yes``,
-        or ``on`` (case-insensitive); ``False`` for any other set value; and
-        ``default`` when the variable is unset.
-
-    Delegates to :func:`hyperloom.common.env.env_bool`.
-    """
-    return env_bool(name, default)
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer configuration value from the environment.
-
-    Args:
-        name: Name of the environment variable to read.
-        default: Value to return when the variable is unset, empty, or not a
-            valid integer.
-
-    Returns:
-        The parsed integer, or ``default`` when the variable is missing or
-        cannot be parsed.
-
-    Delegates to :func:`hyperloom.common.env.env_int`.
-    """
-    return env_int(name, default)
