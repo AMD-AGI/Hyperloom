@@ -18,6 +18,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
@@ -107,19 +108,6 @@ _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "ExitPlanMode",
     "SlashCommand",
 )
-
-_CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_CUSTOM_HEADERS",
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_CUSTOM_HEADERS",
-    "SAFE_API_KEY",
-    "LLM_GATEWAY_KEY",
-)
-
 
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
@@ -607,30 +595,7 @@ class ClaudeBackend:
         Anthropic/gateway env, pass that env to the SDK subprocess and disable
         settings sources so the run is hermetic.
         """
-        if not any((os.environ.get(key) or "").strip() for key in _CLAUDE_GATEWAY_SIGNAL_KEYS):
-            return
-
-        child_env = dict(os.environ)
-        fallback_key = (
-            child_env.get("ANTHROPIC_AUTH_TOKEN")
-            or child_env.get("ANTHROPIC_API_KEY")
-            or child_env.get("OPENAI_API_KEY")
-            or child_env.get("SAFE_API_KEY")
-            or child_env.get("LLM_GATEWAY_KEY")
-            or ""
-        )
-        if fallback_key:
-            child_env.setdefault("ANTHROPIC_API_KEY", fallback_key)
-            child_env.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
-        if "ANTHROPIC_CUSTOM_HEADERS" not in child_env and child_env.get("OPENAI_CUSTOM_HEADERS"):
-            child_env["ANTHROPIC_CUSTOM_HEADERS"] = child_env["OPENAI_CUSTOM_HEADERS"]
-        if self.model:
-            child_env.setdefault("ANTHROPIC_MODEL", self.model)
-            child_env.setdefault("ANTHROPIC_SMALL_FAST_MODEL", self.model)
-        # Keep the subprocess environment compact enough for debugging while
-        # preserving PATH/HOME/PYTHONPATH and all non-secret run metadata.
-        kwargs["env"] = child_env
-        kwargs["setting_sources"] = []
+        kwargs.update(claude_sdk_env_options(model=self.model))
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
         """Build options, dropping ``resume`` if the SDK can't accept it.

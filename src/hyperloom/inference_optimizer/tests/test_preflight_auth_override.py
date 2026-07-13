@@ -225,11 +225,90 @@ def test_preflight_anthropic_only_backfills_geak_aliases(
 
     resolved = cli._preflight()
 
-    # OpenAI/Codex side reuses the Anthropic URL when no OpenAI URL is set.
-    assert resolved == ("https://api.anthropic.com", "https://api.anthropic.com")
+    # Official Anthropic is not OpenAI-compatible; only the Anthropic side is resolved.
+    assert resolved == ("https://api.anthropic.com", "")
     for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         assert cli.os.environ[name] == "https://api.anthropic.com"
     assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
+
+
+def test_preflight_official_anthropic_key_only_uses_default_endpoint(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+
+    resolved = cli._preflight()
+
+    assert resolved == ("https://api.anthropic.com", "")
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert "OPENAI_BASE_URL" not in cli.os.environ
+    config_text = (tmp_path / ".claude" / "config.json").read_text(encoding="utf-8")
+    assert '"primaryApiKey": "sk-ant-user"' in config_text
+    assert '"customApiUrl": "https://api.anthropic.com"' in config_text
+
+
+def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+
+    def _stale_kernel_env_loader():
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+        monkeypatch.setenv("SAFE_API_KEY", "old-gateway-key")
+        monkeypatch.setenv("LLM_API_BASE", "https://llm-api.amd.com/Unified/v1")
+
+    monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
+
+    resolved = cli._preflight()
+
+    assert resolved == ("https://api.anthropic.com", "")
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert "OPENAI_BASE_URL" not in cli.os.environ
+    assert "OPENAI_API_KEY" not in cli.os.environ
+    assert "SAFE_API_KEY" not in cli.os.environ
+    assert cli.os.environ["LLM_API_BASE"] == "https://api.anthropic.com"
+
+
+def test_preflight_official_openai_key_only_uses_default_endpoint(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
+
+    resolved = cli._preflight()
+
+    assert resolved == ("", "https://api.openai.com/v1")
+    assert "ANTHROPIC_BASE_URL" not in cli.os.environ
+    assert cli.os.environ["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+
+
+def test_preflight_both_official_keys_without_urls_uses_default_endpoints(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
+
+    resolved = cli._preflight()
+
+    assert resolved == ("https://api.anthropic.com", "https://api.openai.com/v1")
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert cli.os.environ["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
 
 
 def test_preflight_preserves_operator_geak_tunnel_url(
@@ -1002,6 +1081,20 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "unreachable" in out
+
+
+def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    def _no_probe(**kw):
+        raise AssertionError("Anthropic-only fallback does not use CodexBackend")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    args = _make_args(codex_model="claude-sonnet-4-5-20250929", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://api.anthropic.com", ""))
+
+    assert capsys.readouterr().out == ""
 
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):

@@ -46,6 +46,44 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
+_PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_CUSTOM_HEADERS",
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+    "GEAK_BASE_URL",
+    "LLM_API_BASE",
+)
+
+
+def _provider_only_mode_before_fallback() -> str:
+    """Detect explicit single-provider intent before installer env fallback runs."""
+    has_anthropic = bool(
+        os.environ.get("ANTHROPIC_BASE_URL")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+    has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
+    has_gateway = bool(os.environ.get("SAFE_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
+    if has_anthropic and not has_openai and not has_gateway:
+        return "anthropic"
+    if has_openai and not has_anthropic and not has_gateway:
+        return "openai"
+    return ""
+
+
+def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
+    """Undo stale cross-provider credentials loaded from installer env fallback."""
+    if provider_mode != "anthropic":
+        return
+    for key in _PROVIDER_FALLBACK_KEYS:
+        original = snapshot.get(key)
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+
 # /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 
@@ -679,8 +717,11 @@ def _preflight(
     from . import _load_dotenv_fallback as _load_dotenv_fallback_current
     from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
 
+    provider_mode = _provider_only_mode_before_fallback()
+    provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
     _load_dotenv_fallback_current()
     _load_kernel_agent_env_fallback_current()
+    _restore_provider_only_mode(provider_mode, provider_snapshot)
 
     # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.
     _validate_credentials()

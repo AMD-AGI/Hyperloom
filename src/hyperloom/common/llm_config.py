@@ -1,12 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""LLM gateway environment resolution shared by OpenAI-compatible callers."""
+"""LLM gateway environment resolution shared by LLM SDK callers."""
 
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
+from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -30,6 +31,19 @@ class OpenAIClientConfig:
         if self.default_headers:
             kwargs["default_headers"] = dict(self.default_headers)
         return kwargs
+
+
+CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_CUSTOM_HEADERS",
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+)
 
 
 def parse_custom_headers(raw: str | None) -> dict[str, str]:
@@ -140,6 +154,42 @@ def openai_client_kwargs(
     return resolve_openai_client_config(api_key_env=api_key_env, base_url_env=base_url_env, env=env).as_kwargs()
 
 
+def claude_sdk_env_options(
+    *,
+    model: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Return Claude SDK options that isolate a run from global Claude config.
+
+    Claude Code and ``claude_agent_sdk`` can read ``~/.claude/settings.json``.
+    Hyperloom runs, however, may intentionally point at a per-run provider or
+    gateway. When any LLM-provider signal is present in the current environment,
+    pass an explicit child environment and disable settings sources so global
+    developer-machine configuration cannot override the run contract.
+    """
+    source = dict(env if env is not None else os.environ)
+    if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
+        return {}
+
+    fallback_key = (
+        source.get("ANTHROPIC_AUTH_TOKEN")
+        or source.get("ANTHROPIC_API_KEY")
+        or source.get("OPENAI_API_KEY")
+        or source.get("SAFE_API_KEY")
+        or source.get("LLM_GATEWAY_KEY")
+        or ""
+    )
+    if fallback_key:
+        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
+        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    if "ANTHROPIC_CUSTOM_HEADERS" not in source and source.get("OPENAI_CUSTOM_HEADERS"):
+        source["ANTHROPIC_CUSTOM_HEADERS"] = source["OPENAI_CUSTOM_HEADERS"]
+    if model:
+        source.setdefault("ANTHROPIC_MODEL", model)
+        source.setdefault("ANTHROPIC_SMALL_FAST_MODEL", model)
+    return {"env": source, "setting_sources": []}
+
+
 def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) -> bool:
     if any(name.lower() == "ocp-apim-subscription-key" for name in headers):
         return False
@@ -149,8 +199,10 @@ def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) 
 
 
 __all__ = [
+    "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
+    "claude_sdk_env_options",
     "derive_openai_base_url",
     "openai_client_kwargs",
     "parse_custom_headers",

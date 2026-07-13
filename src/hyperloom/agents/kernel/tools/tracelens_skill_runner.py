@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from hyperloom.common.llm_config import claude_sdk_env_options
+
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _io_utils import safe_float  # noqa: E402
@@ -584,6 +586,7 @@ async def run_tracelens_skill(
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)
+    kwargs.update(claude_sdk_env_options(model=resolved_model))
 
     try:
         options = sdk_options_cls(**kwargs)
