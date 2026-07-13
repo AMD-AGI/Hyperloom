@@ -25,9 +25,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-    # Keep these executor tests single-round so the materialized config is the
-    # one Magpie sees (no warmup/measure split).
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
 
 
 def _write_yaml(path: Path) -> None:

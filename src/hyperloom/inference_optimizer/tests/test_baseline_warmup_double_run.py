@@ -23,6 +23,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
 )
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture(autouse=True)
@@ -225,6 +226,23 @@ def test_baseline_env_var_no_longer_enables_double_run(tmp_path, monkeypatch):
     assert result["status"] == "succeeded"
     assert state["calls"] == 1
     assert "server_lifecycle" not in captured[0]["benchmark"]
+
+
+def test_baseline_double_run_loads_persisted_session_state(tmp_path):
+    """A fresh executor process can recover the launch flag from SharedState."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_double_run = True
+    state.save(session_dir)
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        session_dir=session_dir,
+        shared_state=None,
+    )
+
+    assert executor._double_run_enabled() is True
 
 
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
