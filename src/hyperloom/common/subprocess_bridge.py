@@ -12,25 +12,14 @@ Coordinator or the SKILL harness) over a subprocess JSON bridge:
   subclassed ~12 times there — the subclasses are untouched by this move).
 * ``hyperloom.agents.robustness.runtime.cli`` (``_read_json`` / ``_emit_json`` /
   ``RuntimeAdapterError``, all three in one file).
-* ``hyperloom.agents.framework.runtime.cli`` (``RuntimeAdapterError`` only —
-  see "Sites intentionally NOT delegated here" below for why its
-  ``_emit_json`` and ``_read_json``-shaped helpers stay local).
+* ``hyperloom.agents.framework.runtime.cli`` (``RuntimeAdapterError`` plus
+  ``_emit_json`` via :func:`emit_json` with ``make_parents=True``).
 
 Zero first-party imports (stdlib only) so any package may depend on it
 without creating an import cycle (anti-cycle rule: no first-party imports).
 
 Sites intentionally NOT delegated here (kept local by design):
 
-* ``agents/framework/runtime/cli._emit_json`` — byte-for-byte identical to
-  :func:`emit_json` below *except* it additionally does
-  ``Path(out).parent.mkdir(parents=True, exist_ok=True)`` before writing the
-  ``--out`` file. Critic's and Robustness's ``_emit_json`` never create the
-  parent directory (a missing parent raises ``FileNotFoundError``); folding
-  the ``mkdir`` into the shared implementation would silently change their
-  behaviour, and dropping it from framework's copy would change *its*
-  behaviour (its CLI is invoked with ``--out`` paths under a fresh work dir
-  that may not exist yet). This divergence is real and is left in place
-  rather than force-merged.
 * ``agents/framework/runtime/cli._load_request`` / ``_read_json_request`` —
   these parse a JSON request file like :func:`read_json` but additionally
   enforce "file must exist" / "must decode" / "top-level must be an object"
