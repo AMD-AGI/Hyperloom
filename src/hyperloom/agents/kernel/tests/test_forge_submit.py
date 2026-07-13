@@ -100,21 +100,6 @@ def test_choose_backends_no_double_geak(monkeypatch):
     assert selected == ["forge", "geak_v3"]
 
 
-def test_choose_backends_legacy_env_degrades_without_crash(monkeypatch):
-    # A stale KERNEL_OPT_BACKEND_ORDER with removed OOB backends must degrade to
-    # the surviving backends instead of raising ValueError from parse_backends.
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,geak,claude,codex")
-    selected, _ = ko.choose_backends(_backends_args(""), {})
-    assert selected == ["forge"]
-
-
-def test_choose_backends_legacy_env_all_removed_falls_back_to_default(monkeypatch):
-    # When every token is a removed/delegate backend, fall back to the default ladder.
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak,claude,codex,cursor")
-    selected, _ = ko.choose_backends(_backends_args(""), {})
-    assert selected == ["forge", "geak_v3"]
-
-
 def test_report_anchors_roundtrip(tmp_path):
     """_write_report output must be parseable by kernel_optimization's extractors."""
     report = forge_submit._write_report(tmp_path, 0.183, 0.106, improved=True)

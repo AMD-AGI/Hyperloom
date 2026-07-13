@@ -217,7 +217,7 @@ def test_no_usage_block_is_silent_noop(tmp_path: Path) -> None:
 
 
 def test_non_traced_backend_is_skipped(tmp_path: Path) -> None:
-    """claude/codex/cursor account spend elsewhere; they are not mined here."""
+    """Backends outside the traced set are not mined for token usage here."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
     log = tmp_path / "claude-1_stdout.log"
