@@ -117,11 +117,7 @@ source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 - `SAFE_API_KEY` — your key from the [LLM Gateway](https://your-openai-compatible-gateway.example.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
 - `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). Use an absolute path pointing at any location with enough space.
 
-When it finishes, source `kernel-agent.env.sh` before launching. Then open this
-Hyperloom checkout in Cursor and paste the launch prompt template from
-[Run a Hyperloom optimization](../how-to/optimize.md) into Cursor Chat, using the
-same `USER_DATA_PATH` and filling in your own model path, framework, GPU, and
-workload shape.
+When it finishes, source `kernel-agent.env.sh` before launching.
 
 If you explicitly run the forge kernel backend, prepare KernelForge before
 `install.sh`:
