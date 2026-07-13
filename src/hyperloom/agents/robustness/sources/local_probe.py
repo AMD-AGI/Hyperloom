@@ -27,6 +27,8 @@ from typing import Any, Iterable
 
 import httpx
 
+from hyperloom.common.coerce import to_float
+
 from .base import SourceData, SourceUnavailable
 
 
@@ -714,21 +716,8 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
 
 
 def _coerce_float_or_none(value: str) -> float | None:
-    """Parse a CSV cell to ``float``, or ``None`` when not numeric.
-
-    Args:
-        value (str): The raw cell text.
-
-    Returns:
-        float | None: The parsed float, or ``None`` when empty or
-        unparseable.
-    """
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    """Parse a CSV cell to ``float``, or ``None`` when not numeric."""
+    return to_float(value)
 
 
 def _sample_nvidia_smi() -> dict[str, Any]:
@@ -1507,16 +1496,7 @@ def _coerce_optional_float(value: Any) -> float | None:
         float | None: The float value, or ``None`` when it is a bool,
         a non-numeric string, or any other type.
     """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
+    return to_float(value)
 
 
 # ---------------------------------------------------------------------------

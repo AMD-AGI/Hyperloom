@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from hyperloom.common.coerce import to_float
+
 from .models import Candidate, ExploreRequest
 
 
@@ -31,10 +33,7 @@ def _jaccard(left: set[str], right: set[str]) -> float:
 
 def _float_value(value: Any, default: float = 0.0) -> float:
     """Coerce a ledger numeric field without letting bad rows abort ranking."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    return to_float(value, default=default)
 
 
 def prior_score(

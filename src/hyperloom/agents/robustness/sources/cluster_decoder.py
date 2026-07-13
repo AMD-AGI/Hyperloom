@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import to_int
+
 
 # Map of metric_name -> SourceData.local_gpu field. Keys cover the three
 # exporter conventions seen on core42 (rocm exporter, DCGM, generic) so
@@ -197,10 +199,7 @@ def _coerce_int_id(raw: str) -> int | str:
         int | str: The integer form when ``raw`` parses as an int,
         otherwise ``raw`` unchanged.
     """
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return raw
+    return to_int(raw, default=raw)
 
 
 def _latest_value(values: Any) -> float | None:

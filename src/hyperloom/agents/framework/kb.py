@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.coerce import to_float
+
 from .models import Finding
 
 
@@ -553,10 +555,7 @@ def _normalise_keywords(keywords: Iterable[str] | None) -> set[str]:
 
 def _safe_float(value: object, default: float = 0.0) -> float:
     """Coerce a ledger numeric value while tolerating malformed rows."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    return to_float(value, default=default)
 
 
 def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:

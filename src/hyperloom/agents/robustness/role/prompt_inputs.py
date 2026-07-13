@@ -36,6 +36,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.coerce import to_float, to_int
+
 
 log = logging.getLogger(__name__)
 
@@ -439,33 +441,13 @@ def _split_double_space(value: str) -> str:
 
 
 def _coerce_float(value: str) -> float:
-    """Parse a string into a float, defaulting to ``0.0`` on failure.
-
-    Args:
-        value (str): The string to parse.
-
-    Returns:
-        float: The parsed float, or ``0.0`` when ``value`` is not numeric.
-    """
-    try:
-        return float(value)
-    except ValueError:
-        return 0.0
+    """Parse a string into a float, defaulting to ``0.0`` on failure."""
+    return to_float(value, default=0.0)
 
 
 def _coerce_int(value: str) -> int:
-    """Parse a string into an int, defaulting to ``0`` on failure.
-
-    Args:
-        value (str): The string to parse.
-
-    Returns:
-        int: The parsed integer, or ``0`` when ``value`` is not an int.
-    """
-    try:
-        return int(value)
-    except ValueError:
-        return 0
+    """Parse a string into an int, defaulting to ``0`` on failure."""
+    return to_int(value, default=0)
 
 
 # ---------------------------------------------------------------------------

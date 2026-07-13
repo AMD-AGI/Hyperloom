@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
+
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -257,7 +259,8 @@ def _coerce_unix(value: Any) -> float | None:
     """Coerce a timestamp value to unix seconds.
 
     Accepts numeric epoch seconds or an ISO-8601-ish string (``Z`` suffix
-    tolerated). Booleans are rejected.
+    tolerated). Booleans are rejected. Delegates to
+    :func:`hyperloom.common.coerce.to_unix` (ISO-first string parsing).
 
     Args:
         value (Any): The raw timestamp value.
@@ -266,23 +269,7 @@ def _coerce_unix(value: Any) -> float | None:
         float | None: Unix seconds, or ``None`` when the value cannot be
             interpreted as a timestamp.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            from datetime import datetime
-
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                return None
-    return None
+    return to_unix(value)
 
 
 # ---------------------------------------------------------------------------

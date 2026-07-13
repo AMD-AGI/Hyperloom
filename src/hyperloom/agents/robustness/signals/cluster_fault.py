@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_int
+
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -187,19 +189,7 @@ def _coerce_int(raw: Any) -> int:
     Returns:
         int: The integer value, or 0 when it is a bool or cannot be parsed.
     """
-    if isinstance(raw, bool):
-        # bool subclasses int; reject so ``True == 1`` doesn't pollute thresholds.
-        return 0
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, float):
-        return int(raw)
-    if isinstance(raw, str):
-        try:
-            return int(raw)
-        except ValueError:
-            return 0
-    return 0
+    return to_int(raw, default=0)
 
 
 __all__ = ["ClusterFaultConfig", "evaluate_cluster_fault_signals"]
