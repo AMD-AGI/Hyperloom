@@ -72,21 +72,27 @@ def read_json(path: str | Path) -> Any:
     return json.loads(text) if text.strip() else None
 
 
-def emit_json(obj: Any, out: str | None) -> None:
+def emit_json(obj: Any, out: str | None, *, make_parents: bool = False) -> None:
     """Serialise ``obj`` to JSON, writing to stdout and optionally a file.
 
     Always writes to stdout; additionally writes to ``out`` when it is a
-    path other than ``"-"``/``None``. Does not create ``out``'s parent
-    directory (see the framework-agent divergence note in the module
-    docstring).
+    path other than ``"-"``/``None``.
 
     Args:
         obj: A JSON-serialisable value.
         out: Output path, or ``"-"``/``None`` for stdout only.
+        make_parents: When ``True``, create ``Path(out).parent`` (``parents=True,
+            exist_ok=True``) before writing the ``out`` file. Defaults to
+            ``False`` to preserve the Critic/Robustness contract where a missing
+            parent raises ``FileNotFoundError``; the Framework CLI passes
+            ``True`` (see the divergence note in the module docstring).
     """
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
-        Path(out).write_text(serialised + "\n", encoding="utf-8")
+        path = Path(out)
+        if make_parents:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialised + "\n", encoding="utf-8")
     sys.stdout.write(serialised + "\n")
     sys.stdout.flush()
 
