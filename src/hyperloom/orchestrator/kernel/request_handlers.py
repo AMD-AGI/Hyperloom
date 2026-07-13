@@ -169,8 +169,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
 # usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
 # --json`` whose envelope may carry a ``usage`` block; ``forge`` (Kernel-Forge
 # autonomous loop) prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
-# its claude-agent-sdk ResultMessages. The other backends (claude/codex/cursor)
-# already account their spend via their own paths.
+# its claude-agent-sdk ResultMessages.
 _TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak_v3", "oob", "forge"})
 
 
@@ -3277,9 +3276,6 @@ def _backend_order(payload: dict) -> list[str]:
     filtered = [backend for backend in order if backend in allowed]
     if filtered:
         return filtered
-    removed_oob = {"claude", "codex", "cursor"}
-    if any(backend in removed_oob for backend in order):
-        return list(_DEFAULT_KERNEL_BACKEND_ORDER)
     return []
 
 
@@ -3759,7 +3755,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
 
     A KEEP verdict always beats a non-KEEP regardless of micro_speedup
     (GEAK frequently reports a higher micro on a NEEDS_REVIEW that has no
-    correctness gate, while a Claude/Codex KEEP at a lower micro is a real
+    correctness gate, while a KEEP at a lower micro is a real
     integrate-ready patch); among equals, higher ``micro_speedup`` wins.
     Mirrors the max-key in :func:`_run_optimization_batch` so the ladder,
     the GEAK-vs-OOB race, and the batch all agree on "best".
@@ -4308,7 +4304,7 @@ def _backends_cli_arg(value: Any) -> str:
     """Normalize a payload ``backends`` field into a bare ``--backends`` value.
 
     The orchestration payload may carry ``backends`` as a bare string
-    (``"geak_v3"``), a comma-joined string (``"geak_v3,claude"``), or a JSON list
+    (``"geak_v3"``), a comma-joined string (``"forge,geak_v3"``), or a JSON list
     (``["geak_v3"]``) when an upstream request serializes it as an array. A list
     MUST be comma-joined into bare names, never ``str()``-ed into the repr of a
     list (``"['geak_v3']"``) — the kernel-agent's ``parse_backends`` validator
@@ -4450,7 +4446,7 @@ async def _run_optimization_single(
         # failed result here instead of letting TimeoutExpired propagate to the
         # batch wrapper — that wrapper produces a backend-less result, so the
         # failure was silently bucketed as a GEAK invocation even when a
-        # different optimizer (e.g. claude) actually ran.
+        # different optimizer (e.g. forge) actually ran.
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
@@ -4476,7 +4472,7 @@ async def _run_optimization_single(
             result["backend"] = backend
     # Full-trace: mine each geak/oob/forge attempt's stdout log for token usage
     # and append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the
-    # backend emits no usage block (claude/codex/cursor account spend elsewhere).
+    # backend emits no usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
     # Full-trace: record each forge attempt's key-step timeline (rationale /
     # validation / keep-revert + summary) as a forge_steps audit, backfilled
