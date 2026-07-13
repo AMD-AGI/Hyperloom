@@ -50,6 +50,12 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # fix until the wall-clock deadline. A *progressing* round resets the streak, so
 # an N-gap serial enablement is bounded by N + this cap, not capped at N.
 _ENABLEMENT_MAX_STALL: int = int(os.environ.get("INFERENCE_OPTIMIZER_ENABLEMENT_MAX_STALL", "3") or "3")
+# Unified authored-lane max attempts: applies to apply-failure retries across
+# all non-enablement lanes (perf_framework, perf_explore).  Also used as the
+# new cap for Critic reauthor attempts (raised from 1 → 3).
+_AUTHORED_LANE_MAX_ATTEMPTS: int = int(
+    os.environ.get("INFERENCE_OPTIMIZER_AUTHORED_LANE_MAX_ATTEMPTS", "3") or "3"
+)
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
@@ -1145,6 +1151,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_enqueue_enablement_specialist": "phase_framework",
         "_maybe_record_enablement_human_review": "phase_framework",
         "_maybe_rearm_enablement": "phase_framework",
+        "_maybe_rearm_authored_lane": "phase_framework",
+        "_enqueue_author_specialist": "phase_framework",
+        "_drain_apply_fail_retry_pending": "phase_framework",
         "_framework_candidate_key": "phase_framework",
         "_framework_processed_candidate_keys": "phase_framework",
         "_unprocessed_framework_agent_candidates": "phase_framework",
@@ -1214,7 +1223,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_priors_match_advisory_block": "advisory",
         "_resolve_issue_canonical": "proposals",
         "_workload_canonical_id": "proposals",
-        "_gap_anchor_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
         "_extract_kept_best_config": "proposals",
         "_kb_best_config_overrides_for_keep": "proposals",
@@ -1581,7 +1589,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
     _REPROFILE_CHANGE_TOL: float = 1e-5
 
     # Max re-author rounds per candidate on a needs_review verdict.
-    _MAX_REAUTHOR_ATTEMPTS: int = 1
+    # Raised from 1 → 3 to match the unified authored-lane cap.
+    _MAX_REAUTHOR_ATTEMPTS: int = _AUTHORED_LANE_MAX_ATTEMPTS
 
     # Backstop: max Critic-review submissions for a single candidate before
     # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.

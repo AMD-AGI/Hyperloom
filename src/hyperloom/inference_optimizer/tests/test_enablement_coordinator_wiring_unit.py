@@ -697,3 +697,109 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
     src.write_text("")
     fake = types.SimpleNamespace(shared_state=types.SimpleNamespace())
     assert Coordinator._read_enablement_source_context(fake, _sig(str(src))) == ""
+
+
+# ---------------------------------------------------------------------------
+# _maybe_rearm_authored_lane
+# ---------------------------------------------------------------------------
+
+def _make_coord_with_phase(session_dir) -> "Coordinator":
+    """Build a minimal Coordinator for authored-lane tests."""
+    from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    plan = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    backends = {
+        name: MockBackend(plan, name=name)
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+    }
+    return Coordinator(session_dir, backends=backends)
+
+
+def test_rearm_authored_lane_delegates_enablement(session_dir):
+    """_maybe_rearm_authored_lane with lane=enablement calls _maybe_rearm_enablement."""
+    coord = _make_coord_with_phase(session_dir)
+    called = []
+
+    def _fake_rearm(res):
+        called.append(res)
+
+    coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+
+    res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
+    coord._maybe_rearm_authored_lane(res)
+    assert len(called) == 1 and called[0] is res
+
+
+def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
+    """apply_failed on perf_framework lane increments apply_fail_reauthor_attempts."""
+    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
+
+    coord = _make_coord_with_phase(session_dir)
+    cand_id = "https://github.com/example/repo/pull/99"
+    res = {
+        "status": "apply_failed",
+        "lane": "perf_framework",
+        "candidate": {"candidate_id": cand_id, "pr_url": cand_id},
+        "specialist_task_id": "spec-99",
+        "retry_feedback": [],
+        "prior_patches": [],
+    }
+    coord._maybe_rearm_authored_lane(res)
+    attempts = getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
+    assert attempts.get(cand_id) == 1
+    # A pending retry context should be queued.
+    pending = getattr(coord.shared_state, "apply_fail_retry_pending", [])
+    assert len(pending) == 1
+    assert pending[0]["lane"] == "perf_framework"
+    assert pending[0]["attempt"] == 1
+
+
+def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
+    """After _AUTHORED_LANE_MAX_ATTEMPTS, the next call stamps a terminal row."""
+    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
+
+    coord = _make_coord_with_phase(session_dir)
+    cand_id = "https://github.com/example/repo/pull/100"
+    res = {
+        "status": "apply_failed",
+        "lane": "perf_framework",
+        "candidate": {"candidate_id": cand_id, "pr_url": cand_id},
+        "specialist_task_id": "spec-100",
+        "retry_feedback": [],
+        "prior_patches": [],
+    }
+    # Exhaust cap.
+    coord.shared_state.apply_fail_reauthor_attempts = {cand_id: _AUTHORED_LANE_MAX_ATTEMPTS}
+    # Clear any pending from prior.
+    coord.shared_state.apply_fail_retry_pending = []
+
+    coord._maybe_rearm_authored_lane(res)
+
+    progress = getattr(coord.shared_state, "framework_agent_phase_progress", [])
+    cap_rows = [p for p in progress if p.get("status") == "apply_fail_cap"]
+    assert len(cap_rows) == 1, f"expected terminal row; got {progress}"
+    # No new pending retry.
+    pending = getattr(coord.shared_state, "apply_fail_retry_pending", [])
+    assert pending == []
+
+
+def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_perf(session_dir):
+    """Enablement apply_failed (with enablement:True) does NOT increment apply_fail counter."""
+    coord = _make_coord_with_phase(session_dir)
+    rearm_called = []
+
+    def _fake_rearm(res):
+        rearm_called.append(res)
+
+    coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
+
+    # Even when lane=enablement is absent but enablement=True is present, should delegate.
+    res = {"status": "apply_failed", "enablement": True}
+    coord._maybe_rearm_authored_lane(res)
+    assert len(rearm_called) == 1
+    # apply_fail_reauthor_attempts not touched.
+    assert not getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
