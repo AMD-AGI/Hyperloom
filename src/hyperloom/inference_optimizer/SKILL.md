@@ -1143,7 +1143,7 @@ Auth / SDK drift (`Claude SDK exit code 1`, `Primus.00009 token not present`,
 `Fatal error in message reader`) is owned by `_preflight()`; see
 `## Setup → Recovery` for the supervisor + install rerun loop. Manual SDK
 fallback if frozen pip blocks `_ensure_python_sdks()`:
-`python -m pip install 'claude-agent-sdk>=0.1.65' 'openai>=1.50' 'httpx>=0.27'`.
+`python -m pip install 'claude-agent-sdk==0.2.110' 'openai>=1.50' 'httpx>=0.27'`.
 Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 
 ### Model-gate errors (preflight #10)
