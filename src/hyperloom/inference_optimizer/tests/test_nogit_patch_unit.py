@@ -140,7 +140,7 @@ def test_apply_and_revert_roundtrip(tmp_path):
 
     backup_root = tmp_path / "backups"
 
-    ok, err, backups = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
     if not ok:
         pytest.skip(f"patch CLI unavailable or dry-run failed: {err}")
 
@@ -167,7 +167,7 @@ def test_apply_patch_no_git_dry_run_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _FailCP())
     monkeypatch.setattr(ng.subprocess, "run", lambda *a, **k: _FailCP())
 
-    ok, err, backups = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is False
     assert backups == []
 
@@ -213,14 +213,14 @@ def test_backup_names_unique_across_patches_same_basename(tmp_path):
     backup_root = tmp_path / "shared_backups"
     accumulated: list = []
 
-    ok, err, backups_a = ng._apply_patch_no_git(
+    ok, err, backups_a, *_ = ng._apply_patch_no_git(
         tmp_path, patch_a, backup_root, seq_offset=len(accumulated)
     )
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
     accumulated.extend(backups_a)
 
-    ok, err, backups_b = ng._apply_patch_no_git(
+    ok, err, backups_b, *_ = ng._apply_patch_no_git(
         tmp_path, patch_b, backup_root, seq_offset=len(accumulated)
     )
     if not ok:
@@ -254,7 +254,7 @@ def test_seq_offset_zero_gives_deterministic_names(tmp_path):
     patch_file = tmp_path / "mypatch.patch"
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
 
-    ok, err, backups = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bk")
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bk")
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
 
@@ -348,7 +348,7 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
     # We only test the record structure produced by _apply_patch_no_git; the
     # actual patch CLI application may or may not succeed depending on the
     # target file layout, so we inspect records regardless of ok.
-    _ok, _err, backups = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
 
     # Find old-source and new-destination records.
     restore_old_records = [r for r in backups if r.get("revert_action") == "restore_old"]
@@ -366,3 +366,128 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
     # The destination record must point at new_name.py.
     dst_rec = next((r for r in delete_records if "new_name" in r["target"]), None)
     assert dst_rec is not None, "delete record must target new_name.py"
+
+
+# ---------------------------------------------------------------------------
+# ApplyFeedback structure tests
+# ---------------------------------------------------------------------------
+
+def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatch):
+    """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with
+    an ApplyFeedback carrying the accumulated per-level stderr."""
+    import subprocess as _sp
+    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
+
+    patch_file = tmp_path / "bad.patch"
+    patch_file.write_text("not a patch\n", encoding="utf-8")
+
+    class _FailCP:
+        returncode = 1
+        stdout = ""
+        stderr = "hunk FAILED"
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _FailCP())
+    monkeypatch.setattr(ng.subprocess, "run", lambda *a, **k: _FailCP())
+
+    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
+    assert len(result) == 4, "must return a 4-tuple"
+    ok, err, backups, feedback = result
+    assert ok is False
+    assert backups == []
+    assert isinstance(feedback, ApplyFeedback)
+    assert feedback.channel == "nogit"
+    assert len(feedback.tried_levels) > 0
+    # Per-level stderr should be present.
+    assert "hunk FAILED" in feedback.stderr
+
+
+def test_apply_feedback_success_returns_none_feedback(tmp_path):
+    """A successful apply returns (True, '', backups, None)."""
+    target = tmp_path / "target.py"
+    target.write_text("original\n", encoding="utf-8")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
+    backup_root = tmp_path / "bak"
+
+    result = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    if len(result) == 4:
+        ok, err, backups, feedback = result
+    else:
+        pytest.skip("unexpected return length")
+    if not ok:
+        pytest.skip(f"patch CLI unavailable: {err}")
+    assert feedback is None, "successful apply must return None feedback"
+
+
+def test_apply_feedback_roundtrip_serialization():
+    """ApplyFeedback serialises to dict and deserialises cleanly."""
+    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
+
+    fb = ApplyFeedback(
+        patch="/tmp/foo.patch",
+        channel="git",
+        tried_levels=[1, 0, 2],
+        stderr="error: patch does not apply",
+        rejected_hunks="--- a/foo.py\n+++ b/foo.py",
+        source_context="  42| def foo():",
+    )
+    d = fb.to_dict()
+    assert d["patch"] == "/tmp/foo.patch"
+    assert d["channel"] == "git"
+    restored = ApplyFeedback.from_dict(d)
+    assert restored.patch == fb.patch
+    assert restored.tried_levels == fb.tried_levels
+    assert restored.stderr == fb.stderr
+    assert restored.rejected_hunks == fb.rejected_hunks
+
+
+def test_apply_feedback_format_for_mandate_contains_key_sections():
+    """format_for_mandate includes patch name, stderr, and context sections."""
+    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
+
+    fb = ApplyFeedback(
+        patch="/path/to/001_fix.patch",
+        channel="git",
+        tried_levels=[1],
+        stderr="patch failed for file foo.py",
+        rejected_hunks="@@ -1 +1 @@\n-old",
+        source_context="  10| def foo():\n  11|     pass",
+    )
+    mandate_block = fb.format_for_mandate()
+    assert "001_fix.patch" in mandate_block
+    assert "patch failed for file foo.py" in mandate_block
+    assert "Rejected hunks" in mandate_block
+    assert "Source context" in mandate_block
+
+
+def test_read_patch_source_context_returns_snippet(tmp_path):
+    """read_patch_source_context resolves target + returns a line-numbered snippet."""
+    from hyperloom.orchestrator.actions.executors._apply_feedback import read_patch_source_context
+
+    target = tmp_path / "mod.py"
+    target.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+
+    patch_text = (
+        "--- a/mod.py\n"
+        "+++ b/mod.py\n"
+        "@@ -2,2 +2,2 @@\n"
+        "-line2\n"
+        "+line2_patched\n"
+    )
+    ctx = read_patch_source_context(patch_text, tmp_path, radius=6)
+    assert "mod.py" in ctx
+    assert "line" in ctx  # some content from the file
+
+
+def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
+    """read_patch_source_context returns '' when target file doesn't exist."""
+    from hyperloom.orchestrator.actions.executors._apply_feedback import read_patch_source_context
+
+    patch_text = (
+        "--- a/nonexistent.py\n"
+        "+++ b/nonexistent.py\n"
+        "@@ -1 +1 @@\n"
+        "-x\n+y\n"
+    )
+    ctx = read_patch_source_context(patch_text, tmp_path, radius=6)
+    assert ctx == ""

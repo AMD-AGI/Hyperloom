@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from ..loop.coordinator import (
     DEFAULT_FRAMEWORK_MAX_CANDIDATES,
     PendingProposal,
+    _AUTHORED_LANE_MAX_ATTEMPTS,
     _ENABLEMENT_MAX_STALL,
     _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC,
     _framework_config_levers_from_done,
@@ -1075,6 +1076,9 @@ class FrameworkPhase(PhaseHandler):
         Fully exception-guarded: any failure returns ``""`` so the mandate
         degrades to the no-context form (G is grounding, never a hard dependency).
 
+        Delegates to :func:`~..actions.executors._apply_feedback.source_context_for_file`
+        which is the shared file-resolve + window primitive.
+
         Args:
             signature: The classified :class:`FailureSignature`.
             window: Total number of lines to return around the hit.
@@ -1086,46 +1090,16 @@ class FrameworkPhase(PhaseHandler):
         if not offending_file:
             return ""
         symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
-        try:
-            from pathlib import Path
+        from ..actions.executors._apply_feedback import source_context_for_file
+        from ..framework.paths import resolve_source_file_allowlist
 
-            candidates: list[Path] = []
-            p = Path(offending_file)
-            if p.is_absolute():
-                candidates.append(p)
-            else:
-                from ..framework.paths import resolve_source_file_allowlist
-
-                for root in resolve_source_file_allowlist():
-                    candidates.append(Path(str(root)) / offending_file)
-                    # Also try matching by basename under each root is too broad;
-                    # keep it to the joined relative path only.
-            target: Path | None = next((c for c in candidates if c.is_file()), None)
-            if target is None:
-                return ""
-            lines = target.read_text(errors="replace").splitlines()
-            if not lines:
-                return ""
-            hit = 0
-            if symbol:
-                for i, ln in enumerate(lines):
-                    if symbol in ln:
-                        hit = i
-                        break
-            half = max(1, window // 2)
-            start = max(0, hit - half)
-            end = min(len(lines), start + window)
-            snippet = "\n".join(
-                f"{n + 1:>5}| {lines[n]}" for n in range(start, end)
-            )
-            return f"# {target} (lines {start + 1}-{end})\n{snippet}"
-        except Exception:  # noqa: BLE001 — grounding is best-effort
-            log.debug(
-                "enablement: source-context read failed for %s",
-                offending_file,
-                exc_info=True,
-            )
-            return ""
+        search_roots = [Path(str(r)) for r in resolve_source_file_allowlist()]
+        return source_context_for_file(
+            offending_file,
+            symbol=symbol,
+            window=window,
+            search_roots=search_roots,
+        )
 
     def _derive_checkpoint_weight_facts(self, launch_log: str) -> str:
         """Auto-derive ground-truth checkpoint-weight facts for a weight-init failure.
@@ -1591,6 +1565,356 @@ class FrameworkPhase(PhaseHandler):
             int(getattr(state, "enablement_attempts", 0) or 0),
             f" stop_reason={stop_set}" if stop_set else "",
         )
+
+    def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None) -> None:
+        """Unified rearm dispatcher for all authored lanes.
+
+        Routes to the lane-specific handler:
+
+        * ``enablement`` lane → :meth:`_maybe_rearm_enablement` (unchanged
+          semantics; ``advanced`` / ``kept`` / stall logic preserved).
+        * ``perf_framework`` / ``perf_explore`` lanes with ``apply_failed``
+          status → increment per-candidate apply-fail retry counter; below cap
+          clear the in-flight guard so :meth:`_enqueue_author_specialist` can
+          be called from the dispatcher; at/above cap stamp a terminal
+          progress row.
+
+        All other statuses for perf lanes are not handled here (they go through
+        the existing writeback / progress-stamp paths).
+
+        Args:
+            res: The ``integrate_patch`` or ``framework_agent`` result dict.
+        """
+        if not isinstance(res, dict):
+            return
+        lane = str(res.get("lane") or "")
+        status = str(res.get("status") or "")
+
+        if lane == "enablement" or res.get("enablement"):
+            # Delegate to existing enablement rearm logic (no behaviour change).
+            self._maybe_rearm_enablement(res)
+            return
+
+        if status != "apply_failed":
+            # Non-apply-failed results for perf lanes are handled by the
+            # existing writeback path; nothing to do here.
+            return
+
+        if lane not in ("perf_framework", "perf_explore"):
+            # Unknown lane — ignore silently.
+            return
+
+        # Determine the candidate key for tracking retry attempts.
+        candidate = res.get("candidate")
+        if not isinstance(candidate, dict):
+            candidate = {}
+        cand_id = self._framework_candidate_key(candidate)
+        # Fallback: use specialist_task_id when no candidate dict is present.
+        if not cand_id:
+            cand_id = str(res.get("specialist_task_id") or "").strip()
+        if not cand_id:
+            return
+
+        batch_id = str(
+            (candidate.get("batch_id") if isinstance(candidate, dict) else None)
+            or res.get("batch_id")
+            or ""
+        )
+
+        state = self.shared_state
+        from ..loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
+
+        existing = getattr(state, "apply_fail_reauthor_attempts", None)
+        apply_fail_attempts: dict[str, int] = existing if isinstance(existing, dict) else {}
+        prior = int(apply_fail_attempts.get(cand_id, 0) or 0)
+        attempt = prior + 1
+        apply_fail_attempts[cand_id] = attempt
+        # Always write back (handles first-use when attribute wasn't set).
+        state.apply_fail_reauthor_attempts = apply_fail_attempts
+
+        log.info(
+            "AUTHORED_LANE rearm: lane=%s cand_id=%s apply_fail_attempt=%d cap=%d",
+            lane,
+            cand_id,
+            attempt,
+            _AUTHORED_LANE_MAX_ATTEMPTS,
+        )
+
+        if attempt > _AUTHORED_LANE_MAX_ATTEMPTS:
+            # Cap reached: stamp a terminal progress row.
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="apply_fail_cap",
+                kept=False,
+                rationale=f"apply_failed {attempt} times (cap={_AUTHORED_LANE_MAX_ATTEMPTS})",
+                provenance="apply_fail_retry",
+            )
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("authored_lane: save after cap stamp failed", exc_info=True)
+            return
+
+        # Under cap: store the retry context for the dispatcher to pick up.
+        retry_ctx: dict[str, Any] = {
+            "cand_id": cand_id,
+            "batch_id": batch_id,
+            "lane": lane,
+            "attempt": attempt,
+            "retry_feedback": res.get("retry_feedback") or [],
+            "prior_patches": res.get("prior_patches") or [],
+            "candidate": candidate,
+            "specialist_task_id": str(res.get("specialist_task_id") or ""),
+        }
+        pending = getattr(state, "apply_fail_retry_pending", None) or []
+        if not isinstance(pending, list):
+            pending = []
+        pending.append(retry_ctx)
+        state.apply_fail_retry_pending = pending
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.debug("authored_lane: save after retry-pending failed", exc_info=True)
+
+    async def _enqueue_author_specialist(
+        self,
+        *,
+        lane: str,
+        candidate: "dict[str, Any] | None" = None,
+        specialist_task_id: str = "",
+        attempt: int = 1,
+        retry_feedback: "list[dict[str, Any]] | None" = None,
+        critic_feedback: "dict[str, Any] | None" = None,
+    ) -> str:
+        """Dispatch a fresh authoring specialist for an apply-failure retry.
+
+        Handles the ``perf_framework`` and ``perf_explore`` lanes only
+        (enablement uses :meth:`_maybe_enqueue_enablement_specialist`).
+        Injects structured apply-failure feedback into the specialist mandate
+        and uses a ``:retry:{n}`` idempotency suffix to get a fresh task that
+        reuses the existing worktree via the idempotency-based worktree lookup.
+
+        Args:
+            lane: ``"perf_framework"`` or ``"perf_explore"``.
+            candidate: The candidate dict (for perf_framework lane).
+            specialist_task_id: The original specialist task that produced the
+                failing patch (for worktree reuse + provenance).
+            attempt: Retry attempt number (1-based; appended to idempotency key).
+            retry_feedback: List of :class:`~._apply_feedback.ApplyFeedback`
+                dicts from the failed apply, injected into the specialist mandate.
+            critic_feedback: Optional prior Critic advisory (for reauthor retries
+                that also had a Critic ``needs_review`` verdict).
+
+        Returns:
+            The dispatched specialist ``task_id`` (empty on failure / skip).
+        """
+        if lane not in ("perf_framework", "perf_explore"):
+            log.warning("_enqueue_author_specialist: unsupported lane=%s — skipping", lane)
+            return ""
+
+        candidate = candidate or {}
+        retry_feedback = retry_feedback or []
+        state = self.shared_state
+
+        # Build a feedback section for the mandate.
+        feedback_lines: list[str] = []
+        if retry_feedback:
+            feedback_lines.append("")
+            feedback_lines.append(
+                "APPLY FAILURE FEEDBACK (previous patch failed to apply; "
+                "study the errors below and produce a corrected patch):"
+            )
+            for fb_dict in retry_feedback[:5]:  # cap at 5 entries for prompt brevity
+                from ..actions.executors._apply_feedback import ApplyFeedback
+                fb = ApplyFeedback.from_dict(fb_dict) if isinstance(fb_dict, dict) else None
+                if fb is not None:
+                    feedback_lines.append("")
+                    feedback_lines.append(fb.format_for_mandate())
+            feedback_lines.append("")
+
+        if lane == "perf_framework":
+            # Re-dispatch a framework_agent authoring specialist with apply
+            # failure context injected.  We reuse _enqueue_framework_agent_authoring_specialist
+            # with a crafted critic_feedback-style note carrying the apply stderr.
+            cand_id = self._framework_candidate_key(candidate)
+            if not cand_id:
+                log.warning("_enqueue_author_specialist: perf_framework missing cand_id")
+                return ""
+            batch_id = str(candidate.get("batch_id") or "")
+            # Look up original audit from the specialist task params if available.
+            audit: dict[str, Any] = {}
+            if specialist_task_id:
+                try:
+                    spec_task = await self.tasks.get(specialist_task_id)
+                    spec_params = dict(getattr(spec_task, "params", None) or {})
+                    raw_audit = spec_params.get("framework_audit")
+                    if isinstance(raw_audit, dict):
+                        audit = raw_audit
+                except Exception:  # noqa: BLE001
+                    pass
+            # Merge apply feedback + critic feedback into a single note block.
+            merged_feedback = dict(critic_feedback or {})
+            if feedback_lines:
+                existing_advice = str(merged_feedback.get("advice_text") or "")
+                apply_advice = "\n".join(feedback_lines)
+                merged_feedback["advice_text"] = (
+                    apply_advice + ("\n\n" + existing_advice if existing_advice else "")
+                )
+            try:
+                new_task_id = await self._enqueue_framework_agent_authoring_specialist(
+                    candidate,
+                    audit=audit,
+                    reauthor_attempt=attempt,
+                    critic_feedback=merged_feedback if merged_feedback else None,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "_enqueue_author_specialist: perf_framework dispatch failed cand=%s attempt=%d",
+                    cand_id,
+                    attempt,
+                )
+                return ""
+            log.info(
+                "AUTHORED_LANE: dispatched perf_framework retry specialist "
+                "cand=%s attempt=%d task=%s",
+                cand_id,
+                attempt,
+                new_task_id,
+            )
+            return new_task_id
+
+        # perf_explore lane: reauthor from original specialist worktree.
+        # Build a minimal candidate proxy from the specialist task params.
+        gap_cid = ""
+        gap_symptom = ""
+        framework_name = str(getattr(state, "framework", "") or "").strip().lower()
+        if specialist_task_id:
+            try:
+                spec_task = await self.tasks.get(specialist_task_id)
+                spec_params = dict(getattr(spec_task, "params", None) or {})
+                gap_cid = str(spec_params.get("gap_canonical_id") or "").strip()
+                gap_symptom = str(spec_params.get("gap_symptom") or "").strip()
+                framework_name = str(spec_params.get("framework") or framework_name).strip().lower()
+            except Exception:  # noqa: BLE001
+                pass
+        if not gap_cid:
+            gap_cid = f"gap.explore.retry.{specialist_task_id or 'unknown'}"
+        notes_lines = [
+            "EXPLORE AUTHORING RETRY TASK.",
+            "",
+            "A previous patch you authored failed to apply against the live source tree.",
+            "Your task is to study the apply errors below and produce a corrected patch.",
+        ]
+        notes_lines.extend(feedback_lines)
+        if critic_feedback:
+            req_ev = [
+                str(x).strip()
+                for x in (critic_feedback.get("required_evidence") or [])
+                if str(x).strip()
+            ]
+            if req_ev:
+                notes_lines.append("")
+                notes_lines.append("PRIOR CRITIC FEEDBACK (also address this):")
+                notes_lines.extend(f"  • {ev}" for ev in req_ev[:10])
+            advice = str(critic_feedback.get("advice_text") or "").strip()
+            if advice:
+                notes_lines.append(f"- advice: {advice}")
+        notes = "\n".join(notes_lines)
+        params: dict[str, Any] = {
+            "domain": "serving_specialist",
+            "gap_canonical_id": gap_cid,
+            "gap_symptom": gap_symptom or f"Retry apply-failed patch for {gap_cid}",
+            "gap_layer": "perf_explore",
+            "framework": framework_name,
+            "source": "coordinator_internal",
+            "readonly": False,
+            "notes": notes,
+            "apply_retry_attempt": attempt,
+            "prior_patches": retry_feedback[0].get("patch") if retry_feedback else "",
+            **self._framework_gpu_params(),
+        }
+        try:
+            await self._warm_specialist_params(params)
+        except Exception:  # noqa: BLE001
+            pass
+        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}"
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        try:
+            spec_task, _ = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idem,
+                requires_lanes=lanes,
+                allowed_tools=[
+                    "Read", "Grep", "Glob", "Write", "Edit",
+                    "Bash", "WebSearch", "WebFetch",
+                ],
+                side_effects=["writes_results", "writes_patches"],
+                lease_ttl_sec=ttl,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "_enqueue_author_specialist: perf_explore dispatch failed gap=%s attempt=%d",
+                gap_cid,
+                attempt,
+            )
+            return ""
+        new_tid = str(getattr(spec_task, "task_id", "") or "")
+        log.info(
+            "AUTHORED_LANE: dispatched perf_explore retry specialist "
+            "gap=%s attempt=%d task=%s",
+            gap_cid,
+            attempt,
+            new_tid,
+        )
+        return new_tid
+
+    async def _drain_apply_fail_retry_pending(self) -> None:
+        """Dispatch authoring specialists for any queued apply-failure retries.
+
+        Called from the dispatcher after every ``integrate_patch`` completion.
+        Drains :attr:`SharedState.apply_fail_retry_pending` (a list of retry
+        context dicts populated by :meth:`_maybe_rearm_authored_lane`) by
+        calling :meth:`_enqueue_author_specialist` for each entry, then
+        clearing the list.
+
+        Best-effort: errors are logged and the list is cleared regardless so
+        stale contexts cannot accumulate.
+        """
+        state = self.shared_state
+        pending: list[dict[str, Any]] = getattr(state, "apply_fail_retry_pending", None) or []
+        if not isinstance(pending, list) or not pending:
+            return
+        # Consume the list atomically so a concurrent call doesn't double-fire.
+        to_dispatch = list(pending)
+        state.apply_fail_retry_pending = []
+        for ctx in to_dispatch:
+            if not isinstance(ctx, dict):
+                continue
+            lane = str(ctx.get("lane") or "")
+            attempt = int(ctx.get("attempt") or 1)
+            candidate = ctx.get("candidate") or {}
+            specialist_task_id = str(ctx.get("specialist_task_id") or "")
+            retry_feedback = list(ctx.get("retry_feedback") or [])
+            try:
+                await self._enqueue_author_specialist(
+                    lane=lane,
+                    candidate=candidate,
+                    specialist_task_id=specialist_task_id,
+                    attempt=attempt,
+                    retry_feedback=retry_feedback,
+                )
+            except Exception:  # noqa: BLE001 — never wedge the dispatcher
+                log.exception(
+                    "_drain_apply_fail_retry_pending: dispatch failed lane=%s attempt=%d",
+                    lane,
+                    attempt,
+                )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.debug("drain_apply_fail: save failed", exc_info=True)
 
     @staticmethod
     def _framework_candidate_key(row: dict[str, Any] | None) -> str:
@@ -3221,6 +3545,11 @@ class FrameworkPhase(PhaseHandler):
         # ``patches_written`` is non-empty so the empty-outcome bridge does not
         # fire either). Only an empty / in-progress status is skipped.
         if not status:
+            return
+        # apply_failed with a lane field means the unified retry loop will handle
+        # this result (either re-dispatch or stamp a terminal row at the cap).
+        # Do NOT stamp a progress row here — that would block the retry pump.
+        if status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore"):
             return
         params = getattr(task, "params", None) or {}
         # Resolve the FRAMEWORK candidate id (a PR URL) that this authored
