@@ -171,7 +171,8 @@ def test_instantiate_options_resume_fallback():
     b = _backend(sdk_options_cls=_PickyOptions)
     opts = b._instantiate_options({"max_turns": 4, "resume": "s"})
     assert "resume" not in opts.kwargs
-    assert any("rejected resume" in c.get("warn", "") for c in b.calls)
+    assert any("rejected" in c.get("warn", "") and "resume" in c.get("warn", "") for c in b.calls)
+    assert b._resume_downgraded is True
 
 
 def test_instantiate_options_typeerror_no_resume():
