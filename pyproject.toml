@@ -127,6 +127,7 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
+    "agent_skills/*/SKILL.md",
     "references/*.md",
     "tools/*.sh.example",
     "data/framework/*.md",
@@ -160,6 +161,7 @@ hyperloom = [
     "references/*.md",
     "examples/*.json",
     "examples/*.py",
+    "kb/framework_optimization/*.jsonl",
     "scripts/*.sh",
 ]
 # tree-reform.MD P2.5: quantization_agent's skill assets, promoted alongside
@@ -181,6 +183,12 @@ hyperloom = [
 ]
 "hyperloom.agents.kernel.tools" = [
     "data/*.json",
+]
+"hyperloom.inference_optimizer.multi_node" = [
+    "SKILL.md",
+]
+"hyperloom.inference_optimizer.multi_node.scripts" = [
+    "*.sh",
 ]
 
 [tool.pytest.ini_options]
