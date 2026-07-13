@@ -20,6 +20,8 @@ subtrees:
     title: Quickstart — local mode
   - file: install/bare-metal.md
     title: Quickstart — bare metal
+  - file: install/slurm.md
+    title: Quickstart — Slurm
 
 - caption: Components
   entries:

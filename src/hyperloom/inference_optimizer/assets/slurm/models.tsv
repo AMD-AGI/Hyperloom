@@ -1,0 +1,5 @@
+# key	repo_id	framework	gpu_type	image	tp	prec	isl	osl	conc	model_class	max_hours	target_gain
+dsv4pro_sglang	deepseek-ai/DeepSeek-V4-Pro	sglang	MI355X	primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix	8	fp8	1024	1024	64	moe_mla	6	10
+dsv4pro_vllm	deepseek-ai/DeepSeek-V4-Pro	vllm	MI355X	<REGISTRY>/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix-20260627	8	fp8	1024	1024	64	moe_mla	6	10
+dsv4flash_vllm	deepseek-ai/DeepSeek-V4-Flash	vllm	MI300X	<REGISTRY>/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix-20260627	8	fp8	1024	1024	64	moe_mla	6	10
+dsv4flash_sglang	deepseek-ai/DeepSeek-V4-Flash	sglang	MI300X	<REGISTRY>/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix	8	fp8	1024	1024	64	moe_mla	6	10
