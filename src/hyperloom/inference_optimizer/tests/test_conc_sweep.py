@@ -934,6 +934,75 @@ def test_conc_sweep_executor_missing_session_dir_yields_failure():
     assert result["error_class"] == "missing_session_dir"
 
 
+def test_conc_sweep_executor_state_load_failure_yields_failure(monkeypatch):
+    from hyperloom.orchestrator.actions.executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+
+    class _Task:
+        params = {}
+
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": "/tmp/does-not-matter"}
+
+    def _boom(_session_dir):
+        raise RuntimeError("state is unreadable")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.conc_sweep.SharedState.load_or_init",
+        _boom,
+    )
+
+    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+    assert result["status"] == "failed"
+    assert result["error_class"] == "shared_state_load_failed"
+    assert "state is unreadable" in result["error"]
+
+
+def test_conc_sweep_executor_task_params_override_state(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    from hyperloom.orchestrator.actions.executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.conc_sweep_concs = [1]
+    state.conc_sweep_total_budget_sec = 60
+    state.conc_sweep_variant_timeout_sec = 30
+    state.save(session_dir)
+
+    class _Task:
+        params = {
+            "concs": ["2", "8"],
+            "variant_timeout_sec": "45",
+            "total_budget_sec": "120",
+        }
+
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": str(session_dir)}
+
+    captured: dict = {}
+
+    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+        captured["concs"] = list(concs)
+        captured["timeout"] = variant_timeout_sec
+        captured["budget"] = total_budget_sec
+        return {"status": "succeeded", "summary": {"successful_pairs": 1}}
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.conc_sweep.run_conc_sweep",
+        side_effect=_fake_run,
+    ):
+        result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+
+    assert result["status"] == "succeeded"
+    assert captured == {"concs": [2, 8], "timeout": 45, "budget": 120}
+
+
 def test_conc_sweep_executor_remaps_skip_to_succeeded(
     session_dir: Path,
     baseline_yaml: Path,
