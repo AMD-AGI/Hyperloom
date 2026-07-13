@@ -67,6 +67,17 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def truthy(val: Any) -> bool:
+    """Interpret common truthy spellings from JSON or env strings.
+
+    A real ``bool`` is returned as-is; any other value is stringified,
+    stripped, lower-cased, and matched against ``1/true/yes/on``.
+    """
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
 _COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
 
 
@@ -112,5 +123,6 @@ __all__ = [
     "read_last_lines",
     "safe_float",
     "source_text_looks_complete",
+    "truthy",
     "utc_now",
 ]

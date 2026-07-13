@@ -17,13 +17,12 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import source_text_looks_complete  # noqa: E402
+from _io_utils import source_text_looks_complete, utc_now  # noqa: E402
 
 sys.path.pop(0)
 
@@ -246,10 +245,12 @@ def _dispatch_multinode_revert(
 def _now() -> str:
     """Return the current UTC timestamp as an ISO8601 string.
 
+    Delegates to :func:`_io_utils.utc_now`.
+
     Returns:
         str: The current UTC time formatted as an ISO8601 string.
     """
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now()
 
 
 def _safe_name(value: str) -> str:
