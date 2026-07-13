@@ -2220,6 +2220,11 @@ def compute_next_phase(
     if current == PHASE_SWEEP:
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
+            exit_reason, exit_evidence = norm
+            # Failed conc_sweep closeout is terminal: preserve the honest
+            # stop_reason instead of opening another macro-cycle.
+            if exit_reason == "conc_sweep_failed":
+                return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: in cyclic mode, loop back to EXPLORE (a new macro-cycle)
             # while budget remains and the run hasn't globally converged (R7);
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
@@ -2234,7 +2239,7 @@ def compute_next_phase(
                     reloop_target,
                     "cycle_reloop",
                     {
-                        **norm[1],
+                        **exit_evidence,
                         **reloop_ev,
                         "loopback": True,
                     },
@@ -2250,12 +2255,12 @@ def compute_next_phase(
                     PHASE_CLOSE,
                     "global_converged",
                     {
-                        **norm[1],
+                        **exit_evidence,
                         **reloop_ev,
                         "terminal": True,
                     },
                 )
-            return PHASE_CLOSE, norm[0], {**norm[1], **reloop_ev}
+            return PHASE_CLOSE, exit_reason, {**exit_evidence, **reloop_ev}
         return None
 
     # PHASE_CLOSE — terminal, no further transitions.
