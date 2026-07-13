@@ -21,6 +21,8 @@ import json
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.jsonio import coerce_dict
+
 from ..models import Candidate
 from ..sources import github as github_backend
 from ..sources._shared import GitHubPr, _repo_slug
@@ -179,31 +181,6 @@ def fetch_pr_audit_material(
     }
 
 
-def _coerce_dict(value: dict | Path | str | None) -> dict:
-    """Accept a dict, a Path to a JSON file, or a str path; return dict.
-
-    Args:
-        value (dict | Path | str | None): A dict (returned as-is), a path to a
-            JSON file, or ``None``.
-
-    Returns:
-        dict: The dict value, the parsed JSON object, or ``{}`` when the input
-            is missing, unreadable, or not a JSON object.
-    """
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    path = Path(value) if isinstance(value, (str, Path)) else None
-    if path is None or not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _metric_float(data: dict, keys: Iterable[str]) -> float | None:
     """Return the first int/float among ``keys`` in ``data``.
 
@@ -255,8 +232,8 @@ def evaluate_candidate_outcome(
     if baseline_throughput is None or baseline_throughput <= 0:
         raise ValueError("baseline_throughput must be a positive float")
 
-    bench = _coerce_dict(benchmark)
-    acc = _coerce_dict(accuracy)
+    bench = coerce_dict(benchmark)
+    acc = coerce_dict(accuracy)
     throughput = _metric_float(bench, ("throughput", "output_throughput", "tput"))
     acc_value = _metric_float(acc, ("accuracy", "gsm8k", "exact_match", "score"))
     completed = str(bench.get("completed") or bench.get("Completed") or "")

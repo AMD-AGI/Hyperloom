@@ -8,13 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.coerce import to_int
 from hyperloom.orchestrator.actions.executors import sweep as sw
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
 )
 
 
-# ---- _coerce_int ----
+# ---- int coercion (sweep.max_model_len now uses common.coerce.to_int default=0) ----
 
 
 @pytest.mark.parametrize(
@@ -29,7 +30,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     ],
 )
 def test_coerce_int(value, expected):
-    assert sw._coerce_int(value) == expected
+    assert to_int(value, default=0) == expected
 
 
 # ---- _build_grid ----

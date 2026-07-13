@@ -19,28 +19,6 @@ from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
 
-# Content-based variant fingerprint (cross-action dedup ledger key). Delegates
-# to :func:`canonical_fingerprint` (the single source of truth); both produce
-# the identical 16-char content hash.
-def variant_fingerprint(
-    extra_server_args: str | None,
-    extra_envs: dict[str, Any] | None,
-) -> str:
-    """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
-
-    Name and note are NOT inputs — variants with identical content but
-    different names collapse to the same fingerprint. Delegates to
-    :func:`canonical_fingerprint` so the two never drift.
-
-    Args:
-        extra_server_args (str | None): Backend server args for the variant.
-        extra_envs (dict[str, Any] | None): Per-variant environment overrides.
-
-    Returns:
-        str: The 16-char content fingerprint of the pair.
-    """
-    return canonical_fingerprint(extra_server_args, extra_envs)
-
 _MAGPIE_CWD_DEFAULT = "/tmp"
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
@@ -110,10 +88,10 @@ class GridVariant:
         """Content fingerprint used as dedup-ledger key. See module doc.
 
         Returns:
-            str: :func:`variant_fingerprint` of this variant's
+            str: :func:`canonical_fingerprint` of this variant's
             ``extra_server_args`` and ``extra_envs``.
         """
-        return variant_fingerprint(self.extra_server_args, self.extra_envs)
+        return canonical_fingerprint(self.extra_server_args, self.extra_envs)
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
     """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
@@ -249,10 +227,10 @@ class VariantResult:
         """Same fingerprint scheme as :class:`GridVariant`.
 
         Returns:
-            str: :func:`variant_fingerprint` of this result's
+            str: :func:`canonical_fingerprint` of this result's
             ``extra_server_args`` and ``extra_envs``.
         """
-        return variant_fingerprint(self.extra_server_args, self.extra_envs)
+        return canonical_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict.

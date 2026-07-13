@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import to_int
+
 
 # Map of metric_name -> SourceData.local_gpu field. Keys cover the three
 # exporter conventions seen on core42 (rocm exporter, DCGM, generic) so
@@ -112,7 +114,7 @@ def decode_gpu_snapshot(
                 snap = by_id.setdefault(
                     key,
                     {
-                        "gpu_id": _coerce_int_id(gpu_id),
+                        "gpu_id": to_int(gpu_id, default=gpu_id),
                         "pod_namespace": ns,
                         "pod_name": name,
                     },
@@ -185,22 +187,6 @@ def _extract_gpu_id(labels: Any) -> str:
         if key in labels:
             return str(labels[key])
     return ""
-
-
-def _coerce_int_id(raw: str) -> int | str:
-    """Coerce a GPU id to ``int`` when numeric, else keep it as a string.
-
-    Args:
-        raw (str): The raw GPU id extracted from a series label.
-
-    Returns:
-        int | str: The integer form when ``raw`` parses as an int,
-        otherwise ``raw`` unchanged.
-    """
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return raw
 
 
 def _latest_value(values: Any) -> float | None:

@@ -19,12 +19,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Sibling import works whether run as a standalone script or loaded via
+# importlib; the kernel-agent tools cannot rely on the ``hyperloom`` import root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import truthy as _truthy  # noqa: E402
 
-def _truthy(val: Any) -> bool:
-    """Interpret common truthy spellings from JSON or env strings."""
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
+sys.path.pop(0)
 
 
 def _load_input_json(path: str) -> dict[str, Any]:

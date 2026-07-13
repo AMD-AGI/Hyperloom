@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from hyperloom.common.coerce import to_int
 from hyperloom.orchestrator.actions.executors import sweep
 
 
@@ -65,15 +66,16 @@ class TestBuildGridMaxModelLenFilter:
 
 
 class TestCoerceInt:
+    # sweep's max_model_len coercion now uses common.coerce.to_int(default=0).
     def test_numeric_string(self):
-        assert sweep._coerce_int("6144") == 6144
+        assert to_int("6144", default=0) == 6144
 
     def test_int_passthrough(self):
-        assert sweep._coerce_int(4096) == 4096
+        assert to_int(4096, default=0) == 4096
 
     def test_none_and_empty(self):
-        assert sweep._coerce_int(None) == 0
-        assert sweep._coerce_int("") == 0
+        assert to_int(None, default=0) == 0
+        assert to_int("", default=0) == 0
 
     def test_garbage_is_zero(self):
-        assert sweep._coerce_int("abc") == 0
+        assert to_int("abc", default=0) == 0

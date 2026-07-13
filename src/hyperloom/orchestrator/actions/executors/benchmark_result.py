@@ -18,6 +18,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import first_float as _first_float
+from hyperloom.common.coerce import first_int as _first_int
+from hyperloom.common.coerce import to_float as _to_float
+from hyperloom.common.coerce import to_int as _to_int
 from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
@@ -46,74 +50,6 @@ _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 # ones. 1s absorbs clock-vs-mtime / FS-granularity skew (NFS ~1s) while
 # staying below the multi-second gap that separates genuinely stale leaks.
 _MTIME_GATE_SLACK_SEC: float = 1.0
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a value to ``float``, rejecting bools and ``None``.
-
-    Args:
-        value (Any): The value to coerce.
-
-    Returns:
-        float | None: The parsed float, or ``None`` when the value is a
-        bool, ``None``, or not convertible.
-    """
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_int(value: Any) -> int | None:
-    """Coerce a value to ``int``, rejecting bools and ``None``.
-
-    Args:
-        value (Any): The value to coerce.
-
-    Returns:
-        int | None: The parsed int, or ``None`` when the value is a
-        bool, ``None``, or not convertible.
-    """
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _first_float(*values: Any) -> float | None:
-    """Return the first value that parses as a float.
-
-    Args:
-        *values (Any): Candidate values, tried in order.
-
-    Returns:
-        float | None: The first successfully parsed float, or ``None``.
-    """
-    for value in values:
-        parsed = _to_float(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _first_int(*values: Any) -> int | None:
-    """Return the first value that parses as an int.
-
-    Args:
-        *values (Any): Candidate values, tried in order.
-
-    Returns:
-        int | None: The first successfully parsed int, or ``None``.
-    """
-    for value in values:
-        parsed = _to_int(value)
-        if parsed is not None:
-            return parsed
-    return None
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:

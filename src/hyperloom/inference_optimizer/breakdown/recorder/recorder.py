@@ -25,23 +25,14 @@ import re
 import tempfile
 import threading
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+from hyperloom.common.timeutil import now_iso
 
 from .sections import SECTION_SHAPES
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO-8601 string.
-
-    Returns:
-        The current UTC time formatted as an ISO-8601 string with microsecond
-        precision.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _slug(value: str) -> str:
@@ -199,7 +190,7 @@ class Recorder:
             "section": section,
             "kind": kind,
             "seq": self._next_seq(),
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "producer": self._producer,
             "payload": dict(payload) if isinstance(payload, Mapping) else payload,
         }

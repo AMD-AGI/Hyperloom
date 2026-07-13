@@ -22,9 +22,10 @@ import socket
 import subprocess
 import tempfile
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
 from .session_paths import manifest_path
@@ -34,15 +35,6 @@ log = logging.getLogger(__name__)
 # v3 adds stack_fingerprint + the dependencies provenance block (additive;
 # v2 readers stay compatible).
 SCHEMA_VERSION = 3
-
-
-def _utc_now_compact() -> str:
-    """Format the current UTC time as a compact session-id timestamp.
-
-    Returns:
-        str: Timestamp in ``YYYYMMDDTHHMMSSZ`` form.
-    """
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 # Env vars consulted by _detect_stack_fingerprint (operator pins that
@@ -355,7 +347,7 @@ def build_session_id(model_name: str = "") -> str:
         The derived internal session-id label.
     """
     stem = (model_name or "session").strip().replace("/", "_") or "session"
-    return f"{stem}_{_utc_now_compact()}_{uuid.uuid4().hex[:8]}"
+    return f"{stem}_{utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
 
 def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
@@ -440,7 +432,7 @@ def build_manifest(
         "session_id": session_id or build_session_id(model_name),
         "claw_session_id": claw_session_id,
         "sandbox_user_id": sandbox_user_id,
-        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted at session start so a trace-based
         # consumer can locate the on-disk artifacts (session_dir nests under it

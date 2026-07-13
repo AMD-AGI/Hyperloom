@@ -30,6 +30,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_int
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._grid_runner import (
     GridVariant,
@@ -54,24 +55,6 @@ log = logging.getLogger(__name__)
 DEFAULT_CONC_VALUES = [4, 16, 64]
 DEFAULT_ISL_OSL = ["1024:1024", "8192:1024", "1024:8192"]
 DEFAULT_NUM_PROMPTS_FACTOR = 5
-
-
-def _coerce_int(value: Any) -> int:
-    """Best-effort int coercion that never raises; non-numeric / None
-    collapse to 0 so an unset ``max_model_len`` disables filtering.
-
-    Args:
-        value: The value to coerce to an int.
-
-    Returns:
-        The parsed integer, or 0 when ``value`` is empty/non-numeric.
-    """
-    if value is None or value == "":
-        return 0
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
 
 
 def _build_grid(
@@ -335,7 +318,7 @@ class SweepExecutor:
 
         # Drop ISL+OSL combos over the context window (see _build_grid);
         # resolved from task params, then $MAX_MODEL_LEN.
-        max_model_len = _coerce_int(params.get("max_model_len") or os.environ.get("MAX_MODEL_LEN"))
+        max_model_len = to_int(params.get("max_model_len") or os.environ.get("MAX_MODEL_LEN"), default=0)
 
         grid, skipped_variants = _build_grid(
             conc_values=conc_values,

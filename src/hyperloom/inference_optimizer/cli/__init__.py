@@ -128,7 +128,7 @@ from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_LOCK_STALE_MINUTES,
-    clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
+    clean_stale_aiter_locks,
 )
 
 # Cohesive clusters live in sibling modules; re-exported here so the module
@@ -485,12 +485,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     return auto_disabled
 
 
-# Forward-looking alias for _apply_atom_auto_tighten (old name kept for tests/SKILL refs; same callable).
-_assert_atom_single_node = _apply_atom_auto_tighten
-
-
-
-
 def _emit_launch_info(
     *,
     pid: int,
@@ -577,24 +571,6 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
         )
         sys.exit(SESSION_BUSY_EXIT_CODE)
     return lock
-
-
-def _clean_stale_aiter_locks(
-    aiter_jit_dir: Path | None = None,
-    stale_minutes: int = AITER_LOCK_STALE_MINUTES,
-) -> dict[str, Any]:
-    """Startup sweep of stale aiter JIT locks; delegates to the shared helper.
-
-    Thin shim preserving the historical signature / stats-dict contract for the
-    startup call site and tests. The canonical implementation (plus the
-    liveness-gated per-cold-start variant) lives in
-    ``orchestrator/action_executors/_aiter_jit.py``.
-    """
-    return _clean_stale_aiter_locks_impl(
-        aiter_jit_dir, stale_minutes=stale_minutes,
-    )
-
-
 
 
 # AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
@@ -1488,7 +1464,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 os.environ[env_key] = v
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
-    aiter_sweep = _clean_stale_aiter_locks()
+    aiter_sweep = clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
         print(
             f"Stale aiter locks cleared: "

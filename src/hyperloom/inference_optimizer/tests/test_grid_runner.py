@@ -927,11 +927,11 @@ def test_probe_server_help_text_unknown_framework_returns_empty(
     assert _grid_runner._probe_server_help_text("") == ""
 
 
-def test_probe_sglang_help_text_back_compat_shim(
+def test_probe_server_help_text_sglang(
     _reset_help_cache,
     monkeypatch,
 ):
-    """The legacy ``_probe_sglang_help_text`` name is preserved as a thin wrapper so fixtures patching it keep working."""
+    """The framework-keyed probe handles sglang and populates the sglang cache."""
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -942,9 +942,8 @@ def test_probe_sglang_help_text_back_compat_shim(
             "",
         ),
     )
-    out = _grid_runner._probe_sglang_help_text()
+    out = _grid_runner._probe_server_help_text("sglang")
     assert "USAGE_SGLANG_LEGACY" in out
-    # The shim populates the framework-keyed cache under the sglang key.
     assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
 
 

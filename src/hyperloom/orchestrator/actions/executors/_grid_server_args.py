@@ -16,6 +16,7 @@ import re
 import shlex
 from typing import Any
 
+from hyperloom.common.coerce import optional_positive_int
 
 
 log = logging.getLogger(__name__)
@@ -460,28 +461,6 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
         return default
     return val
 
-def _coerce_optional_positive_int(value: int | str | None) -> int | None:
-    """Coerce ``value`` to a positive int, or ``None`` when unset/invalid.
-
-    Used to validate an optional ``MAX_MODEL_LEN`` ceiling sourced from the
-    workload envs (where it may be an int, a numeric string, or absent) before
-    it clamps ``--context-length``.
-
-    Args:
-        value (int | str | None): Candidate ceiling.
-
-    Returns:
-        int | None: The positive integer, or ``None`` when unset, non-positive,
-        or non-integer.
-    """
-    if value is None:
-        return None
-    try:
-        parsed = int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
 def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
 
@@ -560,7 +539,7 @@ def inject_sglang_context_length(
         return args
     cap = resolve_sglang_context_cap(isl, osl)
     context_length = min(int(max_pos), cap)
-    max_model_len_int = _coerce_optional_positive_int(max_model_len)
+    max_model_len_int = optional_positive_int(max_model_len)
     if max_model_len_int is not None:
         context_length = min(context_length, max_model_len_int)
     return merge_server_args(

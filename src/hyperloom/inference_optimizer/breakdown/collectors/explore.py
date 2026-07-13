@@ -260,10 +260,6 @@ def collect_explore_search(
     }
 
 
-# Backwards-compatible alias for older in-repo callers/tests.
-collect_param_search = collect_explore_search
-
-
 # Sweep
 _VARIANT_NAME_RE = re.compile(r"variant_(\d+)_conc(\d+)_isl(\d+)_osl(\d+)", re.IGNORECASE)
 

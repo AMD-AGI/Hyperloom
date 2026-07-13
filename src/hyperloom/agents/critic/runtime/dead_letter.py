@@ -14,24 +14,16 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from hyperloom.common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
 from .metrics import CRITIC_KB_DEAD_LETTER_COUNT, get_registry
 
 
 DEFAULT_DEAD_LETTER_DIR = "/var/lib/critic-kb-dlq"
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO string.
-
-    Returns:
-        str: The current timestamp in ISO 8601 format.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 @dataclass
@@ -121,7 +113,7 @@ class DeadLetter:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path_for(endpoint)
         record = {
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "endpoint": endpoint,
             "payload": payload,
             "attempts": attempts,

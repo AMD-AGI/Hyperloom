@@ -33,9 +33,10 @@ import json
 import os
 import socket
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso
 
 from . import session_paths
 
@@ -43,11 +44,6 @@ try:  # POSIX runtime (Linux): authoritative flock-based exclusion.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX dev hosts (e.g. Windows).
     fcntl = None  # type: ignore[assignment]
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -172,7 +168,7 @@ class SessionLock:
                 os.close(fd)
                 raise SessionAlreadyRunning(self.session_dir, owner)
         self._fd = fd
-        self._write_owner(self._now_owner(started_at=_now_iso()))
+        self._write_owner(self._now_owner(started_at=now_iso(timespec="seconds")))
         return self
 
     def heartbeat(self) -> None:
@@ -195,7 +191,7 @@ class SessionLock:
 
     def _now_owner(self, *, started_at: str) -> dict[str, Any]:
         """Build the owner document written into the lock body."""
-        now = _now_iso()
+        now = now_iso(timespec="seconds")
         self._started_at = started_at or now
         return {
             "pid": os.getpid(),

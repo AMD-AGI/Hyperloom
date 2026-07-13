@@ -2,8 +2,9 @@
 
 """Shared model-config helpers (config.json parsing + arch/type detection).
 
-Leaf module: depends only on the standard library so both ``cli`` and the
-orchestrator executors can import it without a circular dependency.
+Leaf module: depends only on the standard library (and the stdlib-only
+``hyperloom.common`` base) so both ``cli`` and the orchestrator executors can
+import it without a circular dependency.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import logging
 import re
 import struct
 from pathlib import Path
+
+from hyperloom.common.coerce import to_int as _to_int
 
 
 def _load_model_config_dict(model_path: str) -> dict | None:
@@ -337,16 +340,6 @@ _SHARED_EXPERT_KEYS = ("n_shared_experts", "num_shared_experts", "moe_num_shared
 _TEXT_SCOPE_KEYS = ("text_config", "llm_config", "language_config")
 # Base-family tokens for derived/hybrid model_types (longest first).
 _FAMILY_TOKENS = ("qwen3", "qwen2", "deepseek", "llama", "gemma", "mistral", "phi", "glm")
-
-
-def _to_int(val: object) -> int | None:
-    """Best-effort int coercion; returns None on any malformed value."""
-    if val is None or isinstance(val, bool):
-        return None
-    try:
-        return int(val)
-    except (TypeError, ValueError):
-        return None
 
 
 def _merge_config_scopes(data: dict) -> dict:

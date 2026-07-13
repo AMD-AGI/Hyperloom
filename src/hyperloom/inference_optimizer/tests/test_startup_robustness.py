@@ -273,7 +273,7 @@ def test_parser_does_not_expose_removed_bypass_flags():
         )
 
 
-# _clean_stale_aiter_locks
+# clean_stale_aiter_locks
 def _make_aiter_tree(root):
     """Build a minimal aiter jit/build/ layout with mixed lock ages."""
     stale_mtime = time.time() - 30 * 60  # 30 min ago
@@ -316,7 +316,7 @@ def _make_aiter_tree(root):
 
 def test_clean_stale_aiter_locks_deletes_stale_keeps_fresh(tmp_path):
     layout = _make_aiter_tree(tmp_path)
-    stats = cli._clean_stale_aiter_locks(
+    stats = cli.clean_stale_aiter_locks(
         aiter_jit_dir=tmp_path,
         stale_minutes=5,
     )
@@ -334,7 +334,7 @@ def test_clean_stale_aiter_locks_deletes_stale_keeps_fresh(tmp_path):
 
 def test_clean_stale_aiter_locks_handles_missing_dir():
     """When aiter cannot be located, return empty stats — never raise."""
-    stats = cli._clean_stale_aiter_locks(
+    stats = cli.clean_stale_aiter_locks(
         aiter_jit_dir=type("X", (), {"is_dir": lambda self: False})(),  # noqa: E731
     )
     assert stats["scanned"] == 0
@@ -346,7 +346,7 @@ def test_clean_stale_aiter_locks_respects_stale_minutes(tmp_path):
     (tmp_path / "lock_module_x").write_text("x")
     moderately_old = time.time() - 4 * 60  # 4 min ago
     os.utime(tmp_path / "lock_module_x", (moderately_old, moderately_old))
-    stats = cli._clean_stale_aiter_locks(
+    stats = cli.clean_stale_aiter_locks(
         aiter_jit_dir=tmp_path,
         stale_minutes=10,
     )
@@ -366,7 +366,7 @@ def test_clean_stale_aiter_locks_auto_discovers_via_env_override(
     stale_mtime = time.time() - 30 * 60
     os.utime(stale_lock, (stale_mtime, stale_mtime))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(tmp_path))
-    stats = cli._clean_stale_aiter_locks(stale_minutes=5)
+    stats = cli.clean_stale_aiter_locks(stale_minutes=5)
     assert stats["dir"] in {str(tmp_path), str(tmp_path / "build")}
     assert stats["deleted"] == 1
     assert not stale_lock.exists()

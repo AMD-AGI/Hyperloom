@@ -55,7 +55,7 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
-from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
+from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
@@ -3224,30 +3224,6 @@ _RANK_PCT_KEYS = (
 )
 
 
-def _coerce_float(value: Any) -> float | None:
-    """Parse a CSV/JSON cell into a float.
-
-    Strips a trailing ``%`` and comma thousands separators.
-
-    Args:
-        value: The raw cell value.
-
-    Returns:
-        The parsed float, or ``None`` when not numeric.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value or "").strip().rstrip("%").replace(",", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
 def _lower_keyed(row: dict) -> dict[str, Any]:
     """Return a copy of ``row`` with keys trimmed and lower-cased.
 
@@ -3314,12 +3290,12 @@ def _record_gpu_us(low: dict[str, Any]) -> float | None:
     """
     for k in _RANK_TIME_MS_KEYS:
         if k in low:
-            val = _coerce_float(low[k])
+            val = safe_float(low[k], default=None, strip_percent=True, strip_commas=True)
             if val is not None:
                 return val * 1000.0
     for k in _RANK_TIME_US_KEYS:
         if k in low:
-            val = _coerce_float(low[k])
+            val = safe_float(low[k], default=None, strip_percent=True, strip_commas=True)
             if val is not None:
                 return val
     return None
@@ -3336,7 +3312,7 @@ def _record_gpu_pct(low: dict[str, Any]) -> float | None:
     """
     for k in _RANK_PCT_KEYS:
         if k in low:
-            val = _coerce_float(low[k])
+            val = safe_float(low[k], default=None, strip_percent=True, strip_commas=True)
             if val is not None:
                 return val
     return None
@@ -3484,7 +3460,7 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
     """
     raw = os.environ.get(_OTHER_BUCKET_MIN_GPU_PCT_ENV, "").strip()
     if raw:
-        val = _coerce_float(raw)
+        val = safe_float(raw, default=None, strip_percent=True, strip_commas=True)
         if val is not None and val >= 0:
             return val
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT

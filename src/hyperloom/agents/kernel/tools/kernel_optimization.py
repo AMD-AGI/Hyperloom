@@ -22,6 +22,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
 from _io_utils import (  # noqa: E402
+    append_jsonl,
     append_log,
     atomic_write_json,
     kernel_row_matches,
@@ -33,18 +34,6 @@ from _io_utils import (  # noqa: E402
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
-
-
-def append_jsonl(path: Path, data: dict[str, Any]) -> None:
-    """Append one JSON object as a line to the given JSONL file.
-
-    Args:
-        path (Path): Destination JSONL file; parent dirs are created.
-        data (dict[str, Any]): JSON-serializable object to append.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def update_status(

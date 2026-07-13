@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.agents.robustness.role.prompt_inputs import InboxItem, ReactorContext
 from hyperloom.agents.robustness.signals.stall import (
     StallConfig,
-    _coerce_unix,
     _collect_last_seen,
     evaluate_stall_signals,
 )
@@ -21,11 +21,12 @@ def _item(from_agent: str, ts=None) -> InboxItem:
 
 
 def test_coerce_unix_variants() -> None:
-    assert _coerce_unix(None) is None
-    assert _coerce_unix(5) == 5.0
-    assert _coerce_unix("2026-01-01T00:00:00Z") > 0  # ISO parse (line 157)
-    assert _coerce_unix("123.5") == 123.5  # float fallback (lines 159-160)
-    assert _coerce_unix("not-a-time") is None  # lines 161-162
+    # stall now uses common.coerce.to_unix directly (ISO-first, bool rejected).
+    assert to_unix(None) is None
+    assert to_unix(5) == 5.0
+    assert to_unix("2026-01-01T00:00:00Z") > 0
+    assert to_unix("123.5") == 123.5
+    assert to_unix("not-a-time") is None
 
 
 def test_collect_last_seen_branches() -> None:

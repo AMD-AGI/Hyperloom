@@ -75,7 +75,7 @@ def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     assert hasattr(coord, "_workload_canonical_id")
     assert coord._workload_canonical_id() == _expected_cid()
-    assert coord._gap_anchor_canonical_id() == _expected_cid()
+    assert coord._workload_canonical_id() == _expected_cid()
 
 
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:

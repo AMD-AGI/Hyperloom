@@ -1516,9 +1516,7 @@ class SpecialistRunner:
             "max_turns": max_turns,
             "status": status,
         }
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        _common_io.atomic_write_json(path, payload, indent=None, sort_keys=True, make_parents=False)
 
     @staticmethod
     def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

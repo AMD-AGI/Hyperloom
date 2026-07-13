@@ -4,8 +4,9 @@
 
 Dispatch an LLM specialist sub-agent on the **research_lane** to investigate
 one canonical gap in depth. The specialist reads advisory RecipeKB
-warm-start facts, source-backed research hints, the PR Monitor feed for the
-same tag set, and the framework source roots under `INFERENCEX_PATH`.
+warm-start facts, source-backed research hints, and the framework source
+roots under `INFERENCEX_PATH`, and can query the PR Monitor on demand (over
+the shared `PR_QUERY_REPOS` allowlist) via `mcp__pr_monitor__*` tools.
 It then emits exactly one `specialist_done` intent on exit (Inv-5.3 single
 exit protocol).
 
@@ -117,7 +118,8 @@ Each specialist subprocess sees:
   - the gap statement + evidence
   - optional advisory KB context, warm-start lessons / pitfalls, and
     source-backed research hints
-  - PR feed for `domain.pr_repos`
+  - a PR-query capability block: the `mcp__pr_monitor__*` tools plus the
+    shared `PR_QUERY_REPOS` repo allowlist (self-serve, no pre-warmed feed)
   - framework source root hints
   - the worktree path
   - allocated GPU ids when `needs_gpu=true`

@@ -29,6 +29,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float as _to_float
+from hyperloom.common.timeutil import now_iso
+
 log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
@@ -53,30 +56,10 @@ def _now_iso_safe() -> str:
         The current UTC time as a microsecond-precision ISO-8601 string, or
         ``""`` if the clock read fails.
     """
-    from datetime import datetime, timezone
-
     try:
-        return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        return now_iso(timespec="microseconds")
     except Exception:  # noqa: BLE001
         return ""
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a value to ``float``, rejecting bools and unparseable inputs.
-
-    Args:
-        value (Any): the value to coerce.
-
-    Returns:
-        float | None: the float value, or ``None`` when ``value`` is None, a
-            bool, or not parseable as a float.
-    """
-    try:
-        if value is None or isinstance(value, bool):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _recorder(session_dir: Path | str, producer: str):

@@ -919,7 +919,7 @@ def test_apply_patch_no_git_keep_and_revert(tmp_path: Path) -> None:
     patch_file.write_text(_NOGIT_PATCH, encoding="utf-8")
     backup_root = tmp_path / "backups"
 
-    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, backup_root)
+    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, backup_root)
     pytest.importorskip("subprocess")  # ensure patch CLI available; skip gracefully if not
     if not ok:
         pytest.skip(f"patch CLI unavailable or patch failed: {err}")
@@ -964,10 +964,34 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
 
     assert ok is False
     assert "escapes framework root" in err
     assert backups == []
     assert outside.read_text(encoding="utf-8") == "SAFE\n"
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Verify apply_failed results carry lane + retry_feedback fields
+# ---------------------------------------------------------------------------
+
+def test_derive_lane_enablement():
+    """_derive_lane returns 'enablement' when params.enablement is set."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    assert _derive_lane({"enablement": True}) == "enablement"
+
+
+def test_derive_lane_perf_framework():
+    """_derive_lane returns 'perf_framework' for framework_agent_authoring params."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    assert _derive_lane({"framework_agent_authoring": True}) == "perf_framework"
+    assert _derive_lane({"framework_agent_candidate_id": "x"}) == "perf_framework"
+
+
+def test_derive_lane_perf_explore():
+    """_derive_lane returns 'perf_explore' for plain explore params."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    assert _derive_lane({}) == "perf_explore"
+    assert _derive_lane({"specialist_task_id": "abc"}) == "perf_explore"

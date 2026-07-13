@@ -691,14 +691,22 @@ class DispatcherCollaborator:
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
-                # A reverted enablement patch clears the in-flight guard so the
-                # next FRAMEWORK pump tick retries with the next bridging
-                # candidate; a kept patch is terminal.
+                # Unified rearm: handles enablement (delegates to _maybe_rearm_enablement)
+                # AND apply_failed results for perf lanes (schedules retry or stamps terminal).
+                res_dict = getattr(result, "result", None)
                 try:
-                    self._maybe_rearm_enablement(getattr(result, "result", None))
+                    self._maybe_rearm_authored_lane(res_dict)
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
-                        "ENABLEMENT rearm failed for task=%s",
+                        "AUTHORED_LANE rearm failed for task=%s",
+                        task.task_id,
+                    )
+                # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
+                try:
+                    await self._drain_apply_fail_retry_pending()
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "apply_fail retry drain failed for task=%s",
                         task.task_id,
                     )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.

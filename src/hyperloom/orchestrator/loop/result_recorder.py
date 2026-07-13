@@ -30,6 +30,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from hyperloom.common.coerce import to_float as _coerce_metric
+
 from ..state.optimization_journal import (
     JournalEntry,
     OUTCOME_KEEP,
@@ -48,19 +50,6 @@ from ..state.task_registry import Task
 # (``from __future__ import annotations``) that is never evaluated at runtime.
 
 log = __import__("logging").getLogger(__name__)
-
-
-def _coerce_metric(value: Any) -> float | None:
-    """Best-effort float coercion of a metric value.
-
-    Returns ``None`` when *value* is ``None`` or not float-coercible (matching
-    the inline ``float(x) if x is not None else None`` guards this helper
-    replaces in the fact-recording paths).
-    """
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 class ResultRecorder:

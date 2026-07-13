@@ -144,7 +144,7 @@ def test_nogit_apply_revert_via_executor_roundtrip(tmp_path):
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
 
     backup_root = tmp_path / "bak"
-    ok, err, backups = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
 

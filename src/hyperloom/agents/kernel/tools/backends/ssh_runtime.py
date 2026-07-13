@@ -32,11 +32,17 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 # Reuse the exact env allowlist + credential-alias logic the Ray path uses, so
 # GEAK sees the same GEAK_* / creds / base-url config regardless of placement.
 from ray_runtime import SAFE_ENV_KEYS, safe_runtime_env
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _io_utils import extract_last_json  # noqa: E402
+
+sys.path.pop(0)
 
 DEFAULT_SSH_PORT = 2222
 
@@ -198,38 +204,6 @@ except subprocess.TimeoutExpired:
 """
 
 
-def _extract_last_json(text: str) -> dict | None:
-    """Parse the last top-level JSON object from the pod's stdout.
-
-    Args:
-        text: The pod's stdout to scan.
-
-    Returns:
-        The last top-level JSON object as a dict, or ``None`` when none is
-        found or it fails to parse.
-    """
-    if not text:
-        return None
-    s = text.rstrip()
-    end = s.rfind("}")
-    if end == -1:
-        return None
-    depth = 0
-    for i in range(end, -1, -1):
-        if s[i] == "}":
-            depth += 1
-        elif s[i] == "{":
-            depth -= 1
-            if depth == 0:
-                import json
-
-                try:
-                    return json.loads(s[i : end + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
-
-
 def _ssh_unconfigured() -> dict | None:
     """Return an error dict if MN_SSH_HOST/KEY are missing, else None.
 
@@ -293,7 +267,7 @@ def _run_pod_runner_over_ssh(
         )
     except subprocess.TimeoutExpired:
         return None, None, host
-    return _extract_last_json(proc.stdout or ""), proc, host
+    return extract_last_json(proc.stdout or ""), proc, host
 
 
 def run_geak_over_ssh(

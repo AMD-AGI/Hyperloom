@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
+
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -219,7 +221,7 @@ def _stale_lease_symptoms(
             continue
         # Skip recently-acquired leases (reaper hasn't run); coerce
         # unix-seconds or ISO ``acquired_at``.
-        acquired_unix = _coerce_unix(entry.get("acquired_at"))
+        acquired_unix = to_unix(entry.get("acquired_at"))
         age_s = (now - acquired_unix) if acquired_unix is not None and now > 0 else cfg.stale_lease_min_age_s + 1.0
         if age_s < cfg.stale_lease_min_age_s:
             continue
@@ -251,38 +253,6 @@ def _stale_lease_symptoms(
             )
         )
     return out
-
-
-def _coerce_unix(value: Any) -> float | None:
-    """Coerce a timestamp value to unix seconds.
-
-    Accepts numeric epoch seconds or an ISO-8601-ish string (``Z`` suffix
-    tolerated). Booleans are rejected.
-
-    Args:
-        value (Any): The raw timestamp value.
-
-    Returns:
-        float | None: Unix seconds, or ``None`` when the value cannot be
-            interpreted as a timestamp.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            from datetime import datetime
-
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                return None
-    return None
 
 
 # ---------------------------------------------------------------------------

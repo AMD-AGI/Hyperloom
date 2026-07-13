@@ -13,10 +13,11 @@ issues (contract §6, "writes must not block review_verdict"). Triggers:
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from hyperloom.common.env import env_bool, env_float, env_int
 
 from .category_mapping import map_category_to_kind
 from .dead_letter import DeadLetter
@@ -64,44 +65,6 @@ _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
 # favour "skip KB rather than wait" — one failure opens it, short cooldown.
 _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
-
-
-def _read_bool_env(name: str, default: bool) -> bool:
-    """Read a boolean environment variable.
-
-    Args:
-        name (str): The environment variable name.
-        default (bool): Value returned when the variable is unset.
-
-    Returns:
-        bool: ``True`` if the (trimmed, lower-cased) value is one of
-        ``1``/``true``/``yes``/``on``; otherwise ``False`` or ``default``.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _read_num_env(name: str, default, cast):
-    """Read a numeric environment variable, falling back on errors.
-
-    Args:
-        name (str): The environment variable name.
-        default: Value returned when unset, blank or unparsable.
-        cast: Numeric constructor to apply (``int`` or ``float``).
-
-    Returns:
-        The value parsed via ``cast``, or ``default``.
-    """
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return cast(raw)
-    except ValueError:
-        return default
-
 
 @dataclass
 class WriteContext:
@@ -168,13 +131,14 @@ class KBWriter:
         self.client = client
         self.session_memory = session_memory or SessionMemory()
         self.dead_letter = dead_letter or DeadLetter()
-        self.write_enabled = _read_bool_env("KB_WRITE_ENABLED", True)
-        self.read_enabled = _read_bool_env("KB_READ_ENABLED", True)
+        self.write_enabled = env_bool("KB_WRITE_ENABLED", True)
+        self.read_enabled = env_bool("KB_READ_ENABLED", True)
         self._time_fn = time_fn
 
-        self._breaker_threshold = max(1, _read_num_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD, int))
+        self._breaker_threshold = max(1, env_int("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD))
         self._breaker_cooldown = max(
-            0.0, _read_num_env("CRITIC_KB_BREAKER_COOLDOWN_SECONDS", _DEFAULT_BREAKER_COOLDOWN_SECONDS, float)
+            0.0,
+            env_float("CRITIC_KB_BREAKER_COOLDOWN_SECONDS", _DEFAULT_BREAKER_COOLDOWN_SECONDS),
         )
         self._consecutive_failures = 0
         self._unreachable_until = 0.0

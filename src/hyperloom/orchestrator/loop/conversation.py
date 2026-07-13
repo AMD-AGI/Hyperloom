@@ -557,9 +557,23 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        if msgs:
+        rendered = list(msgs[-20:])
+        # Durable, at-least-once-until-decided delivery of proposals to the
+        # Critic. The inbox tail is lossy: it is capped to the last N events
+        # since the cursor, and after any Critic turn ``_cursor_advance_to_latest``
+        # jumps the cursor to the newest message. So a ``topic=proposal`` message
+        # buried behind >N later events (e.g. a slow discover window full of
+        # timeouts/observations) before a Critic turn renders it is dropped from
+        # the window AND skipped by the advancing cursor — lost forever, no
+        # verdict, and the proposer phase wedges waiting on a verdict that can
+        # never land. Re-present every still-undecided proposal from the durable
+        # ``pending_proposals`` registry (survives ticks + resume) until it is
+        # decided, independent of the tail/cursor.
+        if agent_name == "critic":
+            rendered = await self._augment_critic_inbox_with_pending(rendered)
+        if rendered:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
-            for m in msgs[-20:]:
+            for m in rendered:
                 # Structured rendering for delegated_result/denial/verdict; compact dump otherwise.
                 sections.append(f"  {_format_inbox_event(m)}")
         else:
@@ -567,6 +581,56 @@ class ConversationCollaborator:
             sections.append("(no new messages)")
 
         return "\n".join(sections)
+
+    async def _augment_critic_inbox_with_pending(
+        self, rendered: list["Message"]
+    ) -> list["Message"]:
+        """Ensure every undecided proposal awaiting a Critic verdict is present.
+
+        The rendered tail can drop proposals that scrolled past the capped
+        window; because the Critic's cursor then advances past them, they would
+        never be re-presented and never get a verdict. Source the review set
+        from the durable ``pending_proposals`` registry and merge any missing
+        proposal messages into the rendered window (deduped by ``msg_id``,
+        re-sorted by ``seq`` so "newest last" holds). A decided proposal drops
+        out on the next turn (``_apply_review_verdict`` stamps ``decided``), so
+        this never re-reviews a resolved proposal.
+
+        Args:
+            rendered: The tail-capped messages already selected for the inbox.
+
+        Returns:
+            The rendered list augmented with any undecided proposal messages
+            not already present; unchanged on any error (best-effort).
+        """
+        try:
+            pending = [
+                p
+                for p in self.state.pending_proposals.values()
+                if not getattr(p, "decided", False)
+            ]
+        except Exception:  # noqa: BLE001 — never break prompt composition
+            return rendered
+        if not pending:
+            return rendered
+        seen = {getattr(m, "msg_id", None) for m in rendered}
+        extra: list["Message"] = []
+        for p in pending:
+            pid = str(getattr(p, "proposal_msg_id", "") or "")
+            if not pid or pid in seen:
+                continue
+            try:
+                pm = await self.bus.lookup_by_id(pid)
+            except Exception:  # noqa: BLE001 — defensive
+                pm = None
+            if pm is not None:
+                extra.append(pm)
+                seen.add(pid)
+        if not extra:
+            return rendered
+        merged = list(rendered) + extra
+        merged.sort(key=lambda m: int(getattr(m, "seq", 0) or 0))
+        return merged
 
     async def _load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides.

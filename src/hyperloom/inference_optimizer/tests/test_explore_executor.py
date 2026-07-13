@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
-    variant_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
@@ -128,13 +127,6 @@ def test_canonical_fingerprint_distinguishes_envs():
         {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
-
-
-def test_canonical_fingerprint_matches_variant_fingerprint():
-    """Identity with legacy ``variant_fingerprint`` is preserved during migration."""
-    args = "--attention-backend aiter"
-    envs = {"VLLM_ROCM_USE_AITER": "1"}
-    assert canonical_fingerprint(args, envs) == variant_fingerprint(args, envs)
 
 
 # SharedState — record_explore_accepted / apply_explore_search_update
