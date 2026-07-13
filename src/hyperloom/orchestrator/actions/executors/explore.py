@@ -63,6 +63,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._grid_server_args import compose_server_args
 from ._stack_rebench import measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -141,6 +142,50 @@ def _coerce_args_str(value: Any) -> str:
     return str(value)
 
 
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize optional list-like grid controls."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _variant_control_fields(variant: Any) -> dict[str, Any]:
+    """Return non-default remove/unset/replace controls for ledger rows."""
+    remove_args = _coerce_str_list(getattr(variant, "remove_args", []))
+    unset_envs = _coerce_str_list(getattr(variant, "unset_envs", []))
+    args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
+    out: dict[str, Any] = {}
+    if remove_args:
+        out["remove_args"] = remove_args
+    if unset_envs:
+        out["unset_envs"] = unset_envs
+    if args_mode == "replace":
+        out["args_mode"] = "replace"
+    return out
+
+
+def _entry_control_fields(entry: Any) -> dict[str, Any]:
+    """Return remove/unset/replace controls from a persisted ledger entry."""
+    if not isinstance(entry, dict):
+        return {}
+    remove_args = _coerce_str_list(entry.get("remove_args"))
+    unset_envs = _coerce_str_list(entry.get("unset_envs"))
+    args_mode = str(entry.get("args_mode") or "append").strip().lower()
+    out: dict[str, Any] = {}
+    if remove_args:
+        out["remove_args"] = remove_args
+    if unset_envs:
+        out["unset_envs"] = unset_envs
+    if args_mode == "replace":
+        out["args_mode"] = "replace"
+    return out
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
@@ -150,6 +195,9 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "name": str (required, unique-in-round),
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
+          "remove_args": list[str],      # inherited/base flags to remove
+          "unset_envs": list[str],       # inherited env keys to remove
+          "args_mode": "append"|"replace",
           "note": str,
           "provenance": str,            # llm_direct / default_grid / specialist:<tag>
           "scope": str,                 # specialist dial: domain / domains / freeform (advisory)
@@ -179,6 +227,9 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             extra_server_args=args,
             extra_envs=envs,
             note=str(raw.get("note") or raw.get("provenance") or ""),
+            remove_args=_coerce_str_list(raw.get("remove_args")),
+            unset_envs=_coerce_str_list(raw.get("unset_envs")),
+            args_mode=str(raw.get("args_mode") or "append"),
         )
         # Stash extra metadata on the GridVariant so the ledger writer can
         # pull provenance/evidence; safe on the plain dataclass.
@@ -791,6 +842,7 @@ class ExploreExecutor:
             return canonical_fingerprint(
                 str(entry.get("extra_server_args") or ""),
                 dict(entry.get("extra_envs") or {}),
+                **_entry_control_fields(entry),
             )
 
         # Conditional dedup. KEEP'd variants are permanently blocked (never
@@ -861,7 +913,11 @@ class ExploreExecutor:
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
-            fp = canonical_fingerprint(gv.extra_server_args, gv.extra_envs)
+            fp = canonical_fingerprint(
+                gv.extra_server_args,
+                gv.extra_envs,
+                **_variant_control_fields(gv),
+            )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in seen_fps:
                 skipped_dup.append(
@@ -978,6 +1034,7 @@ class ExploreExecutor:
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
+                control_fields = _variant_control_fields(gv)
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # Round 1 + round 2 share this slot as the lifecycle pid_dir so
@@ -1024,6 +1081,7 @@ class ExploreExecutor:
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "note": gv.note,
                                 "outcome": "FAILED",
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
@@ -1045,6 +1103,7 @@ class ExploreExecutor:
                                     "name": gv.name,
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
+                                    **control_fields,
                                     "note": gv.note,
                                     "reason": "warmup_failed",
                                     "gain_pct": None,
@@ -1060,6 +1119,7 @@ class ExploreExecutor:
                                     "name": gv.name,
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
+                                    **control_fields,
                                     "provenance": provenance,
                                     "gain_pct": None,
                                     "tput": None,
@@ -1117,6 +1177,7 @@ class ExploreExecutor:
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "note": gv.note,
                             "outcome": "KILLED_OVERTIME",
                             "status": r.status,
@@ -1150,6 +1211,7 @@ class ExploreExecutor:
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "note": gv.note,
                                 "reason": "killed_overtime",
                                 "gain_pct": None,
@@ -1168,6 +1230,7 @@ class ExploreExecutor:
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "provenance": provenance,
                                 "gain_pct": None,
                                 "tput": None,
@@ -1257,6 +1320,7 @@ class ExploreExecutor:
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
+                        **control_fields,
                         "note": gv.note,
                         "outcome": outcome,
                         "status": r.status,
@@ -1282,6 +1346,7 @@ class ExploreExecutor:
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
@@ -1293,8 +1358,15 @@ class ExploreExecutor:
                             "ts": _now_iso(),
                         }
                         # Layer onto the running stack BEFORE rebench.
-                        next_args = _join_args(stack_extra_args, gv.extra_server_args)
+                        next_args = compose_server_args(
+                            inherited_args=stack_extra_args,
+                            variant_extra_args=gv.extra_server_args,
+                            remove_args=getattr(gv, "remove_args", []),
+                            args_mode=getattr(gv, "args_mode", "append"),
+                        )
                         next_envs = dict(stack_extra_envs)
+                        for k in getattr(gv, "unset_envs", []) or []:
+                            next_envs.pop(str(k), None)
                         next_envs.update(gv.extra_envs)
                         in_batch_keeps.append(keep_entry)
 
@@ -1316,6 +1388,9 @@ class ExploreExecutor:
                                 extra_server_args=gv.extra_server_args,
                                 extra_envs=dict(gv.extra_envs),
                                 note="stack_rebench",
+                                remove_args=list(getattr(gv, "remove_args", []) or []),
+                                unset_envs=list(getattr(gv, "unset_envs", []) or []),
+                                args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                             )
                             round2_lifecycle = (
                                 {
@@ -1378,6 +1453,7 @@ class ExploreExecutor:
                                         "name": gv.name,
                                         "extra_server_args": gv.extra_server_args,
                                         "extra_envs": dict(gv.extra_envs),
+                                        **control_fields,
                                         "note": gv.note,
                                         "reason": "stack_unstable",
                                         "gain_pct": gain,
@@ -1427,6 +1503,7 @@ class ExploreExecutor:
                                 "gain_pct": gain,
                                 "extra_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "provenance": provenance,
                                 "scope": scope,
                                 "ts": _now_iso(),
@@ -1441,6 +1518,7 @@ class ExploreExecutor:
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "note": gv.note,
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
@@ -1456,6 +1534,7 @@ class ExploreExecutor:
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "provenance": provenance,
                             "gain_pct": gain,
                             "tput": cold_tput,
