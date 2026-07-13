@@ -1139,7 +1139,7 @@ class KernelPhase(PhaseHandler):
             # denominator (cross-harness), so it is PROVISIONAL only. Do NOT stamp
             # cumulative_gain_validated here - validated may only be produced by a
             # same-harness full-stack rebench, consumed in _promote_to_shared_state.
-            # Native/codex lanes are unaffected (they never call this method; their
+            # Other lanes are unaffected (they never call this method; their
             # validated gain is already same-harness).
             self.shared_state.cumulative_gain = gain
             self.shared_state.cumulative_gain_provenance = (

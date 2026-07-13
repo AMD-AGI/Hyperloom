@@ -1736,7 +1736,7 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     # Fellow stability defaults (IS_SANDBOX/TLS/llm-proxy) scoped to THIS child
-    # env only, so they never leak to sibling ladder backends (claude/codex).
+    # env only, so they never leak to sibling ladder backends.
     _apply_fellow_env(env)
     # Compiled-kernel rebuild (RCA compiled-kernel C): aiter ships editable +
     # JITs each op from source. Editing an aiter .cuh/.cu only takes effect if
@@ -2042,7 +2042,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # GPU_TARGET is passed to Kernel-Forge's MCP server tools (build/bench/pmc)
         # via the forge-loop child env (_run_loop_via_cli sets env["GPU_TARGET"]),
         # so it is NOT written to the parent os.environ -- that would leak to the
-        # sibling ladder backends (claude/codex) running in the same process.
+        # sibling ladder backends running in the same process.
         shapes = _shapes_from_candidate(candidate)
         forge_log = output_dir / "forge_loop.log"
         experiments_dir = output_dir / "forge_experiments"

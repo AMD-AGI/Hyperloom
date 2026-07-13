@@ -3311,7 +3311,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
         await krh._run_optimization_batch(
             payload={
                 "candidates_path": "/dummy",
-                "backend_order": "geak_v3,claude,codex",
+                "backend_order": "geak_v3",
                 "max_parallel": 3,
                 "parallel_backends": False,
             },
@@ -3385,7 +3385,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
 
 @pytest.mark.asyncio
 async def test_backend_ladder_breaks_on_first_keep(session_dir):
-    """When GEAK already KEEPs, the ladder short-circuits (no Claude/Codex)."""
+    """When GEAK already KEEPs, the ladder short-circuits."""
     calls: list[str] = []
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
@@ -3406,7 +3406,7 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak_v3"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )

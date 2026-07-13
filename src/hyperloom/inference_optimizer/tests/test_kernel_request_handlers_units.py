@@ -790,8 +790,8 @@ class TestBackendOrder:
 
     def test_documented_kernel_opt_backends_env_is_case_normalized(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        # tokens are lowercased/trimmed; the removed OOB backend (codex) is filtered out
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK_V3 , CoDeX ")
+        # tokens are lowercased/trimmed; unknown backends are filtered out
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK_V3 , Foo ")
 
         assert krh._backend_order({}) == ["geak_v3"]
 
@@ -1684,7 +1684,7 @@ class TestBatchParallelConcurrencyCap:
         ]
         out = asyncio.run(
             krh._run_optimization_batch(
-                payload={"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex", "max_parallel": 10},
+                payload={"candidates_path": "/dummy", "backend_order": "geak_v3", "max_parallel": 10},
                 candidates=candidates,
                 session_dir=tmp_path,
             )
@@ -1723,7 +1723,7 @@ class TestBatchParallelConcurrencyCap:
         ]
         out = asyncio.run(
             krh._run_optimization_batch(
-                payload={"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex", "max_parallel": 7},
+                payload={"candidates_path": "/dummy", "backend_order": "geak_v3", "max_parallel": 7},
                 candidates=candidates,
                 session_dir=tmp_path,
             )
