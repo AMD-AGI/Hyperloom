@@ -30,28 +30,40 @@ Ask these questions using the agent's structured question UI when available.
    - `OpenAI`
    - `LLM Gateway`
 
-2. Collect provider-specific values:
+2. Explain that secrets must be edited in `.env`, not pasted into chat.
+   - Never ask the user to paste API keys into the conversation.
+   - Create `.env` with placeholders for secret values.
+   - Ask the user to edit `.env` directly and replace placeholders.
+   - After the user confirms the file is edited, validate only whether secret keys are set; do not print secret values.
+
+3. Collect provider-specific non-secret values and write secret placeholders:
 
    For `Anthropic`:
-   - Ask for `ANTHROPIC_API_KEY`.
+   - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
    - Ask for `ANTHROPIC_BASE_URL`; if blank, use `https://api.anthropic.com`.
    - Tell the user the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask whether to change it.
 
    For `OpenAI`:
-   - Ask for `OPENAI_API_KEY`.
+   - Write `OPENAI_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
    - Ask for `OPENAI_BASE_URL`; if blank, use `https://api.openai.com/v1`.
    - Tell the user the default `CODEX_MODEL` is `gpt-4.1`; ask whether to change it.
 
    For `LLM Gateway`:
-   - Ask for `SAFE_API_KEY`.
+   - Write `SAFE_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
    - Ask for `OPENAI_BASE_URL`; if blank, use `https://your-openai-compatible-gateway.example.com/v1`.
    - Tell the user the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask whether to change it.
    - Tell the user the default `CODEX_MODEL` is `gpt-4.1`; ask whether to change it.
 
-3. Explain `USER_DATA_PATH`:
+4. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Ask whether to use the current directory as the default or provide a custom path.
    - If the user chooses the default, write the absolute current directory path.
+
+5. Ask whether to install a serving framework:
+   - `none`: use an already-installed SGLang/vLLM framework stack.
+   - `sglang`: install SGLang ROCm framework components.
+   - `vllm`: install vLLM ROCm framework components.
+   - If the user is unsure, recommend `none` first when they are already in a framework image; otherwise recommend `sglang`.
 
 ## Step 3: Write `.env`
 
@@ -61,6 +73,7 @@ Create or update `.env` in the current directory.
 - Replace values collected by this setup.
 - Never print secret values back to the user.
 - Do not write `HYPERLOOM_INSTALL_SOURCE`.
+- Do not overwrite an existing non-placeholder secret key.
 
 Use these keys:
 
@@ -69,7 +82,14 @@ Use these keys:
 - `SAFE_API_KEY`, `OPENAI_BASE_URL`, `CLAUDE_MODEL`, `CODEX_MODEL`
 - `USER_DATA_PATH`
 
-After writing, read `.env` back and confirm that all non-secret values are correct. Report secret keys as `set` only.
+After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
+
+Then read `.env` back and confirm:
+- non-secret values are correct;
+- secret values are `set` or `missing`;
+- no secret key still equals `<PLEASE_FILL_IN>`.
+
+If any required secret is missing or still a placeholder, stop and ask the user to edit `.env` again.
 
 ## Step 4: Run Setup Backend
 
@@ -79,10 +99,24 @@ Run setup from the same directory:
 PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup
 ```
 
-If the user asks to install a serving framework, pass it after `--`, for example:
+Pass the selected framework after `--`.
+
+For `none`:
+
+```bash
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup -- --install-framework none
+```
+
+For `sglang`:
 
 ```bash
 PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup -- --install-framework sglang --yes
+```
+
+For `vllm`:
+
+```bash
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup -- --install-framework vllm --yes
 ```
 
 ## Step 5: Report Result
