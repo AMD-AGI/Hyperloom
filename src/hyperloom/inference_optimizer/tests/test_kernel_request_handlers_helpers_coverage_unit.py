@@ -83,16 +83,15 @@ def test_optimization_wrapper_timeout_adds_grace(monkeypatch) -> None:
 def test_backend_order_explicit_payload(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    # removed OOB backends (cursor/unknown) are filtered out of the ladder
-    assert krh._backend_order({"backend_order": "GEAK_V3,Cursor,unknown"}) == ["geak_v3"]
+    # Unknown backends are filtered out of the ladder.
+    assert krh._backend_order({"backend_order": "GEAK_V3,foo,unknown"}) == ["geak_v3"]
 
 
 def test_backend_order_env_alias(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # Removed OOB backends are filtered out; when nothing survives, fall back
-    # to the default ladder instead of running zero backend attempts.
-    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
-    assert krh._backend_order({}) == ["forge", "geak_v3"]
+    # Unknown backends are filtered out; when nothing survives, the ladder is empty.
+    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "foo,bar")
+    assert krh._backend_order({}) == []
 
 
 def test_backend_order_default_is_forge_geak(monkeypatch) -> None:

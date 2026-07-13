@@ -2921,7 +2921,7 @@ def _expand_op_fanout(
 # moe_fused category metric (and the LLM-rendered analysis.md ``Args`` column)
 # emit the candidate with ``shapes: []``. Hyperloom's dispatch gate
 # (``_validate_kernel_shape_and_paths`` → ``empty_kernel_shape``) then rejects the
-# whole geak→claude→codex ladder before any harness is built.
+# whole backend ladder before any harness is built.
 #
 # TraceLens DOES still capture the operands for this kernel: the per-shape rows in
 # ``perf_report_csvs/ops_unique_args.csv`` carries trace-recorded ``Input Dims``
