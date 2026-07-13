@@ -292,10 +292,9 @@ def test_summary_csv_parseable():
 
 
 def test_roofline_rows_flag_placeholder_not_measured():
-    # The bypass roofline is a structural placeholder (bound_type "—", AI/util
-    # null/0) until the opt-in rocprof-compute enrichment runs. Mark it
-    # ``roofline_measured=False`` so record_trace_analyze / the LLM don't mistake
-    # the "—" bound for a real measured roofline.
+    # The bypass roofline is analytical, not a hardware measurement. Mark it
+    # ``roofline_measured=False`` so record_trace_analyze / the LLM don't
+    # mistake the "—" bound for a real measured roofline.
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     kr = report.build_kernel_roofline(cands, analysis_md_path="/x/a.md", kernel_candidates_path="/x/kc.json")
     assert kr["kernels"]
@@ -351,7 +350,7 @@ def test_render_analysis_md_top10_and_csv_and_no_stale_text():
     assert "## Structured Metrics (CSV)" in md
     assert "kernel_metrics.csv" in md and "kernel_summary.csv" in md
     # stale placeholder phrasing must be gone (bound now analytical)
-    assert "pending rocprof-compute enrichment" not in md
+    assert "pending rocprof" not in md
 
 
 def test_render_analysis_md_xdit_unit():

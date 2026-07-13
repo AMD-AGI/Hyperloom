@@ -3,8 +3,8 @@
 
 """GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main).
 
-This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like the legacy
-per-kernel GEAK single-kernel loop, now ``geak_v3``). Its code lives in GEAK
+This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like
+``forge``). Its code lives in GEAK
 (``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
 KERNEL_AGENT phase via the stable ``interface/run_e2e.py`` contract: we write a
 ``handoff.json`` (Hyperloom best config + workload), call the runner, and read

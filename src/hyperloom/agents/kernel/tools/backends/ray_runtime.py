@@ -318,23 +318,13 @@ SAFE_ENV_KEYS = (
     "LLM_API_BASE",
     "LLM_PROXY_API_KEY",
     "LLM_PROXY_BASE_URL",
-    "GEAK_CONFIG",
-    "GEAK_MODEL_NAME",
+    # GEAK LLM connection (e2e runner reads these; parallel_e2e_runner also
+    # derives them from the gateway key/URL).
     "GEAK_API_KEY",
     "GEAK_BASE_URL",
+    # GEAK/Forge harness contract: patched candidate dir the generated harness
+    # prepends to sys.path (see harness_generator.py).
     "GEAK_WORK_DIR",
-    "GEAK_MEMORY_STORE_PATH",
-    "GEAK_SAVE_TO_KNOWLEDGE_BASE",
-    "GEAK_MEMORY_MIN_SPEEDUP",
-    "GEAK_CROSS_SESSION_MEMORY_URL",
-    "GEAK_MEMORY_API_KEY",
-    "GEAK_USE_KNOWLEDGE_BASE",
-    "GEAK_MEMORY_DISABLE",
-    "GEAK_MEMORY_NO_CROSS_SESSION",
-    # Trace-captured argument signature (tensors + scalar args, in call order):
-    # forwarded so GEAK's harness builder reconstructs the exact kernel call.
-    "GEAK_RAW_ARG_SPEC_JSON",
-    "MSWEA_MODEL_NAME",
     # e2e optimizer (GEAK@GEAK): the runner path + repo
     # root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
     # checkout.
