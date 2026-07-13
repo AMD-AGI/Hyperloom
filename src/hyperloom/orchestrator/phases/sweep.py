@@ -34,11 +34,34 @@ class SweepPhase(PhaseHandler):
         await self._maybe_validate_positive_needs_review_stack()
         if not getattr(state, "conc_sweep_enabled", False):
             log.info(
-                "SWEEP entry (from=%s): conc_sweep disabled; no automatic workload sweep is enqueued.",
+                "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
                 from_phase or "<unknown>",
             )
-            self._record_phase_entry_evidence(
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="disabled",
                 auto_conc_sweep_skipped="disabled",
+            )
+            return
+        prev_conc = getattr(state, "last_conc_sweep_watermark", None)
+        prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
+        prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
+        cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        if (
+            prev_conc
+            and isinstance(prev_validated, (int, float))
+            and cur_validated <= float(prev_validated) + 1e-6
+        ):
+            log.info(
+                "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
+                "conc_sweep (validated=%.4f%% unchanged since %s).",
+                from_phase or "<unknown>",
+                cur_validated,
+                prev_conc.get("ts") or "(unknown)",
+            )
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="no_validated_gain_since_last_conc_sweep",
+                auto_conc_sweep_skipped="no_validated_gain_since_last_conc_sweep",
+                auto_conc_sweep_skipped_validated_gain=cur_validated,
             )
             return
         try:
@@ -121,6 +144,23 @@ class SweepPhase(PhaseHandler):
         # Stamp evidence so PolicyGate's conc_sweep_phase_singleton denies later LLM conc_sweep.
         self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
+
+    def _record_terminal_conc_sweep_skip(
+        self,
+        *,
+        skip_reason: str,
+        **evidence: Any,
+    ) -> None:
+        """Record an auto-conc-sweep skip as terminal so SWEEP can close cleanly."""
+        self._record_phase_entry_evidence(**evidence)
+        self.shared_state.record_conc_sweep(
+            {
+                "status": "skipped",
+                "skip_reason": skip_reason,
+                "was_skipped": True,
+            }
+        )
+        self.shared_state.save(self.session_dir)
 
     async def _enqueue_internal_sweep_task(
         self,

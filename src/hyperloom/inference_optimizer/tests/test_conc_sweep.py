@@ -1039,6 +1039,8 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
 def test_record_conc_sweep_writes_last_conc_sweep():
     s = SharedState()
     assert s.last_conc_sweep == {}
+    assert s.last_conc_sweep_watermark == {}
+    s.cumulative_gain_validated = 3.25
     s.record_conc_sweep(
         {
             "status": "succeeded",
@@ -1052,6 +1054,9 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep.get("status") == "succeeded"
     assert s.last_conc_sweep.get("summary", {}).get("successful_pairs") == 8
     assert s.last_conc_sweep.get("ts")
+    assert s.last_conc_sweep_watermark.get("status") == "succeeded"
+    assert s.last_conc_sweep_watermark.get("cumulative_gain_validated_at_record") == 3.25
+    watermark = dict(s.last_conc_sweep_watermark)
     # Skip cases also recorded so SWEEP exits cleanly even on skip.
     s.record_conc_sweep(
         {
@@ -1063,6 +1068,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep.get("status") == "skipped"
     assert s.last_conc_sweep.get("skip_reason") == "no_optimization_to_compare"
     assert s.last_conc_sweep.get("was_skipped") is True
+    assert s.last_conc_sweep_watermark == watermark
 
 
 def test_exit_normal_sweep_returns_conc_sweep_done():

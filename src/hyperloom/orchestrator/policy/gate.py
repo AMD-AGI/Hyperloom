@@ -1592,7 +1592,7 @@ class PolicyGate:
                 f"of GPU time."
             ),
             hint=(
-                "Coordinator's post-sweep hook already dispatched "
+                "Coordinator's SWEEP-entry hook already dispatched "
                 "conc_sweep — wait for SWEEP→CLOSE. If you need a "
                 "second run for debug, set "
                 f"params.bypass_conc_sweep_singleton=True on the "

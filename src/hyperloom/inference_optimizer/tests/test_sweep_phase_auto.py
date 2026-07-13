@@ -40,6 +40,7 @@ class _BareState:
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     last_sweep: dict[str, Any] = field(default_factory=dict)
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
+    last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
     cumulative_gain_validated: float = 0.0
     conc_sweep_enabled: bool = True
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
@@ -49,6 +50,13 @@ class _BareState:
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        self.last_conc_sweep = {
+            "status": str(result.get("status") or "succeeded"),
+            "skip_reason": str(result.get("skip_reason") or ""),
+            "was_skipped": bool(result.get("was_skipped", False)),
+        }
 
 
 class _StubTaskRegistry:
@@ -845,7 +853,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_conc_sweep_disabled(coord):
-    """If conc_sweep is disabled, no legacy full sweep is enqueued as fallback."""
+    """If conc_sweep is disabled, SWEEP records a terminal skip instead of idling."""
     coord.shared_state.conc_sweep_enabled = False
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
@@ -855,13 +863,38 @@ async def test_on_enter_sweep_skips_when_conc_sweep_disabled(coord):
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert evidence["auto_conc_sweep_skipped"] == "disabled"
     assert "auto_sweep_enqueued" not in evidence
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "disabled"
+    assert coord.shared_state.last_conc_sweep["was_skipped"] is True
+    assert coord.shared_state.save_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep(coord):
+    """Cyclic reloop does not rerun conc_sweep without a new validated gain."""
+    coord.shared_state.cumulative_gain_validated = 12.5
+    coord.shared_state.last_conc_sweep_watermark = {
+        "ts": "2026-01-01T00:00:00Z",
+        "cumulative_gain_validated_at_record": 12.5,
+    }
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    assert coord.tasks._tasks == {}
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_conc_sweep_skipped"] == "no_validated_gain_since_last_conc_sweep"
+    assert evidence["auto_conc_sweep_skipped_validated_gain"] == 12.5
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "no_validated_gain_since_last_conc_sweep"
+    assert coord.shared_state.save_count >= 1
 
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
-    """Legacy last_sweep watermarks no longer suppress the direct conc_sweep."""
+    """A new validated gain after the last conc_sweep watermark dispatches conc_sweep."""
     coord.shared_state.cumulative_gain_validated = 15.0
-    coord.shared_state.last_sweep = {
+    coord.shared_state.last_conc_sweep_watermark = {
         "ts": "2026-01-01T00:00:00Z",
         "cumulative_gain_validated_at_record": 12.5,
     }

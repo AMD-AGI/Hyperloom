@@ -200,7 +200,7 @@ def test_baseline_single_round_by_default(tmp_path, monkeypatch):
 
 
 def test_baseline_env_var_no_longer_enables_double_run(tmp_path, monkeypatch):
-    """The expensive double-run is CLI/state controlled, not environment controlled."""
+    """The expensive double-run is internal state/task-param controlled, not env controlled."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")

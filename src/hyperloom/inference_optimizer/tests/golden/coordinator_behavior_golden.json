@@ -272,6 +272,7 @@
       "workspace": null
     },
     "last_conc_sweep": {},
+    "last_conc_sweep_watermark": {},
     "last_consumed_escalate_hint": "",
     "last_consumed_escalate_hint_ts": "<volatile>",
     "last_cycle_bottleneck": "",
