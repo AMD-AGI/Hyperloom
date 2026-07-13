@@ -68,22 +68,6 @@ _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
 
 
-def _read_bool_env(name: str, default: bool) -> bool:
-    """Read a boolean environment variable.
-
-    Args:
-        name (str): The environment variable name.
-        default (bool): Value returned when the variable is unset.
-
-    Returns:
-        bool: ``True`` if the (trimmed, lower-cased) value is one of
-        ``1``/``true``/``yes``/``on``; otherwise ``False`` or ``default``.
-
-    Delegates to :func:`hyperloom.common.env.env_bool`.
-    """
-    return env_bool(name, default)
-
-
 def _read_num_env(name: str, default, cast):
     """Read a numeric environment variable, falling back on errors.
 
@@ -169,8 +153,8 @@ class KBWriter:
         self.client = client
         self.session_memory = session_memory or SessionMemory()
         self.dead_letter = dead_letter or DeadLetter()
-        self.write_enabled = _read_bool_env("KB_WRITE_ENABLED", True)
-        self.read_enabled = _read_bool_env("KB_READ_ENABLED", True)
+        self.write_enabled = env_bool("KB_WRITE_ENABLED", True)
+        self.read_enabled = env_bool("KB_READ_ENABLED", True)
         self._time_fn = time_fn
 
         self._breaker_threshold = max(1, _read_num_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD, int))

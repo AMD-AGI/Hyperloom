@@ -131,10 +131,6 @@ def _symbols(lines: list[str]) -> list[str]:
     return syms
 
 
-def _now_iso() -> str:
-    return now_iso(timespec="auto")
-
-
 def _verdict(
     *,
     candidate_id: str,
@@ -158,7 +154,7 @@ def _verdict(
         "recommended_next_step": recommended_next_step,
         "layer": layer,
         "metrics": metrics or {},
-        "ts": _now_iso(),
+        "ts": now_iso(timespec="auto"),
     }
 
 

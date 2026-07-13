@@ -55,15 +55,6 @@ from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp with microsecond precision.
-    """
-    return now_iso(timespec="microseconds")
-
-
 # Proposal-payload keys that carry environment-variable / CLI-arg levers as
 # containers rather than direct param values; pulled out so the rest of
 # ``params`` resolves cleanly to substrate knobs.
@@ -1150,7 +1141,7 @@ class DecisionReviewer:
             self.session_memory.append_decision(
                 req.session_id,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(timespec="microseconds"),
                     "target_proposal_msg_id": target,
                     "verdict": verdict,
                     "reasoning": item.get("reasoning"),
@@ -1223,7 +1214,7 @@ class DecisionReviewer:
         self.session_memory.append_decision(
             req.session_id,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(timespec="microseconds"),
                 "decision_review": decision_review,
             },
         )

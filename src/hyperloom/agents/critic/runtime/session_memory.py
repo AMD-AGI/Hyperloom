@@ -348,7 +348,7 @@ class SessionMemory:
             raise SessionMemoryError("decision_review must be a dict")
         self._ensure_session_dir(session_id)
         record = {
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "decision_review": decision_review,
         }
         _append_jsonl(self._decisions_path(session_id), record)
@@ -386,7 +386,7 @@ class SessionMemory:
         if not isinstance(event, dict):
             raise SessionMemoryError("event must be a dict")
         self._ensure_session_dir(session_id)
-        _append_jsonl(self._events_path(session_id), {"ts": _now_iso(), **event})
+        _append_jsonl(self._events_path(session_id), {"ts": now_iso(timespec="microseconds"), **event})
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
         """Return all audit events logged for a session.
@@ -528,7 +528,7 @@ class SessionMemory:
             data = {}
         data[msg_id] = {
             "verdict": verdict,
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "decision_id": decision_id,
         }
         _write_json_atomic(path, data)
@@ -557,15 +557,6 @@ class SessionMemory:
 # ---------------------------------------------------------------------------
 # Tiny JSON helpers — kept private so we don't grow them into a real ORM.
 # ---------------------------------------------------------------------------
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp, e.g. ``2026-06-02T18:00:00.000000+00:00``.
-    """
-    return now_iso(timespec="microseconds")
-
-
 def _read_json(path: Path, *, default: Any) -> Any:
     """Read and decode a JSON file, returning ``default`` if absent.
 

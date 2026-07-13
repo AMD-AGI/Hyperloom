@@ -26,15 +26,6 @@ from .metrics import CRITIC_KB_DEAD_LETTER_COUNT, get_registry
 DEFAULT_DEAD_LETTER_DIR = "/var/lib/critic-kb-dlq"
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO string.
-
-    Returns:
-        str: The current timestamp in ISO 8601 format.
-    """
-    return now_iso(timespec="microseconds")
-
-
 @dataclass
 class ReplaySummary:
     """Outcome counts from a :meth:`DeadLetter.replay` pass.
@@ -122,7 +113,7 @@ class DeadLetter:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path_for(endpoint)
         record = {
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "endpoint": endpoint,
             "payload": payload,
             "attempts": attempts,
