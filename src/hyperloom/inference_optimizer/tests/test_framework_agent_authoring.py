@@ -1028,7 +1028,6 @@ def test_discover_batch_overrides_misdefaulted_cross_repo_framework(
     sglang->vllm port never fired. The candidate's OWN repo must win and re-tag it
     "sglang" so it routes to the cross-framework specialist."""
     monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
-    sglang_url = _fa_client.repo_url_for_framework("sglang")
     vllm_url = _fa_client.repo_url_for_framework("vllm")
 
     async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:

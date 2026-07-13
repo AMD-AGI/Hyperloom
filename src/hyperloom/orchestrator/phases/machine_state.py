@@ -516,7 +516,7 @@ def _default_framework_force_exit_ratio() -> float:
             if 0.0 <= v <= 1.0:
                 return v
         except (TypeError, ValueError):
-            pass
+            pass  # malformed env override; fall through to the 0.6 default
     return 0.6
 
 
