@@ -65,7 +65,7 @@ jobs:
         # Only the push-to-main run needs to hand off to the deploy job; the PR
         # build is a compile check and stops here.
         if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: docs/_build/html
 
