@@ -83,6 +83,38 @@ class MagpieBackend:
         ]
 
 
+class BypassBackend:
+    """Bypass backend: launches Hyperloom's own benchmark runner.
+
+    Accepts the same CLI flags as Magpie and reuses the InferenceX scripts,
+    so the input YAML and the workspace/report contract are unchanged. See
+    :mod:`bypass_runner`.
+    """
+
+    name = "bypass"
+
+    def build_command(
+        self,
+        *,
+        python_exe: str,
+        config_path: Path,
+        output_dir: Path,
+    ) -> list[str]:
+        """Return the bypass runner argv mirroring Magpie's flags."""
+        return [
+            python_exe,
+            "-m",
+            "hyperloom.orchestrator.actions.executors.bypass_runner",
+            "benchmark",
+            "--benchmark-config",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--run-mode",
+            "local",
+        ]
+
+
 def resolve_backend_name() -> str:
     """Resolve the active backend name from the environment.
 
@@ -103,10 +135,12 @@ def resolve_backend() -> BenchmarkBackend:
         The selected BenchmarkBackend implementation.
     """
     name = resolve_backend_name()
+    if name == "bypass":
+        return BypassBackend()
     if name == "magpie":
         return MagpieBackend()
-    # Unknown backend: fall back to Magpie (defensive). Later stages register
-    # additional backends (e.g. bypass) here.
+    # Unknown backend: fall back to Magpie (defensive) so a typo cannot
+    # silently disable benchmarking.
     return MagpieBackend()
 
 
