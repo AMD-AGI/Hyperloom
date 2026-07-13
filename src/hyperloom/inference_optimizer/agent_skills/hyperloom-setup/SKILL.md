@@ -30,13 +30,18 @@ Ask these questions using the agent's structured question UI when available.
    - `OpenAI`
    - `LLM Gateway`
 
-2. Explain that secrets must be edited in `.env`, not pasted into chat.
+   Present exactly those three option labels. Do not add parenthetical
+   descriptions, vendor examples, or base URLs to this first question.
+
+2. Ask the base URL as a separate follow-up question after the mode is chosen.
+
+3. Explain that secrets must be edited in `.env`, not pasted into chat.
    - Never ask the user to paste API keys into the conversation.
    - Create `.env` with placeholders for secret values.
    - Ask the user to edit `.env` directly and replace placeholders.
    - After the user confirms the file is edited, validate only whether secret keys are set; do not print secret values.
 
-3. Collect provider-specific non-secret values and write secret placeholders:
+4. Collect provider-specific non-secret values and write secret placeholders:
 
    For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
@@ -54,12 +59,15 @@ Ask these questions using the agent's structured question UI when available.
    - Tell the user the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask whether to change it.
    - Tell the user the default `CODEX_MODEL` is `gpt-4.1`; ask whether to change it.
 
-4. Explain `USER_DATA_PATH`:
+5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
-   - Ask whether to use the current directory as the default or provide a custom path.
-   - If the user chooses the default, write the absolute current directory path.
+   - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
+   - Always offer the current workspace directory as an option.
+   - Always offer a custom path option.
+   - Do not assume or auto-select any option; write `USER_DATA_PATH` only after the user explicitly chooses.
+   - If the user selects the current workspace directory, write its absolute path.
 
-5. Ask whether to install a serving framework:
+6. Ask whether to install a serving framework:
    - `none`: use an already-installed SGLang/vLLM framework stack.
    - `sglang`: install SGLang ROCm framework components.
    - `vllm`: install vLLM ROCm framework components.
