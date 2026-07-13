@@ -537,6 +537,7 @@ ensure_fd_limit_for_ray() {
         warn "fd-limit: hard nofile cap=$hard < $RAY_MIN_NOFILE; only 'docker run --ulimit nofile=1048576' lifts the hard cap (issue #433)."
       ;;
   esac
+  return 0
 }
 
 # Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
