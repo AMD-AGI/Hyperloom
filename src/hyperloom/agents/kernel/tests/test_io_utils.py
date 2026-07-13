@@ -48,6 +48,22 @@ def test_append_log_creates_parents_and_appends(tmp_path):
     assert log.read_text(encoding="utf-8") == "first\nsecond\n"
 
 
+def test_append_jsonl_creates_parents_and_appends_sorted(tmp_path):
+    path = tmp_path / "logs" / "rows.jsonl"
+    io.append_jsonl(path, {"b": 2, "a": 1})
+    io.append_jsonl(path, {"c": "你好"}, ensure_ascii=False)
+    assert path.read_text(encoding="utf-8").splitlines() == [
+        '{"a": 1, "b": 2}',
+        '{"c": "你好"}',
+    ]
+
+
+def test_write_text_creates_parents(tmp_path):
+    path = tmp_path / "deep" / "out.txt"
+    io.write_text(path, "hello")
+    assert path.read_text(encoding="utf-8") == "hello"
+
+
 def test_read_last_lines_missing_returns_empty(tmp_path):
     assert io.read_last_lines(tmp_path / "nope.log") == []
 
@@ -71,9 +87,22 @@ def test_kernel_row_matches_by_matched_name_and_name():
 def test_safe_float_variants():
     assert io.safe_float(None) == 0.0
     assert io.safe_float("") == 0.0
+    assert io.safe_float(True, default=None) is None
     assert io.safe_float("1.5") == 1.5
     assert io.safe_float(3) == 3.0
     assert io.safe_float("bad", default=-1.0) == -1.0
+    assert io.safe_float("1,234.5%", default=None, strip_percent=True, strip_commas=True) == 1234.5
+
+
+def test_extract_last_json_handles_noise_escapes_and_multiple_objects():
+    text = 'log {"first": 1}\nnoise {"msg": "brace } inside", "nested": {"a": 2}} tail'
+    assert io.extract_last_json(text) == {"msg": "brace } inside", "nested": {"a": 2}}
+
+
+def test_extract_last_json_none_for_missing_or_malformed():
+    assert io.extract_last_json("") is None
+    assert io.extract_last_json("no json") is None
+    assert io.extract_last_json('{"bad": }') is None
 
 
 def test_source_text_looks_complete_python():
@@ -151,5 +180,5 @@ def test_safe_float_matches_common_coerce_for_shared_cases():
     from hyperloom.common.coerce import to_float
 
     # For the inputs both accept, results agree (both reject bool -> default).
-    for value in ("1.5", 3, "bad", None, ""):
+    for value in ("1.5", 3, "bad", None, "", True):
         assert io.safe_float(value, default=0.0) == to_float(value, default=0.0)
