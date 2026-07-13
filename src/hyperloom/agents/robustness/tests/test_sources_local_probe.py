@@ -14,6 +14,7 @@ from hyperloom.agents.robustness.sources.base import SourceUnavailable
 from hyperloom.agents.robustness.sources.local_probe import (
     LocalProbeConfig,
     LocalProbeSource,
+    _probe_gateway_health,
 )
 
 
@@ -377,6 +378,78 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
     assert by_url["http://localhost:30002/dead"]["status"] == "error"
     assert "connect" in by_url["http://localhost:30002/dead"]["error"]
     assert len(seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_probe_gateway_health_uses_custom_subscription_header(monkeypatch):
+    """AMD gateway /models requires the subscription header used by real LLM calls."""
+    import httpx
+    from hyperloom.agents.robustness.sources import local_probe as lp
+
+    seen_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update({k.lower(): v for k, v in request.headers.items()})
+        if request.headers.get("Ocp-Apim-Subscription-Key") == "sub-key":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(401, json={"error": "missing subscription key"})
+
+    transport = httpx.MockTransport(handler)
+
+    class _PatchedClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
+    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+
+    out = await _probe_gateway_health("https://llm-api.amd.com/Unified/v1/models", 1.0)
+
+    assert out["status"] == "ok"
+    assert out["status_code"] == 200
+    assert seen_headers["ocp-apim-subscription-key"] == "sub-key"
+    assert seen_headers["authorization"] == "Bearer gateway-key"
+
+
+@pytest.mark.asyncio
+async def test_probe_gateway_health_uses_provider_api_key(monkeypatch):
+    """Official OpenAI key-only deployments still need Bearer auth on /models."""
+    import httpx
+    from hyperloom.agents.robustness.sources import local_probe as lp
+
+    seen_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update({k.lower(): v for k, v in request.headers.items()})
+        if request.headers.get("Authorization") == "Bearer sk-openai":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(401, json={"error": "missing bearer"})
+
+    transport = httpx.MockTransport(handler)
+
+    class _PatchedClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+
+    out = await _probe_gateway_health("https://api.openai.com/v1/models", 1.0)
+
+    assert out["status"] == "ok"
+    assert out["status_code"] == 200
+    assert seen_headers["authorization"] == "Bearer sk-openai"
+    assert "ocp-apim-subscription-key" not in seen_headers
 
 
 @pytest.mark.asyncio
