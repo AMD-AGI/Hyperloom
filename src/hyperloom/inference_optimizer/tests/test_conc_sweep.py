@@ -743,14 +743,14 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """When the wall-clock budget runs out, remaining variants are skipped."""
+    """When remaining budget cannot cover another variant, the tail is skipped."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     calls = {"n": 0}
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         import time as _t
 
-        _t.sleep(0.6)
+        _t.sleep(1.2)
         calls["n"] += 1
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
@@ -774,7 +774,8 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
                 state,
                 session_dir,
                 concs=[1, 4, 16, 64],
-                total_budget_sec=1,
+                variant_timeout_sec=1,
+                total_budget_sec=2,
             )
         )
 
@@ -786,7 +787,9 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     for p in skipped_pts:
         assert p["error_class"] == "budget_exhausted"
     assert payload["budget_exhausted"] is True
-    assert payload["total_budget_sec"] == 1
+    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert payload["budget_remaining_sec"] < 1
+    assert payload["total_budget_sec"] == 2
     assert calls["n"] < 8
 
 
@@ -829,16 +832,14 @@ def test_run_conc_sweep_zero_budget_disables_gate(
     assert mock_run.call_count == 4  # 2 arms × 2 concs
 
 
-def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
+def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """Per-variant timeout is clamped to the remaining budget."""
+    """A too-small budget is reported as skipped instead of a timeout-prone run."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
-    recorded_timeouts: list[int] = []
 
-    async def _fake_run_grid(*, grid: list[GridVariant], variant_timeout_sec: int, **_kw):
-        recorded_timeouts.append(variant_timeout_sec)
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     def _fake_materialize(src, out_dir, **_kw):
@@ -856,7 +857,7 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
             side_effect=_fake_materialize,
         ),
     ):
-        asyncio.run(
+        payload = asyncio.run(
             run_conc_sweep(
                 state,
                 session_dir,
@@ -866,8 +867,11 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
             )
         )
 
-    assert all(t <= 120 for t in recorded_timeouts)
-    assert all(t >= 1 for t in recorded_timeouts)
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    assert {p["status"] for p in all_points} == {"skipped"}
+    assert {p["error_class"] for p in all_points} == {"budget_exhausted"}
+    assert payload["budget_exhausted"] is True
+    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
 
 
 # ActionExecutor integration (SWEEP-phase dispatch)

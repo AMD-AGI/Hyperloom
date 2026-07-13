@@ -569,10 +569,14 @@ async def run_conc_sweep(
     )
     results: list[VariantResult] = []
     budget_exhausted = False
+    budget_skip_reason = ""
+    budget_remaining_sec: float | None = None
     for idx, variant in enumerate(grid):
         remaining = (deadline - time.time()) if has_budget else None
         if has_budget and remaining is not None and remaining <= 0:
             budget_exhausted = True
+            budget_skip_reason = "total_budget_exhausted"
+            budget_remaining_sec = max(0.0, float(remaining))
             log.warning(
                 "conc_sweep: total budget exhausted (%ds); marking %d remaining variants as skipped",
                 total_budget_sec,
@@ -581,11 +585,23 @@ async def run_conc_sweep(
             for v in grid[idx:]:
                 results.append(_budget_skip_result(v))
             break
+        if has_budget and remaining is not None and remaining < float(variant_timeout_sec):
+            budget_exhausted = True
+            budget_skip_reason = "insufficient_remaining_for_variant"
+            budget_remaining_sec = max(0.0, float(remaining))
+            log.warning(
+                "conc_sweep: remaining budget %.1fs is below per-variant timeout %ds; "
+                "marking %d remaining variants as skipped",
+                remaining,
+                variant_timeout_sec,
+                len(grid) - idx,
+            )
+            for v in grid[idx:]:
+                results.append(_budget_skip_result(v))
+            break
 
-        # Per-variant cap = min(timeout, remaining budget) so the last variant doesn't blow the wall-clock.
+        # At this point enough budget remains for a full variant timeout.
         effective_timeout = variant_timeout_sec
-        if has_budget and remaining is not None:
-            effective_timeout = max(1, min(variant_timeout_sec, int(remaining)))
 
         sub_results = await run_grid(
             base_yaml_path=base_yaml_path,
@@ -646,6 +662,9 @@ async def run_conc_sweep(
         "total_budget_sec": total_budget_sec if has_budget else None,
         "budget_exhausted": budget_exhausted,
     }
+    if budget_exhausted:
+        payload["budget_skip_reason"] = budget_skip_reason
+        payload["budget_remaining_sec"] = round(float(budget_remaining_sec or 0.0), 2)
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
 
