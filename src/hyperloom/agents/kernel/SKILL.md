@@ -76,40 +76,6 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI (per-kernel backend) from `GEAK_V3_REF` (default `GEAK_v3.2`) +
-  `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
-  `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
-  `claude-opus-4-7`). Run-mode default for the generated yaml is
-  controlled by `GEAK_RUN_MODE` (`quick` or `full`; defaults to `full`,
-  which selects the 2 h / 5-round `run.budgets.full` preset). Set
-  `GEAK_RUN_MODE=quick` before `install.sh` for the 1 h / 2-round smoke
-  preset. Other yaml budget knobs are not env-overridable on purpose —
-  edit `$GEAK_CONFIG` directly if you need to tune them per pod.
-- GEAK MCP tools — installed as four pip packages from
-  `${GEAK_V3_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
-  these at preprocess + run time; missing any of them fails the GEAK
-  attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
-  installed → 4-minute aborts with zero-byte baselines).
-    - `rag-mcp` — knowledge-base retrieval; gated by `tools.rag: true`.
-      The first RAG index build writes to
-      `~/.cache/amd-ai-devtool/semantic-index/` and may download the
-      ~1.3 GB BGE embedding model. The installer builds this index with
-      `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can
-      take hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only
-      environments.
-    - `profiler-mcp` — unified profiling MCP (Metrix + rocprof-compute);
-      produces `profile.json` per attempt. Metrix is no longer a separate
-      `metrix-mcp` folder in v3.2.1 — it is pulled in transitively via
-      `profiler-mcp/pyproject.toml` (`dependencies = ["metrix>=0.1.0"]`).
-    - `cross-session-memory-mcp` — SQLite-backed cross-session memory
-      retriever; points at `GEAK_MEMORY_STORE_PATH` (default
-      `/wekafs/hyperloom/geak-memory/memory.db`).
-    - `automated-test-discovery` — pre-fills the eval_command harness so
-      GEAK gets a runnable baseline benchmark.
-- GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
-  memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
-  `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
-  `GEAK_MEMORY_MIN_SPEEDUP=1.05` with the KEEP gate.
 - Node.js/npm + the `claude` CLI (`@anthropic-ai/claude-code`) and
   `~/.claude/config.json` auth — the `forge` backend drives the claude CLI
   inside its autonomous loop, so these are required for forge.
@@ -205,12 +171,9 @@ Use this when Coordinator or Orchestration requests optimization for a specific 
 
 Inputs:
 - `kernel_id`.
-- Optional explicit `backends`: comma separated, e.g. `forge,geak_v3`.
+- Optional explicit `backends`: comma separated, e.g. `forge`.
 - Optional `benchmark_file` or `test_harness_path`.
 - Optional E2E/accuracy evidence from Coordinator or Orchestration.
-- Optional `enable_rag: false` to pass `--disable-rag` for this request only.
-- Optional `enable_xs_memory: false` to pass `--disable-xs-memory` for this
-  request only.
 
 Run:
 
@@ -350,8 +313,8 @@ repeat the manual install above.
 
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
 `ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
-the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
-`${GEAK_V3_ROOT}`) via `cp -r`, runs `pip install -e` against
+the internal checkout to `$TRACELENS_MIRROR_DIR` when needed via `cp -r`,
+runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.
@@ -402,38 +365,23 @@ canonical upstream path returned in `analysis_report_path` from
 User-specified backends win, subject to feasibility checks. If user does not
 specify backends:
 
-- **Default ladder (all rewritable kernels)**: `forge,geak_v3` — Forge first
-  (Kernel-Forge autonomous loop), falling through to GEAK (`geak_v3`) when
-  Forge skips a non-Triton candidate or misses a KEEP. An explicit `--backends`
-  or the `KERNEL_OPT_BACKEND_ORDER` / `KERNEL_OPT_BACKENDS` env still overrides
-  this default as-is. The kernel type (Triton / HIP-C++ / FlyDSL /
-  Python / unknown) does NOT change the ladder; capability differences are
-  backend-side, not Hyperloom-side, so we let the backend decide what to handle.
-- **No-benchmark case**: still attempt GEAK but flag
-  `geak_without_benchmark: true` so the KEEP gate downstream knows
-  verification confidence is reduced (matches the existing user-specified
-  behaviour — the auto-pick now follows the same contract).
+- **Default (all rewritable kernels)**: `forge` — the sole per-kernel
+  backend (Kernel-Forge autonomous loop). An explicit `--backends` or the
+  `KERNEL_OPT_BACKEND_ORDER` / `KERNEL_OPT_BACKENDS` env still overrides this
+  default as-is. The kernel type (Triton / HIP-C++ / FlyDSL / Python /
+  unknown) does NOT change the choice; capability differences are
+  backend-side, not Hyperloom-side, so we let Forge decide what to handle.
 - **Vendor binary / hipBLASLt**: do not rewrite; return reason and
   `NEEDS_REVIEW`. Only case that yields an empty backend list upstream.
 
 FlyDSL kernels (`source_type=flydsl`, detected by content-sniffing
-`@flyc.kernel` / `flydsl.compiler` / `flydsl.expr` markers) are sent to
-GEAK with `kernel_type=flydsl`. GEAK's `task_parser.py` routes that to
-its `skills/flydsl/SKILL.md` (write / optimize / debug workflows for
-`@flyc.kernel` tile programs); Hyperloom does not maintain its own copy
-of the FlyDSL guidance.
+`@flyc.kernel` / `flydsl.compiler` / `flydsl.expr` markers) are handled by
+Forge, which maps `flydsl` to its FlyDSL fellow (write / optimize / debug
+workflows for `@flyc.kernel` tile programs).
 
-Multi-GPU collective kernels (`is_multigpu: True`, e.g. all-reduce / all-gather):
-`parallel_e2e_runner` automatically drops `geak_v3` from the backend list because
-GEAK's sub-agent framework spawns nested `ray.remote(num_gpus=1)` for patch
-validation, which makes any `torchrun --nproc>=2` test inside it fail with
-`HIP error: invalid device ordinal`. `forge` handles these kernels instead —
-it works via standalone HIP `std::thread` simulation or real
-`torchrun --nproc=N`. The dropped backend is recorded under
-`gpu_plan.backends_dropped` in the run summary.
-
-If the user explicitly requests GEAK without a benchmark/test harness, allow the
-attempt but mark `geak_without_benchmark: true`.
+Multi-GPU collective kernels (`is_multigpu: True`, e.g. all-reduce / all-gather)
+are handled by `forge` — it works via standalone HIP `std::thread` simulation
+or real `torchrun --nproc=N`.
 
 ## Optimization Goals & Time Budget
 
