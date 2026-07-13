@@ -38,7 +38,6 @@ from .benchmark_result import (
 # Cohesive clusters live in sibling modules; re-exported here so the module
 # namespace + monkeypatch surface is intact.
 from ._grid_base import (
-    variant_fingerprint as variant_fingerprint,
     _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
     _VARIANT_TIMEOUT_SEC_DEFAULT as _VARIANT_TIMEOUT_SEC_DEFAULT,
     GridVariant as GridVariant,
@@ -98,7 +97,6 @@ from ._grid_variant_filter import (
     _HELP_TEXT_CACHE as _HELP_TEXT_CACHE,
     _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
     _probe_server_help_text as _probe_server_help_text,
-    _probe_sglang_help_text as _probe_sglang_help_text,
     _detect_model_class as _detect_model_class,
     apply_compatibility_filter as apply_compatibility_filter,
     apply_user_skip_list as apply_user_skip_list,
@@ -1835,7 +1833,6 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
-    "variant_fingerprint",
     # Re-exported from the extracted sibling modules (_grid_base /
     # _grid_server_args / _grid_variant_filter) to keep the module namespace
     # and test monkeypatch surface intact. Declared so the re-exports are
@@ -1878,7 +1875,6 @@ __all__ = [
     "_HELP_TEXT_CACHE",
     "_HELP_PROBE_COMMANDS",
     "_probe_server_help_text",
-    "_probe_sglang_help_text",
     "_detect_model_class",
     "apply_compatibility_filter",
     "apply_user_skip_list",

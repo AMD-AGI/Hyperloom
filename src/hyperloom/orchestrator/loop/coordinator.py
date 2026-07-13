@@ -1223,7 +1223,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_priors_match_advisory_block": "advisory",
         "_resolve_issue_canonical": "proposals",
         "_workload_canonical_id": "proposals",
-        "_gap_anchor_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
         "_extract_kept_best_config": "proposals",
         "_kb_best_config_overrides_for_keep": "proposals",

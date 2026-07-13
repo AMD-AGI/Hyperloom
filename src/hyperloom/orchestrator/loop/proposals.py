@@ -31,7 +31,7 @@ class ProposalsCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
-        """Find the issue_node canonical_id this proposal addresses. Priority: payload gap_canonical_id → params gap_canonical_id → _gap_anchor_canonical_id.
+        """Find the issue_node canonical_id this proposal addresses. Priority: payload gap_canonical_id → params gap_canonical_id → _workload_canonical_id.
 
         Args:
             pending: The pending proposal whose payload/params are searched for
@@ -49,7 +49,7 @@ class ProposalsCollaborator:
             explicit_params = str(params.get("gap_canonical_id") or "").strip()
             if explicit_params:
                 return explicit_params
-        return self._gap_anchor_canonical_id()
+        return self._workload_canonical_id()
 
     def _workload_canonical_id(self) -> str:
         """Canonical 5-tuple recipe id for the current workload. MUST match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
@@ -77,14 +77,6 @@ class ProposalsCollaborator:
             model_type=model_type,
             architectures=architectures,
         )
-
-    def _gap_anchor_canonical_id(self) -> str:
-        """Gap anchor: delegates to _workload_canonical_id so anchor and write target never diverge.
-
-        Returns:
-            The workload canonical recipe id used as the gap anchor.
-        """
-        return self._workload_canonical_id()
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
         """Load the authoritative local recipe row for amend/finalize writes.
