@@ -316,7 +316,7 @@ curl -sS -m 30 "$ANTHROPIC_BASE_URL/v1/models" \
 >   **setup-claude-1** and let the user re-enter their settings. For the **AMD
 >   gateway** path this often means the gateway is not directly reachable from
 >   this GPU host — point the user to
->   [`examples/llmgateway-proxy-setup/remote-server-llmgateway-tas-vultr-0711.md`](llmgateway-proxy-setup/remote-server-llmgateway-tas-vultr-0711.md)
+>   [Claude Code on Remote Servers (via AMD LLM Gateway)](https://amd.atlassian.net/wiki/spaces/~712020ea4fade82ae94a95b7c0ba1cb554d2a8/pages/1792352515/Claude+Code+on+Remote+Servers+via+AMD+LLM+Gateway)
 >   to stand up a proxy/tunnel (that machine needs SSH access to this server),
 >   then retry.
 > - If connectivity **succeeds**: ask the user (a question listing the returned
