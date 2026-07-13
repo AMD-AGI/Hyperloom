@@ -1144,6 +1144,15 @@ def _build_parser() -> argparse.ArgumentParser:
         """
         return os.environ.get(env_var, "1").strip() != "0"
 
+    def _env_default_off(env_var: str) -> bool:
+        """Resolve a default-off boolean toggle from an environment variable."""
+        return os.environ.get(env_var, "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
     opt.add_argument(
         "--allow-empty-kernel-shape",
         dest="allow_empty_kernel_shape",
@@ -1237,6 +1246,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable. Env: "
         "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
+    )
+    opt.add_argument(
+        "--baseline-double-run",
+        dest="baseline_double_run",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_off("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN"),
+        help="Run baseline in cold+hot double-run mode: first round boots the "
+        "server and is discarded, second round reuses the hot server as the "
+        "baseline. Default off; enable with --baseline-double-run or "
+        "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN=1.",
     )
     # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC
     # values, output to reports/conc_sweep_summary.json (see orchestrator/conc_sweep.py). Bounded by

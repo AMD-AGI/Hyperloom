@@ -2592,9 +2592,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
-            # Watermark of validated gain at the moment this sweep ran, so a later
-            # SWEEP entry (cyclic reloop) can skip a redundant full sweep when no
-            # validated improvement landed since (see Coordinator._on_enter_sweep).
+            # Watermark of validated gain at the moment this manual/full sweep ran.
             "cumulative_gain_validated_at_record": float(
                 getattr(self, "cumulative_gain_validated", 0.0) or 0.0
             ),

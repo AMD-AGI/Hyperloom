@@ -1445,6 +1445,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
+    os.environ["INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN"] = (
+        "1" if bool(getattr(args, "baseline_double_run", False)) else "0"
+    )
     # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
     _export_workload_envs_for_optimize(
         args,

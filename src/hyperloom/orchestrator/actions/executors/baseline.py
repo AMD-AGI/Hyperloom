@@ -1471,15 +1471,18 @@ class BaselineExecutor:
     def _double_run_enabled() -> bool:
         """Whether baseline double-run is enabled.
 
-        Controlled by ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN``.
+        Controlled by ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN`` and the CLI
+        ``--baseline-double-run`` flag, defaulting off so baseline pays the cold
+        start only once unless the operator explicitly requests cold+hot
+        measurement.
 
         Returns:
-            ``True`` unless the env var is set to a falsey value.
+            ``True`` when the env var is set to a truthy value.
         """
         return os.environ.get(
             "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN",
-            "1",
-        ).strip().lower() not in ("0", "false", "no", "")
+            "0",
+        ).strip().lower() in ("1", "true", "yes", "on")
 
     def _resolve_lifecycle_params(
         self,

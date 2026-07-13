@@ -121,8 +121,9 @@ def _executor(base: Path, tmp_path: Path) -> BaselineExecutor:
     )
 
 
-def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
-    """The executor reports the HOT (second-round) throughput as the baseline."""
+def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
+    """The opt-in double-run reports the HOT second-round throughput."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -161,9 +162,9 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
     assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
-def test_baseline_single_round_when_double_run_disabled(tmp_path, monkeypatch):
-    """``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN=0`` reverts to legacy single-round."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+def test_baseline_single_round_by_default(tmp_path, monkeypatch):
+    """Baseline defaults to one cold-start round unless double-run is requested."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -298,8 +299,9 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
-def test_baseline_warmup_round_failure_short_circuits(tmp_path):
+def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
     """A failed warmup round returns immediately and does NOT run a second round."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -790,8 +792,9 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     assert str(output_dir) in seen["cwd"]
 
 
-def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
+def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
     """Atom baseline engages the lifecycle double-run like vllm/sglang."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="atom")
     output_dir = tmp_path / "ws"
@@ -820,8 +823,9 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
     assert captured[0]["benchmark"]["server_lifecycle"]["enabled"] is True
 
 
-def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
+def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
     """The overtime-kill anchor must reflect round 1's FULL run, not round 2's reuse time."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -864,11 +868,13 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
 
 def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     tmp_path,
+    monkeypatch,
 ):
     """When the reuse port is occupied by a zombie (healthy but no
     metadata), pre-start cleanup must (a) unlink stale pid/json without
     sending signals to potentially-recycled PIDs, and (b) invoke
     _kill_stale_servers() to reap the zombie listener."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -920,9 +926,10 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
 
 
-def test_pre_start_cleanup_no_kill_when_port_free(tmp_path):
+def test_pre_start_cleanup_no_kill_when_port_free(tmp_path, monkeypatch):
     """When the port is NOT occupied (no zombie), _kill_stale_servers must
     NOT fire — avoids killing unrelated servers sharing the pod."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -970,13 +977,14 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path):
     assert state["calls"] == 2
 
 
-def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path):
+def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path, monkeypatch):
     """A healthy port with matching metadata is not a zombie signal.
 
     The global stale-server reaper must not fire for a likely legitimate
     server. File preservation is covered by the direct pre-start test below;
     this full double-run path later removes files in final teardown.
     """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1061,9 +1069,10 @@ def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
     assert meta_file.exists()
 
 
-def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path):
+def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
     """The pre-start cleanup is best-effort: a raising _kill_stale_servers()
     must not abort the run — the double-run proceeds and still succeeds."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
