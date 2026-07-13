@@ -1290,6 +1290,30 @@ async def test_promote_conc_sweep_records(coord: Coordinator) -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_unpromotable_conc_sweep_records_failed_terminal_state(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    task = _ptask("cs-failed", "conc_sweep")
+    await coord._handle_unpromotable_result(
+        task,
+        {
+            "status": "failed",
+            "budget_exhausted": True,
+            "summary": {"successful_pairs": 0},
+            "report_json_path": "/tmp/cs-failed.json",
+        },
+    )
+
+    assert coord.shared_state.last_conc_sweep["status"] == "failed"
+    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is True
+    result = exit_normal_sweep(coord.shared_state)
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_failed"
+    assert evidence["conc_sweep_status"] == "failed"
+
+
 # -- _scan_stale_specialists (running rows) ---------------------------------
 @pytest.mark.asyncio
 async def test_scan_stale_specialists_flags_running(coord: Coordinator) -> None:

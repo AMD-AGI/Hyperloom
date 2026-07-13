@@ -332,7 +332,9 @@ class WritebackCollaborator:
             result: The task result payload; ``None`` is treated as an empty
                 result.
         """
-        result_payload = result or {}
+        result_payload = dict(result or {})
+        if task.kind == "conc_sweep" and not result_payload.get("status"):
+            result_payload["status"] = "failed"
         any_changed = False
         # Per-action audit (failed attempt) for the 6 in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
@@ -356,6 +358,26 @@ class WritebackCollaborator:
             result=result_payload,
         )
         any_changed = True
+        if task.kind == "conc_sweep":
+            self.shared_state.record_action_attempt(
+                action="conc_sweep",
+                task_id=task.task_id,
+                status=str(result_payload.get("status") or "failed"),
+                decision="discarded",
+                result=result_payload,
+                extras={
+                    "was_skipped": bool(result_payload.get("was_skipped", False)),
+                    "skip_reason": result_payload.get("skip_reason"),
+                    "budget_exhausted": bool(result_payload.get("budget_exhausted", False)),
+                    "total_budget_sec": result_payload.get("total_budget_sec"),
+                    "elapsed_sec": result_payload.get("elapsed_sec"),
+                    "best_speedup": ((result_payload.get("summary") or {}).get("best_speedup")),
+                    "best_conc": ((result_payload.get("summary") or {}).get("best_conc")),
+                    "successful_pairs": ((result_payload.get("summary") or {}).get("successful_pairs")),
+                    "report_path": result_payload.get("report_json_path"),
+                },
+            )
+            self.shared_state.record_conc_sweep(result_payload)
         # FRAMEWORK apply/bench silent failure: a
         # framework_agent task that settles ``status="failed"`` (or empty) never
         # reaches the promote branch that writes the terminal progress row, so
