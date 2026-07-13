@@ -29,7 +29,6 @@ from typing import Any
 from ...session.paths import mn_profile_trace_root
 from .._internal import safe_client, ray_dashboard, workload_spec
 from .._internal.log import info, warn
-from .._internal.rayjob_credentials import rayjob_credential_fanout
 
 import logging
 log = logging.getLogger(__name__)
@@ -174,10 +173,6 @@ def ray_gcs_address(head_pod_ip: str) -> str:
     if not ip:
         return ""
     return f"{ip}:6379"
-
-def _credential_fanout() -> dict[str, str]:
-    """Backward-compat alias for :func:`rayjob_credential_fanout`."""
-    return rayjob_credential_fanout()
 
 def _is_safe_get_workload_404(exc: BaseException) -> bool:
     """Check whether an exception is a transient SaFE GET-workload 404.
@@ -367,7 +362,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
 
         if wid is None:
             pending_dashboard_token = secrets.token_urlsafe(32)
-            env = {**_credential_fanout(), **extra_env}
+            env = dict(extra_env)
             env["RAY_DASHBOARD_TOKEN"] = pending_dashboard_token
             body = workload_spec.build_rayjob_workload_body(
                 workspace=workspace,
