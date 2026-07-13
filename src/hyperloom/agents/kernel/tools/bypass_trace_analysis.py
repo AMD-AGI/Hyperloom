@@ -83,63 +83,6 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _maybe_enrich_rocprof(
-    kernel_roofline_path: Path,
-    candidates_path: Path,
-    run_dir: Path,
-) -> dict[str, Any]:
-    """Optionally run rocprof-compute enrichment on the roofline sidecar.
-
-    Opt-in via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`` (off by default), mirroring
-    the TraceLens ``write_reports`` enrichment so the bypass sidecar carries the
-    same per-kernel ``rocprof_roofline`` audit fields. Reuses
-    ``rocprof_roofline.enrich_kernel_roofline_sidecar``, which degrades
-    gracefully (rocprof-compute missing / non-reusable kernel / no benchmark
-    files -> row skipped; per-kernel failure -> row failed) and never aborts.
-
-    The heavy per-kernel rocprof runs (before GEAK / after kernel-opt) happen
-    later in the route-agnostic kernel-opt phase; this stage is only the opt-in
-    batch pass.
-
-    Args:
-        kernel_roofline_path: Path to the written ``kernel_roofline.json``.
-        candidates_path: Path to the written ``kernel_candidates.json``.
-        run_dir: Per-run output directory used as the profiling workdir.
-
-    Returns:
-        The enrich summary dict, ``{"status": "disabled"}`` when the env gate is
-        off, or ``{"status": "error: ..."}`` on unexpected failure. Progress is
-        logged to stderr so stdout stays a single result-JSON line.
-    """
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
-    if enrich_value not in {"1", "true", "yes", "on"}:
-        return {"status": "disabled"}
-    try:
-        from rocprof_roofline import enrich_kernel_roofline_sidecar
-
-        timeout_sec = int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800)
-        enrich_summary = enrich_kernel_roofline_sidecar(
-            sidecar_path=str(kernel_roofline_path),
-            candidates_path=str(candidates_path),
-            workdir=str(run_dir),
-            timeout_sec_per_kernel=timeout_sec,
-            log_fn=None,
-        )
-        print(
-            "[rocprof_enrich] "
-            f"matched={enrich_summary.get('matched', 0)} "
-            f"skipped={enrich_summary.get('skipped', 0)} "
-            f"failed={enrich_summary.get('failed', 0)} "
-            f"rows={enrich_summary.get('rows', 0)}",
-            file=sys.stderr,
-        )
-        return enrich_summary
-    except Exception as exc:  # noqa: BLE001 — enrichment must never break bypass
-        msg = f"error: {type(exc).__name__}: {exc}"
-        print(f"[rocprof_enrich] skipped: {msg}", file=sys.stderr)
-        return {"status": msg}
-
-
 def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
     """Append analysis-quality health signals so weak analyses are never silent.
 
@@ -443,15 +386,12 @@ def main(argv: list[str] | None = None) -> int:
         _emit_quality_warnings(analyze, trace_health_warnings)
 
     # --- build downstream artifacts from classified device kernels ---
-    # Discover per-kernel benchmark files only when the rocprof roofline
-    # enrichment (the sole consumer) is enabled, so default runs skip the grep.
-    enrich_enabled = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower() in {"1", "true", "yes", "on"}
     candidates = _report.build_candidates(
         analyze,
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=enrich_enabled and not args.dry_run,
+        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -513,8 +453,6 @@ def main(argv: list[str] | None = None) -> int:
         generated_at=_utc_now_iso(),
         trace_health_warnings=trace_health_warnings,
     )
-    # summary.json is written below, after the optional rocprof enrichment, so
-    # its ``rocprof_enrich`` audit field reflects the enrichment outcome.
     summary["estimated"] = estimated
     summary["analysis_degraded"] = analysis_degraded
     # Always present (may be null) so the summary/manifest/result schemas match.
@@ -545,14 +483,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     _atomic_write_json(kernel_roofline_path, kernel_roofline)
 
-    # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in
-    # place). Skipped in --dry-run; env-gated + graceful degradation otherwise.
-    rocprof_enrich: dict[str, Any] = (
-        {"status": "disabled"}
-        if args.dry_run
-        else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
-    )
-    summary["rocprof_enrich"] = rocprof_enrich
     _atomic_write_json(summary_path, summary)
 
     # Kernel-fusion opportunities: time-ordered launch adjacency -> fusable
@@ -635,7 +565,6 @@ def main(argv: list[str] | None = None) -> int:
         "orchestrator_mode": "bypass",
         "timeline": analyze.get("timeline") or {},
         "attribution": analyze.get("attribution") or {},
-        "rocprof_enrich": rocprof_enrich,
         "trace_health_warnings": trace_health_warnings,
         "artifact_paths": {
             "trace_report_path": str(analysis_md_path),

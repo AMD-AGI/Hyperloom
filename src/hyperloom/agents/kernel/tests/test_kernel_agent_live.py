@@ -6,7 +6,7 @@
 Run with:
   KERNEL_AGENT_RUN_LIVE=1 \
   KERNEL_AGENT_ENV_FILE=/wekafs/xiaofei/AgentKernelArena/.env \
-  KERNEL_AGENT_LIVE_BACKENDS=geak_v3 \
+  KERNEL_AGENT_LIVE_BACKENDS=forge \
   python3 -m unittest kernel-agent/tests/test_kernel_agent_live.py
 """
 
@@ -139,7 +139,7 @@ class KernelAgentLiveTests(unittest.TestCase):
         )
         env = load_dotenv(env_file)
         env.setdefault("KERNEL_AGENT_LLM_MODEL", "claude4.7")
-        backends = os.environ.get("KERNEL_AGENT_LIVE_BACKENDS", "geak_v3")
+        backends = os.environ.get("KERNEL_AGENT_LIVE_BACKENDS", "forge")
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
