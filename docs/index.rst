@@ -20,7 +20,6 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
   .. grid-item-card:: Install
 
     * :doc:`Hosted UI quickstart </install/quickstart>`
-    * :doc:`Local Mode quickstart </install/local-mode>`
     * :doc:`Bare-metal quickstart </install/bare-metal>`
 
   .. grid-item-card:: Components

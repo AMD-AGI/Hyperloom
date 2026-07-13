@@ -123,8 +123,7 @@ TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"
 # default-vs-override comparison matches the Python side's Path.resolve();
 # unresolvable paths fall back to the trimmed literal so a not-yet-cloned
 # default still compares correctly (#722 / PR#789).
-# Keep in lockstep with the twin helper in
-# src/hyperloom/inference_optimizer/assets/local_setup.sh.
+# Keep in lockstep with Python-side path canonicalization helpers.
 _canonicalize_path() {
   local p="${1:-}"
   [ -z "$p" ] && return 0
@@ -144,6 +143,7 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-int
 # Credentials fallback: env always wins. If any supported LLM credential is
 # missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
+DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
 if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
    || [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${ANTHROPIC_BASE_URL:-}" ] \
    || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
@@ -265,6 +265,26 @@ done
 log() { echo "[kernel-agent] $*"; }
 warn() { echo "[kernel-agent WARN] $*" >&2; }
 die() { echo "[kernel-agent ERROR] $*" >&2; exit 1; }
+
+upsert_dotenv_var() {
+  local key="$1" value="$2" tmp found=0 line stripped
+  [ -n "$key" ] || return 0
+  tmp="$(mktemp)"
+  if [ -f "$DOTENV" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      stripped="${line#"${line%%[![:space:]]*}"}"
+      stripped="${stripped#export }"
+      case "$stripped" in
+        "${key}="*) printf '%s=%s\n' "$key" "$value" >> "$tmp"; found=1 ;;
+        *) printf '%s\n' "$line" >> "$tmp" ;;
+      esac
+    done < "$DOTENV"
+  fi
+  [ "$found" -eq 0 ] && printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  mkdir -p "$(dirname "$DOTENV")"
+  mv "$tmp" "$DOTENV"
+  chmod 600 "$DOTENV" 2>/dev/null || true
+}
 # In --check-only mode, downgrade post-install verification failures to a
 # warning so report_status can still enumerate what's missing. The caller
 # explicitly asked us NOT to install; failing on the first missing piece
@@ -706,9 +726,8 @@ ensure_tracelens() {
       # place only after everything succeeds. Publishing before the ref pin (or
       # on a mid-clone crash) would leave an unpinned/half-cloned $TRACELENS_ROOT
       # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
-      # Keep this temp-clone+pin+atomic-rename in lockstep with the twin
-      # implementations: src/hyperloom/inference_optimizer/assets/local_setup.sh
-      # (clone_or_update "atomic") and src/hyperloom/agents/kernel/tools/tracelens_analysis.py
+      # Keep this temp-clone+pin+atomic-rename in lockstep with
+      # src/hyperloom/agents/kernel/tools/tracelens_analysis.py
       # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
       _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
@@ -899,6 +918,42 @@ write_env_file() {
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
+
+  [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
+  [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
+  [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
+  [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_KERNEL_AGENT_ROOT "$HYPERLOOM_KERNEL_AGENT_ROOT"
+  [ -n "${KERNEL_AGENT_ROOT:-}" ] && upsert_dotenv_var KERNEL_AGENT_ROOT "$KERNEL_AGENT_ROOT"
+  [ -n "${MAGPIE_PATH:-}" ] && upsert_dotenv_var MAGPIE_PATH "$MAGPIE_PATH"
+  [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
+  [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
+  [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
+  [ -n "${_anthropic_url}" ] && upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+  [ -n "${_openai_url:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$_openai_url"
+  [ -n "${_anthropic_key}" ] && upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
+  [ -n "${_anthropic_key}" ] && upsert_dotenv_var ANTHROPIC_AUTH_TOKEN "$_anthropic_key"
+  [ -n "${_openai_key}" ] && upsert_dotenv_var OPENAI_API_KEY "$_openai_key"
+  if [ -n "${_gateway_key}" ]; then
+    upsert_dotenv_var SAFE_API_KEY "$_gateway_key"
+    upsert_dotenv_var AMD_LLM_API_KEY "$_gateway_key"
+    upsert_dotenv_var LLM_GATEWAY_KEY "$_gateway_key"
+  fi
+  [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
+    upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
+  fi
+  [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
+  [ -n "${GEAK_E2E_RUNNER}" ] && upsert_dotenv_var GEAK_E2E_RUNNER "$GEAK_E2E_RUNNER"
+  [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
+  [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
+  [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
+  [ -n "${GEAK_API_KEY_VAL}" ] && upsert_dotenv_var GEAK_API_KEY "$GEAK_API_KEY_VAL"
+  [ -n "${GEAK_BASE_URL_VAL}" ] && upsert_dotenv_var GEAK_BASE_URL "$GEAK_BASE_URL_VAL"
+  [ -n "${GEAK_SCORE_TARGET:-}" ] && upsert_dotenv_var GEAK_SCORE_TARGET "$GEAK_SCORE_TARGET"
+  [ -n "${GEAK_SKIP_PROFILE:-}" ] && upsert_dotenv_var GEAK_SKIP_PROFILE "$GEAK_SKIP_PROFILE"
+  [ -n "${GEAK_MAX_BENCHMARK_SHAPES:-}" ] && upsert_dotenv_var GEAK_MAX_BENCHMARK_SHAPES "$GEAK_MAX_BENCHMARK_SHAPES"
+  log "updated ${DOTENV} with kernel-agent runtime env"
 }
 
 # Clone the e2e optimizer ("geak"; GEAK@GEAK_v4, formerly PerfSkills): SHA pins
