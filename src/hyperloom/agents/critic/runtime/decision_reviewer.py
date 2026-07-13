@@ -15,9 +15,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso
 
 
 log = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ def _now_iso() -> str:
     Returns:
         str: The current UTC timestamp with microsecond precision.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return now_iso(timespec="microseconds")
 
 
 # Proposal-payload keys that carry environment-variable / CLI-arg levers as

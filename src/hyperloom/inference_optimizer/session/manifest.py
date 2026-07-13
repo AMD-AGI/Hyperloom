@@ -22,9 +22,10 @@ import socket
 import subprocess
 import tempfile
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
 from .session_paths import manifest_path
@@ -42,7 +43,7 @@ def _utc_now_compact() -> str:
     Returns:
         str: Timestamp in ``YYYYMMDDTHHMMSSZ`` form.
     """
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return utc_now_compact()
 
 
 # Env vars consulted by _detect_stack_fingerprint (operator pins that
@@ -440,7 +441,7 @@ def build_manifest(
         "session_id": session_id or build_session_id(model_name),
         "claw_session_id": claw_session_id,
         "sandbox_user_id": sandbox_user_id,
-        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted at session start so a trace-based
         # consumer can locate the on-disk artifacts (session_dir nests under it

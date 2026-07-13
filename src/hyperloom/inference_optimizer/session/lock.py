@@ -33,9 +33,10 @@ import json
 import os
 import socket
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso
 
 from . import session_paths
 
@@ -47,7 +48,7 @@ except ImportError:  # pragma: no cover - non-POSIX dev hosts (e.g. Windows).
 
 def _now_iso() -> str:
     """Return the current UTC time as a second-precision ISO-8601 string."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return now_iso(timespec="seconds")
 
 
 def _pid_alive(pid: int | None) -> bool:

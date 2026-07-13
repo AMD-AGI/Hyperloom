@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import now_iso
 
 from ._common import (
     _benchmark_report_candidates,
@@ -488,7 +489,7 @@ def _utc_now_iso() -> str:
     Returns:
         str: e.g. ``"2026-06-02T18:29:00+00:00"``.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return now_iso(timespec="seconds")
 
 
 def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:

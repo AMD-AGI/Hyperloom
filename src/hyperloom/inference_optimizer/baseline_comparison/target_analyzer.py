@@ -28,9 +28,11 @@ concatenation under the session dir.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.coerce import to_float
+from hyperloom.common.timeutil import now_iso
 
 from .inferencex_client import DEFAULT_BASE_URL
 from .name_mapping import to_inferencex_name
@@ -46,7 +48,7 @@ def _iso_utc_now() -> str:
     Returns:
         str: Timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ``.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return now_iso(timespec="seconds", z_suffix=True)
 
 
 def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
@@ -209,10 +211,7 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
         Returns:
             The value as a float, or ``0.0`` if missing or unparseable.
         """
-        try:
-            return float(row.get(key))
-        except (TypeError, ValueError):
-            return 0.0
+        return to_float(row.get(key), default=0.0)
 
     tput = _fnum("tput_per_gpu")
     if tput <= 0:

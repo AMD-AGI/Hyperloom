@@ -25,9 +25,10 @@ import re
 import tempfile
 import threading
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+from hyperloom.common.timeutil import now_iso
 
 from .sections import SECTION_SHAPES
 
@@ -41,7 +42,7 @@ def _now_iso() -> str:
         The current UTC time formatted as an ISO-8601 string with microsecond
         precision.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return now_iso(timespec="microseconds")
 
 
 def _slug(value: str) -> str:

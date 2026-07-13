@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom.common.coerce import to_float as _coerce_float
+from hyperloom.common.timeutil import iso_z as _common_iso_z
+
 
 
 # Shared helpers
@@ -90,19 +93,14 @@ def _to_float(value: Any) -> float | None:
         float | None: The parsed float, or ``None`` when the value is missing,
         a bool, or not numeric.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
-    text = str(value).strip()
-    if not text or text.upper() == "SKIPPED":
-        return None
-    try:
-        return float(text.replace(",", ""))
-    except ValueError:
-        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.upper() == "SKIPPED":
+            return None
+        return _coerce_float(text.replace(",", ""))
+    return _coerce_float(value)
 
 
 def _to_int(value: Any) -> int | None:
@@ -354,19 +352,7 @@ def _iso_z(ts: Any) -> str:
         str: The canonical ``...Z`` UTC string, ``""`` for empty input, or the
         original string when it cannot be parsed.
     """
-    if ts is None:
-        return ""
-    s = str(ts).strip()
-    if not s:
-        return ""
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return s
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    dt = dt.astimezone(timezone.utc)
-    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return _common_iso_z(ts)
 
 
 def _load_optimization_journal(

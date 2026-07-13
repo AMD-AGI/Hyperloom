@@ -15,9 +15,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso
 
 
 log = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ def _symbols(lines: list[str]) -> list[str]:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso(timespec="auto")
 
 
 def _verdict(

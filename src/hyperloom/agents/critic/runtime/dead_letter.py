@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from hyperloom.common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
 from .metrics import CRITIC_KB_DEAD_LETTER_COUNT, get_registry
@@ -31,7 +32,7 @@ def _now_iso() -> str:
     Returns:
         str: The current timestamp in ISO 8601 format.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return now_iso(timespec="microseconds")
 
 
 @dataclass
