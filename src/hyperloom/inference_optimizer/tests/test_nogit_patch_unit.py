@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import _apply_feedback as af
 from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
@@ -376,7 +377,6 @@ def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatc
     """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with
     an ApplyFeedback carrying the accumulated per-level stderr."""
     import subprocess as _sp
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
     patch_file = tmp_path / "bad.patch"
     patch_file.write_text("not a patch\n", encoding="utf-8")
@@ -394,7 +394,7 @@ def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatc
     ok, err, backups, feedback = result
     assert ok is False
     assert backups == []
-    assert isinstance(feedback, ApplyFeedback)
+    assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.channel == "nogit"
     assert len(feedback.tried_levels) > 0
     # Per-level stderr should be present.
@@ -420,9 +420,8 @@ def test_apply_feedback_success_returns_none_feedback(tmp_path):
 
 def test_apply_feedback_roundtrip_serialization():
     """ApplyFeedback serialises to dict and deserialises cleanly."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
-    fb = ApplyFeedback(
+    fb = af.ApplyFeedback(
         patch="/tmp/foo.patch",
         channel="git",
         tried_levels=[1, 0, 2],
@@ -433,7 +432,7 @@ def test_apply_feedback_roundtrip_serialization():
     d = fb.to_dict()
     assert d["patch"] == "/tmp/foo.patch"
     assert d["channel"] == "git"
-    restored = ApplyFeedback.from_dict(d)
+    restored = af.ApplyFeedback.from_dict(d)
     assert restored.patch == fb.patch
     assert restored.tried_levels == fb.tried_levels
     assert restored.stderr == fb.stderr
@@ -442,9 +441,8 @@ def test_apply_feedback_roundtrip_serialization():
 
 def test_apply_feedback_format_for_mandate_contains_key_sections():
     """format_for_mandate includes patch name, stderr, and context sections."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
-    fb = ApplyFeedback(
+    fb = af.ApplyFeedback(
         patch="/path/to/001_fix.patch",
         channel="git",
         tried_levels=[1],
@@ -461,7 +459,6 @@ def test_apply_feedback_format_for_mandate_contains_key_sections():
 
 def test_read_patch_source_context_returns_snippet(tmp_path):
     """read_patch_source_context resolves target + returns a line-numbered snippet."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import read_patch_source_context
 
     target = tmp_path / "mod.py"
     target.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
@@ -473,14 +470,13 @@ def test_read_patch_source_context_returns_snippet(tmp_path):
         "-line2\n"
         "+line2_patched\n"
     )
-    ctx = read_patch_source_context(patch_text, tmp_path, radius=6)
+    ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
     assert "mod.py" in ctx
     assert "line" in ctx  # some content from the file
 
 
 def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
     """read_patch_source_context returns '' when target file doesn't exist."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import read_patch_source_context
 
     patch_text = (
         "--- a/nonexistent.py\n"
@@ -488,7 +484,7 @@ def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
         "@@ -1 +1 @@\n"
         "-x\n+y\n"
     )
-    ctx = read_patch_source_context(patch_text, tmp_path, radius=6)
+    ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
     assert ctx == ""
 
 
@@ -510,7 +506,6 @@ def test_bak_name_sanitises_unsafe_chars():
 
 def test_apply_patch_dry_run_cli_missing(tmp_path, monkeypatch):
     """A FileNotFoundError during the dry-run yields a nogit ApplyFeedback."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
     patch_file = tmp_path / "p.patch"
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
@@ -522,7 +517,7 @@ def test_apply_patch_dry_run_cli_missing(tmp_path, monkeypatch):
     ok, err, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is False
     assert backups == []
-    assert isinstance(feedback, ApplyFeedback)
+    assert isinstance(feedback, af.ApplyFeedback)
     assert "unavailable" in err
 
 
@@ -670,7 +665,6 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
 def test_apply_real_failure_collects_rej(tmp_path):
     """When dry-run passes for a level but the real apply fails, we surface a
     nogit ApplyFeedback (with any .rej content) rather than raising."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -696,14 +690,13 @@ def test_apply_real_failure_collects_rej(tmp_path):
     if call_state["n"] == 0:
         pytest.skip("dry-run never succeeded on this patch CLI")
     assert ok is False
-    assert isinstance(feedback, ApplyFeedback)
+    assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.channel == "nogit"
     assert "FAILED" in feedback.stderr
 
 
 def test_apply_real_apply_cli_vanishes(tmp_path):
     """A FileNotFoundError raised only during the real apply is handled."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -726,7 +719,7 @@ def test_apply_real_apply_cli_vanishes(tmp_path):
     ok, err, backups, feedback = result
     if ok:
         pytest.skip("dry-run failed; cannot reach real-apply branch")
-    assert isinstance(feedback, ApplyFeedback)
+    assert isinstance(feedback, af.ApplyFeedback)
     assert "patch apply failed" in err
 
 
@@ -1027,7 +1020,6 @@ def test_modification_backup_failure_returns_error(tmp_path, monkeypatch):
 def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
     """When the real apply fails AND source-context extraction throws, feedback
     still returns with empty source_context (real-apply exception branch)."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -1045,7 +1037,6 @@ def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatc
     def _raise_ctx(*a, **k):
         raise RuntimeError("ctx boom")
 
-    import hyperloom.orchestrator.actions.executors._apply_feedback as af
     import unittest.mock as um
 
     monkeypatch.setattr(af, "read_patch_source_context", _raise_ctx)
@@ -1055,14 +1046,13 @@ def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatc
     ok, _err, _backups, feedback = result
     if ok:
         pytest.skip("dry-run failed; cannot reach real-apply branch")
-    assert isinstance(feedback, ApplyFeedback)
+    assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.source_context == ""
 
 
 def test_dry_run_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
     """If reading source context throws on total dry-run failure, feedback still
     returns with an empty source_context (exception branch)."""
-    from hyperloom.orchestrator.actions.executors._apply_feedback import ApplyFeedback
 
     patch_file = tmp_path / "bad.patch"
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
@@ -1072,10 +1062,8 @@ def test_dry_run_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
     def _raise_ctx(*a, **k):
         raise RuntimeError("context read boom")
 
-    import hyperloom.orchestrator.actions.executors._apply_feedback as af
-
     monkeypatch.setattr(af, "read_patch_source_context", _raise_ctx)
     ok, err, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is False
-    assert isinstance(feedback, ApplyFeedback)
+    assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.source_context == ""

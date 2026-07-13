@@ -10,8 +10,7 @@ the build_apply_feedback factory.
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from hyperloom.orchestrator.actions.executors import _apply_feedback as af
 from hyperloom.orchestrator.actions.executors._apply_feedback import (
     ApplyFeedback,
     build_apply_feedback,
@@ -209,8 +208,6 @@ def test_build_apply_feedback_with_root_unreadable_patch(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_read_patch_source_context_swallows_exceptions(tmp_path, monkeypatch):
-    import hyperloom.orchestrator.actions.executors._apply_feedback as af
-
     def _boom(*a, **k):
         raise RuntimeError("parse blew up")
 
@@ -219,8 +216,6 @@ def test_read_patch_source_context_swallows_exceptions(tmp_path, monkeypatch):
 
 
 def test_source_context_for_file_swallows_exceptions(monkeypatch):
-    import hyperloom.orchestrator.actions.executors._apply_feedback as af
-
     def _boom(*a, **k):
         raise RuntimeError("resolve blew up")
 

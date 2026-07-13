@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 
 import pytest
@@ -42,9 +43,7 @@ def test_atomic_write_bytes_reraises_and_unlinks_on_failure(tmp_path, monkeypatc
     def _boom(*a, **k):
         raise OSError("replace failed")
 
-    import hyperloom.common.io as io_mod
-
-    monkeypatch.setattr(io_mod.os, "replace", _boom)
+    monkeypatch.setattr(os, "replace", _boom)
     with pytest.raises(OSError, match="replace failed"):
         atomic_write_bytes(p, b"x")
     # No temp files left behind in the directory.

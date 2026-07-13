@@ -231,11 +231,20 @@ def _apply_patch_no_git(
         )
         return False, err_msg, [], feedback
 
+    def _fail(err_message: str, recs: list[dict[str, Any]]) -> "tuple[bool, str, list[dict[str, Any]], Any]":
+        """Return the canonical 4-tuple failure result with structured feedback."""
+        return False, err_message, recs, ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=tried_levels,
+            stderr=err_message,
+        )
+
     # Resolve target files to back up before mutation.
     try:
         patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return False, f"cannot read patch file: {exc}", []
+        return _fail(f"cannot read patch file: {exc}", [])
 
     framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -285,7 +294,7 @@ def _apply_patch_no_git(
                 continue
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             backups.append({
                 "target": str(abs_new),
                 "existed": False,
@@ -299,11 +308,11 @@ def _apply_patch_no_git(
                 continue
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             if abs_old.exists():
                 rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
                 if err:
-                    return False, err, backups
+                    return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             else:
                 backups.append({
@@ -318,15 +327,15 @@ def _apply_patch_no_git(
             # track new destination (to delete on revert).
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             # Back up old source so it can be restored on revert.
             if abs_old.exists():  # type: ignore[union-attr]
                 rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
                 if err:
-                    return False, err, backups
+                    return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             # Track new destination for deletion on revert.
             backups.append({
@@ -343,11 +352,11 @@ def _apply_patch_no_git(
                 continue
             rel_t, abs_t, err = _resolve_target(target_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             if abs_t.exists():  # type: ignore[union-attr]
                 rec, err = _backup_existing(abs_t, rel_t, "restore")  # type: ignore[arg-type]
                 if err:
-                    return False, err, backups
+                    return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             else:
                 backups.append({
