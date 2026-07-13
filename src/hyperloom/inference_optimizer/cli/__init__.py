@@ -1079,6 +1079,8 @@ def _smoke_test_codex_model(
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
     # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
+    if _codex_model_should_follow_claude():
+        return
     critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
     if not needs_codex:
@@ -2228,9 +2230,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
 
-    kernel_str = "DISABLED" if no_kernel else (f"{'Codex' if args.kernel_codex else 'Claude'}")
+    def _backend_kind(role: str) -> str:
+        backend = backends.get(role)
+        name = str(getattr(backend, "name", "") or "").strip().lower()
+        if name == "claude":
+            return "Claude"
+        if name == "codex":
+            return "Codex"
+        if backend is None:
+            return "DISABLED"
+        return backend.__class__.__name__
+
+    orchestration_str = (
+        f"Claude({args.claude_model})"
+        if _backend_kind("orchestration") == "Claude"
+        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    )
+    kernel_str = "DISABLED" if no_kernel else _backend_kind("kernel_agent")
     if critic_choice == "mock":
         critic_str = "mock"
+    elif _backend_kind("critic") == "Claude":
+        critic_str = f"Claude({args.claude_model})"
     else:  # "agent"
         critic_str = f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, root={critic_agent_root})"
     if robustness_choice == "mock":
@@ -2242,7 +2262,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             robustness_str += f"[{kvs}]"
     print(
         f"Backends        : "
-        f"orchestration=Claude({args.claude_model}), "
+        f"orchestration={orchestration_str}, "
         f"kernel={kernel_str}, "
         f"critic={critic_str}, "
         f"robustness={robustness_str}"
