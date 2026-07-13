@@ -2,9 +2,9 @@
 
 """GEAK-dispatch correctness regressions.
 
-* A ``backends`` payload supplied as a JSON list (``["geak_v3"]``) must be
-  serialized into a bare ``--backends geak_v3`` token, never ``str(["geak_v3"])`` →
-  ``"['geak_v3']"`` (which the kernel-agent validator rightly rejects).
+* A ``backends`` payload supplied as a JSON list (``["forge"]``) must be
+  serialized into a bare ``--backends forge`` token, never ``str(["forge"])`` →
+  ``"['forge']"`` (which the kernel-agent validator rightly rejects).
 * A non-GEAK attempt (e.g. a Claude subprocess that times out) must not
   be silently bucketed under the GEAK invocation lane; the backend that ran is
   stamped on the result and an unattributable failure never defaults to GEAK.
@@ -27,13 +27,13 @@ from hyperloom.orchestrator.kernel import request_handlers as krh
 # --backends serialization
 # --------------------------------------------------------------------------- #
 def test_backends_cli_arg_list_is_comma_joined_bare_names():
-    assert krh._backends_cli_arg(["geak_v3"]) == "geak_v3"
-    assert krh._backends_cli_arg(["geak_v3", "claude"]) == "geak_v3,claude"
-    assert krh._backends_cli_arg("geak_v3") == "geak_v3"
-    assert krh._backends_cli_arg("geak_v3,claude") == "geak_v3,claude"
+    assert krh._backends_cli_arg(["forge"]) == "forge"
+    assert krh._backends_cli_arg(["forge", "claude"]) == "forge,claude"
+    assert krh._backends_cli_arg("forge") == "forge"
+    assert krh._backends_cli_arg("forge,claude") == "forge,claude"
     assert krh._backends_cli_arg(None) == ""
     # The repr of a list must never be what reaches --backends.
-    assert krh._backends_cli_arg(["geak_v3"]) != "['geak_v3']"
+    assert krh._backends_cli_arg(["forge"]) != "['forge']"
 
 
 def _bypass_single_kernel_guards(monkeypatch):
@@ -50,7 +50,7 @@ def _bypass_single_kernel_guards(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, monkeypatch):
     # A list backends payload must hit the subprocess as a
-    # bare "geak_v3" token, not the repr "['geak_v3']".
+    # bare "forge" token, not the repr "['forge']".
     _bypass_single_kernel_guards(monkeypatch)
     captured: dict[str, list[str]] = {}
 
@@ -60,14 +60,14 @@ async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, 
 
     monkeypatch.setattr(krh, "_run_subprocess", _fake_run_subprocess)
 
-    payload = {"kernel_id": "k001", "backends": ["geak_v3"], "_single_kernel": True}
+    payload = {"kernel_id": "k001", "backends": ["forge"], "_single_kernel": True}
     await krh._run_optimization_single(payload, session_dir=tmp_path)
 
     cmd = captured["cmd"]
     assert "--backends" in cmd
     val = cmd[cmd.index("--backends") + 1]
-    assert val == "geak_v3"
-    assert val != "['geak_v3']"
+    assert val == "forge"
+    assert val != "['forge']"
 
 
 # --------------------------------------------------------------------------- #
@@ -168,10 +168,10 @@ async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkey
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() + 10_000  # plenty of budget left
     best, attempts = await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1", "source_file": "x"}, "k1", ["forge", "geak_v3"],
+        {}, {"kernel_id": "k1", "source_file": "x"}, "k1", ["forge", "claude"],
         session_dir=tmp_path, deadline=deadline,
     )
-    assert calls == ["forge", "geak_v3"], "fallback must run after a forge timeout"
+    assert calls == ["forge", "claude"], "fallback must run after a forge timeout"
     assert len(attempts) == 2
 
 
@@ -209,7 +209,7 @@ async def test_ladder_skips_backends_when_budget_exhausted(tmp_path: Path, monke
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() - 1  # budget already exhausted
     best, attempts = await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1"}, "k1", ["geak_v3"],
+        {}, {"kernel_id": "k1"}, "k1", ["forge"],
         session_dir=tmp_path, deadline=deadline,
     )
     assert calls == [], "no backend should run once the budget is exhausted"

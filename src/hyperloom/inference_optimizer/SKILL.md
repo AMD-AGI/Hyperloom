@@ -1098,10 +1098,6 @@ The Coordinator does NOT need to drive this step — the main agent executes
 the unittest skill before calling `kernel_optimization.py`. Observability
 shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
 
-The GEAK outer-timeout is managed by `_ensure_yaml_env_timeout()` in
-`kernel_optimization.py`, which sets a fallback of 3600s so GEAK's
-`LocalEnvironment.timeout` never silently inherits the 30s default.
-
 ## Kernel Apply Safety
 
 Kernel optimization may modify `/sgl-workspace/aiter`, `/sgl-workspace/sglang`,

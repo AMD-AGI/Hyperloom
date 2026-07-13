@@ -427,7 +427,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "native" (geak_v3 per-kernel loop, default) or
+    # KERNEL-phase optimizer: "native" (forge per-kernel loop, default) or
     # "geak" (one-shot whole-pipeline e2e optimizer cloned from upstream;
     # see src/hyperloom/agents/kernel/tools/backends/geak_runner.py).
     kernel_optimizer: str = "native"
