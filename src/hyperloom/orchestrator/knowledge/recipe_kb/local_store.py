@@ -53,7 +53,6 @@ ever seen, ~10K is the realistic upper bound).
 
 from __future__ import annotations
 
-import datetime as _dt
 import errno
 import fcntl
 import json
@@ -65,6 +64,10 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json
+from hyperloom.common.timeutil import now_iso
 
 from .canonical_id import (
     InvalidCanonicalIdError,
@@ -130,7 +133,7 @@ def _utc_now_iso() -> str:
         str: Current UTC time formatted as an ISO-8601 string with
             microsecond precision and an explicit offset.
     """
-    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="microseconds")
+    return now_iso(timespec="microseconds")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -154,31 +157,14 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         Exception: Any error raised while writing or renaming is
             re-raised after a best-effort cleanup of the tmp file.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
+    atomic_write_json(
+        path,
+        payload,
+        indent=2,
+        sort_keys=True,
+        make_parents=True,
+        fsync=True,
     )
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError as exc:
-                log.debug("fsync skipped on %s: %s", tmp, exc)
-        os.replace(tmp, path)
-    except Exception:
-        # Best-effort tmp cleanup so a failed write doesn't leave a
-        # ``recipe.json.XXXXX.tmp`` next to the live row.
-        try:
-            tmp.unlink()
-        except OSError:
-            # Temp file already gone; re-raise the original write error below.
-            pass
-        raise
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -202,8 +188,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        return read_json(path, strict=True)
     except FileNotFoundError:
         # Race: file disappeared between is_file() and open(). Treat
         # as missing — same outcome as if we'd never seen it.

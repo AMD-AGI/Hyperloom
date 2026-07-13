@@ -29,6 +29,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom.common.io import append_jsonl as _common_append_jsonl
+from hyperloom.common.timeutil import now_iso
+
 from .errors import SessionMemoryError
 
 
@@ -560,9 +563,7 @@ def _now_iso() -> str:
     Returns:
         str: The current UTC timestamp, e.g. ``2026-06-02T18:00:00.000000+00:00``.
     """
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return now_iso(timespec="microseconds")
 
 
 def _read_json(path: Path, *, default: Any) -> Any:
@@ -605,8 +606,7 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
         path (Path): The JSONL file to append to.
         record (dict[str, Any]): The record to serialise on its own line.
     """
-    with path.open("a", encoding="utf-8") as fp:
-        fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _common_append_jsonl(path, record, ensure_ascii=False)
 
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
