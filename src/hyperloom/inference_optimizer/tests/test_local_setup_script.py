@@ -754,21 +754,19 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
     ), f"flock did not serialize critical sections: {lines}"
 
 
-# pin-dependency-shas: install.sh must clone Magpie / InferenceX pinned to a
-# commit SHA via the SHA-aware fetch-checkout dance, and the Magpie in-place
-# patch must fail-loud on a genuine failure (strict default) while staying
-# soft on a benign no-op. Grep/static-level guards on the script text.
+# pin-dependency-refs: install.sh must clone Magpie / InferenceX pinned to a
+# deterministic ref, and Magpie must support commit SHA and tag refs.
 
 
-def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
-    # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift.
+def test_io_install_pins_magpie_release_commit_and_inferencex_commit_sha() -> None:
+    # Magpie and InferenceX both default to full 40-char SHAs and avoid HEAD drift.
     text = IO_INSTALL.read_text(encoding="utf-8")
     assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"' in text
     assert 'MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"' in text
     assert 'INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"' in text
     assert "export HYPERLOOM_OPEN_SOURCE_ROOT" not in text
     assert re.search(r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M), (
-        "MAGPIE_REF must default to a full 40-char commit SHA and be overridable"
+        "MAGPIE_REF must default to the public Magpie release commit SHA and be overridable"
     )
     assert re.search(r'^INFERENCEX_REF="\$\{INFERENCEX_REF:-[0-9a-fA-F]{40}\}"', text, re.M), (
         "INFERENCEX_REF must default to a full 40-char commit SHA and be overridable"
@@ -776,11 +774,12 @@ def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
 
 
 def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
-    # The SHA-aware fetch-checkout dance must be wired into both ensure_magpie and ensure_inferencex.
+    # SHA refs use fetch-checkout; tag refs use git clone --branch.
     text = IO_INSTALL.read_text(encoding="utf-8")
     assert "^[0-9a-fA-F]{7,40}$" in text, "missing raw-SHA detection regex"
     assert 'fetch --depth 1 origin "$ref"' in text, "missing shallow SHA fetch"
     assert "checkout -q FETCH_HEAD" in text, "missing detached SHA checkout"
+    assert 'git clone --depth 1 --branch "$ref"' in text, "missing tag ref clone path"
     assert 'git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_PATH" "$MAGPIE_REF" "Magpie"' in text, (
         "ensure_magpie must clone via the pinned fetch-checkout helper"
     )
