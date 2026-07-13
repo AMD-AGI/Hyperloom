@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
 from .category_mapping import map_category_to_kind
 from .dead_letter import DeadLetter
 from .errors import (
@@ -76,11 +78,10 @@ def _read_bool_env(name: str, default: bool) -> bool:
     Returns:
         bool: ``True`` if the (trimmed, lower-cased) value is one of
         ``1``/``true``/``yes``/``on``; otherwise ``False`` or ``default``.
+
+    Delegates to :func:`hyperloom.common.env.env_bool`.
     """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return env_bool(name, default)
 
 
 def _read_num_env(name: str, default, cast):
