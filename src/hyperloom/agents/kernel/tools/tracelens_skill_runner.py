@@ -36,6 +36,25 @@ sys.path.pop(0)
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 _OPENAI_TOOL_TIMEOUT_SEC = 300.0
 _OPENAI_MAX_TOOL_TURNS = 50
+_OPENAI_ALLOWED_COMMANDS: frozenset[str] = frozenset(
+    {
+        "python",
+        "python3",
+        "TraceLens_generate_perf_report_pytorch",
+        "TraceLens_generate_perf_report_pytorch_inference",
+        "ls",
+        "find",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _OpenAIToolScope:
+    """Filesystem and command scope for OpenAI/Codex TraceLens tools."""
+
+    tracelens_root: Path
+    output_dir: Path
+    read_roots: tuple[Path, ...]
 
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query
 # has no client-side read timeout, so a gateway that returns a partial response
@@ -399,27 +418,59 @@ def _openai_tool_schemas() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "run_shell",
-                "description": "Run a shell command rooted at the TraceLens directory.",
+                "description": "Run an allowlisted TraceLens command as argv, without a shell.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string"},
+                        "argv": {"type": "array", "items": {"type": "string"}},
                         "timeout_s": {"type": "number"},
                     },
-                    "required": ["command"],
+                    "required": ["argv"],
                 },
             },
         },
     ]
 
 
-def _resolve_tool_path(raw: str, *, cwd: Path) -> Path:
-    """Resolve a tool path, allowing absolute paths and cwd-relative paths."""
+def _path_is_under(path: Path, root: Path) -> bool:
+    """Return whether ``path`` is contained by ``root`` after resolution."""
+    try:
+        resolved = path.resolve(strict=False)
+        resolved_root = root.resolve(strict=False)
+    except OSError:
+        return False
+    return resolved == resolved_root or resolved_root in resolved.parents
+
+
+def _resolve_tool_path(raw: str, *, cwd: Path, allowed_roots: tuple[Path, ...]) -> Path:
+    """Resolve a tool path and require it to live under an allowed root."""
+    if not str(raw or "").strip():
+        raise PermissionError("path is required")
     path = Path(str(raw)).expanduser()
-    return path if path.is_absolute() else cwd / path
+    resolved = path if path.is_absolute() else cwd / path
+    if not any(_path_is_under(resolved, root) for root in allowed_roots):
+        raise PermissionError(f"path outside allowed roots: {resolved}")
+    return resolved
 
 
-def _execute_openai_tool(name: str, arguments_json: str, *, tracelens_root: Path) -> str:
+def _validate_openai_command_argv(argv: Any, *, scope: _OpenAIToolScope) -> list[str]:
+    """Validate an OpenAI TraceLens command argv without permitting shell injection."""
+    if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
+        raise PermissionError("run_shell requires non-empty argv: list[str]")
+    exe = Path(argv[0]).name
+    if exe not in _OPENAI_ALLOWED_COMMANDS:
+        raise PermissionError(f"command not allowed: {exe}")
+    if exe in {"python", "python3"}:
+        if any(part in {"-c", "-m"} for part in argv[1:]):
+            raise PermissionError("python -c/-m is not allowed")
+        script_args = [part for part in argv[1:] if part.endswith(".py")]
+        if not script_args:
+            raise PermissionError("python command must name a .py script")
+        _resolve_tool_path(script_args[0], cwd=scope.tracelens_root, allowed_roots=(scope.tracelens_root,))
+    return argv
+
+
+def _execute_openai_tool(name: str, arguments_json: str, *, scope: _OpenAIToolScope) -> str:
     """Execute one local tool call for the OpenAI/Codex TraceLens runner."""
     try:
         args = json.loads(arguments_json or "{}")
@@ -427,25 +478,29 @@ def _execute_openai_tool(name: str, arguments_json: str, *, tracelens_root: Path
         return json.dumps({"ok": False, "error": f"invalid JSON arguments: {exc}"})
     try:
         if name == "read_file":
-            path = _resolve_tool_path(str(args.get("path") or ""), cwd=tracelens_root)
+            path = _resolve_tool_path(str(args.get("path") or ""), cwd=scope.tracelens_root, allowed_roots=scope.read_roots)
             return json.dumps({"ok": True, "path": str(path), "content": path.read_text(encoding="utf-8", errors="replace")})
         if name == "write_file":
-            path = _resolve_tool_path(str(args.get("path") or ""), cwd=tracelens_root)
+            path = _resolve_tool_path(
+                str(args.get("path") or ""),
+                cwd=scope.output_dir,
+                allowed_roots=(scope.output_dir,),
+            )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(args.get("content") or ""), encoding="utf-8")
             return json.dumps({"ok": True, "path": str(path), "bytes": path.stat().st_size})
         if name == "list_dir":
-            path = _resolve_tool_path(str(args.get("path") or "."), cwd=tracelens_root)
+            path = _resolve_tool_path(str(args.get("path") or "."), cwd=scope.tracelens_root, allowed_roots=scope.read_roots)
             entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
             return json.dumps({"ok": True, "path": str(path), "entries": entries[:500]})
         if name == "run_shell":
-            command = str(args.get("command") or "")
+            argv = _validate_openai_command_argv(args.get("argv"), scope=scope)
             timeout_s = float(args.get("timeout_s") or _OPENAI_TOOL_TIMEOUT_SEC)
             timeout_s = max(1.0, min(timeout_s, _OPENAI_TOOL_TIMEOUT_SEC))
             proc = subprocess.run(
-                command,
-                cwd=str(tracelens_root),
-                shell=True,
+                argv,
+                cwd=str(scope.tracelens_root),
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
@@ -496,6 +551,8 @@ def _usage_value(usage: Any, name: str) -> int:
 async def _run_tracelens_skill_openai(
     *,
     prompt: str,
+    skill_path: Path,
+    trace_path: Path,
     output_dir: Path,
     prefix_path: Path,
     tracelens_root: Path,
@@ -528,6 +585,20 @@ async def _run_tracelens_skill_openai(
     usage_in = 0
     usage_out = 0
     tools = _openai_tool_schemas()
+    scope = _OpenAIToolScope(
+        tracelens_root=tracelens_root,
+        output_dir=output_dir,
+        read_roots=tuple(
+            dict.fromkeys(
+                [
+                    tracelens_root,
+                    output_dir,
+                    skill_path.parent,
+                    trace_path.parent,
+                ]
+            )
+        ),
+    )
 
     with transcript_path.open("w", encoding="utf-8") as transcript_fh:
         for turn in range(_OPENAI_MAX_TOOL_TURNS):
@@ -565,7 +636,7 @@ async def _run_tracelens_skill_openai(
                 break
             messages.append(_openai_assistant_message(msg))
             for tc in tool_calls:
-                result = _execute_openai_tool(tc.function.name, tc.function.arguments, tracelens_root=tracelens_root)
+                result = _execute_openai_tool(tc.function.name, tc.function.arguments, scope=scope)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                 transcript_fh.write(
                     json.dumps(
@@ -830,6 +901,8 @@ async def run_tracelens_skill(
         openai_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_openai(
             prompt=prompt,
+            skill_path=skill_path,
+            trace_path=trace_path,
             output_dir=output_dir,
             prefix_path=prefix_path,
             tracelens_root=tracelens_root,
