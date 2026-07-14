@@ -1053,11 +1053,14 @@ ensure_forge_claude_cli() {
     run npm config set prefix /usr/local
     run npm install -g @anthropic-ai/claude-code
   fi
-  # ~/.claude auth from existing provider / GEAK gateway env so the fellow authenticates.
-  local _claude_key="${_ANTHROPIC_KEY_VAL:-${SAFE_API_KEY:-${GEAK_API_KEY_VAL:-${_OPENAI_KEY_VAL:-}}}}"
+  # ~/.claude authenticates the Claude Code CLI (Anthropic-side). Keep the
+  # gateway fallbacks (SAFE_API_KEY / GEAK_*) but never fall back to the
+  # OpenAI-side key/URL, so an OpenAI-only setup does not leak OpenAI creds
+  # into the Claude config.
+  local _claude_key="${_ANTHROPIC_KEY_VAL:-${SAFE_API_KEY:-${GEAK_API_KEY_VAL:-}}}"
   if [ -n "$_claude_key" ]; then
     mkdir -p /root/.claude
-    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${GEAK_BASE_URL_VAL:-${_OPENAI_BASE_URL_VAL:-}}}"
+    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${GEAK_BASE_URL_VAL:-}}"
     _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
     cat > /root/.claude/config.json <<EOF
@@ -1070,7 +1073,7 @@ ensure_forge_claude_cli() {
 EOF
     chmod 600 /root/.claude/config.json
   else
-    warn "gateway API key not set; ~/.claude/config.json not written (forge fellow auth may fail)"
+    warn "Anthropic-side key not set; ~/.claude/config.json not written (forge fellow auth may fail for OpenAI-only setups)"
   fi
 }
 
