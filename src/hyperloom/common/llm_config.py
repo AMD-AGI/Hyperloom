@@ -140,6 +140,25 @@ def openai_client_kwargs(
     return resolve_openai_client_config(api_key_env=api_key_env, base_url_env=base_url_env, env=env).as_kwargs()
 
 
+def apply_reasoning_effort(
+    params: dict[str, object],
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Inject ``reasoning_effort`` into chat.completions params, env-gated.
+
+    Sets ``params["reasoning_effort"]`` only when ``HYPERLOOM_REASONING_EFFORT``
+    (or ``OPENAI_REASONING_EFFORT``) is a recognized value. No-op otherwise, so
+    non-reasoning models and gateways that reject the field are unaffected.
+    Mutates and returns ``params``.
+    """
+    source = env if env is not None else os.environ
+    val = (source.get("HYPERLOOM_REASONING_EFFORT") or source.get("OPENAI_REASONING_EFFORT") or "").strip().lower()
+    if val in {"minimal", "low", "medium", "high"}:
+        params["reasoning_effort"] = val
+    return params
+
+
 def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) -> bool:
     if any(name.lower() == "ocp-apim-subscription-key" for name in headers):
         return False
@@ -151,6 +170,7 @@ def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) 
 __all__ = [
     "LLMConfigError",
     "OpenAIClientConfig",
+    "apply_reasoning_effort",
     "derive_openai_base_url",
     "openai_client_kwargs",
     "parse_custom_headers",
