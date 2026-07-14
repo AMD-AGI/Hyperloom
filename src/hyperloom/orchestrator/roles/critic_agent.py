@@ -21,7 +21,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import Any, Callable, Literal
 
 from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
@@ -35,10 +35,6 @@ from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
-
-
-if TYPE_CHECKING:  # pragma: no cover
-    from hyperloom.agents.critic.runtime.web_tools import WebToolClients, WebToolsConfig
 
 
 log = logging.getLogger(__name__)
@@ -111,36 +107,6 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 def _extract_review_json(text: str) -> dict[str, Any] | None:
     """Pull the first valid ``{"review_verdicts": ...}`` object out of a reply."""
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE)
-
-
-def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
-    """Re-serialize an OpenAI assistant message that issued tool_calls
-    (minimal dict shape, pydantic v1/v2 compatible).
-
-    Args:
-        msg: The OpenAI assistant message object carrying ``content`` and
-            ``tool_calls``.
-
-    Returns:
-        A minimal assistant-message dict with role, content, and a normalized
-        ``tool_calls`` list suitable for re-sending to the API.
-    """
-    return {
-        "role": "assistant",
-        "content": getattr(msg, "content", None),
-        "tool_calls": [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                },
-            }
-            for tc in (getattr(msg, "tool_calls", None) or [])
-            if tc.function is not None
-        ],
-    }
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
@@ -332,10 +298,6 @@ class CriticAgentBackend:
     # prompt so they don't steer the decision). ``True``/``False`` force it.
     kb_assess_inject: bool | None = None
     name: str = "critic-agent"
-    # Optional web tools (web_search / web_fetch). ``web_tools_config``
-    # None reads from env; ``web_tool_clients_factory`` injects test clients.
-    web_tools_config: "WebToolsConfig | None" = None
-    web_tool_clients_factory: Callable[["WebToolsConfig"], "WebToolClients"] | None = None
 
     # Runtime state. ``_runtime_caller`` is assigned on the instance in
     # __post_init__ (not as a dataclass field) to avoid descriptor binding
@@ -360,13 +322,6 @@ class CriticAgentBackend:
         init=False,
         repr=False,
     )
-    _web_tool_clients: Any = field(default=None, init=False, repr=False)
-    _web_tool_schemas: list[dict[str, Any]] = field(
-        default_factory=list,
-        init=False,
-        repr=False,
-    )
-    _web_tool_max_turns: int = field(default=0, init=False, repr=False)
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -376,9 +331,8 @@ class CriticAgentBackend:
         ``critic_agent_root`` (used as the subprocess ``cwd`` for
         ``runtime.cli`` invocations and to load ``SKILL.md`` / action
         prompts), validates ``kb_mode``, selects the real or test runtime
-        caller, constructs the Codex/OpenAI client (or its factory), resolves
-        the per-session static context (explicit or from ``manifest.json``), and
-        initialises optional web tools.
+        caller,         constructs the Codex/OpenAI client (or its factory), and resolves
+        the per-session static context (explicit or from ``manifest.json``).
 
         Raises:
             BackendError: If ``runtime/cli.py`` is missing, ``kb_mode`` is
@@ -473,64 +427,6 @@ class CriticAgentBackend:
             "critic_agent_backend static_context source=%s keys=%s",
             "explicit" if self.static_context is not None else "manifest",
             sorted(self._static_context.keys()),
-        )
-
-        # Initialize web tools (no-op by default).
-        self._init_web_tools()
-
-    def _init_web_tools(self) -> None:
-        """Resolve :class:`WebToolsConfig` + build clients + freeze schemas;
-        never raises (failure falls back to no-tool reasoning)."""
-        try:
-            from hyperloom.agents.critic.runtime.web_tools import (
-                WebToolsConfig as _Cfg,
-                build_clients as _build_clients,
-                build_tool_schemas as _build_schemas,
-            )
-        except ImportError as exc:
-            log.warning(
-                "critic_agent_backend: hyperloom.agents.critic.runtime.web_tools not importable (%s); web tools disabled",
-                exc,
-            )
-            return
-
-        cfg = self.web_tools_config or _Cfg.from_env()
-        if not cfg.critic_web_tools_enabled:
-            log.info("critic_agent_backend: web tools disabled by config")
-            return
-
-        try:
-            clients = (
-                self.web_tool_clients_factory(cfg) if self.web_tool_clients_factory is not None else _build_clients(cfg)
-            )
-        except Exception as exc:  # noqa: BLE001 — never let setup kill critic
-            log.warning(
-                "critic_agent_backend: failed to construct web tool clients (%s); web tools disabled",
-                exc,
-            )
-            return
-
-        schemas = _build_schemas(cfg)
-        available_names: set[str] = set()
-        if clients.search is not None:
-            available_names.add("web_search")
-        if clients.fetch is not None:
-            available_names.add("web_fetch")
-        schemas = [s for s in schemas if s.get("function", {}).get("name") in available_names]
-        if not schemas or (clients.search is None and clients.fetch is None):
-            log.info(
-                "critic_agent_backend: web tools enabled by config but no "
-                "usable client/schema; falling back to no-tool reasoning",
-            )
-            return
-
-        self._web_tool_clients = clients
-        self._web_tool_schemas = schemas
-        self._web_tool_max_turns = cfg.critic_web_max_tool_turns
-        log.info(
-            "critic_agent_backend: web tools enabled tools=%s max_turns=%d",
-            [s["function"]["name"] for s in schemas],
-            self._web_tool_max_turns,
         )
 
     # Public API — Backend.run
@@ -1012,8 +908,8 @@ class CriticAgentBackend:
         """Drive Codex with the judge bundle and parse a review object.
 
         Builds the skill-preamble + judge-bundle + output-format user prompt,
-        runs the (optionally tool-using) reasoning loop, and extracts the review
-        JSON, falling back to an empty verdict list when nothing parses.
+        runs the single-shot reasoning call, and extracts the review JSON,
+        falling back to an empty verdict list when nothing parses.
 
         Args:
             judge_bundle (dict[str, Any]): The prepared judge bundle to reason
@@ -1083,98 +979,39 @@ class CriticAgentBackend:
         self,
         messages: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
-        """Run the Codex chat-completions loop, optionally interleaving
-        web_search / web_fetch up to ``self._web_tool_max_turns`` before a
-        final text-only reply. Returns ``(text, finish_reason)``; tool-exec
-        failures are reported back to the model, never raised.
+        """Issue one Codex chat-completions call and return ``(text, finish_reason)``.
+
+        The critic reasons single-shot over the judge bundle: it consumes the
+        prepared context and emits the review JSON in one reply (no tool use).
 
         Args:
-            messages: The running chat-completions message list; tool-use turns
-                are appended in place.
+            messages: The chat-completions message list (system + user).
 
         Returns:
-            A tuple of the final reply text and the final finish reason.
+            A tuple of the reply text and the finish reason.
 
         Raises:
-            BackendError: If any Codex chat-completions API call fails.
+            BackendError: If the Codex chat-completions API call fails.
         """
-        tools = self._web_tool_schemas
-        max_turns = self._web_tool_max_turns if tools else 0
-        # Accumulate token usage across every Codex call in
-        # this reasoning loop (initial + tool-use rounds + forced final).
-        # OpenAI has no prompt-cache split, so only in/out counters move.
+        kwargs: dict[str, Any] = {
+            "model": self.codex_model,
+            "messages": messages,
+            "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+        }
+        apply_reasoning_effort(kwargs)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
-        # Sum the wall-clock of every Codex call in this reasoning loop so the
-        # trace reports the critic's real end-to-end latency (tool turns incl.).
-        latency_ms_acc = 0
-
-        for turn in range(max_turns + 1):
-            kwargs: dict[str, Any] = {
-                "model": self.codex_model,
-                "messages": messages,
-                "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-            }
-            if tools and turn < max_turns:
-                kwargs["tools"] = tools
-                kwargs["tool_choice"] = "auto"
-            apply_reasoning_effort(kwargs)
-
-            _t0 = time.perf_counter()
-            try:
-                resp = await self._client.chat.completions.create(**kwargs)
-            except Exception as exc:  # noqa: BLE001
-                raise BackendError(
-                    f"Codex API call failed (critic-agent reasoning): {exc!r}",
-                ) from exc
-            latency_ms_acc += int((time.perf_counter() - _t0) * 1000)
-
-            self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
-            choice = resp.choices[0]
-            msg = choice.message
-            finish = getattr(choice, "finish_reason", None)
-            tool_calls = getattr(msg, "tool_calls", None) or []
-
-            if not tool_calls:
-                self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms_acc)
-                return msg.content or "", finish
-
-            log.info(
-                "critic_agent_backend tool-call turn=%d count=%d tools=%s",
-                turn,
-                len(tool_calls),
-                [tc.function.name for tc in tool_calls if tc.function],
-            )
-            messages.append(_assistant_message_with_tool_calls(msg))
-            for tc in tool_calls:
-                tool_result = await self._execute_tool_call(tc)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_result,
-                    }
-                )
-
-        # Exhausted max_turns mid-tool-use: force a final no-tool reply.
-        final_kwargs = apply_reasoning_effort(
-            {
-                "model": self.codex_model,
-                "messages": messages,
-                "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-            }
-        )
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.chat.completions.create(**final_kwargs)
+            resp = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
             raise BackendError(
-                f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",
+                f"Codex API call failed (critic-agent reasoning): {exc!r}",
             ) from exc
-        latency_ms_acc += int((time.perf_counter() - _t0) * 1000)
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
-        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms_acc)
-        final = resp.choices[0]
-        return final.message.content or "", getattr(final, "finish_reason", None)
+        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
+        choice = resp.choices[0]
+        return choice.message.content or "", getattr(choice, "finish_reason", None)
 
     @staticmethod
     def _accumulate_usage(
@@ -1300,37 +1137,6 @@ class CriticAgentBackend:
                 exc_info=True,
             )
 
-    async def _execute_tool_call(self, tool_call: Any) -> str:
-        """Dispatch one OpenAI tool_call to the configured web client.
-
-        Args:
-            tool_call (Any): The OpenAI tool-call object carrying the function
-                name and JSON-encoded arguments.
-
-        Returns:
-            str: The tool's result text, or an ``Error: ...`` string when the
-            arguments are malformed or the tool is unknown/disabled.
-        """
-        fn = getattr(tool_call, "function", None)
-        name = getattr(fn, "name", "") if fn else ""
-        raw_args = getattr(fn, "arguments", "") if fn else ""
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError as exc:
-            return f"Error: tool arguments are not valid JSON: {exc}"
-        if not isinstance(args, dict):
-            return "Error: tool arguments must be a JSON object"
-
-        clients = self._web_tool_clients
-        if clients is None:
-            return f"Error: tool {name!r} is not available (web tools disabled)"
-
-        if name == "web_search" and clients.search is not None:
-            return await asyncio.to_thread(clients.search.execute, args)
-        if name == "web_fetch" and clients.fetch is not None:
-            return await asyncio.to_thread(clients.fetch.execute, args)
-        return f"Error: unknown or disabled tool {name!r}"
-
     def _load_skill_preamble(self) -> str:
         """Load and cache the critic-agent skill/action markdown preamble.
 
@@ -1362,7 +1168,6 @@ __all__ = [
     "CriticAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
-    "_assistant_message_with_tool_calls",
     "_default_runtime_caller",
     "_extract_review_json",
 ]
