@@ -170,21 +170,16 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
-# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
-# written by src/hyperloom/agents/kernel/scripts/install.sh, but tolerant of any indent).
+# Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
 
 def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
 
-    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
-    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
-    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
-    host-local reverse tunnel) AFTER install, the env override alone is not
-    enough: the stale yaml still sends GEAK at the unreachable gateway and the
-    KERNEL_AGENT phase burns budget on connection-error retries. Syncing the yaml in
-    place closes that gap so the Kernel-agent actually dials the operator's
-    endpoint.
+    Legacy GEAK invocations can still pass ``--config $GEAK_CONFIG`` with an
+    endpoint embedded in yaml. When an operator points ``GEAK_BASE_URL`` at a
+    reachable endpoint (e.g. a host-local reverse tunnel), sync the yaml in
+    place so that explicit config does not keep dialing a stale gateway.
 
     Best-effort: returns ``False`` (never raises) when the path is empty, the
     file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it

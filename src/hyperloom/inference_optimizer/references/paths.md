@@ -10,7 +10,6 @@ holds shared `runtime/` and `logs/`.
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
 ├── runtime/                              # workspace-shared env files / config
 │   ├── kernel-agent.env.sh
-│   ├── geak-config/local.yaml
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
