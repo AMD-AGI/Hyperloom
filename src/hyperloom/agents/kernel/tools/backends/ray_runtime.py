@@ -194,7 +194,7 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     # container default (1024).
     ensure_fd_limit(log_path=log_path)
     # Bind the dashboard/jobs API to loopback: this is a local single-node head
-    # (oob/geak local Ray), so nothing off-box needs :8265. GCS (:6379) is
+    # (forge/geak local Ray), so nothing off-box needs :8265. GCS (:6379) is
     # unaffected, so local ray.init(address="auto") still works. Avoids exposing
     # the unauthenticated Ray Jobs RCE surface on the pod network.
     cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]

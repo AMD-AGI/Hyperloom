@@ -132,7 +132,7 @@ def test_kernel_lifecycle_full_with_adopted_and_residual():
             "call_count": 10,
             "selected_for_optimization": True,
             "geak": {"best_speedup": 1.3, "attempts": 2, "decision": "KEEP"},
-            "oob": {"best_speedup": 1.1, "attempts": 1, "decision": "REVERT"},
+            "forge": {"best_speedup": 1.1, "attempts": 1, "decision": "REVERT"},
             "final_decision": "kept",
             "adopted_by": "geak",
             "bandwidth_util_pct": 55.0,

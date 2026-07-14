@@ -28,7 +28,7 @@ CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 CATEGORY_UNATTEMPTED = "UNATTEMPTED"
 
 #: Terminal kernel-outcome bucket. Closed 4-value set the dashboard reads
-#: directly (one uniform field across forge / geak / oob backends) instead of
+#: directly (one uniform field across forge / geak / forge backends) instead of
 #: re-deriving from decision/status strings. ``IN_FLIGHT`` (no terminal
 #: decision) folds into ``fail`` -- a completed session should never leave a
 #: kernel mid-flight.

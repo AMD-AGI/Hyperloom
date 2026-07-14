@@ -14,7 +14,7 @@ collectors intentionally **summarize** search and kernel activity:
 |------|---------------------------|---------------|
 | params/backends rounds | full `tested`, `rejected`, `last_round` | ledger capped; no per-variant reject reason in a dedicated view |
 | promotion rationale | `*_attempts[].extras` (gain, best name) | no structured `promotion_rule` |
-| GEAK/OOB | `optimization_attempts.jsonl`, result JSON | paths only; proposal/verification not inline |
+| GEAK/Forge | `optimization_attempts.jsonl`, result JSON | paths only; proposal/verification not inline |
 | profiling | traces, TraceLens status JSON, kernel CSV | trace paths in `telemetry`; parsed kernels not exported |
 | baseline | server.log per attempt | final `baseline.invocation` only |
 
@@ -61,7 +61,7 @@ state.json + runs/ + kernel-agent/
   collectors.py          coordinator.py (Phase 2 only)
   - collect_decision_journal     audit_extras on promote:
   - collect_kernel_profiling       promotion_rule, rule_detail,
-  - enrich baseline / GEAK/OOB     keep_threshold_pct, …
+  - enrich baseline / GEAK/Forge   keep_threshold_pct, …
         │
         ▼
   exporter.build(detail_level)

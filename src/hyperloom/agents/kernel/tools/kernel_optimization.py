@@ -1878,7 +1878,7 @@ def build_prompt(
                 else:
                     focus_line = "Use the report below as full context for this kernel.\n"
                 tracelens_context_block = "\n## TraceLens Context\n\n" + focus_line + "\n" + full_report
-    # Use GEAK task_parser field names so its parser can extract them; OOB reads the same body as prose.
+    # Use GEAK task_parser field names so its parser can extract them; external reads the same body as prose.
     return "\n".join(
         [
             f"# TASK: Optimize the `{kernel_name}` kernel",
@@ -2109,7 +2109,7 @@ def invoke_backend(
     """Run a backend via the self-contained submitters.
 
     Returns a normalized dict: returncode, stdout_tail, stderr_tail, stdout,
-    gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (oob).
+    gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (forge).
 
     Args:
         backend (str): Backend name to run (e.g. ``geak``, ``forge``).
@@ -2164,7 +2164,7 @@ def invoke_backend(
         )
     _shared_out_dir = _forge_output_dir(args.session_id, prompt_file)
     # HL builds a harness for backends that lack their own preprocess stage
-    # (forge/OOB), forcing it via --test-command.
+    # (forge), forcing it via --test-command.
     if common_test_command:
         _harness_cmd = _try_generate_harness(
             common_test_command,
@@ -2180,7 +2180,7 @@ def invoke_backend(
         if backend == "forge":
             # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
             # worktree of kernel_repo (never mutates the live repo) and emits the
-            # same artifacts as OOB (optimized_versions/ + optimization_report.md),
+            # same artifacts as external (optimized_versions/ + optimization_report.md),
             # so the downstream verify/propose/integrate path is unchanged.
             forge = _import_backend("forge_submit")
             out_dir = _forge_output_dir(args.session_id, prompt_file)
@@ -2299,7 +2299,7 @@ def run_attempt(
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
-            # Use the workspace path from oob's init event (mtime heuristic mis-attributed concurrent replicas).
+            # Use the workspace path from forge's init event (mtime heuristic mis-attributed concurrent replicas).
             cli_workspace = (result.get("cli_workspace") or "") if isinstance(result, dict) else ""
             session_id_oob = (result.get("session_id") or "") if isinstance(result, dict) else ""
             cli_log = ""
@@ -2350,7 +2350,7 @@ def run_attempt(
             if cli_log:
                 backend_paths["cli_execution_log"] = cli_log
             if session_id_oob:
-                backend_paths["oob_session_id"] = session_id_oob
+                backend_paths["kernel_session_id"] = session_id_oob
             test_cmd_used = (result.get("test_command") or "") if isinstance(result, dict) else ""
             if test_cmd_used:
                 backend_paths["test_command"] = test_cmd_used
@@ -2459,7 +2459,7 @@ def _read_json_file(path: str | Path) -> Any | None:
 
 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
-    """Scan an OOB ``optimization_report.md`` for a speedup figure.
+    """Scan an external ``optimization_report.md`` for a speedup figure.
 
     Uses a median-of-top-3 to dodge cherry-picked best-shape numbers.
 

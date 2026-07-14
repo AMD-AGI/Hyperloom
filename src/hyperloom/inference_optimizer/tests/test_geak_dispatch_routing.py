@@ -94,9 +94,9 @@ async def test_timeout_result_is_attributed_to_dispatched_backend(tmp_path: Path
     assert result["backend"] == "claude"
 
 
-def test_record_kernel_invocations_claude_timeout_routes_to_oob(tmp_path: Path):
-    # A backend-stamped (claude) no-attempts failure lands on the oob lane,
- # never the geak lane. Hyperloom#602.
+def test_record_kernel_invocations_claude_timeout_is_not_recorded_as_kernel_lane(tmp_path: Path):
+    # A backend-stamped (claude) no-attempts failure must not contaminate
+    # kernel backend lanes.
     result = {
         "kernel_id": "k008",
         "status": "failed",
@@ -107,8 +107,8 @@ def test_record_kernel_invocations_claude_timeout_routes_to_oob(tmp_path: Path):
     }
     instrument.record_kernel_invocations(tmp_path, result)
     sections = assemble_parts(tmp_path)
-    assert sections.get("oob_invocations"), "claude failure must be on the oob lane"
     assert not sections.get("geak_invocations"), "must NOT contaminate the geak lane"
+    assert not sections.get("forge_invocations"), "must NOT contaminate the forge lane"
 
 
 def test_record_kernel_invocations_unknown_backend_is_not_geak(tmp_path: Path):
@@ -124,7 +124,6 @@ def test_record_kernel_invocations_unknown_backend_is_not_geak(tmp_path: Path):
     instrument.record_kernel_invocations(tmp_path, result)
     sections = assemble_parts(tmp_path)
     assert not sections.get("geak_invocations"), "unknown backend must not default to geak"
-    assert not sections.get("oob_invocations")
     assert not sections.get("forge_invocations")
 
 

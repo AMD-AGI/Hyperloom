@@ -339,7 +339,7 @@ def _build_fixture(sd: Path) -> None:
             "kernel_id": "k001",
             "source_file": "/path/to/rmsnorm.py",
             "best_artifact_path": str(sd / "patches/k001/0001.patch"),
-            "selected_backends": ["claude"],
+            "selected_backends": ["forge"],
             "proposal": {"decision": "KEEP", "reasons": ["compile_pass"]},
             "verification": {"micro_speedup": 1.27, "compile_passed": True, "correctness_passed": True},
             "cli_log_path": str(kar / "logs/kernel_optimization/ko-deadbeef.log"),
@@ -352,7 +352,7 @@ def _build_fixture(sd: Path) -> None:
                     {
                         "attempt_id": f"a{i:02d}",
                         "kernel_id": "k001",
-                        "backend": "claude",
+                        "backend": "forge",
                         "model": "claude-sonnet-4.5",
                         "ts": f"2026-05-14T07:{40 + i * 5:02d}:00+00:00",
                         "status": "succeeded",
@@ -406,7 +406,7 @@ def test_envelope(fixture_session: Path) -> None:
         "phase_timeline",
         "capability_summary",
         "geak_invocations",
-        "oob_invocations",
+        "forge_invocations",
         "forge_invocations",
         "kernel_lifecycle",
         "param_search",
@@ -555,11 +555,11 @@ def test_session_stop_reason_prefers_specific_close_reason(tmp_path: Path) -> No
 
 def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
     """KEEP decision must land on the BEST attempt, not every attempt."""
-    oob = build(fixture_session)["oob_invocations"]
-    assert len(oob) == 3
-    keeps = [o for o in oob if o["decision"] == "KEEP"]
-    others = [o for o in oob if o["decision"] != "KEEP"]
-    assert len(keeps) == 1, [o["decision"] for o in oob]
+    forge = build(fixture_session)["forge_invocations"]
+    assert len(forge) == 3
+    keeps = [o for o in forge if o["decision"] == "KEEP"]
+    others = [o for o in forge if o["decision"] != "KEEP"]
+    assert len(keeps) == 1, [o["decision"] for o in forge]
     assert len(others) == 2
     assert keeps[0]["micro_speedup"] == 1.27
     assert keeps[0]["compile_passed"] is True
@@ -569,9 +569,9 @@ def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
 
 def test_capability_summary(fixture_session: Path) -> None:
     cap = build(fixture_session)["capability_summary"]
-    assert cap["oob"]["status"] == "kept"
-    assert cap["oob"]["keeps"] == 1
-    assert cap["oob"]["attempts"] == 3
+    assert cap["forge"]["status"] == "kept"
+    assert cap["forge"]["keeps"] == 1
+    assert cap["forge"]["attempts"] == 3
     assert cap["geak"]["status"] == "not_attempted"
     assert cap["explore"]["status"] == "kept"
     assert cap["explore"]["best_gain_pct"] == pytest.approx(23.4)
@@ -624,12 +624,12 @@ def test_telemetry_aggregates_gpu_monitor(fixture_session: Path) -> None:
     assert gm["max_power_w"] >= gm["avg_power_w"]
 
 
-def test_attribution_kernel_goes_to_oob(fixture_session: Path) -> None:
-    """The single KEEP'd kernel is OOB; family breakdown must reflect that."""
+def test_attribution_kernel_goes_to_forge(fixture_session: Path) -> None:
+    """The single KEEP'd kernel is forge; family breakdown must reflect that."""
     attr = build(fixture_session)["attribution"]
     assert len(attr["gain_per_stack_entry"]) == 3
     sb = attr["source_breakdown"]
-    assert sb["oob_pct_of_total"] >= 45.0
+    assert sb["forge_pct_of_total"] >= 45.0
     assert sb["geak_pct_of_total"] == 0.0
     assert sb["explore_pct_of_total"] == pytest.approx(31.2)
     assert sb["validated_total_pct"] == pytest.approx(84.2)
@@ -680,7 +680,7 @@ def test_no_kernel_agent_runs_returns_empty_invocations(tmp_path: Path) -> None:
     _write_json(sd / "state.json", {"session_id": "x", "baseline_tput": 100.0})
     b = build(sd)
     assert b["geak_invocations"] == []
-    assert b["oob_invocations"] == []
+    assert b["forge_invocations"] == []
     assert b["kernel_lifecycle"]["detected"] == []
 
 
@@ -937,7 +937,7 @@ def test_attribution_framework_surfaces_in_source_breakdown(
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
-        + sb["oob_pct_of_total"]
+        + sb["forge_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
         + sb["framework_pct_of_total"]
@@ -1093,7 +1093,7 @@ def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
-        + sb["oob_pct_of_total"]
+        + sb["forge_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
         + sb["framework_pct_of_total"]
@@ -1171,7 +1171,7 @@ def test_attribution_replay_warm_recipe_surfaces_in_source_breakdown(
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
-        + sb["oob_pct_of_total"]
+        + sb["forge_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["replay_warm_recipe_pct_of_total"]
         + sb["sweep_pct_of_total"]
@@ -1812,7 +1812,7 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
                         "error_message": "preprocess reported 1 error(s)",
                     },
                     {
-                        "backend": "claude",
+                        "backend": "forge",
                         "status": "failed",
                         "produced_artifact": False,
                         "elapsed_sec": 483.5,
@@ -3146,7 +3146,7 @@ def test_v1_reader_does_not_crash_on_v2_payload(tmp_path):
         "phase_timeline",
         "capability_summary",
         "geak_invocations",
-        "oob_invocations",
+        "forge_invocations",
         "kernel_lifecycle",
         "param_search",
         "sweep",
