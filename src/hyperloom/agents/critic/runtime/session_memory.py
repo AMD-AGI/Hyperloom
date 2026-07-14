@@ -32,7 +32,6 @@ from typing import Any, Iterable
 from hyperloom.common.io import append_jsonl as _common_append_jsonl
 from hyperloom.common.io import atomic_write_json as _common_atomic_write_json
 from hyperloom.common.jsonio import read_json as _common_read_json
-from hyperloom.common.jsonio import read_jsonl as _common_read_jsonl
 from hyperloom.common.timeutil import now_iso
 
 from .errors import SessionMemoryError
@@ -363,21 +362,6 @@ class SessionMemory:
         }
         _common_append_jsonl(self._decisions_path(session_id), record, ensure_ascii=False)
 
-    def list_decisions(self, session_id: str) -> list[dict[str, Any]]:
-        """Return all decision records logged for a session.
-
-        Args:
-            session_id (str): The opaque session identifier.
-
-        Returns:
-            list[dict[str, Any]]: The decision records in append order, or an
-            empty list if none exist.
-        """
-        path = self._decisions_path(session_id)
-        if not path.exists():
-            return []
-        return list(_read_jsonl(path))
-
     # ------------------------------------------------------------------
     # Events (free-form audit trail)
     # ------------------------------------------------------------------
@@ -401,21 +385,6 @@ class SessionMemory:
             {"ts": now_iso(timespec="microseconds"), **event},
             ensure_ascii=False,
         )
-
-    def list_events(self, session_id: str) -> list[dict[str, Any]]:
-        """Return all audit events logged for a session.
-
-        Args:
-            session_id (str): The opaque session identifier.
-
-        Returns:
-            list[dict[str, Any]]: The event records in append order, or an
-            empty list if none exist.
-        """
-        path = self._events_path(session_id)
-        if not path.exists():
-            return []
-        return list(_read_jsonl(path))
 
     # ------------------------------------------------------------------
     # KB priors cache (per-scope+topic)
@@ -478,42 +447,6 @@ class SessionMemory:
     # ------------------------------------------------------------------
     # Already-reviewed proposals
     # ------------------------------------------------------------------
-    def is_msg_already_reviewed(self, session_id: str, msg_id: str) -> bool:
-        """Return whether a proposal message has already been reviewed.
-
-        Args:
-            session_id (str): The opaque session identifier.
-            msg_id (str): The proposal message id to check.
-
-        Returns:
-            bool: ``True`` if a verdict was recorded for ``msg_id``.
-        """
-        data = _read_json(self._reviewed_path(session_id), default={})
-        if not isinstance(data, dict):
-            return False
-        return msg_id in data
-
-    def reviewed_verdict_for(self, session_id: str, msg_id: str) -> str | None:
-        """Return the recorded verdict for a reviewed message, if any.
-
-        Args:
-            session_id (str): The opaque session identifier.
-            msg_id (str): The proposal message id to look up.
-
-        Returns:
-            str | None: The stored verdict string, or ``None`` if the message
-            was not reviewed or no verdict was recorded.
-        """
-        data = _read_json(self._reviewed_path(session_id), default={})
-        if not isinstance(data, dict):
-            return None
-        entry = data.get(msg_id)
-        if isinstance(entry, dict):
-            verdict = entry.get("verdict")
-            if isinstance(verdict, str):
-                return verdict
-        return None
-
     def mark_reviewed(
         self,
         session_id: str,
@@ -590,26 +523,6 @@ def _read_json(path: Path, *, default: Any) -> Any:
         return _common_read_json(path, strict=True, empty_value=None)
     except json.JSONDecodeError as exc:
         raise SessionMemoryError(f"corrupt json at {path}: {exc}") from exc
-
-
-def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield dict records from a JSONL file, skipping blank lines.
-
-    Args:
-        path (Path): The JSONL file to read.
-
-    Yields:
-        dict[str, Any]: Each decoded JSON object line (non-dict lines are
-        skipped).
-
-    Raises:
-        SessionMemoryError: If a non-blank line contains invalid JSON.
-    """
-    try:
-        rows = _common_read_jsonl(path, require_dict=True, skip_non_dict=True)
-    except json.JSONDecodeError as exc:
-        raise SessionMemoryError(f"corrupt jsonl line at {path}: {exc}") from exc
-    yield from rows
 
 
 __all__ = [

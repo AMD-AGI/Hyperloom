@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
 from hyperloom.common.subprocess_bridge import emit_json as _common_emit_json
 
+from ..pr_kb_slug import normalise_repo as _normalise_pr_kb_repo
+
 if TYPE_CHECKING:
     from ..models import ExploreRequest
 
@@ -475,14 +477,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             if str(entry.get("source") or "") == "explicit" and (
                 repo.startswith("http") or repo.endswith(".git")
             ):
-                try:
-                    from framework_agent.pr_kb_slug import normalise_repo as _norm_repo
-
-                    slug = _norm_repo(repo)
-                    if slug:
-                        repo_slug = slug  # used only for pr_url/diff_url below
-                except Exception:  # noqa: BLE001 — best-effort
-                    repo_slug = repo
+                slug = _normalise_pr_kb_repo(repo)
+                if slug:
+                    repo_slug = slug  # used only for pr_url/diff_url below
             ref = str(entry.get("ref") or "")
             key = (repo, ref)
             if not ref or key in seen_refs:

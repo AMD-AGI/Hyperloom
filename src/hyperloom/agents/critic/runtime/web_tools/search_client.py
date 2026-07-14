@@ -212,7 +212,6 @@ class WebSearchClient:
     config: WebToolsConfig
     providers: Sequence[WebSearchProvider] = field(default_factory=tuple)
     _rate_limiter: _LeakyBucket = field(init=False, repr=False)
-    call_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Initialise the rate limiter from config after dataclass init."""
@@ -235,7 +234,6 @@ class WebSearchClient:
             an ``Error: ...`` string on validation/rate-limit/provider
             failure (never raises for ordinary failures).
         """
-        self.call_count += 1
         try:
             request = WebSearchInput.from_payload(
                 payload,

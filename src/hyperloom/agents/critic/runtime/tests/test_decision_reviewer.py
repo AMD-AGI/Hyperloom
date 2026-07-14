@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from hyperloom.agents.critic.runtime.decision_reviewer import DecisionReviewer
@@ -343,8 +345,8 @@ def test_commit_review_for_coordinator_inbox_emits_intent_envelope(reviewer):
     verdicts = [i["payload"]["verdict"] for i in intents]
     assert types == ["review_verdict", "review_verdict"]
     assert sorted(verdicts) == ["approve", "reject"]
-    assert sm.is_msg_already_reviewed("sess_c", "aaa1")
-    assert sm.is_msg_already_reviewed("sess_c", "bbb2")
+    reviewed = json.loads((sm.session_dir("sess_c") / "reviewed_msg_ids.json").read_text("utf-8"))
+    assert {"aaa1", "bbb2"} <= set(reviewed)
 
 
 def _verdict_intent_for(intents: list[dict], target: str) -> dict:
@@ -589,7 +591,11 @@ def test_init_session_records_event(reviewer):
         }
     )
     assert out["session_id"] == "sess_init"
-    events = sm.list_events("sess_init")
+    events = [
+        json.loads(line)
+        for line in (sm.session_dir("sess_init") / "events.jsonl").read_text("utf-8").splitlines()
+        if line.strip()
+    ]
     assert events and events[0]["kind"] == "init_session"
 
 
