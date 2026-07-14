@@ -30,6 +30,38 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 _KERNEL_AGENT_DEFAULT_MAX_TURNS = 5
 
 
+def _official_anthropic_only() -> bool:
+    """True when only the Anthropic-side endpoint is available."""
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_anthropic and not has_openai
+
+
+def _official_openai_only() -> bool:
+    """True when only the OpenAI-side endpoint is available."""
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
 def _resolve_kernel_agent_max_turns() -> int:
     """Resolve the kernel_agent Claude turn budget.
 
@@ -100,8 +132,19 @@ def _build_backends(
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
+    provider_anthropic_only = _official_anthropic_only()
+    provider_openai_only = _official_openai_only()
+
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
+    elif provider_anthropic_only:
+        # No OpenAI-compatible endpoint exists, so run the critic role through
+        # Claude tool-use. The critic system prompt still gates it to
+        # review_verdict / advice intents.
+        critic_backend = ClaudeBackend(
+            model=claude_model,
+            max_turns_default=4,
+        )
     else:  # "agent"
         if critic_agent_root is None:
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
@@ -141,24 +184,32 @@ def _build_backends(
             options=robustness_options,
         )
 
-    backends: dict[str, Any] = {
+    if provider_openai_only:
+        # Official OpenAI has no Anthropic/Claude-Code endpoint. Use the
+        # JSON-intent Codex backend for Orchestration so an OpenAI-only config
+        # can still drive the coordinator.
+        orchestration_backend: Any = CodexBackend(model=codex_model)
+    else:
         # Orchestration runs as a persistent ReAct conversation: the same
-        # Claude session is resumed across ticks so the
-        # model's plan / chain-of-thought persists instead of being
-        # re-derived from a full state dump each turn. The conversational
-        # floors (max_turns / call_timeout) are applied inside
-        # ClaudeBackend.__post_init__. kernel / critic / robustness keep
-        # the stateless per-tick reactor mode.
-        "orchestration": ClaudeBackend(
+        # Claude session is resumed across ticks so the model's plan persists.
+        orchestration_backend = ClaudeBackend(
             model=claude_model,
             max_turns_default=4,
             conversational=True,
-        ),
+        )
+
+    backends: dict[str, Any] = {
+        "orchestration": orchestration_backend,
         "critic": critic_backend,
         "robustness": robustness_backend,
     }
     if not no_kernel:
-        if kernel_codex:
+        if provider_anthropic_only:
+            backends["kernel_agent"] = ClaudeBackend(
+                model=claude_model,
+                max_turns_default=_resolve_kernel_agent_max_turns(),
+            )
+        elif provider_openai_only or kernel_codex:
             backends["kernel_agent"] = CodexBackend(model=codex_model)
         else:
             # Opt-in (default off): resume the kernel Claude session across LLM
@@ -196,6 +247,10 @@ def _build_proposal_scorer(
         disabled or no models resolve.
     """
     if getattr(args, "no_proposal_scoring", False):
+        return None
+    if _official_anthropic_only():
+        # ProposalScorer is OpenAI-compatible only; avoid calling official
+        # OpenAI with an Anthropic key in Anthropic-only deployments.
         return None
     raw = getattr(args, "proposal_scorer_models", None)
     if raw is None:
