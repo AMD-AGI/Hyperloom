@@ -91,8 +91,13 @@ def _deepseek_openai_client_factory() -> Any:
     critic-agent's existing OpenAI review path works unchanged once the client
     base URL / key are set to DeepSeek — without mutating the process env (which
     would flip the provider-only routing decision for the other roles).
+
+    The OpenAI SDK appends the route to ``base_url`` verbatim (it does not
+    insert ``/v1``), so the default carries the conventional ``/v1`` suffix. An
+    explicit ``DEEPSEEK_BASE_URL`` is respected as-is (custom gateways may not
+    use ``/v1``).
     """
-    base_url = (os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip().rstrip("/")
+    base_url = (os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1").strip().rstrip("/")
     api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
 
     def _factory() -> Any:
