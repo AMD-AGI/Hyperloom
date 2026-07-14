@@ -2156,9 +2156,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer. Disabled by
-        # default: ``None`` unless --enable-proposal-scoring is passed, and
-        # still ``None`` under --no-proposal-scoring, in Anthropic-only
-        # deployments, or with an empty model list. When active it scores
+        # default: ``None`` unless --proposal-scoring is passed (--no-proposal-
+        # scoring is the explicit off form), and still ``None`` in Anthropic-
+        # only deployments or with an empty model list. When active it scores
         # each proposal_set and surfaces the results to Orchestration as
         # one reference among many (never gates anything). Not persisted
         # across --resume (re-pass the flag). ``session_dir`` is forwarded
