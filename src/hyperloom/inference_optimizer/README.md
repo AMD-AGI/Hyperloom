@@ -71,7 +71,7 @@ src/hyperloom/inference_optimizer/
 ├── actions/                    # Per-action markdown specs + scheduling metadata
 ├── tools/                      # Operator CLIs (dump_session_breakdown/event_counts/…)
 ├── experiments/                # A/B and roofline-audit scripts
-├── assets/                     # install.sh/local_setup.sh + baseline/profile configs
+├── assets/                     # install.sh + bare-metal/profile configs
 ├── data/                       # Framework/recipe reference data (framework/, recipes/)
 └── tests/                      # Unit + regression tests
 ```

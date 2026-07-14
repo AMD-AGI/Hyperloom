@@ -25,7 +25,7 @@ Pick the ROCm image matching your GPU (browse all tags at **[hub.docker.com/r/pr
 - vLLM MI300X: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
 - vLLM MI355X: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
 
-Start a long-running container that can access the GPU:
+Start a long-running container that can access the GPU. The SGLang images have no default entrypoint, so `tail -f /dev/null` runs as-is:
 
 ```bash
 docker run -d \
@@ -36,6 +36,20 @@ docker run -d \
   --group-add video \
   docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix \
   tail -f /dev/null
+```
+
+The vLLM images ship with an `ENTRYPOINT` of `vllm serve`, so a trailing `tail -f /dev/null` would be parsed as `vllm serve tail -f /dev/null` and the container would exit immediately. Override the entrypoint to keep it idle:
+
+```bash
+docker run -d \
+  --name hyperloom-local \
+  --shm-size 64g \
+  --device /dev/kfd \
+  --device /dev/dri \
+  --group-add video \
+  --entrypoint tail \
+  docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix \
+  -f /dev/null
 ```
 
 > **Notes:** You need a model available inside the container — download one after attaching (e.g. `huggingface-cli download ...`), or reuse a host model by adding `-v /path/to/models:/models`. The `-profilerfix` images patch rocprofiler so it captures kernels launched under HipGraphLaunch ([SGLang issue #352](https://github.com/sgl-project/sglang/issues/352)).

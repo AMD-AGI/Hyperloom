@@ -62,7 +62,7 @@ def _lane_summary(lane: dict[str, Any] | None) -> str:
     """Format a per-lane summary cell: best-speedup + attempts + last decision.
 
     Args:
-        lane (dict[str, Any] | None): A GEAK or OOB lane record with optional
+        lane (dict[str, Any] | None): A GEAK or Forge lane record with optional
             ``best_speedup``, ``attempts`` and ``decision`` keys.
 
     Returns:
@@ -129,7 +129,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     selected = sum(1 for d in detected if d.get("selected_for_optimization"))
     geak_touched = sum(1 for d in detected if d.get("geak"))
-    oob_touched = sum(1 for d in detected if d.get("oob"))
+    forge_touched = sum(1 for d in detected if d.get("forge"))
     adopted = [d for d in detected if d.get("final_decision") == "kept"]
     reverted = [d for d in detected if d.get("final_decision") == "reverted"]
     rejected = [d for d in detected if d.get("final_decision") == "rejected"]
@@ -138,14 +138,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts: list[str] = []
     facts.append(
         f"{len(detected)} kernel(s) detected, {selected} selected for "
-        f"optimization, GEAK touched {geak_touched}, OOB touched "
-        f"{oob_touched}, adopted={len(adopted)}, reverted={len(reverted)}, "
+        f"optimization, GEAK touched {geak_touched}, Forge touched "
+        f"{forge_touched}, adopted={len(adopted)}, reverted={len(reverted)}, "
         f"rejected={len(rejected)}, attempted-no-decision={len(attempted)}."
     )
-    if selected and not (geak_touched or oob_touched):
+    if selected and not (geak_touched or forge_touched):
         facts.append(
             "Kernels were selected for optimization but neither GEAK nor "
-            "OOB lane recorded an attempt — kernel optimization pipeline "
+            "Forge recorded an attempt — kernel optimization pipeline "
             "stalled before launch."
         )
     if adopted:
@@ -182,7 +182,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             Decision(
                 kind="not_attempted",
                 subject="kernel_lifecycle",
-                rationale=(f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor OOB attempted)"),
+                rationale=(f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)"),
             )
         )
 
@@ -195,7 +195,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         headers.append("bw%")
     if show_compute:
         headers.append("compute%")
-    headers += ["selected", "GEAK", "OOB", "adopted_by", "final"]
+    headers += ["selected", "GEAK", "Forge", "adopted_by", "final"]
 
     def _row_for(d: dict[str, Any]) -> list[Any]:
         """Build one table row for a detected kernel record.
@@ -220,7 +220,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         row += [
             "yes" if d.get("selected_for_optimization") else "no",
             _lane_summary(d.get("geak")),
-            _lane_summary(d.get("oob")),
+            _lane_summary(d.get("forge")),
             d.get("adopted_by") or "—",
             d.get("final_decision") or "—",
         ]
@@ -234,7 +234,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         if (
             d.get("selected_for_optimization")
             or d.get("geak")
-            or d.get("oob")
+            or d.get("forge")
             or (d.get("final_decision") and d["final_decision"] != "not_optimized")
         ):
             actionable.append(d)
@@ -247,7 +247,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     else:
         parts.append(
             "_No kernel was selected for optimization, and neither "
-            "GEAK nor OOB recorded an attempt. The kernel optimization "
+            "GEAK nor Forge recorded an attempt. The kernel optimization "
             "pipeline did not run on this session._"
         )
     if residual:
