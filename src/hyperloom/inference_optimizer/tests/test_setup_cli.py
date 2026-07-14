@@ -285,6 +285,99 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     assert "LLM_GATEWAY_KEY=" not in dotenv_text
 
 
+def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
+    """Regression: writing kernel-agent env must NOT wipe the Anthropic creds
+    the operator put in .env. A prior version unconditionally removed every
+    provider var from .env, so an Anthropic-only setup lost ANTHROPIC_API_KEY /
+    ANTHROPIC_BASE_URL right after install."""
+    install_script = (
+        Path(setup.__file__).resolve().parents[1]
+        / "agents"
+        / "kernel"
+        / "scripts"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    upsert_start = script_text.index("upsert_dotenv_var() {")
+    upsert_end = script_text.index("\n# In --check-only mode")
+    env_start = script_text.index("write_env_file() {")
+    env_end = script_text.index("\nensure_geak() {")
+    dotenv_helpers = script_text[upsert_start:upsert_end]
+    write_env_file = script_text[env_start:env_end]
+    dotenv = tmp_path / ".env"
+    kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "ANTHROPIC_API_KEY=sk-ant-real-key",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "HYPERLOOM_RUN_MODE=baremetal",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = tmp_path / "kernel-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                f"KERNEL_AGENT_ENV={kernel_env}",
+                f"USER_DATA_PATH={tmp_path / 'session'}",
+                f"HYPERLOOM_RUNTIME_DIR={tmp_path / 'runtime'}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "_ANTHROPIC_BASE_URL_VAL=https://api.anthropic.com",
+                "_ANTHROPIC_KEY_VAL=sk-ant-real-key",
+                "_OPENAI_BASE_URL_VAL=",
+                "_OPENAI_KEY_VAL=",
+                "GEAK_API_KEY_VAL=",
+                "LLM_GATEWAY_KEY=",
+                "LLM_API_KEY=",
+                "GEAK_BASE_URL_VAL=",
+                "HYPERLOOM_KERNEL_AGENT_ROOT=",
+                "KERNEL_AGENT_ROOT=",
+                "MAGPIE_PATH=",
+                "MAGPIE_PYTHON=",
+                "PYTHONPATH=",
+                "INFERENCEX_PATH=",
+                "TRACELENS_ROOT=",
+                "TRACELENS_INTERNAL_ROOT=",
+                "HYPERLOOM_ROOT=",
+                "GEAK_E2E_RUNNER=",
+                "GEAK_ROOT=",
+                "GEAK_CLAUDE_MODEL_VAL=",
+                "GEAK_RUN_MODE_VAL=",
+                "GEAK_SCORE_TARGET=",
+                "GEAK_SKIP_PROFILE=",
+                "GEAK_MAX_BENCHMARK_SHAPES=",
+                "log() { :; }",
+                "warn() { :; }",
+                dotenv_helpers,
+                write_env_file,
+                "write_env_file",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    kernel_text = kernel_env.read_text(encoding="utf-8")
+    dotenv_text = dotenv.read_text(encoding="utf-8")
+    # .env must still carry the Anthropic creds after install.
+    assert "ANTHROPIC_API_KEY=sk-ant-real-key" in dotenv_text
+    assert "ANTHROPIC_BASE_URL=https://api.anthropic.com" in dotenv_text
+    # kernel-agent env mirrors the same Anthropic values and no OpenAI leak.
+    assert "export ANTHROPIC_API_KEY='sk-ant-real-key'" in kernel_text
+    assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
+    assert "export OPENAI_API_KEY=" not in kernel_text
+    assert "OPENAI_API_KEY=" not in dotenv_text
+
+
 def test_setup_cli_reports_missing_installer(tmp_path: Path, monkeypatch, capsys):
     missing = tmp_path / "missing.sh"
     monkeypatch.setattr(setup, "_INSTALL_BAREMETAL_SH", missing)

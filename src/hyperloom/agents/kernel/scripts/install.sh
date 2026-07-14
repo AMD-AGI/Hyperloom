@@ -940,10 +940,29 @@ write_env_file() {
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
   [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
-  remove_dotenv_var ANTHROPIC_BASE_URL
-  remove_dotenv_var ANTHROPIC_API_KEY
-  remove_dotenv_var OPENAI_BASE_URL
-  remove_dotenv_var OPENAI_API_KEY
+  # Persist each provider's own canonical vars (write when present, clear when
+  # absent) so an operator's .env creds survive a re-install. Never cross-write
+  # and never persist gateway aliases, so the two providers stay separated.
+  if [ -n "${_anthropic_url}" ]; then
+    upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+  else
+    remove_dotenv_var ANTHROPIC_BASE_URL
+  fi
+  if [ -n "${_anthropic_key}" ]; then
+    upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
+  else
+    remove_dotenv_var ANTHROPIC_API_KEY
+  fi
+  if [ -n "${_openai_url}" ]; then
+    upsert_dotenv_var OPENAI_BASE_URL "$_openai_url"
+  else
+    remove_dotenv_var OPENAI_BASE_URL
+  fi
+  if [ -n "${_openai_key}" ]; then
+    upsert_dotenv_var OPENAI_API_KEY "$_openai_key"
+  else
+    remove_dotenv_var OPENAI_API_KEY
+  fi
   remove_dotenv_var ANTHROPIC_AUTH_TOKEN
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
