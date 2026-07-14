@@ -44,16 +44,21 @@ Confirm the current directory contains a `hyperloom/` Python package directory. 
 
 ## Step 2: Ask Configuration Questions
 
-Ask these questions using the agent's structured question UI when available.
+Use the agent's structured question UI **only for questions that have discrete
+options** (LLM mode, run mode, serving framework). It requires at least two
+options per question, so do not use it for free-form input. Ask free-form
+questions (a base URL, a custom model id) as plain text prompts instead.
 
-1. Choose one LLM mode:
+1. Choose one LLM mode (structured, two options):
    - `Anthropic`
    - `DeepSeek`
 
    Present exactly those two option labels. Do not add parenthetical
    descriptions, vendor examples, or base URLs to this first question.
 
-2. Ask the base URL as a separate follow-up question after the mode is chosen.
+2. Ask the base URL as a plain-text follow-up after the mode is chosen (not the
+   structured UI): tell the user the default and let them press enter to accept
+   it or type a custom URL.
 
 3. Explain that secrets must be edited in `.env`, not pasted into chat.
    - Never ask the user to paste API keys into the conversation.
@@ -63,15 +68,18 @@ Ask these questions using the agent's structured question UI when available.
 
 4. Collect provider-specific non-secret values and write secret placeholders:
 
+   Ask the base URL and model questions below as plain-text prompts, not the
+   structured UI (they take free-form input).
+
    For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask for `ANTHROPIC_BASE_URL`; if blank, use `https://api.anthropic.com`.
-   - Tell the user the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask whether to change it.
+   - Ask for `ANTHROPIC_BASE_URL` (plain text); if blank, use `https://api.anthropic.com`.
+   - State the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask (plain text) to press enter to keep it or type a different id.
 
    For `DeepSeek`:
    - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask for `DEEPSEEK_BASE_URL`; if blank, use `https://api.deepseek.com/anthropic`.
-   - Tell the user the default `DEEPSEEK_MODEL` is `deepseek-chat`; ask whether to change it.
+   - Ask for `DEEPSEEK_BASE_URL` (plain text); if blank, use `https://api.deepseek.com/anthropic`.
+   - State the default `DEEPSEEK_MODEL` is `deepseek-chat`; ask (plain text) to press enter to keep it or type a different id.
 5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
