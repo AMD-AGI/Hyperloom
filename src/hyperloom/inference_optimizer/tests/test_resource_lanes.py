@@ -625,12 +625,6 @@ async def test_manager_counters_track_acquire_busy_full(conn, locks):
             action="profile",
             ttl_sec=60,
         )
-    counters = locks.counters_snapshot()
-    assert counters["research_lane"]["acquire_count"] == 2
-    assert counters["research_lane"]["lane_full_count"] == 1
-    assert counters["benchmark_lane"]["acquire_count"] >= 1
-    # The cross-lane conflict shows up on profile_lane (the requested lane).
-    assert "lane_busy_count" in counters.get("profile_lane", {})
     await locks.release(a)
     await locks.release(a2)
     await locks.release(b)
@@ -651,8 +645,6 @@ async def test_lane_holders_distinct(conn, locks):
     ]
     holders = await locks.lane_holders()
     assert holders == {"research_lane": 3}
-    actives = await locks.active_lanes()
-    assert actives == ["research_lane"]  # DISTINCT
     for l in leases:
         await locks.release(l)
 

@@ -2,19 +2,9 @@
 
 """CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts.
 
-Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). Four
-functions in this cluster (``_load_dotenv_fallback``,
-``_load_kernel_agent_env_fallback``, ``_clone_inferencex``, and — still in
-``__init__.py`` — ``_probe_llm_catalog``) are directly monkeypatched by name
-in ``test_preflight_auth_override.py`` via
-``monkeypatch.setattr(cli, "<name>", ...)``. Per tree-reform-lessons.MD §3.2/
-§3.3, a bare-name call from inside this module would resolve THIS module's
-own binding and silently bypass such a patch — even for a function defined in
-this same file (verified empirically; see the inline comments at each call
-site below). Every call to one of those four names is therefore a lazy,
-package-qualified ``from . import <name>`` read at call time instead of a
-bare-name reference, so the patched value on the ``cli`` package is always
-picked up (same technique used for coordinator.py's cross-collaborator calls).
+Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). Tests and
+callers that need private preflight hooks should import this concrete module
+instead of relying on package-root re-exports.
 """
 
 from __future__ import annotations
@@ -30,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .credentials import (  # noqa: F401 - re-exported for callers/tests
+from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
@@ -711,19 +701,13 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
-    # Lazy, package-qualified lookups (not bare-name calls): tests monkeypatch
-    # these by name on the ``cli`` package (``monkeypatch.setattr(cli,
-    # "_load_dotenv_fallback", ...)``), and since this function now lives in a
-    # sibling module, a bare-name call would resolve this module's own
-    # (un-patched) binding and silently bypass the patch. Re-reading the
-    # current package attribute at call time picks up the patched version.
-    from . import _load_dotenv_fallback as _load_dotenv_fallback_current
-    from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
-
+    # Capture explicit single-provider intent before the installer env
+    # fallbacks run, then undo any cross-provider credentials they inject so a
+    # provider-only launch is not silently rewired onto the wrong gateway.
     provider_mode = _provider_only_mode_before_fallback()
     provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
-    _load_dotenv_fallback_current()
-    _load_kernel_agent_env_fallback_current()
+    _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
 
     # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.
@@ -823,9 +807,8 @@ def _preflight(
                     os.environ[alias] = gateway_url
                     print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
-        # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
-        # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
-        # resolved GEAK_BASE_URL above actually reaches the kernel agent.
+        # Legacy / explicitly supplied GEAK_CONFIG yaml may still carry its own
+        # endpoint. Sync it so an operator GEAK_BASE_URL override reaches GEAK.
         geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
         geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
         if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
@@ -921,14 +904,7 @@ def _preflight(
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
-        # Lazy package-qualified lookup (see the comment above the
-        # _load_dotenv_fallback/_load_kernel_agent_env_fallback calls): tests
-        # monkeypatch ``cli._clone_inferencex`` directly, and a bare-name call
-        # -- even to a function defined in this same module -- resolves this
-        # module's own binding and misses that patch (verified empirically).
-        from . import _clone_inferencex as _clone_inferencex_current
-
-        inferencex_path = _clone_inferencex_current(dest)
+        inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
             print(
                 "Preflight: ERROR — InferenceX checkout missing and clone "
@@ -1019,10 +995,25 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    # Inject --cortex-kb-url into env so the probe script sees it; empty URL means skip the KB branch.
+    # The Cortex KB endpoint is a CLI-flag concern (no env fallback): the probe
+    # must see ONLY the --cortex-kb-url value, never a stale parent CORTEX_KB_URL.
+    # Drop any inherited value first, then inject the flag when set (empty ==
+    # skip the KB branch / stay local-only).
+    env.pop("CORTEX_KB_URL", None)
     cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
     if cortex_url:
         env["CORTEX_KB_URL"] = cortex_url
+    # PR Monitor endpoint is a CLI-flag concern (canonical env
+    # PRIMUS_CORTEX_PR_API resolves --pr-monitor-url at parse time). The
+    # legacy PR_MONITOR_URL env is removed; compute the probe's healthz base
+    # from the resolved flag so the shell never reads a stale parallel var.
+    # The REST base omits /v1 (the client appends it) but healthz lives under
+    # /v1, so normalise the probe base to end with /v1.
+    env.pop("PR_MONITOR_URL", None)
+    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
+    if pr_url:
+        probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
+        env["PR_MONITOR_URL"] = probe_base
     if explicit_kb:
         env["SKIP_KB_PROBE"] = "1"
     if explicit_pr:

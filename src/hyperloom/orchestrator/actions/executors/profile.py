@@ -32,7 +32,6 @@ from typing import Any
 import yaml
 
 from hyperloom.common.io import safe_mtime
-from hyperloom.common.payload_aliases import read_extra_server_args
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -770,7 +769,7 @@ class ProfileExecutor(BaselineExecutor):
         base_args = _sanitize_profile_server_args(
             str(params.get("base_extra_args") or "").strip(),
         )
-        caller_args = _sanitize_profile_server_args(read_extra_server_args(params))
+        caller_args = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
         from ._grid_runner import merge_server_args
 
         merged_args = merge_server_args(base_args, caller_args)
@@ -778,7 +777,6 @@ class ProfileExecutor(BaselineExecutor):
             params["extra_server_args"] = merged_args
         else:
             params.pop("extra_server_args", None)
-        params.pop("extra_sglang_args", None)
         extra = getattr(ctx, "extra", None) or {}
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")

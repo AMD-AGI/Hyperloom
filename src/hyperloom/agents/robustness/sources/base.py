@@ -95,51 +95,6 @@ class SourceData:
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
 
-    def merge_from(self, other: "SourceData") -> None:
-        """Merge another snapshot into this one in place.
-
-        Existing non-empty fields are preserved; only empty slots are
-        filled from ``other``.
-
-        Args:
-            other: The snapshot to merge fields from.
-        """
-        for slot in (
-            "session_pods",
-            "session_events",
-            "cluster_faults",
-            "local_processes",
-            "local_log_tail",
-            "local_log_errors",
-            "local_server_health",
-            "coordinator_events",
-        ):
-            if not getattr(self, slot):
-                setattr(self, slot, list(getattr(other, slot)))
-        for slot in (
-            "session_metrics",
-            "session_summary",
-            "local_gpu",
-            "local_disk",
-            "local_ray",
-            "local_fd",
-            "local_aiter_jit",
-            "local_decision_audit",
-            "local_manifest",
-            "local_kernel_breakdown",
-            "local_critic_health",
-            "local_state_integrity",
-            "local_external_deps",
-        ):
-            if not getattr(self, slot):
-                setattr(self, slot, dict(getattr(other, slot)))
-        if other.degraded_reason and not self.degraded_reason:
-            self.degraded_reason = other.degraded_reason
-        for name in other.sources_used:
-            if name not in self.sources_used:
-                self.sources_used.append(name)
-
-
 @runtime_checkable
 class Source(Protocol):
     """Async source contract the DegradeRouter consumes."""

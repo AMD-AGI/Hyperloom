@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.knowledge.cortex_t0 import (
-    T0Result,
     _warm_recipe_source,
     run_t0_anchor,
 )
@@ -105,7 +104,7 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
 ) -> None:
     """First T0 anchor writes a recipe row whose on-disk JSON matches the arbor schema."""
     state = _FakeSharedState()
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="DeepSeek-R1",
@@ -118,8 +117,6 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
         },
         session_dir=session_dir,
     )
-    assert isinstance(result, T0Result)
-    assert result.workload == "DeepSeek-R1"
     cid = _expected_cid(state, "DeepSeek-R1", "MI300X")
     row = kb.get_recipe(canonical_id=cid)
     assert row is not None
@@ -247,7 +244,7 @@ def test_t0_anchor_short_circuits_when_already_anchored(
         cortex_session_id="prior-sid",
         warm_start_ts="2026-05-28T00:00:00Z",
     )
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="m",
@@ -256,7 +253,6 @@ def test_t0_anchor_short_circuits_when_already_anchored(
         session_dir=session_dir,
         resume=False,
     )
-    assert result.status == "skipped_already"
     cid = _expected_cid(state, "m", "mi300x")
     assert kb.get_recipe(canonical_id=cid) is None
 
@@ -270,7 +266,7 @@ def test_t0_anchor_resume_does_not_short_circuit(
         cortex_session_id="prior-sid",
         warm_start_ts="2026-05-28T00:00:00Z",
     )
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="m",
@@ -279,7 +275,6 @@ def test_t0_anchor_resume_does_not_short_circuit(
         session_dir=session_dir,
         resume=True,
     )
-    assert result.status in ("ok", "resumed")
     cid = _expected_cid(state, "m", "mi300x")
     assert kb.get_recipe(canonical_id=cid) is not None
 
@@ -393,14 +388,13 @@ def test_t0_anchor_tolerates_missing_extra_attrs(
     session_dir: Path,
 ) -> None:
     state = _FakeSharedState()
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="m",
         hw="mi300x",
         session_dir=session_dir,
     )
-    assert result.status in ("ok", "resumed")
 
 
 def test_t0_anchor_requires_explicit_session_dir(

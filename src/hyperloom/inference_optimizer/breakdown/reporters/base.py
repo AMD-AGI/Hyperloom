@@ -19,7 +19,6 @@ __all__ = [
     "RendererFn",
     "REGISTRY",
     "register_renderer",
-    "renderer_names",
 ]
 
 
@@ -91,15 +90,6 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
         return fn
 
     return _wrap
-
-
-def renderer_names() -> list[str]:
-    """List the section ids of all registered renderers, in order.
-
-    Returns:
-        list[str]: Section identifiers in registry insertion order.
-    """
-    return [sid for sid, _ in REGISTRY]
 
 
 # Small markdown helpers — kept here so individual renderers stay terse.

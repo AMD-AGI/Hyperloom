@@ -58,7 +58,6 @@ import fcntl
 import json
 import logging
 import os
-import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,9 +116,6 @@ class LocalRecipeStoreError(RuntimeError):
     """
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _read_json(path: Path) -> dict[str, Any] | None:
     """Read a JSON file or return ``None`` if it doesn't exist.
 
@@ -366,9 +362,8 @@ class LocalRecipeStore:
         """Yield every directory at a valid depth below ``root``
         that contains a live ``recipe.json``.
 
-        Used by :meth:`list_recent` / :meth:`search` — both of which
-        only care about live recipe rows. Directories that hold
-        attempts but no recipe are intentionally excluded.
+        Used by :meth:`search`, which only cares about live recipe rows.
+        Directories that hold attempts but no recipe are intentionally excluded.
 
         Only 7-level directories are accepted.
         """
@@ -389,39 +384,6 @@ class LocalRecipeStore:
                 )
                 continue
             yield recipe_dir
-
-    def _walk_cid_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly seven levels below ``root``
-        that contains EITHER a live ``recipe.json`` OR an
-        ``attempts.ndjson``.
-
-        Used by :meth:`list_session_attempts` so attempts written
-        against a cid that doesn't (yet) have a parent recipe row
-        are still discoverable. Mirrors the central server contract
-        that attempts have no FK to the parent recipe.
-
-        Yields:
-            Each canonical-id directory at the 5-level depth holding either a
-            ``recipe.json`` or an ``attempts.ndjson`` (deduplicated).
-        """
-        if not self.root.is_dir():
-            return
-        seen: set[Path] = set()
-        for filename in (RECIPE_FILENAME, ATTEMPTS_FILENAME):
-            for path in self.root.rglob(filename):
-                if not path.is_file():
-                    continue
-                cid_dir = path.parent
-                try:
-                    rel_parts = cid_dir.relative_to(self.root).parts
-                except ValueError:
-                    continue
-                if len(rel_parts) != 7:
-                    continue
-                if cid_dir in seen:
-                    continue
-                seen.add(cid_dir)
-                yield cid_dir
 
     # ------------------------------------------------------------------
     # put_recipe
@@ -579,11 +541,11 @@ class LocalRecipeStore:
                 "precision": precision,
                 "best_config": dict(best_config or {}),
                 "best_throughput": float(best_throughput),
-                "what_worked": _normalise_str_dicts(what_worked, keys=("description", "measured_impact")),
-                "what_failed": _normalise_str_dicts(what_failed, keys=("description", "reason")),
-                "remaining_gaps": _normalise_str_dicts(remaining_gaps, keys=("description", "metrics")),
+                "what_worked": _normalise_str_dicts(what_worked, ("description", "measured_impact")),
+                "what_failed": _normalise_str_dicts(what_failed, ("description", "reason")),
+                "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
                 "prs_tested": _normalise_prs(prs_tested),
-                "pitfalls": _normalise_str_dicts(pitfalls, keys=("description", "severity")),
+                "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
                 "last_profiled": last_profiled,
                 "stack_fingerprint": dict(stack_fingerprint or {}),
@@ -617,7 +579,7 @@ class LocalRecipeStore:
         }
 
     # ------------------------------------------------------------------
-    # get_recipe / get_history / delete
+    # get_recipe
     # ------------------------------------------------------------------
     def get_recipe(
         self,
@@ -666,130 +628,9 @@ class LocalRecipeStore:
         snapshot = archive.get("snapshot") if isinstance(archive, dict) else None
         return dict(snapshot) if isinstance(snapshot, dict) else None
 
-    def get_history(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Return every archived prior version, ascending by version.
-
-        The current (live) row is NOT included — callers fetch that
-        via :meth:`get_recipe`. Mirrors the central server's
-        ``/history`` contract that returns ``{canonical_id, history:
-        [...]}`` with the live row excluded.
-
-        Unknown canonical_id returns ``[]`` (no 404 — matches central
-        server behaviour for ``/history``).
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-            limit (int): Maximum number of archived rows to return.
-
-        Returns:
-            list[dict[str, Any]]: Archived prior versions ascending by
-                version (live row excluded), truncated to ``limit``.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
-        if not canonical_id:
-            raise ValueError("get_history requires a non-empty canonical_id")
-        history_dir = self._history_dir(canonical_id)
-        if not history_dir.is_dir():
-            return []
-        rows: list[dict[str, Any]] = []
-        for entry in sorted(history_dir.iterdir()):
-            if not entry.is_file():
-                continue
-            if not (entry.name.startswith(HISTORY_VERSION_PREFIX) and entry.name.endswith(HISTORY_VERSION_SUFFIX)):
-                continue
-            archive = _read_json(entry)
-            if isinstance(archive, dict):
-                rows.append(archive)
-        rows.sort(key=lambda r: int(r.get("version") or 0))
-        if limit and len(rows) > int(limit):
-            rows = rows[: int(limit)]
-        return rows
-
-    def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live row, preserving history.
-
-        Mirrors the central server contract: history rows survive,
-        any prior ``GET ?version=N`` still returns the archived
-        snapshot.
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-
-        Returns:
-            bool: ``True`` iff a live row was actually removed;
-                ``False`` when none was present.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-            LocalRecipeStoreError: If the live row exists but cannot
-                be removed.
-        """
-        if not canonical_id:
-            raise ValueError("delete_recipe requires a non-empty canonical_id")
-        live_path = self._live_path(canonical_id)
-        lock = _CidLock(self._lock_path(canonical_id))
-        with lock:
-            try:
-                live_path.unlink()
-                return True
-            except FileNotFoundError:
-                return False
-            except OSError as exc:
-                raise LocalRecipeStoreError(
-                    f"failed to delete {live_path}: {exc}",
-                ) from exc
-
     # ------------------------------------------------------------------
-    # list_recent / search / list_all_live_recipes
+    # search
     # ------------------------------------------------------------------
-    def list_all_live_recipes(self) -> list[dict[str, Any]]:
-        """Return ALL live recipes without the search() 1000-row clamp.
-
-        Used by the mirror ingest CronJob which must iterate the entire
-        corpus. Unlike search(), this bypasses the limit/filter/sort
-        machinery and simply walks every recipe dir.
-        """
-        rows: list[dict[str, Any]] = []
-        for recipe_dir in self._walk_recipe_dirs():
-            try:
-                cid = canonical_id_for_path(
-                    root=self.root,
-                    recipe_dir=recipe_dir,
-                )
-            except InvalidCanonicalIdError:
-                continue
-            payload = _read_json(recipe_dir / RECIPE_FILENAME)
-            if not isinstance(payload, dict):
-                continue
-            payload.setdefault("canonical_id", cid)
-            rows.append(payload)
-        return rows
-
-    def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Recent live recipes (``updated_at DESC``), no filter.
-
-        Walks the whole store tree — O(N) over distinct cids. Matches
-        the central server's ``GET /recipes`` contract; pagination is
-        a single ``limit`` because the optimizer uses this only for
-        operator dashboards (full search uses :meth:`search`).
-
-        Args:
-            limit (int): Maximum number of recipes to return.
-
-        Returns:
-            list[dict[str, Any]]: Live recipes ordered
-                ``updated_at DESC``, truncated to ``limit``.
-        """
-        return self.search(order_by="updated_at DESC", limit=int(limit))
 
     def search(
         self,
@@ -983,107 +824,6 @@ class LocalRecipeStore:
             "recipe_canonical_id": canonical_id,
             "attempt_at": stamped_at,
         }
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """List attempts for one recipe, newest first.
-
-        Mirrors the central server's ``GET /recipes/{cid}/attempts``.
-        Empty list for absent canonical_id (no 404 surface).
-
-        Args:
-            canonical_id (str): Parent recipe identity; must be
-                non-empty.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempt rows newest-first, truncated
-                to ``limit``.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
-        if not canonical_id:
-            raise ValueError(
-                "list_attempts requires a non-empty canonical_id",
-            )
-        rows = _list_jsonl(self._attempts_path(canonical_id))
-        # Newest first — central response is ordered ``attempt_at
-        # DESC`` (per spec) but the on-disk file is append-only so
-        # iteration order is ascending. Reversing gives the required
-        # newest-first contract.
-        rows.reverse()
-        if limit and len(rows) > int(limit):
-            rows = rows[: int(limit)]
-        return rows
-
-    def list_session_attempts(
-        self,
-        *,
-        session_id: str,
-        limit: int = 500,
-    ) -> list[dict[str, Any]]:
-        """List attempts for one session across all recipes (oldest first).
-
-        Mirrors the central server's
-        ``GET /sessions/{session_id}/attempts``. The local store
-        achieves the cross-recipe view by walking the tree.
-
-        Args:
-            session_id (str): Session whose attempts to collect; must
-                be non-empty.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempts for the session across all
-                recipes, oldest-first, truncated to ``limit``.
-
-        Raises:
-            ValueError: If ``session_id`` is empty.
-        """
-        if not session_id:
-            raise ValueError(
-                "list_session_attempts requires a non-empty session_id",
-            )
-        all_rows: list[dict[str, Any]] = []
-        for cid_dir in self._walk_cid_dirs():
-            attempts_path = cid_dir / ATTEMPTS_FILENAME
-            for row in _list_jsonl(attempts_path):
-                if str(row.get("session_id") or "") == session_id:
-                    all_rows.append(row)
-        all_rows.sort(key=lambda r: str(r.get("attempt_at") or ""))
-        if limit and len(all_rows) > int(limit):
-            all_rows = all_rows[: int(limit)]
-        return all_rows
-
-    # ------------------------------------------------------------------
-    # Maintenance helpers (used by tests / future cleanup tooling)
-    # ------------------------------------------------------------------
-    def purge_recipe(self, *, canonical_id: str) -> None:
-        """Remove the entire directory tree for one cid (live + history
-        + attempts).
-
-        Distinct from :meth:`delete_recipe` which preserves history;
-        this is the "obliterate this recipe" escape hatch for tests
-        and CLI tooling. Not reachable from the Coordinator hot path.
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
-        if not canonical_id:
-            raise ValueError("purge_recipe requires a non-empty canonical_id")
-        recipe_dir = self._recipe_dir(canonical_id)
-        if recipe_dir.is_dir():
-            shutil.rmtree(recipe_dir)
-
 
 # ---------------------------------------------------------------------------
 # search filter helpers

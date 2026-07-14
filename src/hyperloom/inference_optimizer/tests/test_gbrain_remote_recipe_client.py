@@ -287,16 +287,6 @@ def test_disabled_client_returns_empty() -> None:
     assert c.enabled is False
     assert c.get_recipe(canonical_id="inference:m:h:f:v:p") is None
     assert c.search(label_match={"model": "x"}) == []
-    assert c.list_recent() == []
-    assert c.health() is False
-
-
-def test_get_history_and_attempts_are_empty() -> None:
-    c = _client({_default_slug("r1"): _recipe_page("m", "mi300x")})
-    assert c.get_history(canonical_id="inference:m:mi300x:sglang:v:p") == []
-    assert c.list_attempts(canonical_id="inference:m:mi300x:sglang:v:p") == []
-    assert c.list_session_attempts(session_id="s") == []
-    assert c.session_summary(session_id="s") is None
 
 
 def test_build_from_env(monkeypatch) -> None:
@@ -381,16 +371,3 @@ def test_mcp_call_raises_on_tool_iserror(monkeypatch) -> None:
     mcp = grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
     with pytest.raises(GbrainRemoteError):
         mcp.call("list_pages", {"type": "recipe"})
-
-
-def test_health_false_on_rpc_error(monkeypatch) -> None:
-    _patch_urlopen(
-        monkeypatch,
-        {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "error": {"code": -32000, "message": "boom"},
-        },
-    )
-    c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
-    assert c.health() is False

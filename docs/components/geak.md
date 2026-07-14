@@ -75,12 +75,11 @@ chains into `src/hyperloom/agents/kernel/scripts/install.sh`, whose `ensure_geak
 GEAK under the pod-local open-source checkout root by default
 (`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`)
 and pip-installs it. Runtime config is written under
-`$USER_DATA_PATH/runtime/geak-config/local.yaml`. For multi-node Dynamo runs
+`$USER_DATA_PATH/runtime/kernel-agent.env.sh`. For multi-node Dynamo runs
 (`--mn-backend dynamo`), `python -m hyperloom.inference_optimizer.multi_node install-geak`
 can pip-install a supplied GEAK checkout into GPU pods so the `geak` CLI lands on `PATH`; pass `--geak-src` or
-`HYPERLOOM_GEAK_SRC` when the checkout is not in a shared runtime path. The GEAK
-run config is resolved from `$GEAK_CONFIG` and must set
-`model.model_class: litellm`.
+`HYPERLOOM_GEAK_SRC` when the checkout is not in a shared runtime path. GEAKv4
+uses the Claude Code workflow and reads its model from `GEAK_CLAUDE_MODEL`.
 ```
 
 ## Usage

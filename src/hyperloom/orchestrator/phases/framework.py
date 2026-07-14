@@ -1621,7 +1621,6 @@ class FrameworkPhase(PhaseHandler):
         )
 
         state = self.shared_state
-        from ..loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
 
         existing = getattr(state, "apply_fail_reauthor_attempts", None)
         apply_fail_attempts: dict[str, int] = existing if isinstance(existing, dict) else {}

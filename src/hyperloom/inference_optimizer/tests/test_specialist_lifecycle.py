@@ -411,7 +411,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     tmp_path: Path,
 ):
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
-    from hyperloom.inference_optimizer.cli import _build_specialist_executor
+    from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
     from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
         MockTurn,

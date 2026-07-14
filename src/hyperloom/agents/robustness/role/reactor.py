@@ -14,12 +14,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
 
-from ..decision.action_ladder import ActionLadder, Finding
+from ..decision.action_ladder import ActionLadder
 from ..decision.policy_aware import PolicyAware
 from ..decision.rca_engine import NoopRcaEngine, RcaEngine
-from ..signals import Classifier, Symptom
+from ..signals import Classifier
 from ..sources.base import DegradeRouter
 from ..state_store import DetectorStateStore
 from .envelope import Intent, PolicyViolation
@@ -77,8 +76,6 @@ class Reactor:
         self._finalizer = components.finalizer
         self._state_store = components.state_store
         self._tick_index = 0
-        self._last_symptoms: list[Symptom] = []
-        self._last_data_summary: dict[str, Any] = {}
         # In-memory latch: ``finalizer.finalize`` runs at most once per instance,
         # complementing the finalizer's disk marker for cross-process resume.
         self._finalize_fired: bool = False
@@ -91,15 +88,6 @@ class Reactor:
             int: Number of ``tick`` calls served by this instance.
         """
         return self._tick_index
-
-    @property
-    def last_symptoms(self) -> list[Symptom]:
-        """Symptoms classified on the most recent tick.
-
-        Returns:
-            list[Symptom]: A copy of the last tick's symptom list.
-        """
-        return list(self._last_symptoms)
 
     async def tick(self, ctx: ReactorContext) -> list[Intent]:
         """Run one pipeline tick and return the validated intents.
@@ -162,8 +150,6 @@ class Reactor:
         # because fsync blocks.
         await self._flush_state_store()
 
-        self._last_symptoms = symptoms
-        self._last_data_summary = _summarise(data, symptoms, result.findings)
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
@@ -228,30 +214,5 @@ class Reactor:
                 "reactor tick=%d postmortem finalizer raised",
                 self._tick_index,
             )
-
-
-def _summarise(
-    data: Any,
-    symptoms: list[Symptom],
-    findings: list[Finding],
-) -> dict[str, Any]:
-    """Build a compact debug summary of a tick's pipeline outputs.
-
-    Args:
-        data (Any): The source snapshot produced by the router.
-        symptoms (list[Symptom]): Symptoms classified this tick.
-        findings (list[Finding]): Findings produced by the action ladder.
-
-    Returns:
-        dict[str, Any]: Summary with sources used, degraded reason, and
-        symptom / finding counts.
-    """
-    return {
-        "sources_used": list(getattr(data, "sources_used", []) or []),
-        "degraded_reason": getattr(data, "degraded_reason", None),
-        "symptom_count": len(symptoms),
-        "finding_count": len(findings),
-    }
-
 
 __all__ = ["Reactor", "ReactorComponents"]

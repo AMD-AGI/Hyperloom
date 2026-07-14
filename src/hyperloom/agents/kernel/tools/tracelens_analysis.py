@@ -63,8 +63,6 @@ from _paths import workspace_root
 # Idle-gate threshold + high-idle warning: shared single source of truth so the
 # TraceLens and bypass routes gate on identical semantics.
 from _idle_gate import (
-    HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
-    HIGH_IDLE_PCT_THRESHOLD_ENV,
     build_high_idle_warning as _build_high_idle_warning,
     resolve_idle_pct_threshold,
 )

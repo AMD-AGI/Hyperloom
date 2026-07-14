@@ -27,12 +27,11 @@ retry budget).
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from .assessment import (
     ASK_RETRYABLE,
@@ -439,23 +438,7 @@ def _build_failed_bootstrap_result(
     )
 
 
-# Convenience sync wrapper for the CLI smoke path. The library entry remains
-# async to compose cleanly with the orchestrator's asyncio loop.
-def quantize_via_prompt_sync(prompt: str, **kwargs: Any) -> QuantSkillRunResult:
-    """Synchronous wrapper around :func:`quantize_via_prompt`.
-
-    Args:
-        prompt: Natural-language quantization request.
-        **kwargs: Keyword arguments forwarded to :func:`quantize_via_prompt`.
-
-    Returns:
-        The :class:`QuantSkillRunResult` produced by the async entry point.
-    """
-    return asyncio.run(quantize_via_prompt(prompt, **kwargs))
-
-
 __all__ = [
     "QuantSkillRunResult",
     "quantize_via_prompt",
-    "quantize_via_prompt_sync",
 ]

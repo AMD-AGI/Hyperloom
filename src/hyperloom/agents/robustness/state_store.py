@@ -249,25 +249,6 @@ class DetectorStateView:
         self._store = store
         self._slot = slot
 
-    @property
-    def slot_name(self) -> str:
-        """Name of the slot this view is bound to.
-
-        Returns:
-            str: The slot namespace.
-        """
-        return self._slot
-
-    @property
-    def is_persistent(self) -> bool:
-        """Whether this view is backed by a real store.
-
-        Returns:
-            bool: True when a backing store is present; False for a no-op
-            view.
-        """
-        return self._store is not None
-
     def load(self) -> dict[str, Any]:
         """Load this view's slot content.
 

@@ -359,15 +359,15 @@ class Journal:
 
 # helpers
 def _variant_args(variant: dict[str, Any]) -> str:
-    """Read a variant's server-arg string, canonical (``extra_server_args``) first with a legacy ``extra_sglang_args`` fallback.
+    """Read a variant's canonical server-arg string.
 
     Args:
         variant: The variant dict to read server args from.
 
     Returns:
-        The server-arg string, or an empty string when neither key is present.
+        The server-arg string, or an empty string when the key is absent.
     """
-    return str(variant.get("extra_server_args") or variant.get("extra_sglang_args") or "")
+    return str(variant.get("extra_server_args") or "")
 
 
 def derive_journal_outcome(

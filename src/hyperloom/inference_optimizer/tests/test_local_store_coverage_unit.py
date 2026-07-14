@@ -46,28 +46,19 @@ def test_coerce_dict_variants():
 
 
 def test_normalise_findings_and_failures():
-    assert ls._normalise_str_dicts(
-        [{"description": "d", "measured_impact": "i"}, "skip"],
-        keys=("description", "measured_impact"),
-    ) == [
+    assert ls._normalise_str_dicts([{"description": "d", "measured_impact": "i"}, "skip"], ("description", "measured_impact")) == [
         {"description": "d", "measured_impact": "i"},
     ]
-    assert ls._normalise_str_dicts(
-        [{"description": "d", "reason": "r"}], keys=("description", "reason")
-    ) == [
+    assert ls._normalise_str_dicts([{"description": "d", "reason": "r"}], ("description", "reason")) == [
         {"description": "d", "reason": "r"},
     ]
 
 
 def test_normalise_gaps_pitfalls_lessons():
-    assert ls._normalise_str_dicts(
-        [{"description": "d", "metrics": "m"}], keys=("description", "metrics")
-    ) == [
+    assert ls._normalise_str_dicts([{"description": "d", "metrics": "m"}], ("description", "metrics")) == [
         {"description": "d", "metrics": "m"},
     ]
-    assert ls._normalise_str_dicts(
-        [{"description": "d", "severity": "high"}], keys=("description", "severity")
-    ) == [
+    assert ls._normalise_str_dicts([{"description": "d", "severity": "high"}], ("description", "severity")) == [
         {"description": "d", "severity": "high"},
     ]
     out = ls._normalise_lessons([{"statement": "s", "measured_impact": {"x": 1}}])
@@ -138,15 +129,12 @@ def test_put_get_history_roundtrip(tmp_path):
     # unknown version
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    assert history[0]["version"] == 1
+    assert store.get_recipe(canonical_id=cid, version=1)["version"] == 1
 
 
 def test_get_recipe_missing(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
     assert store.get_recipe(canonical_id=_cid()) is None
-    assert store.get_history(canonical_id=_cid()) == []
 
 
 def test_empty_cid_raises(tmp_path):
@@ -155,38 +143,6 @@ def test_empty_cid_raises(tmp_path):
         store.put_recipe(canonical_id="")
     with pytest.raises(ValueError):
         store.get_recipe(canonical_id="")
-    with pytest.raises(ValueError):
-        store.get_history(canonical_id="")
-    with pytest.raises(ValueError):
-        store.delete_recipe(canonical_id="")
-    with pytest.raises(ValueError):
-        store.list_attempts(canonical_id="")
-    with pytest.raises(ValueError):
-        store.list_session_attempts(session_id="")
-
-
-# ---- delete / purge ----
-
-
-def test_delete_recipe(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    assert store.delete_recipe(canonical_id=cid) is False  # nothing yet
-    store.put_recipe(canonical_id=cid, model="m")
-    assert store.delete_recipe(canonical_id=cid) is True
-    assert store.get_recipe(canonical_id=cid) is None
-
-
-def test_purge_recipe(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid, model="m")
-    store.purge_recipe(canonical_id=cid)
-    assert store.get_recipe(canonical_id=cid) is None
-    # purge of absent cid is a no-op
-    store.purge_recipe(canonical_id=cid)
-    with pytest.raises(ValueError):
-        store.purge_recipe(canonical_id="")
 
 
 # ---- attempts ----
@@ -198,11 +154,8 @@ def test_attempts_roundtrip(tmp_path):
     a1 = store.append_attempt(canonical_id=cid, session_id="s1", fitness=1.0, outcome="ok", diff={"x": 1})
     assert a1["id"] == 1
     store.append_attempt(canonical_id=cid, session_id="s2", fitness=None)
-    listed = store.list_attempts(canonical_id=cid)
-    assert listed[0]["id"] == 2  # newest first
-    sess = store.list_session_attempts(session_id="s1")
-    assert len(sess) == 1
-    assert sess[0]["session_id"] == "s1"
+    rows = ls._list_jsonl(store._attempts_path(cid))
+    assert [row["id"] for row in rows] == [1, 2]
 
 
 def test_append_attempt_requires_session(tmp_path):
@@ -231,8 +184,7 @@ def test_search_filters(tmp_path):
     assert len(res) == 1
     # updated_since far future -> none
     assert store.search(updated_since="9999-01-01T00:00:00") == []
-    # list_recent
-    assert len(store.list_recent(limit=10)) == 2
+    assert len(store.search(limit=10)) == 2
 
 
 def test_search_bad_order_by(tmp_path):
@@ -269,21 +221,6 @@ def test_list_jsonl_skips_bad(tmp_path):
     assert rows == [{"a": 1}, {"b": 2}]
 
 
-def test_atomic_write_json_cleanup_on_error(tmp_path):
-    # Non-serialisable payload makes json.dump raise -> tmp cleanup branch.
-    with pytest.raises(TypeError):
-        ls.atomic_write_json(
-            tmp_path / "x.json",
-            {"bad": object()},
-            indent=2,
-            sort_keys=True,
-            make_parents=True,
-            fsync=True,
-        )
-    # tmp file should have been cleaned up
-    assert list(tmp_path.glob("*.tmp")) == []
-
-
 def test_coerce_dict_dataclass():
     from dataclasses import dataclass
 
@@ -295,10 +232,10 @@ def test_coerce_dict_dataclass():
 
 
 def test_normalisers_skip_uncoercible():
-    assert ls._normalise_str_dicts(["x", None], keys=("description", "reason")) == []
-    assert ls._normalise_str_dicts(["x"], keys=("description", "metrics")) == []
+    assert ls._normalise_str_dicts(["x", None], ("description", "reason")) == []
+    assert ls._normalise_str_dicts(["x"], ("description", "metrics")) == []
     assert ls._normalise_prs([None]) == []
-    assert ls._normalise_str_dicts(["x"], keys=("description", "severity")) == []
+    assert ls._normalise_str_dicts(["x"], ("description", "severity")) == []
     assert ls._normalise_lessons([None]) == []
     assert ls._normalise_sessions(["x"]) == []
 

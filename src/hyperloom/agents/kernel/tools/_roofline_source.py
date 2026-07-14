@@ -35,8 +35,3 @@ from __future__ import annotations
 PLACEHOLDER = "placeholder"
 #: Bound derived from an analytical roofline model (shapes/op-model + ceiling).
 ANALYTICAL = "analytical"
-#: Bound refined by a hardware measurement; strongest source.
-ROCPROF = "rocprof"
-
-#: The full set of valid ``roofline_source`` values.
-VALID = frozenset({PLACEHOLDER, ANALYTICAL, ROCPROF})

@@ -103,7 +103,6 @@ class InboxItem:
         topic (str): Message topic string.
         payload (dict[str, Any]): Decoded payload dict; empty when the
             payload was absent or could not be decoded.
-        raw_payload (str): The raw, undecoded payload text as rendered.
     """
 
     seq: int
@@ -111,7 +110,6 @@ class InboxItem:
     from_agent: str
     topic: str
     payload: dict[str, Any] = field(default_factory=dict)
-    raw_payload: str = ""
 
 
 @dataclass
@@ -504,7 +502,6 @@ def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
                 from_agent=match.group("from_agent"),
                 topic=match.group("topic"),
                 payload=payload,
-                raw_payload=payload_text,
             )
         )
     return items, warnings

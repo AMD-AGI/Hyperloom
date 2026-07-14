@@ -890,8 +890,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Cortex KB base URL for this run, used only by the Critic "
-        "agent's per-proposal assess enrichment (/v2/reasoning/assess); "
-        "also settable via $CORTEX_KB_URL. This is NOT the recipe KB — "
+        "agent's per-proposal assess enrichment (/v2/reasoning/assess). "
+        "This flag is the single source of truth: the CLI no longer reads a "
+        "$CORTEX_KB_URL env fallback (the flag value is forwarded to the "
+        "critic subprocess as CORTEX_KB_URL). This is NOT the recipe KB — "
         "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
         "go to --local-kb-root. Leave it UNSET to skip Critic assess "
         "enrichment entirely.",
@@ -991,20 +993,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pr-monitor-url",
         dest="pr_monitor_url",
         type=str,
-        default=None,
-        help="Override PR Monitor REST URL for this run. Default: "
-        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local"
-        "/v1 (env: PR_MONITOR_URL). Pair with --pr-monitor-mcp-url "
-        "when port-forwarding for local debug.",
+        default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
+        help="PR Monitor REST URL for this run (flag wins). Default: "
+        "$PRIMUS_CORTEX_PR_API (the canonical internal PR API env), else "
+        "the in-cluster "
+        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local. "
+        "Set this flag / $PRIMUS_CORTEX_PR_API to a reachable HTTPS "
+        "endpoint when running outside the primus-cortex namespace. Pair "
+        "with --pr-monitor-mcp-url when port-forwarding for local debug.",
     )
     opt.add_argument(
         "--pr-monitor-mcp-url",
         dest="pr_monitor_mcp_url",
         type=str,
         default=None,
-        help="Override PR Monitor MCP URL handed to specialist LLM "
-        "backends. Default mirrors --pr-monitor-url with /mcp/ "
-        "suffix; the trailing slash is mandatory.",
+        help="PR Monitor MCP URL handed to specialist LLM backends (flag "
+        "wins). Default: the in-cluster MCP endpoint. The trailing slash "
+        "is mandatory.",
     )
     opt.add_argument(
         "--degraded-pr",
@@ -1064,16 +1069,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated gateway model slugs that independently "
         "score each specialist proposal_set (advisory only; never "
         "gates; rater identities are anonymized in the orchestration "
-        "prompt). Default 'claude-opus-4-8,gpt-5.5,"
+        "prompt). Only takes effect when --proposal-scoring is also "
+        "passed (scoring is OFF by default); this flag alone does not "
+        "enable scoring. Default 'claude-opus-4-8,gpt-5.5,"
         "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
-        "Add a model by "
-        "appending its slug. Empty list disables scoring.",
+        "Add a model by appending its slug. Empty list disables scoring "
+        "even when enabled.",
     )
     opt.add_argument(
-        "--no-proposal-scoring",
-        dest="no_proposal_scoring",
-        action="store_true",
-        help="Disable the advisory specialist-proposal scorer entirely.",
+        "--proposal-scoring",
+        dest="proposal_scoring",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the advisory specialist-proposal scorer (disabled by "
+        "default). Use --no-proposal-scoring to keep it off explicitly. "
+        "Even when enabled it is skipped in Anthropic-only deployments "
+        "(OpenAI-compatible only) or when the model list is empty. "
+        "Advisory only; never gates.",
+    )
+    # Retired: the earlier --enable-proposal-scoring spelling was folded into
+    # the --proposal-scoring / --no-proposal-scoring BooleanOptionalAction pair;
+    # hard-fail with a migration hint instead of an opaque unrecognized-arg error.
+    opt.add_argument(
+        "--enable-proposal-scoring",
+        action=_RetiredFlag,
+        hint="Use ``--proposal-scoring`` (default off) / ``--no-proposal-scoring`` instead.",
     )
     # specialist sub-agent backend selection: Claude (default), inherits orchestration model; per-task caps bound LLM use.
     opt.add_argument(

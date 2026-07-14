@@ -25,8 +25,6 @@ from _io_utils import (  # noqa: E402
     append_jsonl,
     append_log,
     atomic_write_json,
-    kernel_row_matches,
-    read_json,
     read_last_lines,
     safe_float,
     source_text_looks_complete,
@@ -1476,7 +1474,8 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         runtime_flags.update(candidate["runtime_flags"])
     runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
     runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
-    # Canonical key is ``extra_server_args`` (legacy ``extra_sglang_args`` still read by the shim).
+    # The standalone shim keeps kernel-agent scripts independent from the
+    # ``hyperloom`` package when launched on remote nodes.
     from _payload_aliases import (  # type: ignore[import-not-found]
         read_extra_server_args as _read_eserver,
     )
@@ -1485,7 +1484,6 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         getattr(args, "extra_server_args", "")
         or _read_eserver(candidate)
         or candidate.get("candidate_extra_server_args", "")
-        or candidate.get("candidate_extra_sglang_args", "")
     )
     parsed_sglang_args = parse_extra_server_args(str(extra_server_args))
     for key in (

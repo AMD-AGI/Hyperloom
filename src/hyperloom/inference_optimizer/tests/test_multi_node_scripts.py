@@ -759,7 +759,7 @@ def test_dynamo_body_vllm_backend_and_session_label():
 # dynamo_support pure-helper tests (Dynamo backend SSH fan-out).
 
 
-def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
+def test_dynamo_discover_role_pods_aggregated_excludes_frontend_sorts_by_ordinal():
     from hyperloom.inference_optimizer.multi_node._internal import dynamo_support
 
     wl = {
@@ -770,7 +770,7 @@ def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
             {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
         ]
     }
-    w = dynamo_support.discover_worker_pods(wl)
+    w = dynamo_support.discover_role_pods(wl, pd_mode="aggregated")["worker"]
     assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
     assert [p["lwsIndex"] for p in w] == [0, 1]
 
@@ -932,17 +932,6 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     assert mn_cli.install_geak_on_pods_best_effort() == 0
-
-
-def test_install_kernel_tools_noop_for_rayjob(tmp_path, monkeypatch):
-    # kernel-tools install is Dynamo-only (GEAK); RayJob is a no-op.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3"}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    assert mn_cli.install_kernel_tools_on_pods_best_effort() == 0
 
 
 # ---------------------------------------------------------------------------
