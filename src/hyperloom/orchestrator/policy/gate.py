@@ -823,24 +823,6 @@ class PolicyGate:
             tools.append("Read")
         return tools
 
-    def allowed_tools_for_action(self, action_name: str) -> list[str]:
-        """Per-action tool intersection; action's declared ``allowed_tools`` or the default ``["emit_intent"]``.
-
-        Args:
-            action_name (str): the action whose allowed tools are requested.
-
-        Returns:
-            list[str]: the action's declared ``allowed_tools``, or
-                ``["emit_intent"]`` when no registry is wired or the action is
-                unknown.
-        """
-        if self.action_registry is None:
-            return ["emit_intent"]
-        meta = self.action_registry.get(action_name)
-        if meta is None:
-            return ["emit_intent"]
-        return list(meta.allowed_tools)
-
     # Per-intent validators
     def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``DELEGATE`` intent against the full delegate rule set.
@@ -1465,54 +1447,6 @@ class PolicyGate:
                 f"Coordinator-mediated KnowledgePlane facade instead."
             ),
         )
-
-    # R4 / R5 public helper — pure validator for the SpecialistRunner tool-list builder.
-    def validate_tool_invocation(
-        self,
-        tool_name: str,
-        *,
-        source_role: str,
-        phase: str | None = None,
-    ) -> None:
-        """Raise :class:`PolicyDenied` if ``tool_name`` is not allowed for ``source_role`` (pure, Inv-11.1; ``phase`` no longer gates).
-
-        Args:
-            tool_name (str): the canonical tool name to validate.
-            source_role (str): the role attempting to invoke the tool.
-            phase (str | None): the current phase; retained for signature
-                compatibility but no longer used to gate.
-
-        Raises:
-            PolicyDenied: when ``tool_name`` is empty, a KB write surface, or a
-                known external tool not whitelisted for ``source_role``.
-        """
-        tool_name = (tool_name or "").strip()
-        if not tool_name:
-            raise PolicyDenied(
-                "validate_tool_invocation: tool_name is empty",
-                rule="payload",
-                hint="caller must pass the canonical tool name",
-            )
-        # R4 — KB writes are categorically off-limits.
-        if tool_name in KB_WRITE_TOOL_NAMES:
-            raise PolicyDenied(
-                f"KB write tool {tool_name!r} cannot be invoked by role={source_role!r}",
-                rule="kb_write_unauthorized",
-                hint=("Direct KB writes are not allowed (KB_design §3.11 R4). The Coordinator owns all KB writes."),
-            )
-        # R5 — role whitelist for the known external tools.
-        if tool_name in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
-            allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(
-                source_role,
-                frozenset(),
-            )
-            if tool_name not in allowed_for_role:
-                raise PolicyDenied(
-                    f"role={source_role!r} cannot invoke tool {tool_name!r}",
-                    rule="tool_whitelist_role",
-                    hint=(f"{tool_name} is restricted to specialist sub-agents. KB_design §3.11 §4.5."),
-                )
-        # Anything else is implicitly allowed; internal tools are filtered by the SpecialistRunner's own denylist.
 
     # ``sweep_phase_singleton``
     def _validate_sweep_singleton(

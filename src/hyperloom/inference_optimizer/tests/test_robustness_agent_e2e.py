@@ -9,11 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _resolve_robustness_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_robustness_agent_root
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     RobustnessAgentBackend,
     ScriptedPlan,
 )
@@ -89,7 +88,7 @@ async def test_robustness_agent_real_runtime_heartbeat(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat_intent()), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": backend,
     }
@@ -140,7 +139,7 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat_intent()), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": backend,
     }
@@ -189,7 +188,7 @@ async def test_robustness_agent_workdir_is_per_turn(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat_intent()), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": backend,
     }

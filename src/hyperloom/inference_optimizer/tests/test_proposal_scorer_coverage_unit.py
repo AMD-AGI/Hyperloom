@@ -68,7 +68,13 @@ def test_normalise_drops_unknown_and_bad_score():
 
 # ---- _ensure_client ----
 def test_ensure_client_no_api_key(monkeypatch):
-    for var in ("ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
+    for var in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "LLM_GATEWAY_KEY",
+        "SAFE_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
     scorer = ProposalScorer(models=("m",))
     with pytest.raises(RuntimeError):

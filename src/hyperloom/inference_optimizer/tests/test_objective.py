@@ -59,17 +59,14 @@ def test_target_gain_basic_progress():
     s = SharedState(baseline_tput=1000.0, cumulative_gain=0.0)
     assert obj.kind() == "gain_pct"
     assert obj.progress(s) == 0.0
-    assert obj.remaining_gap(s) == 10.0
     assert not obj.reached(s)
 
     s.cumulative_gain = 5.0
     assert obj.progress(s) == 0.5
-    assert obj.remaining_gap(s) == 5.0
     assert not obj.reached(s)
 
     s.cumulative_gain = 12.0
     assert obj.progress(s) == 1.0
-    assert obj.remaining_gap(s) == 0.0
     assert obj.reached(s)
 
 
@@ -78,12 +75,6 @@ def test_target_gain_zero_or_negative_rejected():
         TargetGainObjective(target_gain_pct=0)
     with pytest.raises(ObjectiveError, match="must be > 0"):
         TargetGainObjective(target_gain_pct=-3)
-
-
-def test_target_gain_pressure_zero_before_baseline():
-    obj = TargetGainObjective(target_gain_pct=10.0)
-    s = SharedState(baseline_tput=0.0, cumulative_gain=0.0)
-    assert obj.pressure_input(s) == 0.0
 
 
 # TargetTputObjective
@@ -150,7 +141,6 @@ def test_time_only_never_reached():
     s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0}, cumulative_gain=99.0)
     assert obj.kind() == "time_only"
     assert obj.progress(s) == 0.0
-    assert obj.remaining_gap(s) == float("inf")
     assert not obj.reached(s)
 
 

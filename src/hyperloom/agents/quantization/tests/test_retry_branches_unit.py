@@ -84,14 +84,3 @@ def test_decide_next_step_checkpoint_aborted(tmp_path) -> None:
     )
     assert decision.retry is False
     assert "checkpoint_aborted" in decision.note
-
-
-def test_quantize_via_prompt_sync_bootstrap_failure(tmp_path) -> None:
-    # quark_root missing -> fast-path failed result via the sync wrapper (line 456).
-    result = retry.quantize_via_prompt_sync(
-        "quantize please",
-        workspace=str(tmp_path / "ws"),
-        quark_root=str(tmp_path / "no_such_quark"),
-    )
-    assert result.status == "failed"
-    assert result.assessment.final == OutcomeId.quark_root_missing

@@ -8,7 +8,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 from hyperloom.common.coerce import to_float
-from hyperloom.common.payload_aliases import read_extra_server_args
 from ..state.optimization_journal import (
     Journal,
     classify_change_kind,
@@ -22,7 +21,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,
-    _merge_cumulative_extra_sglang_args,
+    _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
     _geak_revalidation_decision,
@@ -212,9 +211,9 @@ class WritebackCollaborator:
             self.shared_state.seed_stack_from_current_best()
 
         cb = self.shared_state.current_best or {}
-        # Read result via the compat helper (handles legacy extra_sglang_args); cb is migrated at load time.
         extra_args = (
-            read_extra_server_args(result) or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
+            str(result.get("extra_server_args") or "")
+            or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
         ).strip()
         apply_result = result.get("apply_result") or {}
         backup_manifest = apply_result.get("manifest_path") if isinstance(apply_result, dict) else None
@@ -778,9 +777,9 @@ class WritebackCollaborator:
             candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or bv.get("extra_sglang_args") or "").strip()
+            full_args = str(bv.get("extra_server_args") or "").strip()
         # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
-        full_args = _merge_cumulative_extra_sglang_args(
+        full_args = _merge_cumulative_extra_server_args(
             base_args,
             candidate_args,
             full_args,
@@ -1232,36 +1231,22 @@ class WritebackCollaborator:
                         min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
                     if decision == "validated":
-                        if self._geak_legacy_promote():
-                            # Legacy: current_best/stack were written up front by
-                            # the provisional promote; here we only stamp the
-                            # same-harness validated watermark.
-                            self.shared_state.cumulative_gain_validated = (
-                                (float(measured) - self.shared_state.baseline_tput)
-                                / self.shared_state.baseline_tput
-                                * 100.0
+                        # Rebench-first: THIS is where the headline is first
+                        # written - from the measured orchestrator-harness
+                        # rebench. Lifts current_best + optimization_stack +
+                        # the validated gain and clears geak_pending.
+                        ps = (
+                            self.shared_state.geak_result
+                            if isinstance(
+                                getattr(self.shared_state, "geak_result", None), dict
                             )
-                            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                            self.shared_state.cumulative_gain_provenance = "geak_orch_harness_validated"
-                            self.shared_state.resume_pending_revalidation = False
-                        else:
-                            # Rebench-first: THIS is where the headline is first
-                            # written - from the measured orchestrator-harness
-                            # rebench. Lifts current_best + optimization_stack +
-                            # the validated gain and clears geak_pending.
-                            ps = (
-                                self.shared_state.geak_result
-                                if isinstance(
-                                    getattr(self.shared_state, "geak_result", None), dict
-                                )
-                                else {}
-                            )
-                            self._promote_geak_from_candidate(
-                                ps,
-                                measured_tput=float(measured),
-                                provenance="geak_orch_harness_validated",
-                            )
+                            else {}
+                        )
+                        self._promote_geak_from_candidate(
+                            ps,
+                            measured_tput=float(measured),
+                            provenance="geak_orch_harness_validated",
+                        )
                     else:
                         # 2b inconclusive (config-identity or engagement) -> GEAK
                         # harness replay (2a). Leaves pending flag set; 2a clears
@@ -1288,13 +1273,7 @@ class WritebackCollaborator:
                         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                         cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                         recorded = cb_rec.get("tput")
-                        try:
-                            floor = float(
-                                os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
-                                or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                            )
-                        except (TypeError, ValueError):
-                            floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                         if (
                             isinstance(recorded, (int, float))
                             and recorded > 0

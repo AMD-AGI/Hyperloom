@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Stdlib-only mirror of ``hyperloom.common.payload_aliases``.
+"""Stdlib-only payload-args helper for standalone kernel-agent tools.
 
-Kept as an independent, stdlib-only mirror (not a ``hyperloom.common``
-re-export) because ``tools/`` scripts must run standalone on remote nodes
+Kept as an independent, stdlib-only module because ``tools/`` scripts must run
+standalone on remote nodes
 without a ``hyperloom`` import: they are invoked as bare
 ``python3 <root>/tools/<tool>.py --args`` subprocesses (see
 ``HYPERLOOM_KERNEL_AGENT_ROOT`` in

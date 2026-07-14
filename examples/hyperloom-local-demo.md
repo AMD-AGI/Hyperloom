@@ -269,16 +269,16 @@ of Claude account they will use:
 **setup-claude-2 — collect the key(s) and set the env vars** for the chosen method.
 
 - **AMD internal (gateway):** ask the user (a question) for `ANTHROPIC_BASE_URL`
-  and their `LLM_GATEWAY_KEY`. `ANTHROPIC_BASE_URL` defaults to
+  and their `SAFE_API_KEY`. `ANTHROPIC_BASE_URL` defaults to
   `https://llm-api.amd.com/Anthropic` — tell the user this and use it as-is
-  unless they provide their own. `LLM_GATEWAY_KEY` is **required**; if they don't
+  unless they provide their own. `SAFE_API_KEY` is **required**; if they don't
   have one, they can get it from <https://llm.amd.com/key-management>. Then:
 
 ```bash
-export LLM_GATEWAY_KEY="xxxxx"   # <- the user's LLM gateway key
+export SAFE_API_KEY="xxxxx"   # <- the user's LLM gateway key
 export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"   # or the user's override
 export ANTHROPIC_API_KEY="dummy"
-export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: $LLM_GATEWAY_KEY"
+export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: $SAFE_API_KEY"
 ```
 
 - **Personal Anthropic account:** ask the user (a question) for their
@@ -331,15 +331,15 @@ of OpenAI account they will use:
 **setup-codex-2 — collect the key(s) and set the env vars** for the chosen method.
 
 - **AMD internal (gateway):** ask the user (a question) for `OPENAI_BASE_URL` and
-  their `LLM_GATEWAY_KEY`. `OPENAI_BASE_URL` defaults to
+  their `SAFE_API_KEY`. `OPENAI_BASE_URL` defaults to
   `https://llm-api.amd.com/Unified/v1` — tell the user this and use it as-is
-  unless they provide their own. `LLM_GATEWAY_KEY` is **required**. Then:
+  unless they provide their own. `SAFE_API_KEY` is **required**. Then:
 
 ```bash
-export LLM_GATEWAY_KEY="xxxxx"   # <- the user's LLM gateway key
+export SAFE_API_KEY="xxxxx"   # <- the user's LLM gateway key
 export OPENAI_BASE_URL="https://llm-api.amd.com/Unified/v1"   # or the user's override
 export OPENAI_API_KEY="dummy"
-export OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: $LLM_GATEWAY_KEY"
+export OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: $SAFE_API_KEY"
 ```
 
 - **Personal OpenAI account:** ask the user (a question) for their
@@ -502,7 +502,7 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc 'cat "$
 | INFERENCEX_PATH | _fill in_ |
 | TRACELENS_ROOT | _fill in_ |
 | GEAK_ROOT | _fill in_ |
-| GEAK_CONFIG | _fill in_ |
+| GEAK_CLAUDE_MODEL | _fill in_ |
 
 3. **Save** the summary — the `.env` highlights **and** the `kernel-agent.env.sh`
    table above:

@@ -72,7 +72,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime",  # pod-local env files (kernel-agent.env.sh, etc.)
-    "runtime/geak-config",  # generated litellm config consumed by GEAK CLI
     # Cortex KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
     # created up-front so the KB client never mkdir's on the hot path.
     "runtime/cortex",
@@ -272,21 +271,6 @@ def asset_root() -> Path:
     return PACKAGE_ROOT
 
 
-def asset_scripts_dir() -> Path:
-    """Return the directory of shipped release-contract shell scripts
-    (installers + baseline/profile configs).
-
-    ``scripts/`` was split three ways (``assets/`` for
-    installers/configs, ``tools/`` for operator CLIs, ``experiments/`` for
-    A/B scripts); this helper follows the ``assets/`` successor since that is
-    the shell-installer counterpart of the former single ``scripts/`` dir.
-
-    Returns:
-        Path: ``<asset_root>/assets``.
-    """
-    return asset_root() / "assets"
-
-
 def asset_actions_dir() -> Path:
     """Return the directory of shipped action-metadata files.
 
@@ -319,29 +303,6 @@ def asset_system_prompts_dir() -> Path:
     import hyperloom.orchestrator.prompts as _prompts_pkg
 
     return Path(_prompts_pkg.__file__).resolve().parent
-
-
-def asset_kernel_opt_dir() -> Path:
-    """Return the directory of shipped kernel-optimization prompt templates.
-
-    Returns:
-        Path: ``<asset_root>/kernel_opt``.
-    """
-    return asset_root() / "kernel_opt"
-
-
-def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
-    """Per-agent inbox/outbox dir under the session (created by
-    make_session_dir; this only computes the path).
-
-    Args:
-        session_dir: The session directory root.
-        agent_name: The agent name subdirectory.
-
-    Returns:
-        ``<session_dir>/agents/<agent_name>``.
-    """
-    return Path(session_dir) / "agents" / agent_name
 
 
 # Workspace-/session-scoped artefact helpers. Single source of truth so
@@ -411,25 +372,6 @@ def tracelens_root() -> Path:
     return open_source_root() / "TraceLens"
 
 
-def kernel_agent_root(session_dir: Path) -> Path:
-    """``<sd>/kernel-agent/`` — kernel-agent CLI tool output root (one
-    ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
-    ``<sd>/kernel-agent-workspace/``.
-
-    Renamed from ``kernel_agent_runs_root`` (which
-    collided with the unrelated ``session_paths.kernel_agent_runs_root`` —
-    that one returns the ``runs/`` subdirectory *one level below* this
-    root) to remove the same-name-different-meaning ambiguity.
-
-    Args:
-        session_dir: The session directory root.
-
-    Returns:
-        ``<session_dir>/kernel-agent``.
-    """
-    return Path(session_dir) / "kernel-agent"
-
-
 def mn_profile_trace_root() -> Path:
     """``<workspace_root>/profile-traces/`` — multi-node torch profile shared
     root (``<rayjob_id>/torch_trace/`` per provision). Multi-node operators
@@ -450,14 +392,10 @@ __all__ = [
     "ENV_SESSION_LAYOUT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
-    "agent_session_dir",
     "asset_actions_dir",
-    "asset_kernel_opt_dir",
     "asset_root",
-    "asset_scripts_dir",
     "asset_system_prompts_dir",
     "db_path_for",
-    "kernel_agent_root",
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",

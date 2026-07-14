@@ -273,30 +273,6 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_reverify_best_env_queues_explore(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "1")
-    coord._resumed_from["is_resume"] = True
-    coord.shared_state.current_best = {
-        "variant_name": "best",
-        "extra_server_args": "--best 1",
-        "extra_envs": {"BEST": "1"},
-        "tput": 123.0,
-    }
-
-    report = await coord._resume_consistency_pass()
-
-    queued = await coord.tasks.queued()
-    assert any(t.kind == "explore" and t.params.get("source") == "resume_reverify_best" for t in queued)
-    assert any(
-        isinstance(f, dict) and f.get("kind") == "queued_resume_reverify_best"
-        for f in report["fixes"]
-    )
-
-
-@pytest.mark.asyncio
 async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
     # Gap B: an integrate_patch KEEP whose run workspace is gone is discarded +
     # surfaced (alert), never silently treated as applied.

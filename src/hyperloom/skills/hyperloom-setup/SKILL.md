@@ -107,8 +107,12 @@ Ask these questions using the agent's structured question UI when available.
 
 Create or update `.env` in the current directory.
 
-- Preserve unrelated existing keys.
-- Replace values collected by this setup.
+- For every value the user chose in this run (LLM mode, base URL, model, run
+  mode, `USER_DATA_PATH`), write exactly what the user selected. This wins over
+  any pre-existing value in `.env` or the shell environment — e.g. if the user
+  picked the Anthropic official URL, write `ANTHROPIC_BASE_URL=https://api.anthropic.com`
+  even when a different `ANTHROPIC_BASE_URL` already exists.
+- Preserve existing keys unrelated to this setup.
 - Never print secret values back to the user.
 - Do not write `HYPERLOOM_INSTALL_SOURCE`.
 - Do not overwrite an existing non-placeholder secret key.
@@ -184,11 +188,12 @@ PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-fr
 
 ### `docker`
 
-Run the backend with `--install-framework none` (the container the example
-generates later provides the framework):
+Run the backend with `--install-framework none` and `--skip-base-check`. The
+host does not need ROCm or a serving framework yet; the container the example
+generates later provides both:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --skip-base-check --install-framework none --yes
 ```
 
 This skill does not start a container. `HYPERLOOM_RUN_MODE` is recorded so the
@@ -201,11 +206,17 @@ After setup completes, the backend writes the detected serving framework to
 `FRAMEWORK` in `.env` (`sglang` or `vllm`). Read `.env` back and check it:
 
 - If `FRAMEWORK` is set, report it. Downstream demo skills read this value.
-- If `FRAMEWORK` is missing or empty, no serving framework was importable
-  (e.g. `--install-framework none` on a host without SGLang/vLLM). Tell the
-  user that demo skills needing a framework will not run until one is
-  installed, and offer to re-run setup with `--install-framework sglang`
-  or `vllm`. Do not invent a `FRAMEWORK` value.
+- If `HYPERLOOM_RUN_MODE` is `docker`, an unset `FRAMEWORK` is expected: the
+  container has not run yet, so the host has no importable serving framework.
+  Tell the user the example (workload) skill will detect or provide the
+  framework when it starts the container. Do not offer to re-run setup with
+  `--install-framework sglang` or `vllm`.
+- If `HYPERLOOM_RUN_MODE` is `baremetal` and `FRAMEWORK` is missing or empty,
+  no serving framework was importable on the host (e.g. `--install-framework
+  none` without SGLang/vLLM installed). Tell the user that demo skills needing
+  a framework will not run until one is installed, and offer to re-run setup
+  with `--install-framework sglang` or `vllm`. Do not invent a `FRAMEWORK`
+  value.
 
 ## Step 6: Report Result
 

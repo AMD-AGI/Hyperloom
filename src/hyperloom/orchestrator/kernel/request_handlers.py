@@ -34,30 +34,11 @@ from ..trace.parse_usage import (
     parse_forge_usage,
 )
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
+# Cohesive decision helpers live in the sibling module; request handlers only
+# import the flag helpers they use internally.
 from ._kernel_decisions import (
-    _HONEST_E2E_UMBRELLA_ENV as _HONEST_E2E_UMBRELLA_ENV,
     _TRUEY as _TRUEY,
-    _FALSEY as _FALSEY,
     _honest_flag as _honest_flag,
-    _format_last_kernel_opt as _format_last_kernel_opt,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_kernel_opt as record_kernel_opt,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
 )
 
 
@@ -860,8 +841,17 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     return None
 
 
+_ALLOW_EMPTY_KERNEL_SHAPE = False
+
+
+def set_allow_empty_kernel_shape(value: bool) -> None:
+    """Set the process-local empty-shape escape hatch used by CLI runs."""
+    global _ALLOW_EMPTY_KERNEL_SHAPE
+    _ALLOW_EMPTY_KERNEL_SHAPE = bool(value)
+
+
 def _allow_empty_kernel_shape(payload: dict) -> bool:
-    """Escape hatch (default off) via ``payload['allow_empty_kernel_shape']`` or ``HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1``.
+    """Escape hatch (default off) via ``payload['allow_empty_kernel_shape']`` or the CLI process flag.
 
     Args:
         payload: Request payload that may carry ``allow_empty_kernel_shape``.
@@ -871,7 +861,7 @@ def _allow_empty_kernel_shape(payload: dict) -> bool:
     """
     if bool(payload.get("allow_empty_kernel_shape")):
         return True
-    return str(os.environ.get("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    return _ALLOW_EMPTY_KERNEL_SHAPE
 
 
 def _validate_kernel_shape_and_paths(
@@ -1190,10 +1180,9 @@ def _fill_integrate_defaults_from_state(
         if cfg:
             resolved["config_path"] = cfg
 
-    # Field renamed ``extra_sglang_args`` -> ``extra_server_args``; read canonical first with a legacy fallback, write canonical.
     current_best = getattr(state, "current_best", None) or {}
     if not resolved.get("extra_server_args") and isinstance(current_best, dict):
-        cb_args = current_best.get("extra_server_args") or current_best.get("extra_sglang_args") or ""
+        cb_args = current_best.get("extra_server_args") or ""
         if cb_args:
             resolved["extra_server_args"] = cb_args
 
@@ -4062,7 +4051,7 @@ async def _run_optimization_single(
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
         cmd += ["--target-platform", str(target_platform)]
-    extra_args = str(payload.get("extra_server_args") or payload.get("extra_sglang_args") or "").strip()
+    extra_args = str(payload.get("extra_server_args") or "").strip()
     if extra_args:
         cmd += ["--extra-sglang-args", extra_args]
     if payload.get("candidates_path"):
@@ -4435,12 +4424,9 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
-    from hyperloom.common.payload_aliases import read_extra_server_args
-
     env_only_validation = (
         str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"}
-        and (bool(payload.get("extra_envs")) or bool(read_extra_server_args(payload).strip()))
+        and (bool(payload.get("extra_envs")) or bool(str(payload.get("extra_server_args") or "").strip()))
     )
     if not env_only_validation:
         payload, missing_inputs = _resolve_integrate_payload(
@@ -4490,7 +4476,7 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    extra_args = read_extra_server_args(payload).strip()
+    extra_args = str(payload.get("extra_server_args") or "").strip()
     # VRAM barrier (flag-gated, default off): cap re-baseline util so the
     # integrate server cannot OOM on a tighter node. No-op when off.
     extra_args = _vram_guarded_server_args(extra_args)
@@ -4854,68 +4840,13 @@ def get_handler(kind: str) -> HandlerFn | None:
     return KERNEL_REQUEST_HANDLERS.get(kind)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 __all__ = [
     "KERNEL_REQUEST_HANDLERS",
     "get_handler",
     "has_handler",
     "integrate_handler",
+    "run_fusion_handler",
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
-    # Re-exported from sibling modules for backward compat and the test
-    # monkeypatch surface (referenced via ``request_handlers.<name>``).
-    # Declared so the re-exports are intentional, not flagged imports.
-    "_HONEST_E2E_UMBRELLA_ENV",
-    "_FALSEY",
-    "_format_last_kernel_opt",
-    "_resolve_kernel_patch_identity",
-    "kernel_patch_key",
-    "find_rejected_kernel_patch",
-    "record_kernel_integrate_result",
-    "record_kernel_opt",
-    "record_gemm_tuning",
-    "_kernel_ids_in_optimization_stack",
-    "_source_files_in_optimization_stack",
-    "_kernel_ids_with_integrate_attempts",
-    "integrate_attempt_count_for_kernel",
-    "_kernel_trace_impact_pct",
-    "next_pending_keep_kernel_id",
-    "pending_keep_kernel_ids",
-    "has_keep_pending_integrate",
-    "kernel_opt_attempts_count",
-    "untried_hot_reusable_kernels",
 ]
