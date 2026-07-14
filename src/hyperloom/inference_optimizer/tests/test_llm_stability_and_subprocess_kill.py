@@ -4,7 +4,7 @@
 
 Covers the orchestrator-side LLM-transport stability env helper and the
 process-group kill in ``_run_subprocess`` that reaps a hung grandchild (the
-claude CLI / oob / curl holding a stalled streaming socket) instead of
+claude CLI / forge / curl holding a stalled streaming socket) instead of
 orphaning it.
 """
 
