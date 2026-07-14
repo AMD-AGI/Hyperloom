@@ -206,9 +206,8 @@ docker run -d \
 
 ### 2b. Check GitHub connectivity for the public dependency repos
 
-The default demo uses the open GEAK whole-pipeline optimizer (`geak`, formerly
-GEAK v4). It must **not** require private KernelForge access. Confirm the
-container can reach the public repos that `install.sh` and the chained
+The default demo uses the open GEAK whole-pipeline optimizer (`geak`). Confirm
+the container can reach the public repos that `install.sh` and the chained
 kernel-agent installer clone:
 
 ```bash
@@ -229,11 +228,6 @@ done'
 | AMD-AGI/TraceLens | _fill in_ |
 | AMD-AGI/GEAK | _fill in_ |
 | SemiAnalysisAI/InferenceX | _fill in_ |
-
-> **Optional private Forge path:** only if the user explicitly wants the private
-> KernelForge backend and has repo access, set a Forge backend order and run
-> `local_setup.sh`. The default tutorial path below stays on `geak` and skips
-> KernelForge.
 
 ### 2c. Set up the Claude & Codex accounts in the container
 
@@ -437,9 +431,7 @@ cat >> .env <<EOF
 # model id. The current catalog probe also applies custom headers, so this is
 # about model selection rather than a workaround for missing auth headers.
 export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
-# Default to the open GEAK whole-pipeline optimizer. Do not use geak_v3 here:
-# geak_v3 is the legacy per-kernel fallback token, while geak owns the full
-# KERNEL_AGENT phase.
+# Default to the open GEAK whole-pipeline optimizer for the full KERNEL_AGENT phase.
 export KERNEL_OPT_BACKEND_ORDER=geak
 # Claude (orchestration) — the values you validated in setup-claude-3.
 export ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL"
@@ -473,8 +465,8 @@ echo "USER_DATA_PATH=$USER_DATA_PATH"
 
 Create the workspace and run the installer **inside the container**. This clones
 Magpie / InferenceX and chains the kernel-agent installer, which prepares
-TraceLens plus both GEAK checkouts. With `KERNEL_OPT_BACKEND_ORDER=geak`, the
-demo uses the open whole-pipeline GEAK path and does not require KernelForge.
+TraceLens plus the GEAK runtime. With `KERNEL_OPT_BACKEND_ORDER=geak`, the demo
+uses the open whole-pipeline GEAK path.
 
 ```bash
 docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc '
@@ -487,11 +479,6 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc '
 `install.sh` is idempotent. It writes
 `$USER_DATA_PATH/runtime/kernel-agent.env.sh`, which is the env file to source
 before launching or resuming.
-
-> **Optional private Forge path:** only if the user explicitly requests Forge,
-> set `KERNEL_OPT_BACKEND_ORDER=forge,geak_v3`, ensure KernelForge access, and
-> run `src/hyperloom/inference_optimizer/assets/local_setup.sh` before
-> `install.sh`. Keep this out of the default demo.
 
 ### Report — save and pause
 
@@ -516,7 +503,6 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc 'cat "$
 | INFERENCEX_PATH | _fill in_ |
 | TRACELENS_ROOT | _fill in_ |
 | GEAK_ROOT | _fill in_ |
-| GEAK_V3_ROOT | _fill in_ |
 | GEAK_CONFIG | _fill in_ |
 
 3. **Save** the summary — the `.env` highlights **and** the `kernel-agent.env.sh`
