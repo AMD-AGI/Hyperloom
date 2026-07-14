@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import safe_mtime
 
 from ._common import (
     _load_json_safe,
@@ -988,19 +989,6 @@ _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 _CONC_SWEEP_VARIANT_RE = re.compile(r"^(baseline|optimized)_conc(\d+)$")
 
 
-def _safe_mtime(p: Path) -> float:
-    """mtime for sort keys; 0.0 when the entry vanished mid-scan.
-
-    Breakdown collectors must never raise, so a concurrent workspace cleanup
-    that removes a path between enumeration and ``stat`` must not surface as
-    an exception out of ``collect_conc_sweep_summary``.
-    """
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
 def _conc_sweep_successful_pairs(summary: dict[str, Any]) -> int:
     try:
         return int((summary.get("summary") or {}).get("successful_pairs") or 0)
@@ -1012,7 +1000,7 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
     """Best-effort point extraction from a conc_sweep variant workspace."""
     result_paths = sorted(
         variant_dir.rglob("inferencex_result.json"),
-        key=_safe_mtime,
+        key=safe_mtime,
         reverse=True,
     )
     for result_path in result_paths:
@@ -1124,7 +1112,7 @@ def _recover_conc_sweep_summary_from_runs(
         return {}
     tasks = sorted(
         (p for p in runs_dir.iterdir() if p.is_dir()),
-        key=_safe_mtime,
+        key=safe_mtime,
         reverse=True,
     )
     best_payload: dict[str, Any] = {}

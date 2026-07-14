@@ -243,6 +243,20 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
+# ``$FRAMEWORK`` (lowercased) -> shipped Magpie YAML, relative to
+# ``asset_root()``. Unknown / unset frameworks fall back to
+# ``_DEFAULT_BASELINE_CONFIG`` (sglang) so existing sglang-default tests keep
+# passing. Values are relative so ``asset_root()`` is still resolved at call
+# time (honoring the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override).
+_BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
+    "atom": Path("assets/configs/baseline_atom.yaml"),
+    "vllm": Path("assets/configs/baseline_vllm.yaml"),
+    "xdit": Path("assets/configs/baseline_xdit.yaml"),
+    "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
+}
+_DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
+
+
 def default_baseline_config() -> Path:
     """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
 
@@ -253,17 +267,8 @@ def default_baseline_config() -> Path:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    if fw == "atom":
-        name = "baseline_atom.yaml"
-    elif fw == "vllm":
-        name = "baseline_vllm.yaml"
-    elif fw == "xdit":
-        name = "baseline_xdit.yaml"
-    elif fw == "hunyuan_image3":
-        name = "baseline_hunyuan_image3.yaml"
-    else:
-        name = "baseline_sglang.yaml"
-    return asset_root() / "assets" / "configs" / name
+    rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
+    return asset_root() / rel
 
 
 def materialize_config_with_envs(

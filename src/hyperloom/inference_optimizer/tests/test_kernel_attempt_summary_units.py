@@ -250,6 +250,89 @@ def test_kernel_outcome_class_mapping():
     assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
 
 
+# CATEGORY_DISPATCH — single source of truth consumed by the summary builder
+# and both count sites; pin the count-key mapping + per-category summary output
+# so the three formerly-duplicated dispatch sites can never drift apart.
+def test_category_dispatch_count_keys():
+    # The table covers exactly the four terminal categories.
+    assert set(kas.CATEGORY_DISPATCH) == {
+        kas.CATEGORY_INTEGRATED,
+        kas.CATEGORY_KEEP_PENDING,
+        kas.CATEGORY_ATTEMPTED_REJECTED,
+        kas.CATEGORY_IN_FLIGHT,
+    }
+    # Each category maps to the ``totals`` counter the old if/elif ladder used.
+    assert kas._category_count_key(kas.CATEGORY_INTEGRATED) == "integrated"
+    assert kas._category_count_key(kas.CATEGORY_KEEP_PENDING) == "keep_pending"
+    assert kas._category_count_key(kas.CATEGORY_ATTEMPTED_REJECTED) == "rejected"
+    assert kas._category_count_key(kas.CATEGORY_IN_FLIGHT) == "in_flight"
+    # Unknown/blank category falls back to the ``in_flight`` counter (the old
+    # ``else`` branch), never a KeyError.
+    assert kas._category_count_key("NOT_A_CATEGORY") == "in_flight"
+    assert kas._category_count_key("") == "in_flight"
+
+
+def test_summary_one_line_per_category():
+    integrated = kas._summary_one_line(
+        category=kas.CATEGORY_INTEGRATED,
+        entry={"last_micro_speedup": 1.25},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert integrated == "integrated into optimization_stack; micro_speedup=1.250x"
+
+    keep = kas._summary_one_line(
+        category=kas.CATEGORY_KEEP_PENDING,
+        entry={"last_micro_speedup": 1.2},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert keep == "KEEP awaiting integrate; micro_speedup=1.200x (pending integrate action)"
+
+    in_flight = kas._summary_one_line(
+        category=kas.CATEGORY_IN_FLIGHT,
+        entry={"attempts": 3},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert in_flight == "in-flight; 3 attempt(s) recorded, no terminal decision yet"
+
+    # ATTEMPTED_REJECTED: all-failed ladder branch wins over the decision fallback.
+    all_failed = kas._summary_one_line(
+        category=kas.CATEGORY_ATTEMPTED_REJECTED,
+        entry={"last_decision": "REVERT", "rejected_reason": "revert_decision"},
+        backend_ladder=[
+            {"backend": "geak_v3", "status": "failed", "produced_artifact": False},
+            {"backend": "claude", "status": "failed", "produced_artifact": False},
+        ],
+        artifact_error="no usable artifact",
+    )
+    assert all_failed == (
+        "kernel-agent ladder (geak_v3/claude) all 2 backends failed to produce a "
+        "usable patch; verification: no usable artifact"
+    )
+
+    # ATTEMPTED_REJECTED: decision/reason fallback when not all-failed.
+    rejected = kas._summary_one_line(
+        category=kas.CATEGORY_ATTEMPTED_REJECTED,
+        entry={"last_decision": "revert", "rejected_reason": "max_failures_without_keep"},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert rejected == "REVERT; rejected_reason=max_failures_without_keep"
+
+    # Unknown category -> empty string (the old trailing ``return ""``).
+    assert (
+        kas._summary_one_line(
+            category="NOT_A_CATEGORY",
+            entry={},
+            backend_ladder=[],
+            artifact_error="",
+        )
+        == ""
+    )
+
+
 def test_session_kernel_opt_outcome_rollup():
     out = kas._session_kernel_opt_outcome
     # No kernels -> skip.

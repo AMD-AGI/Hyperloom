@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.io import append_jsonl
 
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
@@ -1608,8 +1608,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = (
-        _truthy_env_value(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
-        or _truthy_env_value(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+        is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+        or is_truthy(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
     )
 
     quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
@@ -1639,11 +1639,6 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         precision = "bf16"
     quant_type = str(payload.get("quant_type") or "auto").strip()
     return precision, quant_type
-
-
-def _truthy_env_value(value: Any) -> bool:
-    """Return True for common env truthy values."""
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_forge_server_log(state, session_dir: Path) -> str:

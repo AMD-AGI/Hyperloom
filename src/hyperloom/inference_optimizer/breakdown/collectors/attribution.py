@@ -10,6 +10,7 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 
@@ -43,6 +44,38 @@ def _normalize_specialist_key(provenance: str) -> str:
     return s
 
 
+# Ordered ``(predicate, family)`` table for :func:`_action_family`. Matched
+# top-to-bottom on the lowercased action label; the FIRST hit wins, so the
+# order is load-bearing (e.g. the ``kernel_opt`` prefix must precede the exact
+# ``==`` checks below it). Falls through to ``"other"`` when nothing matches.
+_ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
+    (lambda s: s.startswith("kernel_opt") or s == "integrate", "kernel_agent"),
+    # Legacy stack-entry action labels from archived sessions.
+    (lambda s: s == "backends", "backends"),
+    (lambda s: s == "params", "params"),
+    (lambda s: s == "validate_stack", "validate"),
+    (lambda s: s == "sweep", "sweep"),
+    # merged explore family subsuming the legacy backends + params buckets.
+    (lambda s: s == "explore", "explore"),
+    # REPLAY_WARM_RECIPE: warm-recipe / cortex best_config replay (a prep action).
+    # Its own headline row so its gain reconciles against validated_total_pct
+    # instead of vanishing into the non-emitted ``other`` family. The label may
+    # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
+    (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
+    # FRAMEWORK: own headline row so per-source totals reconcile against
+    # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
+    (lambda s: s == "framework", "framework"),
+    # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
+    # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
+    (lambda s: s == "gemm_tuning", "gemm_tuning"),
+    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
+    # from generic ``kernel`` (which is split across geak_v3/oob/forge adopt
+    # entries) so its gain gets a dedicated row instead of vanishing into
+    # ``other`` or being mis-credited to a backend.
+    (lambda s: s == "geak_e2e", "geak"),
+)
+
+
 def _action_family(action: str) -> str:
     """Map an action label to a family for source_breakdown bucketing.
 
@@ -55,40 +88,9 @@ def _action_family(action: str) -> str:
         ``gemm_tuning``, or ``"other"`` when unrecognized.
     """
     s = (action or "").lower()
-    if s.startswith("kernel_opt") or s == "integrate":
-        return "kernel_agent"
-    # Legacy stack-entry action labels from archived sessions.
-    if s == "backends":
-        return "backends"
-    if s == "params":
-        return "params"
-    if s == "validate_stack":
-        return "validate"
-    if s == "sweep":
-        return "sweep"
-    # merged explore family subsuming the legacy backends + params buckets.
-    if s == "explore":
-        return "explore"
-    # REPLAY_WARM_RECIPE: warm-recipe / cortex best_config replay (a prep action).
-    # Its own headline row so its gain reconciles against validated_total_pct
-    # instead of vanishing into the non-emitted ``other`` family. The label may
-    # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
-    if s.split(":", 1)[0] == "replay_warm_recipe":
-        return "replay_warm_recipe"
-    # FRAMEWORK: own headline row so per-source totals reconcile against
-    # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    if s == "framework":
-        return "framework"
-    # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
-    # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
-    if s == "gemm_tuning":
-        return "gemm_tuning"
-    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
-    # from generic ``kernel`` (which is split across geak_v3/oob/forge adopt
-    # entries) so its gain gets a dedicated row instead of vanishing into
-    # ``other`` or being mis-credited to a backend.
-    if s == "geak_e2e":
-        return "geak"
+    for predicate, family in _ACTION_FAMILY_TABLE:
+        if predicate(s):
+            return family
     return "other"
 
 

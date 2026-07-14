@@ -251,6 +251,25 @@ def tail_lines(path: Path, n: int) -> list[str]:
     return [line.rstrip("\n") for line in tail]
 
 
+def safe_mtime(path: Path) -> float:
+    """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails.
+
+    Never raises: a missing entry (concurrent cleanup mid-scan) or an
+    ``OSError`` from ``stat`` (e.g. an NFS stale handle) degrades to ``0.0``,
+    which sorts oldest for the ``key=`` / mtime-cutoff comparisons that use it.
+
+    Args:
+        path: Filesystem path to stat.
+
+    Returns:
+        The ``st_mtime`` of ``path``, or ``0.0`` on any ``stat()`` failure.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 __all__ = [
     "atomic_write_bytes",
     "atomic_write_text",
@@ -258,4 +277,5 @@ __all__ = [
     "append_jsonl",
     "read_jsonl",
     "tail_lines",
+    "safe_mtime",
 ]
