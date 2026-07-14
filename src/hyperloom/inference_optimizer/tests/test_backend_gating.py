@@ -60,3 +60,66 @@ def test_install_sh_gates_magpie_calls():
     # InferenceX stays unconditional (after the fi).
     inferencex_idx = text.index("ensure_inferencex\n", fi_idx)
     assert inferencex_idx > fi_idx
+
+def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):
+    """bypass backend reports server_lifecycle ineligible with a clear reason."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "benchmark_script": "vllm_mi300x.sh",  # would be eligible under magpie
+            "envs": {"PORT": 8888},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is False
+    assert "bypass" in info["reason"]
+    assert info["framework"] == "vllm"
+    assert info["port"] == 8888
+
+
+def test_lifecycle_magpie_default_unchanged(tmp_path, monkeypatch):
+    """Default (magpie) backend keeps script-name-based eligibility."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "benchmark_script": "vllm_mi300x.sh",  # a Magpie built-in
+            "envs": {"PORT": 8888},
+            "profiler": {"torch_profiler": {"enabled": False}},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is True  # magpie built-in script -> eligible
+
+
+def test_lifecycle_magpie_non_builtin_ineligible(tmp_path, monkeypatch):
+    """magpie backend: a non-built-in script stays ineligible (unchanged)."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "benchmark_script": "custom_thing.sh",
+            "envs": {"PORT": 8888},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is False

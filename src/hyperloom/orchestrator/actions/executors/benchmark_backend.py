@@ -60,6 +60,15 @@ class MagpieBackend:
 
     name = "magpie"
 
+    def lifecycle_eligibility(self, bench: dict) -> dict | None:
+        """Return None to use the default (Magpie script-based) eligibility.
+
+        Magpie keeps the historical behavior: server_lifecycle is decided
+        by the built-in benchmark_script name in :func:`resolve_lifecycle_params`.
+        Returning None signals the caller to run that default path.
+        """
+        return None
+
     def build_command(
         self,
         *,
@@ -92,6 +101,25 @@ class BypassBackend:
     """
 
     name = "bypass"
+
+    def lifecycle_eligibility(self, bench: dict) -> dict | None:
+        """bypass does not yet support server_lifecycle reuse (Stage 4c-2).
+
+        Returns an explicit ineligible verdict so the caller runs a single
+        measured round instead of assuming Magpie's script-based reuse.
+        """
+        framework = str(bench.get("framework") or "").lower()
+        envs = bench.get("envs") or {}
+        try:
+            port = int(envs.get("PORT", 8888))
+        except (TypeError, ValueError):
+            port = 8888
+        return {
+            "eligible": False,
+            "framework": framework,
+            "port": port,
+            "reason": "bypass backend: server_lifecycle not yet implemented",
+        }
 
     def build_command(
         self,
