@@ -216,7 +216,7 @@
     "kernel_enabled": true,
     "kernel_integrate_attempts": {},
     "kernel_opt_attempts": {},
-    "kernel_optimizer": "native",
+    "kernel_optimizer": "geak",
     "last_action_failures": [
       {
         "action": "baseline",
