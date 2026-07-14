@@ -416,7 +416,7 @@ in place first.
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK v3.2.1 yaml ships two
+- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK yaml ships two
   presets — `run.budgets.quick.total_s=3600` (1 h, 2 rounds) and
   `run.budgets.full.total_s=7200` (2 h, 5 rounds). GEAK's mini.py:435
   resolves mode by LLM-parsing the prompt-quoted budget: <120 min → quick,

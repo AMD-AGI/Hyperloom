@@ -479,7 +479,7 @@ class Invocation(TypedDict, total=False):
     attempt_id: str
     run_id: str
     ts: str
-    backend: str  # forge / geak_v3 / historical backend names
+    backend: str  # forge / geak / backend name
     model: str | None
     kernel_metadata: KernelMetadata
     prompt_path: str | None
@@ -558,7 +558,7 @@ class OptimizedKernel(TypedDict, total=False):
 
     Attributes:
         kernel_id (str): Kernel identifier.
-        backend (str): Winning backend (for example ``forge`` / ``geak_v3``, best-of).
+        backend (str): Winning backend (for example ``forge`` / ``geak``, best-of).
         total_attempts (int): Total optimization attempts.
         successful_attempts (int): Attempts that succeeded.
         best_micro_speedup (float | None): Best micro-benchmark speedup, or None.
@@ -568,7 +568,7 @@ class OptimizedKernel(TypedDict, total=False):
     """
 
     kernel_id: str
-    backend: str  # forge / geak_v3 / historical backend names (best-of)
+    backend: str  # forge / geak / backend name (best-of)
     total_attempts: int
     successful_attempts: int
     best_micro_speedup: float | None
@@ -1852,6 +1852,8 @@ class ConcSweepSummary(TypedDict, total=False):
     elapsed_sec: float
     total_budget_sec: int  # None when budget gate disabled
     budget_exhausted: bool
+    budget_skip_reason: str  # why budget-gated variants were skipped, when budget_exhausted=true
+    budget_remaining_sec: float
     report_json_path: str
     report_csv_path: str  # for the "download CSV" button
     roofline_ceiling: dict[str, Any]  # per-CONC theoretical peak + MBU%; may be absent on old products
@@ -1949,6 +1951,8 @@ class TokenUsageBucket(TypedDict, total=False):
     calls: int
     total_in_out: int
     grand_total: int
+    # cache_read / (cache_creation + cache_read); 0.0 when no split cache data.
+    cache_hit_rate: float
 
 
 class TokenUsageAttribution(TypedDict, total=False):

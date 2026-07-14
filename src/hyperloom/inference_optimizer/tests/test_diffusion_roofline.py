@@ -153,10 +153,10 @@ def test_fmt_pct_none_and_value():
     assert dr._fmt_pct(0.5) == "50.0%"
 
 
-def test_to_float_non_numeric_is_zero():
-    assert dr._to_float("not-a-number") == 0.0
-    assert dr._to_float(None) == 0.0
-    assert dr._to_float("12.5") == pytest.approx(12.5)
+def test_safe_float_non_numeric_is_zero():
+    assert dr.safe_float("not-a-number") == 0.0
+    assert dr.safe_float(None) == 0.0
+    assert dr.safe_float("12.5") == pytest.approx(12.5)
 
 
 def test_aggregate_unified_memory_bound_split():

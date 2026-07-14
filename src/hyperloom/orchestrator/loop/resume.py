@@ -676,7 +676,7 @@ class ResumeCollaborator:
             if ps_flags or ps_envs or ps_overlay:
                 # Identity hash uses the SAME (args, envs) contract the grid
                 # executor fingerprints with (overlay is NOT part of the hash,
-                # matching _grid_runner.variant_fingerprint) so expected == the
+                # matching canonical_fingerprint) so expected == the
                 # ran variant's fingerprint by construction, and any executor-side
                 # drop/alter of config is caught downstream.
                 expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
