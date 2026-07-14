@@ -350,5 +350,3 @@ class TestPathForFramework:
         # path_for_framework is read-only; it must NOT create the dir.
         _ = kb.path_for_framework("atom")
         assert not (kb_root / "framework_optimization" / "atom").exists()
-
-

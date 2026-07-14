@@ -161,4 +161,3 @@ def test_mirroring_kb_swallows_mirror_error(monkeypatch) -> None:
     monkeypatch.setattr(gi, "mirror_recipe", _raise)
     kb = gi.GbrainMirroringRecipeKB(_Inner(), _FakeMcp())
     assert kb.put_recipe(canonical_id="a:b:c:d:e") == "wrote"  # error swallowed
-

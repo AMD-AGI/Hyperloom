@@ -34,4 +34,3 @@ class TestIsoZ:
 
     def test_unparseable_returned_unchanged(self):
         assert iso_z("not-a-timestamp") == "not-a-timestamp"
-
