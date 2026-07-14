@@ -392,10 +392,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "native" (geak_v3 per-kernel loop, default) or
-    # "geak" (one-shot whole-pipeline e2e optimizer cloned from upstream;
-    # see src/hyperloom/agents/kernel/tools/backends/geak_runner.py).
-    kernel_optimizer: str = "native"
+    # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e
+    # optimizer cloned from upstream; see
+    # src/hyperloom/agents/kernel/tools/backends/geak_runner.py) or "native"
+    # (legacy per-kernel loop when explicitly requested).
+    kernel_optimizer: str = "geak"
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
@@ -415,6 +416,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Internal-only baseline cold+hot double-run switch. Public CLI/env controls
+    # are intentionally unsupported; default-on keeps EXPLORE warm-decision
+    # apples-to-apples with the baseline measurement basis.
+    baseline_double_run: bool = True
     # Discarded first-round tput from the baseline cold-start double-run.
     # Kept only for audit/debugging; conclusion fields and gain math use the
     # hot measure-round value in ``baseline_tput``.
@@ -660,6 +665,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_sweep: dict[str, Any] = field(default_factory=dict)
     # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE exits on conc_sweep completion.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
+    # Durable watermark from the last real conc_sweep measurement. Macro-cycle
+    # reloop clears ``last_conc_sweep`` so SWEEP does not exit on stale terminal
+    # state; this marker remains to skip redundant closeout when no validated
+    # gain landed since the prior conc_sweep.
+    last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result. These
@@ -2543,9 +2553,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
-            # Watermark of validated gain at the moment this sweep ran, so a later
-            # SWEEP entry (cyclic reloop) can skip a redundant full sweep when no
-            # validated improvement landed since (see Coordinator._on_enter_sweep).
+            # Watermark of validated gain at the moment this manual/full sweep ran.
             "cumulative_gain_validated_at_record": float(
                 getattr(self, "cumulative_gain_validated", 0.0) or 0.0
             ),
@@ -2569,6 +2577,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "summary": dict(result.get("summary") or {}),
             "workspace": str(result.get("workspace") or ""),
         }
+        status = str(self.last_conc_sweep.get("status") or "").lower()
+        if status in ("succeeded", "partial", "completed") and not self.last_conc_sweep.get("was_skipped"):
+            self.last_conc_sweep_watermark = {
+                **self.last_conc_sweep,
+                "cumulative_gain_validated_at_record": float(
+                    getattr(self, "cumulative_gain_validated", 0.0) or 0.0
+                ),
+            }
 
 
 
