@@ -173,9 +173,6 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
 
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        # Force the microbench branch: hyperloom's achievable spec now
-        # short-circuits populate_gpu_arch_json (A3), so isolate the fallback.
-        patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
         patch.object(
             tab,
             "select_idle_gpu",
@@ -263,11 +260,10 @@ def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
 def test_populate_external_raises_on_microbench_failure(
     tmp_path: Path,
 ) -> None:
-    """Open-source path surfaces a non-zero microbenchmark exit code."""
+    """Open-source path surfaces a non-zero microbenchmark exit code when the
+    hyperloom fallback is also unavailable."""
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        # A3 short-circuits on hyperloom's achievable spec; force the microbench
-        # branch so the non-zero exit code propagates as intended.
         patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
         patch.object(tab, "select_idle_gpu", return_value=0),
     ):
@@ -279,6 +275,65 @@ def test_populate_external_raises_on_microbench_failure(
                 log=lambda _msg: None,
                 run_command=lambda *_a, **_k: 7,
             )
+
+
+def test_populate_falls_back_to_hyperloom_when_microbench_unavailable(
+    tmp_path: Path,
+) -> None:
+    """No idle GPU -> the hyperloom achievable spec is used instead of raising."""
+    fallback = tmp_path / "MI355X.json"
+
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "select_idle_gpu", side_effect=RuntimeError("no unoccupied GPU")),
+        patch.object(tab, "write_hyperloom_arch_spec", return_value=fallback),
+    ):
+        path = tab.populate_gpu_arch_json(
+            tracelens_root=tmp_path,
+            platform="MI355X",
+            internal_extension_enabled=False,
+            log=lambda _msg: None,
+            run_command=lambda *_a, **_k: 0,
+        )
+
+    assert path == fallback
+
+
+def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
+    tmp_path: Path,
+) -> None:
+    """A measured spec with all-zero MAF falls back to the hyperloom spec."""
+    fallback = tmp_path / "MI355X.json"
+
+    def _run_command(cmd, *, cwd, timeout_s, env=None):
+        out = Path(cmd[cmd.index("--output") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(
+                {
+                    "name": "MI355X",
+                    "mem_bw_gbps": 8000,
+                    "max_achievable_tflops": {"matrix_bf16": 0, "matrix_fp8": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "select_idle_gpu", return_value=0),
+        patch.object(tab, "write_hyperloom_arch_spec", return_value=fallback),
+    ):
+        path = tab.populate_gpu_arch_json(
+            tracelens_root=tmp_path,
+            platform="MI355X",
+            internal_extension_enabled=False,
+            log=lambda _msg: None,
+            run_command=_run_command,
+        )
+
+    assert path == fallback
 
 
 def _install_fake_tracelens(monkeypatch: pytest.MonkeyPatch, leaf: str, attr: str, value) -> None:
