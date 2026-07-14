@@ -996,10 +996,25 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    # Inject --cortex-kb-url into env so the probe script sees it; empty URL means skip the KB branch.
+    # The Cortex KB endpoint is a CLI-flag concern (no env fallback): the probe
+    # must see ONLY the --cortex-kb-url value, never a stale parent CORTEX_KB_URL.
+    # Drop any inherited value first, then inject the flag when set (empty ==
+    # skip the KB branch / stay local-only).
+    env.pop("CORTEX_KB_URL", None)
     cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
     if cortex_url:
         env["CORTEX_KB_URL"] = cortex_url
+    # PR Monitor endpoint is a CLI-flag concern (canonical env
+    # PRIMUS_CORTEX_PR_API resolves --pr-monitor-url at parse time). The
+    # legacy PR_MONITOR_URL env is removed; compute the probe's healthz base
+    # from the resolved flag so the shell never reads a stale parallel var.
+    # The REST base omits /v1 (the client appends it) but healthz lives under
+    # /v1, so normalise the probe base to end with /v1.
+    env.pop("PR_MONITOR_URL", None)
+    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
+    if pr_url:
+        probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
+        env["PR_MONITOR_URL"] = probe_base
     if explicit_kb:
         env["SKIP_KB_PROBE"] = "1"
     if explicit_pr:
