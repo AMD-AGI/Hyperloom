@@ -157,3 +157,31 @@ def test_bypass_lifecycle_ineligible_for_non_serving(tmp_path, monkeypatch):
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     info = sl.resolve_lifecycle_params(cfg_path)
     assert info["eligible"] is False
+
+
+def test_bypass_lifecycle_ineligible_when_multi_node(tmp_path, monkeypatch):
+    """bypass lifecycle is ineligible on multi-node (reuse is local-only).
+
+    The same single-node-eligible vllm config must flip to ineligible when
+    ``is_multi_node()`` is True; the bypass verdict must not short-circuit past
+    the multi-node gate that the Magpie path enforces.
+    """
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "benchmark_script": "vllm_mi300x.sh",
+            "envs": {"PORT": 8888},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is False
+    assert "multi-node" in info["reason"]

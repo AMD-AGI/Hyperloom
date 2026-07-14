@@ -184,6 +184,14 @@ def run_benchmark(
             bench_envs=bench_envs, start=start, rc=rc,
         )
 
+    # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle,
+    # default 2700s / INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the
+    # server-boot budget for lifecycle rounds. It only bounds waiting for the
+    # server to come up; the client benchmark still uses timeout_seconds. When
+    # absent (non-lifecycle run) fall back to timeout_s so behavior is unchanged.
+    sl = bench.get("server_lifecycle") or {}
+    server_ready_timeout = _as_float(sl.get("server_ready_timeout_s"), timeout_s)
+
     if phase == "server":
         if not pid_dir:
             _emit_failure(output_dir, framework, model, "phase=server requires pid_dir", workspace=workspace)
@@ -192,7 +200,8 @@ def run_benchmark(
             framework=framework, model=model, tp=tp, port=port,
             max_model_len=max_model_len_i, profile=profile, profile_dir=profile_dir,
             bench_envs=bench_envs, server_log=server_log, base_url=base_url,
-            timeout_s=timeout_s, pid_dir=pid_dir, workspace=workspace, output_dir=output_dir,
+            timeout_s=timeout_s, server_ready_timeout_s=server_ready_timeout,
+            pid_dir=pid_dir, workspace=workspace, output_dir=output_dir,
         )
 
     if phase == "client":
@@ -207,7 +216,6 @@ def run_benchmark(
     # (cleanup/pid_dir/port) and drives warmup(cleanup=false)+measure(cleanup=
     # true) as two identical calls, delegating phase choice to us. Honor it so
     # bypass reuse works through run_grid with no scheduler changes.
-    sl = bench.get("server_lifecycle") or {}
     if phase == "all" and bool(sl.get("enabled")):
         sl_cleanup = bool(sl.get("cleanup", True))
         sl_pid_dir = str(sl.get("pid_dir") or workspace)
@@ -224,7 +232,8 @@ def run_benchmark(
             framework=framework, model=model, tp=tp, port=port,
             max_model_len=max_model_len_i, profile=profile, profile_dir=profile_dir,
             bench_envs=bench_envs, server_log=server_log, base_url=base_url,
-            timeout_s=timeout_s, pid_dir=sl_pid_dir, cleanup=sl_cleanup,
+            timeout_s=timeout_s, server_ready_timeout_s=server_ready_timeout,
+            pid_dir=sl_pid_dir, cleanup=sl_cleanup,
             inferencex_root=inferencex_root, conc=conc, isl=isl, osl=osl, rrr=rrr,
             workspace=workspace, output_dir=output_dir,
         )
@@ -244,7 +253,7 @@ def run_benchmark(
     start = time.time()
     server_proc = _launch_server(server_cmd, server_env, server_log)
     try:
-        if not bypass_engine.wait_for_server_ready(base_url, timeout_s=timeout_s):
+        if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout):
             _write_report(workspace, framework, model, False, start, ["server did not become ready"])
             return 1
         rc = _run_client_and_eval(
@@ -263,7 +272,7 @@ def run_benchmark(
 
 def _run_server_phase(
     *, framework, model, tp, port, max_model_len, profile, profile_dir,
-    bench_envs, server_log, base_url, timeout_s, pid_dir, workspace, output_dir,
+    bench_envs, server_log, base_url, timeout_s, server_ready_timeout_s, pid_dir, workspace, output_dir,
 ) -> int:
     """Start a persistent server, write pid/meta, and exit without teardown."""
     server_env = _server_env(profile, profile_dir, bench_envs)
@@ -277,7 +286,7 @@ def _run_server_phase(
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
         return 2
     proc = _launch_server(server_cmd, server_env, server_log)
-    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=timeout_s):
+    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
         _terminate_server(proc)
         _write_report(workspace, framework, model, False, time.time(), ["server did not become ready"])
         return 1
@@ -319,7 +328,7 @@ def _run_client_phase(
 
 def _run_lifecycle_all(
     *, framework, model, tp, port, max_model_len, profile, profile_dir,
-    bench_envs, server_log, base_url, timeout_s, pid_dir, cleanup,
+    bench_envs, server_log, base_url, timeout_s, server_ready_timeout_s, pid_dir, cleanup,
     inferencex_root, conc, isl, osl, rrr, workspace, output_dir,
 ) -> int:
     """Start + persist a server, run this round's client, teardown iff cleanup.
@@ -340,7 +349,7 @@ def _run_lifecycle_all(
         return 2
     start = time.time()
     proc = _launch_server(server_cmd, server_env, server_log)
-    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=timeout_s):
+    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
         _terminate_server(proc)
         _write_report(workspace, framework, model, False, start, ["server did not become ready"])
         return 1

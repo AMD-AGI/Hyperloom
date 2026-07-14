@@ -619,6 +619,66 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
     assert teardown["called"] is True  # cleanup=true -> torn down
 
 
+def test_lifecycle_server_ready_timeout_honored(tmp_path, monkeypatch):
+    """server_lifecycle.server_ready_timeout_s bounds server-boot, not the client.
+
+    wait_for_server_ready must receive the lifecycle server_ready_timeout_s
+    (not benchmark.timeout_seconds), while the client benchmark keeps using
+    timeout_seconds.
+    """
+    import yaml
+
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/models/x",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "envs": {"TP": 1, "CONC": 4, "ISL": 128, "OSL": 64, "RUN_EVAL": "false", "PORT": 8888},
+            "server_lifecycle": {
+                "enabled": True,
+                "cleanup": False,
+                "pid_dir": str(pid_dir),
+                "server_ready_timeout_s": 1234,
+            },
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    class _FakeServer:
+        pid = 5555
+
+        def wait(self, timeout=None):
+            return 0
+
+    seen = {}
+
+    def fake_wait(base_url, *, timeout_s, **kwargs):
+        seen["timeout_s"] = timeout_s
+        return True
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", fake_wait)
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # no server yet
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    # server-boot budget comes from server_ready_timeout_s, not timeout_seconds.
+    assert seen["timeout_s"] == 1234
+
+
 def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
     """BENCHMARK_BASE_URL set: bypass runs client against remote, no local server."""
     inferencex = tmp_path / "InferenceX"

@@ -139,6 +139,15 @@ class BypassBackend:
         except (TypeError, ValueError):
             port = 8888
         verdict = {"eligible": False, "framework": framework, "port": port, "reason": ""}
+        # The reuse protocol boots a local server and re-attaches a client
+        # round to it; that only holds single-node. Mirror the Magpie path's
+        # multi-node gate (see _server_lifecycle.resolve_lifecycle_params),
+        # which our non-None verdict would otherwise short-circuit past.
+        from ._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            verdict["reason"] = "multi-node (server_lifecycle is local-only)"
+            return verdict
         if framework not in self._LIFECYCLE_FRAMEWORKS:
             verdict["reason"] = f"framework {framework!r} is not a serving framework"
             return verdict
