@@ -231,7 +231,7 @@ def test_f5_silent_when_too_few_backends_per_kernel():
 
 
 def test_f5_integrate_keep_excludes_kernel():
-    """A KEEP'd integrate decision counts as progress even without oob hit."""
+    """A KEEP'd integrate decision counts as progress even without forge hit."""
     data = SourceData(
         local_decision_audit={
             "oob_attempts": [

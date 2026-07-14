@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Shared LLM-transport stability env for claude-CLI / claude-agent-sdk / oob children.
+"""Shared LLM-transport stability env for claude-CLI / claude-agent-sdk / forge children.
 
 Hyperloom RCA (Sandbox hang): a streaming request to the SaFE/LiteLLM gateway
 can return a partial response (``stop_reason=None``) and then stop pushing
