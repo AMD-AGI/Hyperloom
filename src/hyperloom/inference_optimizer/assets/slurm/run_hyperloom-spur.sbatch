@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 # Hyperloom optimization job for a single model, run inside a vllm/sglang ROCm
-# container via enroot/pyxis. Submit through submit.sh (do not sbatch directly
-# unless HL_CONF_DIR is exported).
+# container via docker/pyxis. SPUR variant of run_hyperloom.sbatch: submit
+# through submit-spur.sh (do not sbatch directly unless HL_CONF_DIR is exported).
 #
-# Args: $1 = model key (row in models.tsv), $2 = backend (python|claude)
+# Differs from run_hyperloom.sbatch only where the spur scheduler diverges from
+# stock Slurm:
+#   - spur `sbatch` does not pass positional args to the script, so the model
+#     key / backend arrive via HL_MODEL_KEY / HL_BACKEND (env) instead of $1/$2;
+#   - the python backend uses the codex kernel-agent conversation backend
+#     (--kernel-codex, driven by CODEX_MODEL) instead of --kernel-claude.
+#
+# Carriers (BACKEND): python runs `inference_optimizer optimize` directly;
+# claude / codex are outer CLI carriers that load SKILL.md and drive the same
+# optimize command agentically (claude = Claude Code CLI, codex = OpenAI
+# `codex exec`). Both carriers default KERNEL_OPT_BACKEND_ORDER=geak.
+#
+# Args (optional, env fallback): $1 = model key, $2 = backend (python|claude|codex)
 #
 #SBATCH --job-name=hyperloom
 #SBATCH --nodes=1
@@ -13,11 +25,13 @@
 
 set -euo pipefail
 
-MODEL_KEY="${1:?usage: run_hyperloom.sbatch <model_key> [python|claude]}"
-BACKEND="${2:-python}"
+# spur `sbatch` does not forward positional args to the batch script, so accept
+# the model key / backend from HL_MODEL_KEY / HL_BACKEND when $1/$2 are absent.
+MODEL_KEY="${1:-${HL_MODEL_KEY:?usage: run_hyperloom-spur.sbatch <model_key> [python|claude] (or export HL_MODEL_KEY)}}"
+BACKEND="${2:-${HL_BACKEND:-python}}"
 
-# Config dir carrying models.tsv + proxy.env (exported by submit.sh).
-CONF_DIR="${HL_CONF_DIR:?HL_CONF_DIR not set (submit via submit.sh)}"
+# Config dir carrying models.tsv + proxy.env (exported by submit-spur.sh).
+CONF_DIR="${HL_CONF_DIR:?HL_CONF_DIR not set (submit via submit-spur.sh)}"
 
 # --- resolve the model row -------------------------------------------------
 ROW="$(awk -F'\t' -v k="$MODEL_KEY" '$1==k{print;exit}' "$CONF_DIR/models.tsv")"
@@ -74,8 +88,8 @@ export HF_TOKEN="${HF_TOKEN:-}"
 # run_hyperloom.sbatch and run_hyperloom-spur.sbatch execute the SAME
 # _incontainer.sh.in inside the container; keep it single-sourced to avoid
 # drift. HL_KERNEL_BACKEND selects the python carrier's kernel-agent backend
-# (stock Slurm -> claude); it is forwarded into the container.
-export HL_KERNEL_BACKEND="${HL_KERNEL_BACKEND:-claude}"
+# (spur -> codex); it is forwarded into the container.
+export HL_KERNEL_BACKEND="${HL_KERNEL_BACKEND:-codex}"
 INCONTAINER="$USER_DATA_PATH/_incontainer.sh"
 cp "$CONF_DIR/_incontainer.sh.in" "$INCONTAINER"
 chmod +x "$INCONTAINER"
@@ -99,7 +113,7 @@ case "$RUNTIME" in
   pyxis)
     # Private registry image needs enroot creds (~/.config/enroot/.credentials).
     srun --container-image="docker://${IMAGE}" \
-         --container-mounts="${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}${PROXY_MOUNTS}" \
+         --container-mounts="${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}${HL_EXTRA_MOUNTS:+,${HL_EXTRA_MOUNTS}}${PROXY_MOUNTS}" \
          --container-writable \
          --no-container-remap-root \
          --export=ALL \
@@ -114,8 +128,10 @@ case "$RUNTIME" in
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
              KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
-             MAX_HOURS TARGET_GAIN BACKEND HL_KERNEL_BACKEND HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
+             MAX_HOURS TARGET_GAIN BACKEND HL_KERNEL_BACKEND INFERENCE_OPTIMIZER_SERVER_ARGS \
+             HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
              CURSOR_DEFAULT_MODEL GEAK_MODEL_NAME CLAUDE_MODEL CODEX_MODEL LLM_MODEL \
+             KERNEL_OPT_BACKEND_ORDER CODEX_HOME CODEX_CA_CERTIFICATE HL_CODEX_WIRE_API \
              RECIPE_KB_REMOTE GBRAIN_BASE_URL GBRAIN_TOKEN GBRAIN_KG_GUIDED \
              GBRAIN_KG_NATIVE GBRAIN_RECIPE_SCAN_BUDGET_SEC \
              HYPERLOOM_LANGFUSE_ENABLE LANGFUSE_HOST LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
@@ -127,15 +143,29 @@ case "$RUNTIME" in
     CA_MOUNT=()
     [ -n "${HL_CA_BUNDLE_HOST:-}" ] && [ -f "${HL_CA_BUNDLE_HOST}" ] \
       && CA_MOUNT=(-v "${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro")
-    # --ulimit lifts the container's open-files hard cap so the Ray raylet's fd
-    # preflight can raise soft nofile high enough to stay up (issue #433).
+    # Extra read-only bind mounts (e.g. a shared model store on /it-shared).
+    # HL_EXTRA_MOUNTS is a comma-separated list of docker -v specs.
+    EXTRA_MOUNTS=()
+    if [ -n "${HL_EXTRA_MOUNTS:-}" ]; then
+      IFS=',' read -ra _em <<<"$HL_EXTRA_MOUNTS"
+      for m in "${_em[@]}"; do [ -n "$m" ] && EXTRA_MOUNTS+=(-v "$m"); done
+    fi
+    # spur compute nodes give docker's default bridge network no DNS/egress, so
+    # the container cannot resolve pypi.org/github.com or route to the gateway.
+    # Use the host network stack (verified: gateway /models -> HTTP 200) so the
+    # installer (pip/git) and the LLM gateway calls work. HL_DOCKER_NETWORK can
+    # override this if a cluster ever needs a different mode.
+    # Some images (e.g. vllm-openai-rocm) set ENTRYPOINT to their CLI, which
+    # would swallow `bash "$INCONTAINER"`; clear it so the runner script runs.
     docker run --rm \
+      --entrypoint "" \
+      --network "${HL_DOCKER_NETWORK:-host}" \
       --ulimit "nofile=${HL_NOFILE:-1048576}:${HL_NOFILE:-1048576}" \
       --device=/dev/kfd --device=/dev/dri \
       --security-opt seccomp=unconfined --group-add video --ipc=host \
       --shm-size="${HL_SHM_SIZE:-64g}" \
       -v "${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}" \
-      "${CA_MOUNT[@]}" "${ADD_HOST[@]}" "${DOCKER_ENV[@]}" \
+      "${EXTRA_MOUNTS[@]}" "${CA_MOUNT[@]}" "${ADD_HOST[@]}" "${DOCKER_ENV[@]}" \
       "${IMAGE}" bash "$INCONTAINER"
     ;;
   *)
