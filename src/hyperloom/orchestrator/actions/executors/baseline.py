@@ -28,7 +28,6 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.payload_aliases import read_extra_server_args
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -1182,7 +1181,7 @@ class BaselineExecutor:
         # framework cannot pick a safe flag, so we leave the flag armed (do not
         # consume) and let a later baseline with a known framework apply it,
         # instead of burning the one-shot on a no-op retry.
-        effective_extra_server_args = read_extra_server_args(params)
+        effective_extra_server_args = str(params.get("extra_server_args") or "")
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
         fw = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip()
