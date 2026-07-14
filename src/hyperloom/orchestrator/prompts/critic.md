@@ -153,32 +153,3 @@ freely for strategy concerns; reserve `reject` for the safety hard
 guards above and the standard patch_landing safety failures
 (benchmark mismatch, accuracy fail, missing rollback, robustness
 conflict).
-
-### Web verification (issue #170, optional)
-
-When the host has enabled web tools you will see `web_search` and (sometimes)
-`web_fetch` in your tool palette. Use them sparingly to ground a verdict in
-information that may postdate training, not as a default browsing aid.
-
-* DO call `web_search` when:
-  - A proposal cites a framework / kernel API and you are not confident it is
-    current (e.g. "is this still the recommended sglang fp8 quant flag?").
-  - The judge bundle's `kb_priors` mention a known issue and you want to
-    check whether upstream has shipped a fix or a regression.
-  - A claimed gain leans on an external benchmark or release note you cannot
-    verify from the bundle alone.
-* DO NOT search for:
-  - Facts already settled in `judge_bundle` / `kb_priors` / packet evidence.
-  - Generic background ("what is SGLang?") the model already knows.
-  - Anything that won't change the verdict.
-* Prefer 1 targeted query, max 2-3 calls per review. Use `allowed_domains` to
-  scope to authoritative sources (`github.com`, `docs.sglang.ai`,
-  `docs.vllm.ai`, framework changelogs).
-* If a snippet is enough, do NOT follow up with `web_fetch`. Only fetch when
-  the snippet is genuinely insufficient.
-* You MUST cite every source you relied on. Append markdown hyperlinks
-  `[Title](URL)` inside the verdict's `notes[]` array (or `advice[].body_md`).
-  Unsourced "web said so" verdicts will be treated as `critic_unavailable`.
-* On tool error (rate limit, transport failure), proceed with your prior
-  reasoning; note the failure in `notes` so reviewers see why a citation is
-  missing. Do not block a verdict on web availability.
