@@ -32,16 +32,34 @@ _KERNEL_AGENT_DEFAULT_MAX_TURNS = 5
 
 def _official_anthropic_only() -> bool:
     """True when only the Anthropic-side endpoint is available."""
-    return bool((os.environ.get("ANTHROPIC_BASE_URL") or "").strip()) and not bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_anthropic and not has_openai
 
 
 def _official_openai_only() -> bool:
     """True when only the OpenAI-side endpoint is available."""
-    return bool((os.environ.get("OPENAI_BASE_URL") or "").strip()) and not bool(
-        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    return has_openai and not has_anthropic
 
 
 def _resolve_kernel_agent_max_turns() -> int:

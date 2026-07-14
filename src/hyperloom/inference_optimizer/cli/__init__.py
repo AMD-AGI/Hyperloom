@@ -876,6 +876,11 @@ def _claude_model_should_follow_codex() -> bool:
     return has_openai and not has_anthropic
 
 
+def _critic_agent_runtime_needed(critic_choice: str) -> bool:
+    """Whether the selected critic path will actually instantiate critic-agent."""
+    return critic_choice == "agent" and not _codex_model_should_follow_claude()
+
+
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
@@ -1501,12 +1506,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
 
+    # Capture provider intent before _preflight() fills missing endpoints. A
+    # single Anthropic-compatible gateway may cause preflight to populate
+    # OPENAI_BASE_URL from ANTHROPIC_BASE_URL, but the user's original intent
+    # was still "Codex-style roles follow Claude".
+    codex_follows_claude = _codex_model_should_follow_claude()
     resolved_urls = _preflight(args)
 
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
     if claude_follows_codex:
         args.claude_model = args.codex_model
-    codex_follows_claude = _codex_model_should_follow_claude()
     _validate_and_resolve_claude_model(args, resolved_urls)
     if codex_follows_claude:
         args.codex_model = args.claude_model
@@ -2010,7 +2019,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if critic_choice == "agent":
+    if _critic_agent_runtime_needed(critic_choice):
         critic_agent_root = _resolve_critic_agent_root()
         if critic_agent_root is None:
             print(
