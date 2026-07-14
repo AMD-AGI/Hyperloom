@@ -49,7 +49,7 @@ class BackendType(str, Enum):
 
 
 # Built-in default model + API key env table
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"

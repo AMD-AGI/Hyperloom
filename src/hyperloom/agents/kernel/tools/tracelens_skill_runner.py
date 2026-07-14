@@ -42,8 +42,6 @@ _OPENAI_ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "python3",
         "TraceLens_generate_perf_report_pytorch",
         "TraceLens_generate_perf_report_pytorch_inference",
-        "ls",
-        "find",
     }
 )
 
@@ -938,7 +936,7 @@ async def run_tracelens_skill(
     }
     # Defensive fallback for full-suite/test-order runs where module globals can
     # be mutated; keep model resolution stable even if DEFAULT_MODEL is missing.
-    resolved_model = resolved_model or str(globals().get("DEFAULT_MODEL", "claude-opus-4-7")).strip()
+    resolved_model = resolved_model or str(globals().get("DEFAULT_MODEL", "claude-opus-4-8")).strip()
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)
