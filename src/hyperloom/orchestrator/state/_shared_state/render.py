@@ -549,7 +549,8 @@ class _RenderMixin:
             f"last_profile={self._format_attempt(self.last_profile)}",
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
-            f"last_sweep={self._format_attempt(self.last_sweep)}",
+            # last_sweep is already rendered above via the richer
+            # _format_last_sweep() (grid/best/tput); no second generic line.
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",

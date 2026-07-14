@@ -1907,6 +1907,39 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         return text[-limit:] if len(text) > limit else text
 
+    def _common_result_fields(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Build the failure/diagnostic fields shared by the attempt + failure logs.
+
+        Single source of truth for the overlapping fields recorded by both
+        :meth:`record_action_attempt` and :meth:`record_action_failure`, so the
+        two writers can never drift.
+
+        ``stderr_tail`` is captured for EVERY failure carrying an ``error`` blob
+        (no ``error_class`` whitelist). The tail is the actionable end of a
+        server/subprocess crash — e.g. a vLLM ``server_init_dead`` whose root
+        cause (``ValueError: No common block size``) lives in the server.log
+        excerpt the executor already folded into ``error``. Both the breakdown
+        RCA exporter and the orchestration prompt consume it, so gating it by
+        error_class silently dropped the one field that explains the failure.
+
+        Args:
+            result (dict[str, Any]): The action result envelope.
+
+        Returns:
+            dict[str, Any]: The shared diagnostic fields (``error_class`` /
+                ``error_excerpt`` / ``stderr_tail`` / ``stderr_log_path`` /
+                ``workspace`` / ``raw_result_path`` / ``reported_success``).
+        """
+        return {
+            "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
+            "error_excerpt": self._truncate_excerpt(result.get("error")),
+            "stderr_tail": self._stderr_tail(result.get("error")),
+            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
+            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
+            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
+            "reported_success": result.get("reported_success"),
+        }
+
     def record_action_attempt(
         self,
         action: str,
@@ -1959,19 +1992,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "decision": str(decision or ""),
             "key_metric": key_metric,
             "key_metric_kind": metric_kind,
-            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
-            "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
-            "error_excerpt": self._truncate_excerpt(result.get("error")),
-            # stderr_tail mirrors record_action_failure: only for subprocess
-            # failures, so the breakdown exporter can surface the raw crash.
-            "stderr_tail": (
-                self._stderr_tail(result.get("error"))
-                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout", "kv_cache_oom"}
-                else None
-            ),
-            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
-            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
-            "reported_success": result.get("reported_success"),
+            **self._common_result_fields(result),
             "extras": dict(extras or {}),
         }
         history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
@@ -2015,21 +2036,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             dict[str, Any]: The recorded failure entry.
         """
         result = result or {}
-        error_class = result.get("error_class")
-        error_class_str = str(error_class) if error_class else None
         entry: dict[str, Any] = {
             "ts": _now_iso(),
             "action": str(action or ""),
             "task_id": str(task_id or ""),
-            "error_class": error_class_str,
-            "error_excerpt": self._truncate_excerpt(result.get("error")),
-            "stderr_tail": (
-                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout", "kv_cache_oom"} else None
-            ),
-            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
-            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
-            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
-            "reported_success": result.get("reported_success"),
+            **self._common_result_fields(result),
         }
         history = list(self.last_action_failures or [])
         history.append(entry)

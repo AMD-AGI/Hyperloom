@@ -1472,7 +1472,7 @@ class BaselineExecutor:
         """
         params = params or {}
         if "baseline_double_run" in params:
-            return _is_truthy(params.get("baseline_double_run"))
+            return is_truthy(params.get("baseline_double_run"))
 
         extra = ctx_extra or {}
         state = extra.get("shared_state") or self.shared_state
