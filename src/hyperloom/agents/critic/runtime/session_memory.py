@@ -29,6 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom.common.io import append_jsonl as _common_append_jsonl
+from hyperloom.common.io import atomic_write_json as _common_atomic_write_json
+from hyperloom.common.jsonio import read_json as _common_read_json
+from hyperloom.common.jsonio import read_jsonl as _common_read_jsonl
+from hyperloom.common.timeutil import now_iso
+
 from .errors import SessionMemoryError
 
 
@@ -263,7 +269,14 @@ class SessionMemory:
         if not isinstance(context, dict):
             raise SessionMemoryError(f"context must be a dict, got {type(context).__name__}")
         self._ensure_session_dir(session_id)
-        _write_json_atomic(self._context_path(session_id), context)
+        _common_atomic_write_json(
+            self._context_path(session_id),
+            context,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=False,
+            make_parents=False,
+        )
 
     def merge_context(
         self,
@@ -345,10 +358,10 @@ class SessionMemory:
             raise SessionMemoryError("decision_review must be a dict")
         self._ensure_session_dir(session_id)
         record = {
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "decision_review": decision_review,
         }
-        _append_jsonl(self._decisions_path(session_id), record)
+        _common_append_jsonl(self._decisions_path(session_id), record, ensure_ascii=False)
 
     def list_decisions(self, session_id: str) -> list[dict[str, Any]]:
         """Return all decision records logged for a session.
@@ -383,7 +396,11 @@ class SessionMemory:
         if not isinstance(event, dict):
             raise SessionMemoryError("event must be a dict")
         self._ensure_session_dir(session_id)
-        _append_jsonl(self._events_path(session_id), {"ts": _now_iso(), **event})
+        _common_append_jsonl(
+            self._events_path(session_id),
+            {"ts": now_iso(timespec="microseconds"), **event},
+            ensure_ascii=False,
+        )
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
         """Return all audit events logged for a session.
@@ -456,7 +473,7 @@ class SessionMemory:
         path = self._priors_cache_path(session_id)
         cache = _read_json(path, default={})
         cache[cache_key] = {"ts": time.time(), "priors": list(priors)}
-        _write_json_atomic(path, cache)
+        _common_atomic_write_json(path, cache, ensure_ascii=False, indent=2, sort_keys=False, make_parents=False)
 
     # ------------------------------------------------------------------
     # Already-reviewed proposals
@@ -525,10 +542,10 @@ class SessionMemory:
             data = {}
         data[msg_id] = {
             "verdict": verdict,
-            "ts": _now_iso(),
+            "ts": now_iso(timespec="microseconds"),
             "decision_id": decision_id,
         }
-        _write_json_atomic(path, data)
+        _common_atomic_write_json(path, data, ensure_ascii=False, indent=2, sort_keys=False, make_parents=False)
 
     def filter_unreviewed(
         self,
@@ -554,17 +571,6 @@ class SessionMemory:
 # ---------------------------------------------------------------------------
 # Tiny JSON helpers — kept private so we don't grow them into a real ORM.
 # ---------------------------------------------------------------------------
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp, e.g. ``2026-06-02T18:00:00.000000+00:00``.
-    """
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
-
-
 def _read_json(path: Path, *, default: Any) -> Any:
     """Read and decode a JSON file, returning ``default`` if absent.
 
@@ -581,32 +587,9 @@ def _read_json(path: Path, *, default: Any) -> Any:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8") or "null")
+        return _common_read_json(path, strict=True, empty_value=None)
     except json.JSONDecodeError as exc:
         raise SessionMemoryError(f"corrupt json at {path}: {exc}") from exc
-
-
-def _write_json_atomic(path: Path, data: Any) -> None:
-    """Write ``data`` as indented JSON atomically via a temp file + rename.
-
-    Args:
-        path (Path): The destination file.
-        data (Any): A JSON-serialisable value to write.
-    """
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    """Append one record as a JSON line to ``path``.
-
-    Args:
-        path (Path): The JSONL file to append to.
-        record (dict[str, Any]): The record to serialise on its own line.
-    """
-    with path.open("a", encoding="utf-8") as fp:
-        fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -622,17 +605,11 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     Raises:
         SessionMemoryError: If a non-blank line contains invalid JSON.
     """
-    with path.open("r", encoding="utf-8") as fp:
-        for line in fp:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SessionMemoryError(f"corrupt jsonl line at {path}: {exc}") from exc
-            if isinstance(obj, dict):
-                yield obj
+    try:
+        rows = _common_read_jsonl(path, require_dict=True, skip_non_dict=True)
+    except json.JSONDecodeError as exc:
+        raise SessionMemoryError(f"corrupt jsonl line at {path}: {exc}") from exc
+    yield from rows
 
 
 __all__ = [

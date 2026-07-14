@@ -53,7 +53,6 @@ ever seen, ~10K is the realistic upper bound).
 
 from __future__ import annotations
 
-import datetime as _dt
 import errno
 import fcntl
 import json
@@ -65,6 +64,10 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json
+from hyperloom.common.timeutil import now_iso
 
 from .canonical_id import (
     InvalidCanonicalIdError,
@@ -118,21 +121,6 @@ class LocalRecipeStoreError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _utc_now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Matches the central server's ``created_at`` / ``updated_at``
-    precision (microsecond resolution with an explicit UTC offset) so
-    timestamps written locally compare byte-wise the same way the
-    server's do.
-
-    Returns:
-        str: Current UTC time formatted as an ISO-8601 string with
-            microsecond precision and an explicit offset.
-    """
-    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="microseconds")
-
-
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomically write ``payload`` as JSON via a tmp-file + rename.
 
@@ -154,31 +142,14 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         Exception: Any error raised while writing or renaming is
             re-raised after a best-effort cleanup of the tmp file.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
+    atomic_write_json(
+        path,
+        payload,
+        indent=2,
+        sort_keys=True,
+        make_parents=True,
+        fsync=True,
     )
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError as exc:
-                log.debug("fsync skipped on %s: %s", tmp, exc)
-        os.replace(tmp, path)
-    except Exception:
-        # Best-effort tmp cleanup so a failed write doesn't leave a
-        # ``recipe.json.XXXXX.tmp`` next to the live row.
-        try:
-            tmp.unlink()
-        except OSError:
-            # Temp file already gone; re-raise the original write error below.
-            pass
-        raise
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -202,8 +173,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        return read_json(path, strict=True)
     except FileNotFoundError:
         # Race: file disappeared between is_file() and open(). Treat
         # as missing — same outcome as if we'd never seen it.
@@ -594,7 +564,7 @@ class LocalRecipeStore:
         recipe_dir.mkdir(parents=True, exist_ok=True)
         lock = _CidLock(self._lock_path(canonical_id))
         with lock:
-            now = _utc_now_iso()
+            now = now_iso(timespec="microseconds")
             live = _read_json(self._live_path(canonical_id))
             created = live is None
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
@@ -870,8 +840,8 @@ class LocalRecipeStore:
           can't satisfy the bound).
         * ``updated_since``: ISO-8601 string compared lexically (UTC
           ISO-8601 sorts byte-wise the same as chronologically as
-          long as the offset is constant, which our ``_utc_now_iso``
-          guarantees).
+          long as the offset is constant, which our microsecond-precision
+          ``now_iso`` timestamps guarantee).
         * ``order_by``: strict whitelist of 6 values, matches the
           server constant. Anything else raises ValueError.
         * ``limit``: ``[1, 1000]`` clamp.
@@ -1002,7 +972,7 @@ class LocalRecipeStore:
         with lock:
             existing = _list_jsonl(attempts_path)
             next_id = len(existing) + 1
-            stamped_at = attempt_at or _utc_now_iso()
+            stamped_at = attempt_at or now_iso(timespec="microseconds")
             attempt = Attempt(
                 id=next_id,
                 recipe_canonical_id=canonical_id,

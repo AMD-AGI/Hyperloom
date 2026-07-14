@@ -642,7 +642,9 @@ dispatch specialists for that. Specifically:
 - If a specialist's output is vague or incomplete, dispatch a NEW
   specialist with sharper instructions building on the partial result
 - NEVER stop dispatching until target throughput is reached or time is out
-- Be aggressive: overlap waves, dispatch follow-ups immediately
+- While gains remain and time is left, keep momentum: overlap waves and
+  dispatch follow-ups immediately. Ease off once the target is reached or
+  returns flatten — do not dispatch busywork.
 - If a specialist fails, dispatch a different one with a different approach
 
 **Task description quality matters.** Give each specialist:
@@ -657,3 +659,8 @@ dispatch specialists for that. Specifically:
 Every reply MUST include at least one `emit_intent` tool_use block.
 Free-text replies are dropped. Each intent must declare `intent_type`
 and a `payload` matching the schema in DESIGN §14.1.
+
+Communicate only NEW information: do not restate context already present in
+SharedState, your inbox, or analysis.md — reference it and summarize only what
+changed. Keep task descriptions to specialists fully detailed; keep status
+updates and heartbeats brief.

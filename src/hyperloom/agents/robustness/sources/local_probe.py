@@ -27,6 +27,7 @@ from typing import Any, Iterable
 
 import httpx
 
+from hyperloom.common.coerce import to_float
 from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
 
 from .base import SourceData, SourceUnavailable
@@ -692,7 +693,7 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
             field = _ROCM_HEADER_MAP.get(header)
             if not field:
                 continue
-            value = _coerce_float_or_none(cells[col_idx])
+            value = to_float(cells[col_idx])
             if value is None:
                 continue
             if field in _ROCM_BYTE_TO_MB_FIELDS:
@@ -713,24 +714,6 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
                     snap["util_mem_pct"] = used / total * 100.0
             out.append(snap)
     return out
-
-
-def _coerce_float_or_none(value: str) -> float | None:
-    """Parse a CSV cell to ``float``, or ``None`` when not numeric.
-
-    Args:
-        value (str): The raw cell text.
-
-    Returns:
-        float | None: The parsed float, or ``None`` when empty or
-        unparseable.
-    """
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
 
 
 def _sample_nvidia_smi() -> dict[str, Any]:
@@ -1354,9 +1337,9 @@ def _normalise_integrate_entry(
             patch_size_bytes = Path(patch_path).stat().st_size
         except (FileNotFoundError, PermissionError, OSError):
             patch_size_bytes = None
-    base_tput = _coerce_optional_float(data.get("base_tput"))
-    new_tput = _coerce_optional_float(data.get("new_tput"))
-    gain_pct = _coerce_optional_float(data.get("gain_pct"))
+    base_tput = to_float(data.get("base_tput"))
+    new_tput = to_float(data.get("new_tput"))
+    gain_pct = to_float(data.get("gain_pct"))
     dispatched_count = data.get("dispatched_count")
     if not isinstance(dispatched_count, int):
         dispatched_count = None
@@ -1429,7 +1412,7 @@ def _scan_oob_attempts(
                     "kernel_id": str(row.get("kernel_id") or ""),
                     "backend": str(row.get("backend") or ""),
                     "report_text": str(row.get("report_text") or "")[:500],
-                    "microbench_speedup": _coerce_optional_float(row.get("microbench_speedup")),
+                    "microbench_speedup": to_float(row.get("microbench_speedup")),
                     "ts": row.get("ts"),
                     "source_file": str(path),
                 }
@@ -1494,31 +1477,6 @@ def _json_loads_or_none(text: str) -> Any:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
-
-
-def _coerce_optional_float(value: Any) -> float | None:
-    """Coerce a value to ``float`` where sensible, else ``None``.
-
-    Booleans are explicitly rejected (so ``True`` is not read as 1.0);
-    ints / floats convert directly and numeric strings are parsed.
-
-    Args:
-        value (Any): The value to coerce.
-
-    Returns:
-        float | None: The float value, or ``None`` when it is a bool,
-        a non-numeric string, or any other type.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
 
 
 # ---------------------------------------------------------------------------
