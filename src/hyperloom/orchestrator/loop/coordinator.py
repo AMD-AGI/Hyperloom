@@ -584,56 +584,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
     ):
-        """Construct the single per-session Coordinator and wire its plane.
-
-        Builds the persistence layer (SQLite connection, MessageBus,
-        ResourceLockManager, TaskRegistry, CursorStore), the PolicyGate,
-        the phase machine, and the per-agent reactor bookkeeping, then
-        detects whether this session is a resume and anchors the Cortex KB.
-
-        Args:
-            session_dir (Path): Directory holding this session's state.json,
-                SQLite DB and artifacts.
-            backends (dict[str, Backend]): Map of agent-role name to its
-                Backend; every role in ``role_registry`` must be present.
-            role_registry (dict[str, AgentRole] | None): Agent-role registry;
-                ``None`` uses :func:`default_role_registry`.
-            sub_agent_runner (SubAgentRunner | None): Runner for delegated
-                sub-agent tasks; ``None`` constructs a default one.
-            bus_class (type[MessageBus]): MessageBus class to instantiate.
-            compare_against_gpu (str | None): Reference GPU id for target
-                analysis priors; ``None``/blank disables external comparison.
-            model_class (str | None): Model-class override seeded into
-                SharedState when none is already persisted.
-            cortex_kb (RecipeKB | None): Recipe-snapshot KB dispatcher; ``None``
-                makes the fact-write hooks no-ops.
-            phase_budget_pct (dict[str, float] | None): Per-phase wall-clock
-                budget percentages; ``None`` uses library defaults.
-            knowledge_plane (Any): Optional KnowledgePlane facade used to
-                pre-warm specialist knowledge before enqueue.
-            warm_replay_enabled (bool): Whether warm-recipe replay may
-                auto-apply the KB best_config.
-            warm_replay_min_confidence (float): Minimum KB confidence required
-                to fire a warm replay.
-            warm_replay_min_reproduce_pct (float): Minimum reproduce fraction
-                required to fire a warm replay.
-
-        Raises:
-            ValueError: If a role in ``role_registry`` has no matching backend.
-
-        Attributes:
-            session_dir (Path): Session working directory.
-            backends (dict[str, Backend]): Wired per-role backends.
-            db (SqliteConnection): Session persistence connection.
-            bus (MessageBus): Message routing bus.
-            locks (ResourceLockManager): Lane/resource lease manager.
-            tasks (TaskRegistry): Delegated-task registry.
-            cursors (CursorStore): Per-agent message cursors.
-            sub (SubAgentRunner): Sub-agent task runner.
-            shared_state (SharedState): Persistent session state (state.json).
-            policy (PolicyGate): Intent-validation choke-point.
-            state (CoordinatorState): In-memory reactor/dispatcher state.
-        """
+        """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # Recipe-snapshot KB dispatcher; ``None`` makes fact-write hooks no-ops.
