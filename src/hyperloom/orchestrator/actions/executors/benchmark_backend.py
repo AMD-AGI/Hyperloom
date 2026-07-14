@@ -9,8 +9,8 @@ is byte-for-byte identical to the previously hardcoded Magpie benchmark
 invocation (python -m Magpie -v benchmark --benchmark-config CFG
 --output-dir OUT --run-mode local).
 
-A future bypass backend can implement the same contract (same input YAML,
-same workspace/report artifacts) and be selected via
+The bypass backend implements the same contract (same input YAML, same
+workspace/report artifacts) and is selected via
 HYPERLOOM_BENCHMARK_BACKEND=bypass without touching the executors.
 """
 
@@ -193,8 +193,9 @@ def resolve_backend_name() -> str:
 def resolve_backend() -> BenchmarkBackend:
     """Resolve the active benchmark backend instance.
 
-    Only the Magpie backend exists today; any unknown value falls back to it so
-    a typo cannot silently disable benchmarking.
+    ``bypass`` selects the Hyperloom runner; ``magpie`` (the default) and any
+    unknown value fall back to Magpie so a typo cannot silently disable
+    benchmarking.
 
     Returns:
         The selected BenchmarkBackend implementation.

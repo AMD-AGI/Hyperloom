@@ -473,6 +473,10 @@ def test_client_phase_reuses_healthy_server(tmp_path, monkeypatch):
     cfg_path = _write_cfg(tmp_path, inferencex)
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
+    # phase=client reuses a server a prior server phase persisted: pid/meta exist.
+    bypass_engine.write_lifecycle_files(
+        pid_dir=str(pid_dir), framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x",
+    )
 
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
     teardown = {"called": False}
@@ -605,6 +609,10 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
     pid_dir.mkdir()
     cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
 
+    # A prior round persisted the server: pid/meta exist alongside a healthy port.
+    bypass_engine.write_lifecycle_files(
+        pid_dir=str(pid_dir), framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x",
+    )
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)  # server already up
     launched = {"n": 0}
     monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: launched.__setitem__("n", launched["n"] + 1))
@@ -963,3 +971,153 @@ def test_server_env_injects_rocr_visible_devices():
     env2 = bypass_runner._server_env(False, None, {})
     # No pin in bench_envs: whatever the parent env had (may be unset).
     assert env2.get("ROCR_VISIBLE_DEVICES") == os.environ.get("ROCR_VISIBLE_DEVICES")
+
+
+def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
+    """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc.
+
+    The client is identified by --result-dir (writes inferencex_result.json);
+    anything else is treated as the eval subprocess.
+    """
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        is_client = "--result-dir" in cmd and "benchmark_serving.py" in " ".join(cmd)
+        if is_client:
+            rd = Path(cmd[cmd.index("--result-dir") + 1])
+            rd.mkdir(parents=True, exist_ok=True)
+            if client_rc == 0:
+                (rd / "inferencex_result.json").write_text(
+                    json.dumps({"output_throughput": 700.0, "completed": 40, "duration": 30.0}),
+                    encoding="utf-8",
+                )
+
+            class _C:
+                returncode = client_rc
+                stdout = "client ok"
+                stderr = ""
+
+            return _C()
+
+        class _E:
+            returncode = eval_rc
+            stdout = ""
+            stderr = "run_eval failed with exit code 1" if eval_rc else ""
+
+        return _E()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_eval_failure_propagates_as_run_failure(tmp_path, monkeypatch):
+    """client succeeds but lm-eval fails: the whole run must fail (no silent 0).
+
+    Magpie's ``run_eval ... || exit $?`` aborts the benchmark on eval failure;
+    bypass must mirror that so baseline's eval-rooted RUN_EVAL=false fallback can
+    detect it. The report must be success=false and carry the eval marker.
+    """
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
+
+    class _FakeServer:
+        pid = 7
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    _eval_client_run(monkeypatch, client_rc=0, eval_rc=1)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc != 0  # eval failure must not be swallowed
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+    assert any("run_eval failed with exit code" in e for e in rep["errors"])
+
+
+def test_eval_success_keeps_run_success(tmp_path, monkeypatch):
+    """client + eval both succeed: run succeeds (regression guard for the fix)."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex, run_eval="true")
+
+    class _FakeServer:
+        pid = 7
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    _eval_client_run(monkeypatch, client_rc=0, eval_rc=0)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is True
+
+
+def test_lifecycle_reuse_without_metadata_fails(tmp_path, monkeypatch):
+    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie
+    server occupies the port. bypass must NOT silently reuse or re-boot over it;
+    it fails explicitly so the reuse-key mismatch surfaces instead of being
+    papered over.
+    """
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
+
+    # Healthy port, but pid/meta are absent (no prior bypass round wrote them).
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
+    launched = {"n": 0}
+    monkeypatch.setattr(
+        bypass_runner, "_launch_server",
+        lambda cmd, env, log: launched.__setitem__("n", launched["n"] + 1),
+    )
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc != 0  # explicit failure, not a silent reuse/boot
+    assert launched["n"] == 0  # must not boot over a foreign server
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+
+
+def test_lifecycle_reuse_with_metadata_reuses(tmp_path, monkeypatch):
+    """YAML-lifecycle: /health=200 AND pid/meta present -> reuse (no new boot)."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
+
+    # A prior round persisted the server: pid/meta exist and port is healthy.
+    bypass_engine.write_lifecycle_files(
+        pid_dir=str(pid_dir), framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x",
+    )
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
+    launched = {"n": 0}
+    monkeypatch.setattr(
+        bypass_runner, "_launch_server",
+        lambda cmd, env, log: launched.__setitem__("n", launched["n"] + 1),
+    )
+    teardown = {"called": False}
+    import hyperloom.orchestrator.actions.executors._server_lifecycle as sl
+    monkeypatch.setattr(sl, "teardown_lifecycle_server", lambda **k: teardown.__setitem__("called", True))
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert launched["n"] == 0  # reused existing server
+    assert teardown["called"] is True  # cleanup=true -> torn down

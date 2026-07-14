@@ -298,6 +298,20 @@ def lifecycle_meta_file(pid_dir: str, framework: str, port: int) -> Path:
     return Path(pid_dir) / f"{framework}_{port}.json"
 
 
+def lifecycle_files_present(pid_dir: str, framework: str, port: int) -> bool:
+    """Whether both pid and meta files exist for a persistent server.
+
+    A healthy ``/health`` port WITHOUT these files means the port is held by a
+    server this bypass run did not launch (foreign/zombie), so its reuse-key
+    would not match. Callers use this to distinguish a genuine reuse target
+    from an unrelated listener.
+    """
+    return (
+        lifecycle_pid_file(pid_dir, framework, port).exists()
+        and lifecycle_meta_file(pid_dir, framework, port).exists()
+    )
+
+
 def write_lifecycle_files(
     *,
     pid_dir: str,

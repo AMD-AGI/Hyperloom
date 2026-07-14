@@ -12,9 +12,11 @@ server, wait for HTTP readiness, run the InferenceX benchmark client, then
 optionally run lm-eval. This depends on the InferenceX checkout (benchmark
 client + lm-eval), but NOT on the Magpie repository.
 
-Scope: single-node ``--run-mode local`` for sglang/vllm/atom, plus the
-optional ``RUN_EVAL`` accuracy pass. Docker/Ray/scriptable/server-lifecycle and
-richer analysis are deferred.
+Scope: ``--run-mode local`` for sglang/vllm/atom, plus the optional ``RUN_EVAL``
+accuracy pass. Also covers the server_lifecycle reuse protocol (persist server
+on the first round, reuse on the next), the scriptable (server-less) path for
+xDiT diffusion, the multi-node remote-client path (``BENCHMARK_BASE_URL``), and
+an additive ``bypass_analysis`` block. Docker/Ray remain deferred.
 """
 
 from __future__ import annotations
@@ -87,6 +89,28 @@ def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str
         return shlex.split(raw)
     except ValueError:
         return raw.split()
+
+
+# Reuse verdicts for a persistent lifecycle server (see _server_reusable).
+_REUSE = "reuse"  # healthy port + our pid/meta present -> attach a client round
+_BOOT = "boot"  # port not up -> this round boots the server
+_FOREIGN = "foreign"  # healthy port but no pid/meta -> not ours; refuse
+
+
+def _server_reusable(base_url: str, pid_dir: str | None, framework: str, port: int) -> str:
+    """Classify whether a persistent lifecycle server can be reused.
+
+    Reuse requires BOTH a healthy ``/health`` and this run's pid/meta files, so
+    a port held by a server bypass did not launch (foreign/zombie) is never
+    silently reused or booted over ΓÇö it is reported so the caller fails loudly.
+
+    Returns one of ``_REUSE`` / ``_BOOT`` / ``_FOREIGN``.
+    """
+    if not bypass_engine.server_health_ok(base_url):
+        return _BOOT
+    if pid_dir and bypass_engine.lifecycle_files_present(pid_dir, framework, port):
+        return _REUSE
+    return _FOREIGN
 
 
 def run_benchmark(
@@ -219,15 +243,25 @@ def run_benchmark(
     if phase == "all" and bool(sl.get("enabled")):
         sl_cleanup = bool(sl.get("cleanup", True))
         sl_pid_dir = str(sl.get("pid_dir") or workspace)
-        if bypass_engine.server_health_ok(base_url):
-            # A persistent server from a prior round is up: reuse it.
+        verdict = _server_reusable(base_url, sl_pid_dir, framework, port)
+        if verdict == _REUSE:
+            # A persistent server from a prior round is up AND ours: reuse it.
             return _run_client_phase(
                 framework=framework, model=model, port=port, conc=conc, isl=isl, osl=osl,
                 rrr=rrr, profile=profile, bench_envs=bench_envs, inferencex_root=inferencex_root,
                 base_url=base_url, server_log=server_log, timeout_s=timeout_s,
                 workspace=workspace, pid_dir=sl_pid_dir, cleanup=sl_cleanup, start=time.time(),
             )
-        # No server yet: start + persist, run this round's client, then honor cleanup.
+        if verdict == _FOREIGN:
+            # Healthy port but no pid/meta: a server we did not launch holds it.
+            # Refuse rather than reuse (reuse-key mismatch) or boot over it.
+            _write_report(
+                workspace, framework, model, False, time.time(),
+                [f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"],
+            )
+            return 1
+        # verdict == _BOOT: no server yet. Start + persist, run this round's
+        # client, then honor cleanup.
         return _run_lifecycle_all(
             framework=framework, model=model, tp=tp, port=port,
             max_model_len=max_model_len_i, profile=profile, profile_dir=profile_dir,
@@ -306,8 +340,13 @@ def _run_client_phase(
     inferencex_root, base_url, server_log, timeout_s, workspace, pid_dir, cleanup, start,
 ) -> int:
     """Reuse a running server; run client (+eval); teardown when cleanup."""
-    if not bypass_engine.server_health_ok(base_url):
-        _write_report(workspace, framework, model, False, start, ["no healthy server to reuse"])
+    verdict = _server_reusable(base_url, pid_dir, framework, port)
+    if verdict != _REUSE:
+        reason = (
+            "no healthy server to reuse" if verdict == _BOOT
+            else f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"
+        )
+        _write_report(workspace, framework, model, False, start, [reason])
         return 1
     try:
         rc = _run_client_and_eval(
@@ -441,16 +480,29 @@ def _run_client_and_eval(
             tasks=os.environ.get("MAGPIE_EVAL_TASKS", "gsm8k").strip() or "gsm8k",
             limit=(os.environ.get("MAGPIE_EVAL_LIMIT", "").strip() or None),
         )
-        _run_subprocess(eval_cmd, timeout_s, workspace, "eval")
+        eval_rc = _run_subprocess(eval_cmd, timeout_s, workspace, "eval")
+        # Magpie's ``run_eval ... || exit $?`` aborts the benchmark when the
+        # accuracy pass fails, so a healthy client run with a failed eval is a
+        # failed run ΓÇö not a silently-passing one. Propagate the eval exit code
+        # so _finalize_report fails the run and emits the same marker baseline's
+        # eval-rooted RUN_EVAL=false fallback keys on (_EVAL_FAILURE_MARKERS).
+        if eval_rc != 0:
+            _write_eval_returncode(workspace, eval_rc)
+            return eval_rc
     return rc
 
 
 def _finalize_report(*, workspace, framework, model, server_log, bench_envs, start, rc) -> int:
     """Parse raw result, build analysis, write report; return exit code."""
     raw = _load_raw_result(workspace)
-    success = rc == 0 and raw is not None
+    eval_rc = _read_eval_returncode(workspace)
+    success = rc == 0 and eval_rc == 0 and raw is not None
     errors: list[str] = []
-    if rc != 0:
+    if eval_rc != 0:
+        # Mirror InferenceX's benchmark_lib.sh message so baseline's
+        # _is_eval_rooted_failure recognizes a bypass eval failure too.
+        errors.append(f"run_eval failed with exit code {eval_rc}")
+    elif rc != 0:
         errors.append(f"benchmark client exited {rc}")
     if raw is None:
         errors.append("inferencex_result.json not produced")
@@ -460,7 +512,9 @@ def _finalize_report(*, workspace, framework, model, server_log, bench_envs, sta
         stderr_text=client_stderr, run_eval=_run_eval_enabled(bench_envs),
     )
     _write_report(workspace, framework, model, success, start, errors, raw=raw, analysis=analysis)
-    return 0 if success else (rc or 1)
+    if success:
+        return 0
+    return rc or eval_rc or 1
 
 
 
@@ -485,13 +539,17 @@ def _server_env(
 def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> subprocess.Popen:
     """Launch the server in its own session, redirecting logs to server.log."""
     log_fh = open(server_log, "w", encoding="utf-8")  # noqa: SIM115 - closed on terminate
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         env=env,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    # Stash the log handle on the proc so _terminate_server can close it; the
+    # child holds its own dup'd fd, so closing ours does not truncate the log.
+    proc._bypass_log_fh = log_fh  # type: ignore[attr-defined]
+    return proc
 
 
 def _terminate_server(proc: subprocess.Popen | None) -> None:
@@ -511,6 +569,14 @@ def _terminate_server(proc: subprocess.Popen | None) -> None:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
+            pass
+    # Close the server.log handle opened by _launch_server (the child kept its
+    # own dup'd fd) so repeated lifecycle rounds don't leak file descriptors.
+    log_fh = getattr(proc, "_bypass_log_fh", None)
+    if log_fh is not None:
+        try:
+            log_fh.close()
+        except OSError:
             pass
 
 
@@ -556,6 +622,29 @@ def _load_raw_result(workspace: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+# Sentinel file carrying a failed eval's exit code from _run_client_and_eval to
+# _finalize_report (which only receives the client rc). Keeps the client/eval
+# split out of the phase call signatures while still failing the run on eval
+# failure. Absent/unreadable means "eval did not fail".
+_EVAL_RC_FILE = "eval_returncode"
+
+
+def _write_eval_returncode(workspace: Path, rc: int) -> None:
+    """Persist a failed eval's exit code for _finalize_report (best-effort)."""
+    try:
+        (workspace / _EVAL_RC_FILE).write_text(str(int(rc)), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_eval_returncode(workspace: Path) -> int:
+    """Read the eval exit code sentinel; 0 when absent/unreadable."""
+    try:
+        return int((workspace / _EVAL_RC_FILE).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
 
 
 def _write_report(
