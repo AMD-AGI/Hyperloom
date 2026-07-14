@@ -422,33 +422,6 @@ def competitor_target_json(session_dir: Path) -> Path:
     return Path(session_dir) / "competitor_target.json"
 
 
-def logs_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/logs/``, the host dir for per-agent log files.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/logs``.
-    """
-    return Path(session_dir) / "logs"
-
-
-# Launcher-side artefacts (stdout, PID file, robustness monitor logs)
-def optimizer_runs_dir(session_dir: Path) -> Path:
-    """``<sd>/optimizer_runs/`` — launcher artefacts (run_<tag>.log / .pid /
-    robustness_monitor_*.log). Under $USER_DATA_PATH so one override moves
-    the whole run tail.
-
-    Args:
-        session_dir: The session root directory.
-
-    Returns:
-        ``<session_dir>/optimizer_runs``.
-    """
-    return Path(session_dir) / "optimizer_runs"
-
-
 # Per-agent artefacts
 def agent_dir(session_dir: Path, role: str) -> Path:
     """Compute ``<sd>/agents/<role>/``, the per-agent artefact root.
@@ -798,9 +771,7 @@ __all__ = [
     "kernel_agent_runs_dir",
     "kernel_agent_runs_root",
     "llm_calls_path",
-    "logs_dir",
     "manifest_path",
-    "optimizer_runs_dir",
     "patches_dir",
     "reports_dir",
     "research_hints_json",
