@@ -44,26 +44,6 @@ class GlobalFacts:
         return asdict(self)
 
 
-def _safe_pct(num: Any, denom: Any) -> float | None:
-    """Compute a signed percentage change, tolerating bad inputs.
-
-    Args:
-        num (Any): The new value (numerator); coerced to float.
-        denom (Any): The baseline value (denominator); coerced to float.
-
-    Returns:
-        float | None: ``(num - denom) / denom * 100`` as a percent, or
-            ``None`` if either value is non-numeric or the denominator is 0.
-    """
-    try:
-        n, d = float(num), float(denom)
-    except (TypeError, ValueError):
-        return None
-    if d == 0:
-        return None
-    return (n - d) / d * 100.0
-
-
 def _workload_summary(workload: dict[str, Any]) -> str:
     """Build a compact one-line description of the workload.
 

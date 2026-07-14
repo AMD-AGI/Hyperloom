@@ -346,15 +346,11 @@ def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
 
 
 # Workspace-/session-scoped artefact helpers. Single source of truth so
-# callers go through e.g. magpie_dir(session_dir()) instead of concatenating
+# callers go through e.g. magpie_dir() / runtime_dir() instead of concatenating
 # paths by hand.
-def runtime_dir(session_dir: Path | None = None) -> Path:
+def runtime_dir() -> Path:
     """``<workspace_root>/runtime/`` — workspace-shared writable runtime
-    (kernel-agent env file, GEAK litellm config). Survives across sessions;
-    the ``session_dir`` param is ignored (back-compat).
-
-    Args:
-        session_dir: Ignored; accepted for back-compat.
+    (kernel-agent env file, GEAK litellm config). Survives across sessions.
 
     Returns:
         ``<workspace_root>/runtime``.
@@ -379,13 +375,10 @@ def open_source_root() -> Path:
     return Path("/opt/hyperloom/open-source-repos")
 
 
-def magpie_dir(session_dir: Path | None = None) -> Path:
+def magpie_dir() -> Path:
     """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_PATH``
     overrides). Aligned with install.sh so script and runtime resolve the same
-    checkout. ``session_dir`` param ignored (back-compat).
-
-    Args:
-        session_dir: Ignored; accepted for back-compat.
+    checkout.
 
     Returns:
         The Magpie checkout path.

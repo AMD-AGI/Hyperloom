@@ -417,7 +417,7 @@ def test_wait_health_false_on_timeout(monkeypatch):
 
 def test_find_head_pod_ip_prefers_kuberay_head_suffix():
     """SaFE may list submitter as resourceId 0; real Ray head podId contains '-head-'."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     wl = {
         "pods": [
@@ -433,18 +433,18 @@ def test_find_head_pod_ip_prefers_kuberay_head_suffix():
             },
         ],
     }
-    assert mn_cli._find_head_pod_ip(wl) == "10.245.131.77"
+    assert mn_rayjob._find_head_pod_ip(wl) == "10.245.131.77"
 
 
 def test_find_head_pod_ip_fallback_resource_id_zero():
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     wl = {
         "pods": [
             {"podId": "legacy-pod", "resourceId": 0, "podIP": "10.0.0.1"},
         ],
     }
-    assert mn_cli._find_head_pod_ip(wl) == "10.0.0.1"
+    assert mn_rayjob._find_head_pod_ip(wl) == "10.0.0.1"
 
 
 def test_build_rayjob_entrypoints_empty_submitter_tail():
@@ -841,18 +841,18 @@ def test_dynamo_build_node_launch_args_sglang_and_kill_only():
 
 
 def test_resolve_geak_src_resolution_order(monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
     monkeypatch.delenv("HYPERLOOM_GEAK_SRC", raising=False)
     monkeypatch.delenv("HYPERLOOM_ROOT", raising=False)
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
-    assert mn_cli._resolve_geak_src("/x/geak") == "/x/geak"  # explicit wins
+    assert mn_dynamo._resolve_geak_src("/x/geak") == "/x/geak"  # explicit wins
     monkeypatch.setenv("USER_DATA_PATH", "/data")
-    assert mn_cli._resolve_geak_src(None) == "/data/runtime/geak"
+    assert mn_dynamo._resolve_geak_src(None) == "/data/runtime/geak"
     monkeypatch.setenv("HYPERLOOM_ROOT", "/r")
-    assert mn_cli._resolve_geak_src(None) == "/r/geak"
+    assert mn_dynamo._resolve_geak_src(None) == "/r/geak"
     monkeypatch.setenv("HYPERLOOM_GEAK_SRC", "/explicit/geak")
-    assert mn_cli._resolve_geak_src(None) == "/explicit/geak"
+    assert mn_dynamo._resolve_geak_src(None) == "/explicit/geak"
 
 
 def test_apply_patch_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeypatch):
@@ -1058,11 +1058,11 @@ def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
     # Meta lands at <profile_traces>/<wid>/<session_id> with all fields populated and JSON-decodable.
     import json as _json
 
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs())
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs())
 
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
     assert meta_path.is_file()
@@ -1081,12 +1081,12 @@ def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
 
 def test_write_rayjob_meta_skipped_when_session_id_missing(tmp_path, monkeypatch):
     # Empty/None session_id → the helper short-circuits and creates nothing under profile-traces/.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs(session_id=None))
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs(session_id=""))
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(session_id=None))
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(session_id=""))
 
     profile_traces = tmp_path / "profile-traces"
     # The directory may not even exist; if it does, it must be empty.
@@ -1098,11 +1098,11 @@ def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
     # owner_id is optional; the meta must still serialize cleanly with owner_id=None.
     import json as _json
 
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs(owner_id=None))
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(owner_id=None))
 
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
     payload = _json.loads(meta_path.read_text(encoding="utf-8"))
@@ -1111,7 +1111,7 @@ def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
 
 def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
     # A filesystem failure must NOT propagate (meta is audit data); force Path.mkdir to raise OSError.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
@@ -1121,7 +1121,7 @@ def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.mkdir", _boom)
 
     # If the helper re-raised, this call would fail the test.
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs())
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs())
 
     # And no file should have been created.
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"

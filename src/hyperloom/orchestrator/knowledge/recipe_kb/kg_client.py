@@ -1061,14 +1061,6 @@ class KGClient:
             log.warning("kg emit_fact degraded (skipped): %s", exc)
             return False
 
-    def retract_fact_safe(self, **kwargs: Any) -> bool:
-        """Call :meth:`retract_fact`, returning ``False`` on any backend error."""
-        try:
-            return self.retract_fact(**kwargs)
-        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
-            log.warning("kg retract_fact degraded (skipped): %s", exc)
-            return False
-
 
 def _page_content(page: Any, *, full: bool = False) -> str:
     """Extract a page's body (or full raw markdown) from a get_page result.

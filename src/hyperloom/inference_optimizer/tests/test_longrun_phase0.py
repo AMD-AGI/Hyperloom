@@ -205,7 +205,8 @@ async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
         {"target_proposal_msg_id": "", "verdict": "approve"},
     ))
 
-    pending = await dbm.pending_proposal_seqs(conn)
+    rows = await conn.fetchall(dbm._PENDING_PROPOSAL_SEQS_SQL)
+    pending = {int(r["seq"]) for r in rows or []}
 
     # Cross-check against the same join replay_for_resume uses.
     proposals = await bus.tail(topic="proposal", n=1000)

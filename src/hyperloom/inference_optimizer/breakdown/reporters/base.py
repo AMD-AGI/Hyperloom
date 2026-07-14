@@ -189,21 +189,3 @@ def fmt_pct(v: Any, *, plus: bool = False) -> str:
         return "—"
     sign = "+" if (plus and x > 0) else ""
     return f"{sign}{x:.2f}%"
-
-
-def fmt_int(v: Any) -> str:
-    """Format a value as a thousands-separated integer string.
-
-    Args:
-        v (Any): The value to format.
-
-    Returns:
-        str: The integer with thousands separators (e.g. ``"1,234"``), the
-            raw ``str(v)`` when it is non-numeric, or ``"—"`` when ``None``.
-    """
-    if v is None:
-        return "—"
-    try:
-        return f"{int(v):,}"
-    except (TypeError, ValueError):
-        return str(v)

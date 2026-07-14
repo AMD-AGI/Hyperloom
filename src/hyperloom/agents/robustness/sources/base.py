@@ -16,12 +16,11 @@ tick"; the next tick re-probes after ``recheck_interval_s``.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
 log = logging.getLogger(__name__)
@@ -404,38 +403,3 @@ class DegradeRouter:
             reason,
             state.fail_streak,
         )
-
-
-# ---------------------------------------------------------------------------
-# Helpers used by source implementations
-# ---------------------------------------------------------------------------
-
-
-async def call_with_timeout(
-    coro_factory: Callable[[], Awaitable[Any]],
-    *,
-    timeout_s: float,
-    label: str,
-) -> Any:
-    """Run ``coro_factory()`` under :func:`asyncio.wait_for`.
-
-    Translates :class:`asyncio.TimeoutError` to :class:`SourceUnavailable`
-    so DegradeRouter treats it as a counted failure. Other exceptions
-    propagate.
-
-    Args:
-        coro_factory (Callable[[], Awaitable[Any]]): Zero-arg callable
-            returning the awaitable to run.
-        timeout_s (float): Maximum seconds to await before timing out.
-        label (str): Label used in the raised error message.
-
-    Returns:
-        Any: The result of awaiting ``coro_factory()``.
-
-    Raises:
-        SourceUnavailable: When the awaited coroutine times out.
-    """
-    try:
-        return await asyncio.wait_for(coro_factory(), timeout=timeout_s)
-    except asyncio.TimeoutError as exc:
-        raise SourceUnavailable(f"{label}: timeout after {timeout_s}s") from exc
