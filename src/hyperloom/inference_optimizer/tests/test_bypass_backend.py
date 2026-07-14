@@ -100,6 +100,52 @@ def test_eval_command_shape():
     assert "base_url=http://127.0.0.1:8888/v1/completions" in joined
 
 
+def test_eval_command_without_limit_omits_limit_flag():
+    cmd = bypass_engine.build_eval_command(
+        python_exe="PY",
+        model="/m",
+        base_url="http://127.0.0.1:8888/",
+        conc=2,
+        out_dir="/ws/lm_eval",
+        tasks="gsm8k,truthfulqa",
+        limit=None,
+    )
+    assert "--limit" not in cmd
+    assert "gsm8k,truthfulqa" in cmd
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in " ".join(cmd)
+
+
+def test_resolve_inferencex_root_env_fallbacks(monkeypatch):
+    monkeypatch.delenv("MAGPIE_INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    assert bypass_engine.resolve_inferencex_root({}) == ""
+
+    monkeypatch.setenv("INFERENCEX_PATH", "/ix-env")
+    assert bypass_engine.resolve_inferencex_root({}) == "/ix-env"
+
+    monkeypatch.setenv("MAGPIE_INFERENCEX_PATH", "/ix-magpie")
+    assert bypass_engine.resolve_inferencex_root({}) == "/ix-magpie"
+
+    assert bypass_engine.resolve_inferencex_root({"inferencex_path": " /ix-yaml "}) == "/ix-yaml"
+
+
+def test_unknown_server_framework_raises_value_error():
+    try:
+        bypass_engine.build_server_command(
+            framework="unknown",
+            model="/m",
+            tp=1,
+            port=8888,
+            max_model_len=None,
+            extra_args=[],
+            profile_dir=None,
+        )
+    except ValueError as exc:
+        assert "no server launcher" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unknown server framework")
+
+
 def test_wait_for_server_ready_polls_until_200():
     calls = {"n": 0}
 
@@ -404,6 +450,7 @@ def test_vllm_server_command_no_profiler_when_dir_none():
 
 def test_bypass_pid_meta_helpers(tmp_path):
     pid_dir = str(tmp_path)
+    assert bypass_engine.lifecycle_files_present(pid_dir, "vllm", 8888) is False
     bypass_engine.write_lifecycle_files(
         pid_dir=pid_dir, framework="vllm", port=8888, pid=123, pgid=123, model="/m",
     )
@@ -413,6 +460,7 @@ def test_bypass_pid_meta_helpers(tmp_path):
     meta = json.loads(metaf.read_text(encoding="utf-8"))
     assert meta["pid"] == 123 and meta["port"] == 8888
     assert meta["base_url"] == "http://127.0.0.1:8888"
+    assert bypass_engine.lifecycle_files_present(pid_dir, "vllm", 8888) is True
 
 
 def test_server_health_ok_probe():
