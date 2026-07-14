@@ -6,6 +6,7 @@ import pytest
 
 from hyperloom.common.llm_config import (
     LLMConfigError,
+    claude_sdk_env_options,
     derive_openai_base_url,
     openai_client_kwargs,
     parse_custom_headers,
@@ -68,3 +69,28 @@ def test_openai_kwargs_preserves_explicit_openai_config():
 def test_openai_kwargs_requires_a_key():
     with pytest.raises(LLMConfigError):
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic"})
+
+
+def test_claude_sdk_env_options_from_deepseek_key_only():
+    opts = claude_sdk_env_options(
+        model="deepseek-chat",
+        env={"DEEPSEEK_API_KEY": "sk-deepseek"},
+    )
+    assert opts["setting_sources"] == []
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert child_env["ANTHROPIC_API_KEY"] == "sk-deepseek"
+    assert child_env["ANTHROPIC_AUTH_TOKEN"] == "sk-deepseek"
+    assert child_env["ANTHROPIC_MODEL"] == "deepseek-chat"
+
+
+def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
+    opts = claude_sdk_env_options(
+        model="deepseek-chat",
+        env={
+            "DEEPSEEK_API_KEY": "sk-deepseek",
+            "DEEPSEEK_BASE_URL": "https://deepseek.example/anthropic",
+        },
+    )
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://deepseek.example/anthropic"

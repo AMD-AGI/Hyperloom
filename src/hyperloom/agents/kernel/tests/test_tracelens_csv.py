@@ -1425,6 +1425,83 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-sonnet-4-5-20250929"
 
 
+def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
+    """OpenAI-only deployments must run TraceLens without Claude SDK."""
+    import asyncio
+    from types import SimpleNamespace
+
+    output_dir = tmp_path / "out"
+    calls: list[dict] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            tool_calls = [
+                SimpleNamespace(
+                    id="call_write",
+                    function=SimpleNamespace(
+                        name="write_file",
+                        arguments=json.dumps(
+                            {
+                                "path": str(output_dir / "analysis.md"),
+                                "content": "# Codex TraceLens report\n",
+                            }
+                        ),
+                    ),
+                )
+            ]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="", tool_calls=tool_calls),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=5),
+            )
+
+    class _Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    def _no_claude_query(**_kwargs):
+        raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="gpt-5.5",
+            sdk_query_factory=_no_claude_query,
+            sdk_options_cls=object,
+            openai_client_factory=_Client,
+        )
+    )
+
+    assert res.report_path == output_dir / "analysis.md"
+    assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
+    assert calls
+    assert calls[0]["model"] == "gpt-5.5"
+    assert calls[0]["tools"]
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_agent_transcript" in res.artifact_paths
+
+
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
     """Sandbox-hang RCA: a gateway stream that goes silent mid-response must
     abort on the per-message idle timeout instead of blocking forever on

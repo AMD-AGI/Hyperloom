@@ -38,12 +38,17 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
     "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
 )
+
+DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 
 
 def parse_custom_headers(raw: str | None) -> dict[str, str]:
@@ -171,9 +176,13 @@ def claude_sdk_env_options(
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
 
+    if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
+        source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
+
     fallback_key = (
         source.get("ANTHROPIC_AUTH_TOKEN")
         or source.get("ANTHROPIC_API_KEY")
+        or source.get("DEEPSEEK_API_KEY")
         or source.get("OPENAI_API_KEY")
         or source.get("SAFE_API_KEY")
         or source.get("LLM_GATEWAY_KEY")
@@ -200,6 +209,8 @@ def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) 
 
 __all__ = [
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
+    "DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL",
+    "DEFAULT_DEEPSEEK_MODEL",
     "LLMConfigError",
     "OpenAIClientConfig",
     "claude_sdk_env_options",
