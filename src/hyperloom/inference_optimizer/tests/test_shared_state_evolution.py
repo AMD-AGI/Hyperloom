@@ -54,6 +54,33 @@ def test_v06_state_without_schema_version_is_migrated(tmp_path):
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
+def test_legacy_extra_sglang_args_are_renamed_on_load(tmp_path):
+    """Old state.json launch-arg fields migrate to canonical ``extra_server_args``."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    legacy = {
+        "session_id": "legacy-args",
+        "current_best": {
+            "variant_name": "warm",
+            "extra_sglang_args": "--enable-foo",
+        },
+        "optimization_stack": [
+            {
+                "action": "kernel_opt",
+                "candidate_extra_sglang_args": "--candidate-foo",
+            },
+        ],
+    }
+    (sd / "state.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = SharedState.load_or_init(sd)
+
+    assert loaded.current_best["extra_server_args"] == "--enable-foo"
+    assert "extra_sglang_args" not in loaded.current_best
+    assert loaded.optimization_stack[0]["candidate_extra_server_args"] == "--candidate-foo"
+    assert "candidate_extra_sglang_args" not in loaded.optimization_stack[0]
+
+
 # 2. Inv-10.1 — fact-layer survives migration unchanged
 _FACT_LAYER_PAYLOAD: dict = {
     "session_id": "legacy",
@@ -133,10 +160,8 @@ def test_migration_is_idempotent(tmp_path):
     assert second.schema_version == third.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
-def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
+def test_v08_payload_short_circuits_migration(caplog):
     """A current-schema payload (schema_version == LATEST) skips the migration log line."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
         "schema_version": LATEST_STATE_SCHEMA_VERSION,
         "session_id": "fresh-v08",
@@ -151,7 +176,6 @@ def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
 # 4. Migration log content
 def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
     """A legacy payload with action_scores logs the scoreboard drop + migrated schema_version."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
         "session_id": "legacy",
         "baseline_tput": 100.0,
@@ -169,7 +193,6 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
 # 5. Strict / lenient migration mode
 def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
     """Lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", "lenient")
     # Drop ``baseline_tput`` from the known field set to force the "raw has it, filtered doesn't" branch.
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
@@ -179,7 +202,7 @@ def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
         "baseline_tput": 100.0,
     }
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.state.shared_state"):
-        loaded = SharedState.from_dict(payload)
+        loaded = SharedState.from_dict(payload, migration_mode="lenient")
     assert loaded.session_id == "legacy"
     warned = [r for r in caplog.records if "Inv-10.1 violation" in r.getMessage()]
     assert warned, "lenient mode should still log a WARNING about the drop"
@@ -187,7 +210,6 @@ def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
 
 def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
     """Strict mode raises ValueError when a fact-layer field would be lost."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
     monkeypatch.setattr(SharedState, "__dataclass_fields__", fake_fields)

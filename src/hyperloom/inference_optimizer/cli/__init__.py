@@ -1255,17 +1255,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     nodes_resolved = max(1, int(args.nodes))
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node with the same CLI > env > 8 chain _provision_multi_node_rayjob_stack uses.
+    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
     gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
     if gpn_attr is not None:
         gpus_per_node_resolved = int(gpn_attr)
     else:
-        try:
-            gpus_per_node_resolved = int(
-                os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8,
-            )
-        except ValueError:
-            gpus_per_node_resolved = 8
+        gpus_per_node_resolved = 8
     total_gpus = nodes_resolved * gpus_per_node_resolved
 
     # Topology sanity gates — multi-node only (nodes>=2); fail fast vs a cryptic launcher crash mid-cold-start.
@@ -1443,7 +1438,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        state = SharedState.load_or_init(session_dir)
+        legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+        migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
+        state = SharedState.load_or_init(
+            session_dir,
+            legacy_action_scores=legacy_mode,
+            migration_mode=migration_mode,
+        )
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1851,11 +1852,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
     else:
         print("Recipe sediment : DISABLED (--no-recipe-sediment)")
-    if bool(getattr(args, "allow_empty_kernel_shape", False)):
-        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+    from hyperloom.orchestrator.kernel.request_handlers import set_allow_empty_kernel_shape
+
+    allow_empty_kernel_shape = bool(getattr(args, "allow_empty_kernel_shape", False))
+    set_allow_empty_kernel_shape(allow_empty_kernel_shape)
+    if allow_empty_kernel_shape:
         print("Kernel shape    : empty-shape dispatch ALLOWED (--allow-empty-kernel-shape)")
     else:
-        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
         print("Kernel shape    : non-empty trace shape REQUIRED for kernel-opt dispatch")
 
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
@@ -1941,49 +1944,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
-    # Propagate --legacy-action-scores so SharedState.from_dict handles drop/warn uniformly (default drop).
-    legacy_mode = (
-        str(
-            getattr(args, "legacy_action_scores", "drop") or "drop",
-        )
-        .strip()
-        .lower()
-    )
-    if legacy_mode == "warn":
-        os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
-    # Propagate --migration-mode: SharedState.from_dict treats fact-layer discrepancy as fatal (strict) or WARN (lenient).
-    migration_mode = (
-        str(
-            getattr(args, "migration_mode", "strict") or "strict",
-        )
-        .strip()
-        .lower()
-    )
-    if migration_mode == "lenient":
-        os.environ["INFERENCE_OPTIMIZER_MIGRATION_MODE"] = "lenient"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_MIGRATION_MODE", None)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)
-    # Propagate --breakdown-include-transcripts (inline / path-only choice) to end-of-session breakdown.
-    transcripts_flag = (
-        str(
-            getattr(args, "breakdown_include_transcripts", "false") or "false",
-        )
-        .strip()
-        .lower()
-    )
-    if transcripts_flag == "true":
-        os.environ["INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS"] = "1"
-    else:
-        os.environ.pop(
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
-            None,
-        )
+    from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
 
+    legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+    migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
+    transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
+    set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
@@ -2002,6 +1971,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
+        legacy_action_scores=legacy_mode,
+        migration_mode=migration_mode,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer. Disabled by

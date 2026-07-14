@@ -44,8 +44,6 @@ configured upstream gateway.
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://your-openai-compatible-gateway.example.com/v1`).
-   If `GEAK_BASE_URL` or `LLM_API_BASE` is set, confirm it points at a
-   routable endpoint for the worker runtime.
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
 
