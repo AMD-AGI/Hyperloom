@@ -399,8 +399,9 @@ def populate_gpu_arch_json(
       backfills MAF itself, so we never run the microbenchmark. Any bundled
       spec already on disk is returned as an artifact; otherwise ``None`` is
       returned and the internal extension supplies MAF at report time.
-    - When it is False (open-source path) a bundled spec short-circuits, and
-      a missing spec triggers the TraceLens microbenchmark on an idle GPU.
+    - When it is False (open-source path) a bundled spec short-circuits;
+      otherwise the TraceLens microbenchmark runs on an idle GPU, falling back
+      to hyperloom's in-repo achievable spec when it cannot produce a usable one.
 
     Args:
         tracelens_root: Root of the TraceLens checkout.
@@ -438,59 +439,63 @@ def populate_gpu_arch_json(
     if not canonical:
         raise RuntimeError("target platform is empty; cannot resolve or generate gpu arch JSON")
 
-    # Prefer hyperloom's in-repo achievable spec (NDA-clear, shared with the LLM
-    # baseline roofline) over a live microbenchmark: newer cards (e.g. MI355X)
-    # are absent from the public bundle, and this keeps a single source of truth
-    # without needing an idle GPU or a TraceLens-internal checkout.
+    # Prefer a live microbenchmark (measured MAF); fall back to hyperloom's
+    # in-repo achievable spec when no idle GPU is available or the microbenchmark
+    # cannot produce a usable spec.
+    out_path = default_arch_output_path(tracelens_root, canonical)
+    mb_error: RuntimeError | None = None
+    try:
+        log(
+            "gpu_arch_json: no bundled spec for "
+            f"{canonical} and internal extension disabled; running TraceLens "
+            f"microbenchmark -> {out_path}"
+        )
+        physical_id = select_idle_gpu(log=log)
+        rc = run_command(
+            [
+                sys.executable,
+                "-m",
+                "TraceLens.PerfModel.benchmarking.microbench",
+                "--device",
+                str(device),
+                "--warmup",
+                str(MICROBENCH_WARMUP),
+                "--rep",
+                str(MICROBENCH_REP),
+                "--output",
+                str(out_path),
+            ],
+            cwd=tracelens_root,
+            timeout_s=timeout_s,
+            env=single_physical_gpu_env(physical_id),
+        )
+        if rc != 0:
+            raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
+        if not out_path.is_file():
+            raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {out_path}")
+
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
+        changed = False
+        if payload.get("name") != canonical:
+            payload["name"] = canonical
+            changed = True
+            log(f"gpu_arch_json: patched name field -> {canonical}")
+
+        # Reject / sanitize a spec with 0 (unmeasured) MAF or bandwidth before
+        # roofline consumes it as a divisor (#390).
+        changed = _sanitize_measured_arch_spec(payload, platform=canonical, out_path=out_path, log=log) or changed
+
+        if changed:
+            out_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
+
+        log(f"gpu_arch_json: measured spec ready at {out_path}")
+        return out_path
+    except RuntimeError as exc:
+        mb_error = exc
+        log(f"gpu_arch_json: microbenchmark unusable ({exc}); falling back to hyperloom achievable spec")
+
     hyperloom_spec = write_hyperloom_arch_spec(tracelens_root, canonical, log)
     if hyperloom_spec is not None:
         return hyperloom_spec
-
-    out_path = default_arch_output_path(tracelens_root, canonical)
-    log(
-        "gpu_arch_json: no bundled spec for "
-        f"{canonical} and internal extension disabled; running TraceLens "
-        f"microbenchmark -> {out_path}"
-    )
-
-    physical_id = select_idle_gpu(log=log)
-
-    rc = run_command(
-        [
-            sys.executable,
-            "-m",
-            "TraceLens.PerfModel.benchmarking.microbench",
-            "--device",
-            str(device),
-            "--warmup",
-            str(MICROBENCH_WARMUP),
-            "--rep",
-            str(MICROBENCH_REP),
-            "--output",
-            str(out_path),
-        ],
-        cwd=tracelens_root,
-        timeout_s=timeout_s,
-        env=single_physical_gpu_env(physical_id),
-    )
-    if rc != 0:
-        raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
-    if not out_path.is_file():
-        raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {out_path}")
-
-    payload = json.loads(out_path.read_text(encoding="utf-8"))
-    changed = False
-    if payload.get("name") != canonical:
-        payload["name"] = canonical
-        changed = True
-        log(f"gpu_arch_json: patched name field -> {canonical}")
-
-    # Reject / sanitize a spec with 0 (unmeasured) MAF or bandwidth before
-    # roofline consumes it as a divisor (#390).
-    changed = _sanitize_measured_arch_spec(payload, platform=canonical, out_path=out_path, log=log) or changed
-
-    if changed:
-        out_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")
-
-    log(f"gpu_arch_json: measured spec ready at {out_path}")
-    return out_path
+    assert mb_error is not None
+    raise mb_error
