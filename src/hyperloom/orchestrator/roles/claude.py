@@ -289,16 +289,6 @@ class ClaudeBackend:
                 self.mcp_server_config = cfg
                 self.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
 
-    @property
-    def has_emit_intent_tool(self) -> bool:
-        """Whether the ``emit_intent`` MCP tool is wired up and usable.
-
-        Returns:
-            bool: ``True`` when both the MCP server config and qualified tool
-            name are present.
-        """
-        return self.mcp_server_config is not None and self.mcp_tool_name is not None
-
     # ------------------------------------------------------------------
     # Backend protocol
     # ------------------------------------------------------------------
@@ -528,31 +518,12 @@ class ClaudeBackend:
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
-    @property
-    def has_context_tools(self) -> bool:
-        """Whether the context-tools MCP server is configured.
-
-        Returns:
-            ``True`` if a context-server config was set up successfully.
-        """
-        return self._context_server_config is not None
-
     def reset_conversation(self) -> None:
         """Drop the captured session so the next ``run`` starts fresh.
 
         Used after a checkpoint/compaction or resume rebuild.
         """
         self._session_id = None
-
-    @property
-    def conversation_session_id(self) -> str | None:
-        """Current SDK session token (conversational mode), or None.
-
-        Returns:
-            The captured SDK session id in conversational mode, otherwise
-            ``None``.
-        """
-        return self._session_id if self.conversational else None
 
     def _build_options(
         self,

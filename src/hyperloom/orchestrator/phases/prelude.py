@@ -99,9 +99,7 @@ class PreludePhase(PhaseHandler):
         for row in what_failed:
             if not isinstance(row, dict):
                 continue
-            args = str(
-                row.get("extra_sglang_args") or row.get("args") or "",
-            ).strip()
+            args = str(row.get("extra_server_args") or row.get("args") or "").strip()
             envs = row.get("extra_envs") or row.get("envs") or {}
             if not isinstance(envs, dict):
                 envs = {}
@@ -116,7 +114,7 @@ class PreludePhase(PhaseHandler):
                     "name": str(row.get("name") or "")[:120],
                     "fingerprint": fp,
                     "reason": "warm_recipe_what_failed",
-                    "extra_sglang_args": args,
+                    "extra_server_args": args,
                     "extra_envs": dict(envs),
                     "source": "warm_start_recipe",
                     "source_tier": tier,
@@ -290,13 +288,7 @@ class PreludePhase(PhaseHandler):
             best_config = recipe_attrs.get("best_config") or {}
             if not isinstance(best_config, dict):
                 best_config = {}
-            # Read canonical extra_server_args FIRST, then legacy extra_sglang_args/args.
-            bc_args = str(
-                best_config.get("extra_server_args")
-                or best_config.get("extra_sglang_args")
-                or best_config.get("args")
-                or ""
-            ).strip()
+            bc_args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
             bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
             if not isinstance(bc_envs, dict):
                 bc_envs = {}
@@ -364,7 +356,7 @@ class PreludePhase(PhaseHandler):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "warm_replay_prelude",
-            "extra_sglang_args": bc_args,
+            "extra_server_args": bc_args,
             "extra_envs": dict(bc_envs),
             # Reuse the baseline's workload contract; else replay renders from YAML smoke defaults.
             "config_path": str(state.baseline_config_path or ""),
@@ -513,11 +505,11 @@ class PreludePhase(PhaseHandler):
         if reproduced:
             # An empty stack entry corrupts session_breakdown attribution; degrade gracefully when task is None.
             params = (task.params if task is not None else {}) or {}
-            warm_args = str(params.get("extra_sglang_args") or "").strip()
+            warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             if not warm_args and not warm_envs:
                 outcome["status"] = "reproduced_but_no_params"
-                outcome["reason"] = "task.params missing extra_sglang_args/extra_envs"
+                outcome["reason"] = "task.params missing extra_server_args/extra_envs"
                 log.warning(
                     "warm-replay measured +%.2f%% but cannot push stack (task=%r has no warm args/envs)",
                     measured_gain,
