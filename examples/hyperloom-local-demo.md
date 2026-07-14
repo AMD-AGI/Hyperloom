@@ -414,7 +414,6 @@ environment you configured in Step 2c:
 ```bash
 export USER_DATA_PATH="$(pwd)/$DEMO_OUT/workspace"
 
-docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -ic '
 set -e
 : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL missing; redo setup-claude}"
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing; redo setup-claude}"
@@ -451,7 +450,7 @@ EOF
 
 sed -i "s#^USER_DATA_PATH=.*#USER_DATA_PATH=$USER_DATA_PATH#" .env
 echo "USER_DATA_PATH=$USER_DATA_PATH"
-'
+
 ```
 
 > **Agent:** `$DEMO_OUT` is the output dir from Step 1. The `ANTHROPIC_*` /
