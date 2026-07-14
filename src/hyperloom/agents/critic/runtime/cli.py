@@ -34,7 +34,6 @@ from typing import Any
 from hyperloom.common.subprocess_bridge import emit_json as _emit_json
 from hyperloom.common.subprocess_bridge import read_json as _read_json
 
-from .cortex_kb_client import CortexKBClient
 from .dead_letter import DeadLetter
 from .decision_reviewer import DecisionReviewer
 from .errors import RuntimeAdapterError
@@ -55,10 +54,6 @@ def _resolve_kb_client() -> KBClient:
     """Build the KB client selected by ``CRITIC_KB_CLIENT_MODE``.
 
     Modes:
-        ``cortex`` — read-only :class:`CortexKBClient` against the cortex
-            ``kb-service`` ``/v1`` graph API. Reuses the existing
-            ``CORTEX_KB_URL`` env (already injected into the runtime by the
-            Critic backend); no separate ``KB_BASE_URL`` is needed.
         ``live`` — :class:`HTTPKBClient` against the legacy ``/api/kb/*``
             scoped-article contract (``KB_BASE_URL`` required).
         anything else — :class:`InMemoryKBClient` (tests / dry-runs).
@@ -67,22 +62,13 @@ def _resolve_kb_client() -> KBClient:
         KBClient: The resolved KB client.
 
     Raises:
-        RuntimeAdapterError: If ``cortex`` is selected but ``CORTEX_KB_URL`` is
-            unset, or ``live`` is selected but ``KB_BASE_URL`` is unset.
+        RuntimeAdapterError: If ``live`` is selected but ``KB_BASE_URL`` is
+            unset.
     """
     mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
     timeout_ms = int(os.environ.get("KB_TIMEOUT_MS", "10000"))
     retry_max = int(os.environ.get("KB_RETRY_MAX", "3"))
     token = os.environ.get("KB_SERVICE_TOKEN")
-    if mode == "cortex":
-        base_url = os.environ.get("CORTEX_KB_URL")
-        if not base_url:
-            raise RuntimeAdapterError(
-                "CRITIC_KB_CLIENT_MODE=cortex but CORTEX_KB_URL is not set"
-            )
-        return CortexKBClient(
-            base_url=base_url, timeout_ms=timeout_ms, retry_max=retry_max, token=token
-        )
     if mode == "live":
         base_url = os.environ.get("KB_BASE_URL")
         if not base_url:

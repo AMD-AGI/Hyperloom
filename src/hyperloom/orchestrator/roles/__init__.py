@@ -7,7 +7,6 @@ from .claude import ClaudeBackend
 from .codex import CodexBackend
 from .critic_agent import CriticAgentBackend, RuntimeCall, RuntimeCaller
 from .critic_mock import MockCriticBackend
-from .kernel_mock import MockKernelBackend
 from .mcp_context_tools import (
     CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_QUALIFIED_NAMES,
@@ -40,7 +39,6 @@ __all__ = [
     "MCP_SERVER_NAME",
     "MockBackend",
     "MockCriticBackend",
-    "MockKernelBackend",
     "MockRobustnessBackend",
     "MockTurn",
     "RobustnessAgentBackend",

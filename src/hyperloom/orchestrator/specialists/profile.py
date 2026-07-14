@@ -70,15 +70,6 @@ class SpecialistProfile:
         return self.scope == SCOPE_FREEFORM
 
     @property
-    def is_cross_domain(self) -> bool:
-        """Whether this profile spans multiple knowledge domains.
-
-        Returns:
-            ``True`` if the scope is the multi-domain scope.
-        """
-        return self.scope == SCOPE_DOMAINS
-
-    @property
     def reserves_benchmark_lane(self) -> bool:
         """True iff this dispatch should contend for the ``benchmark_lane``.
 

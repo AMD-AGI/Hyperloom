@@ -17,16 +17,19 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import credentials as cli_credentials
+from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
 # _preflight() override semantics
 @pytest.fixture
 def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
-    monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
+    monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", lambda: None)
     # N24: stub the kernel-agent env fallback (it hard-fails when missing);
     # its fail-loud behaviour is covered by test_n24_kernel_agent_env_hardfail.
-    monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", lambda: None)
+    monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", lambda: None)
 
     # InferenceX setup is orthogonal to the auth block under test. On a CI
     # runner the auto-detect finds no checkout and the clone path is a real
@@ -38,12 +41,12 @@ def stub_install_steps(monkeypatch, tmp_path):
     (inferencex_dir / "benchmarks").mkdir(parents=True)
     (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text("# stub", encoding="utf-8")
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
-    monkeypatch.setattr(cli, "_clone_inferencex", lambda dest: str(inferencex_dir))
+    monkeypatch.setattr(cli_preflight, "_clone_inferencex", lambda dest: str(inferencex_dir))
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"
 
-    monkeypatch.setattr(cli.shutil, "which", _fake_which)
+    monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
 
     class _FakeCompleted:
         def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -54,7 +57,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     def _fake_run(cmd, *args, **kwargs):
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(cli_preflight.subprocess, "run", _fake_run)
     return None
 
 
@@ -95,7 +98,7 @@ def clean_url_env(monkeypatch):
 
 def test_derive_anthropic_base_url_strips_openai_v1_suffix():
     assert (
-        cli._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
+        cli_credentials._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
         == "https://gateway.example/api/v1/llm-proxy"
     )
 
@@ -135,7 +138,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
         encoding="utf-8",
     )
 
-    resolved = cli._preflight()
+    resolved = cli_preflight._preflight()
 
     assert resolved == (
         "https://gateway.example/api/v1/llm-proxy",
@@ -179,7 +182,7 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     for name in ("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "_".join(("GEAK", "API", "KEY")), "_".join(("LLM", "API", "KEY")), "_".join(("AMD_LLM", "API", "KEY"))):
         monkeypatch.delenv(name, raising=False)
 
-    resolved = cli._preflight()
+    resolved = cli_preflight._preflight()
 
     # Both base URLs are kept distinct (no derivation collapse).
     assert resolved == ("https://api.anthropic.com", "https://api.openai.com/v1")
@@ -204,7 +207,7 @@ def test_preflight_claude_config_uses_explicit_anthropic_key_over_safe(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
 
-    cli._preflight()
+    cli_preflight._preflight()
 
     config_text = (tmp_path / ".claude" / "config.json").read_text(encoding="utf-8")
     assert '"primaryApiKey": "anthropic-user-token"' in config_text
@@ -225,7 +228,7 @@ def test_preflight_anthropic_only_backfills_geak_aliases(
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
-    resolved = cli._preflight()
+    resolved = cli_preflight._preflight()
 
     # Official Anthropic is not OpenAI-compatible; only the Anthropic side is resolved.
     assert resolved == ("https://api.anthropic.com", "")
@@ -268,7 +271,7 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
         monkeypatch.setenv("_".join(("SAFE", "API", "KEY")), "old-gateway-key")
         monkeypatch.setenv("LLM_API_BASE", "https://llm-api.amd.com/Unified/v1")
 
-    monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
+    monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
 
     resolved = cli._preflight()
 
@@ -336,7 +339,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     monkeypatch.setenv("GEAK_BASE_URL", tunnel)
     # LLM_API_BASE left unset → should default to the gateway.
 
-    resolved = cli._preflight()
+    resolved = cli_preflight._preflight()
 
     gateway = resolved[1]
     # Operator tunnel preserved.
@@ -364,18 +367,18 @@ def test_preflight_rewrites_stale_proxy_even_when_operator_set(
         "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
     )
 
-    resolved = cli._preflight()
+    resolved = cli_preflight._preflight()
 
     assert cli.os.environ["GEAK_BASE_URL"] == resolved[1]
     assert "127.0.0.1:4002" not in cli.os.environ["GEAK_BASE_URL"]
 
 
 def test_is_stale_proxy_url_matches_legacy_only():
-    assert cli._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
-    assert not cli._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
-    assert not cli._is_stale_proxy_url("https://gateway.example/v1")
-    assert not cli._is_stale_proxy_url("")
-    assert not cli._is_stale_proxy_url(None)
+    assert cli_credentials._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+    assert not cli_credentials._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
+    assert not cli_credentials._is_stale_proxy_url("https://gateway.example/v1")
+    assert not cli_credentials._is_stale_proxy_url("")
+    assert not cli_credentials._is_stale_proxy_url(None)
 
 
 # _sync_geak_config_base_url : GEAK reads $GEAK_CONFIG yaml, not env.
@@ -402,7 +405,7 @@ def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
     )
     tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
 
-    changed = cli._sync_geak_config_base_url(str(cfg), tunnel)
+    changed = cli_credentials._sync_geak_config_base_url(str(cfg), tunnel)
 
     assert changed is True
     text = cfg.read_text(encoding="utf-8")
@@ -419,19 +422,19 @@ def test_sync_geak_config_noop_when_already_in_sync(tmp_path):
     cfg.write_text(_GEAK_CFG_TEMPLATE.format(url=url), encoding="utf-8")
     before = cfg.read_text(encoding="utf-8")
 
-    assert cli._sync_geak_config_base_url(str(cfg), url) is False
+    assert cli_credentials._sync_geak_config_base_url(str(cfg), url) is False
     assert cfg.read_text(encoding="utf-8") == before
 
 
 def test_sync_geak_config_missing_file_is_safe(tmp_path):
     missing = tmp_path / "nope.yaml"
-    assert cli._sync_geak_config_base_url(str(missing), "https://x/v1") is False
+    assert cli_credentials._sync_geak_config_base_url(str(missing), "https://x/v1") is False
 
 
 def test_sync_geak_config_no_base_url_line_is_safe(tmp_path):
     cfg = tmp_path / "geak.yaml"
     cfg.write_text("model:\n  model_class: litellm\n", encoding="utf-8")
-    assert cli._sync_geak_config_base_url(str(cfg), "https://x/v1") is False
+    assert cli_credentials._sync_geak_config_base_url(str(cfg), "https://x/v1") is False
 
 
 def test_preflight_anthropic_only_sets_geak_v4_claude_model(
@@ -483,8 +486,8 @@ def test_preflight_deepseek_only_sets_geak_v4_claude_model(
 def test_sync_geak_config_empty_args_are_safe(tmp_path):
     cfg = tmp_path / "geak.yaml"
     cfg.write_text(_GEAK_CFG_TEMPLATE.format(url="https://x/v1"), encoding="utf-8")
-    assert cli._sync_geak_config_base_url("", "https://y/v1") is False
-    assert cli._sync_geak_config_base_url(str(cfg), "") is False
+    assert cli_credentials._sync_geak_config_base_url("", "https://y/v1") is False
+    assert cli_credentials._sync_geak_config_base_url(str(cfg), "") is False
 
 
 def test_sync_geak_config_preserves_url_with_special_chars(tmp_path):
@@ -496,7 +499,7 @@ def test_sync_geak_config_preserves_url_with_special_chars(tmp_path):
     )
     weird = r"https://host/api\g<0>/v1"
 
-    assert cli._sync_geak_config_base_url(str(cfg), weird) is True
+    assert cli_credentials._sync_geak_config_base_url(str(cfg), weird) is True
     assert f"base_url: {weird}" in cfg.read_text(encoding="utf-8")
 
 
@@ -534,9 +537,9 @@ def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
             _Completed(returncode=0),
         ]
     )
-    monkeypatch.setattr(cli.subprocess, "run", runner)
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
-    cli._ensure_python_sdks("/opt/venv/bin/python", [])
+    cli_preflight._ensure_python_sdks("/opt/venv/bin/python", [])
 
     assert len(runner.calls) == 3
     for call in runner.calls:
@@ -559,9 +562,9 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
             _Completed(returncode=0),
         ]
     )
-    monkeypatch.setattr(cli.subprocess, "run", runner)
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
-    cli._ensure_python_sdks("/opt/venv/bin/python", ["--break-system-packages"])
+    cli_preflight._ensure_python_sdks("/opt/venv/bin/python", ["--break-system-packages"])
 
     assert len(runner.calls) == 4
     install_call = runner.calls[1]
@@ -579,7 +582,7 @@ def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
 
-    cli._unset_hip_visible_devices()
+    cli_preflight._unset_hip_visible_devices()
 
     import os as _os
 
@@ -592,7 +595,7 @@ def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
 
-    cli._unset_hip_visible_devices()
+    cli_preflight._unset_hip_visible_devices()
 
     import os as _os
 
@@ -1153,7 +1156,7 @@ def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "")
 
-    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert args.claude_model == "claude-opus-4-6"
     assert args.codex_model == "claude-opus-4-6"
@@ -1168,7 +1171,7 @@ def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
     monkeypatch.setenv("CLAUDE_MODEL", "deepseek-chat")
     monkeypatch.setenv("CODEX_MODEL", "")
 
-    resolved = cli._resolve_llm_endpoints()
+    resolved = cli_credentials._resolve_llm_endpoints()
     for key, value in (("ANTHROPIC_BASE_URL", resolved[0]), ("OPENAI_BASE_URL", resolved[1])):
         if value:
             monkeypatch.setenv(key, value)
@@ -1191,7 +1194,7 @@ def test_parser_deepseek_key_only_defaults_to_deepseek_chat(monkeypatch):
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("CODEX_MODEL", raising=False)
 
-    resolved = cli._resolve_llm_endpoints()
+    resolved = cli_credentials._resolve_llm_endpoints()
     for key, value in (("ANTHROPIC_BASE_URL", resolved[0]), ("OPENAI_BASE_URL", resolved[1])):
         if value:
             monkeypatch.setenv(key, value)
@@ -1210,7 +1213,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "gpt-5.4")
 
-    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert args.claude_model == "claude-opus-4-6"
     assert args.codex_model == "claude-opus-4-6"
@@ -1253,7 +1256,7 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
-    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert args.claude_model == "GPT-5.4"
     assert args.codex_model == "GPT-5.4"
@@ -1268,7 +1271,7 @@ def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.5")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
-    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert args.claude_model == "GPT-5.5"
     assert args.codex_model == "GPT-5.5"
@@ -1289,7 +1292,7 @@ def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
         return {"GPT-5.4"}
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
-    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
     cli._validate_and_resolve_claude_model(args, ("https://llm-api.amd.com/Unified", "https://llm-api.amd.com/Unified/v1"))
 
     assert seen == {"base_url": "https://llm-api.amd.com/Unified/v1", "api_key": "openai-token"}
@@ -1308,9 +1311,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-from hyperloom.inference_optimizer import cli as cli_module
-
 
 def _ns(**overrides) -> argparse.Namespace:
     defaults: dict = {
@@ -1375,11 +1375,11 @@ def marker_path(tmp_path, monkeypatch) -> Path:
 def test_ir3_kb_ok_pr_ok(marker_path):
     args = _ns()
     with patch.object(
-        cli_module.subprocess,
+        cli_preflight.subprocess,
         "run",
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
-        cli_module._run_ir3_preflight(args)
+        cli_preflight._run_ir3_preflight(args)
     assert args.cortex_enabled is True
     assert args.pr_monitor_enabled is True
     assert args.kb_degraded_reason is None
@@ -1390,7 +1390,7 @@ def test_ir3_kb_ok_pr_ok(marker_path):
 def test_ir3_kb_5xx_auto_degrade(marker_path):
     args = _ns()
     with patch.object(
-        cli_module.subprocess,
+        cli_preflight.subprocess,
         "run",
         side_effect=_fake_run_writes_marker(
             marker_path,
@@ -1399,7 +1399,7 @@ def test_ir3_kb_5xx_auto_degrade(marker_path):
             kb_failure_reason="500",
         ),
     ):
-        cli_module._run_ir3_preflight(args)
+        cli_preflight._run_ir3_preflight(args)
     assert args.cortex_enabled is False
     assert args.pr_monitor_enabled is True
     assert args.kb_degraded_reason == "ir3_auto"
@@ -1416,8 +1416,8 @@ def test_ir3_kb_explicit_flag(marker_path):
         _write_marker(marker_path, kb_reachable=False, pr_reachable=True, kb_skipped=True)
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
-        cli_module._run_ir3_preflight(args)
+    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
+        cli_preflight._run_ir3_preflight(args)
     assert seen_env.get("SKIP_KB_PROBE") == "1"
     assert "SKIP_PR_PROBE" not in seen_env
     assert args.cortex_enabled is False
@@ -1431,11 +1431,11 @@ def test_ir3_kb_401_with_token(marker_path, monkeypatch):
     monkeypatch.setenv("KB_SERVICE_TOKEN", "tok-abc")
     args = _ns()
     with patch.object(
-        cli_module.subprocess,
+        cli_preflight.subprocess,
         "run",
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
-        cli_module._run_ir3_preflight(args)
+        cli_preflight._run_ir3_preflight(args)
     assert args.cortex_enabled is True
     assert args.kb_degraded_reason is None
 
@@ -1445,7 +1445,7 @@ def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
     monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
     args = _ns()
     with patch.object(
-        cli_module.subprocess,
+        cli_preflight.subprocess,
         "run",
         side_effect=_fake_run_writes_marker(
             marker_path,
@@ -1454,7 +1454,7 @@ def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
             kb_failure_reason="missing_token",
         ),
     ):
-        cli_module._run_ir3_preflight(args)
+        cli_preflight._run_ir3_preflight(args)
     assert args.cortex_enabled is False
     assert args.kb_degraded_reason == "ir3_auto"
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -1471,8 +1471,8 @@ def test_ir3_pr_explicit_flag_kb_ok(marker_path):
         _write_marker(marker_path, kb_reachable=True, pr_reachable=False, pr_skipped=True)
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
-        cli_module._run_ir3_preflight(args)
+    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
+        cli_preflight._run_ir3_preflight(args)
     assert seen_env.get("SKIP_PR_PROBE") == "1"
     assert "SKIP_KB_PROBE" not in seen_env
     assert args.cortex_enabled is True
@@ -1484,8 +1484,8 @@ def test_ir3_pr_explicit_flag_kb_ok(marker_path):
 # 7. Both flags → preflight_kb.sh NOT invoked.
 def test_ir3_both_flags_short_circuit(marker_path):
     args = _ns(degraded_kb=True, degraded_pr=True)
-    with patch.object(cli_module.subprocess, "run") as run_mock:
-        cli_module._run_ir3_preflight(args)
+    with patch.object(cli_preflight.subprocess, "run") as run_mock:
+        cli_preflight._run_ir3_preflight(args)
         run_mock.assert_not_called()
     assert args.cortex_enabled is False
     assert args.pr_monitor_enabled is False
@@ -1509,8 +1509,8 @@ def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
         )
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
-        cli_module._run_ir3_preflight(args)
+    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
+        cli_preflight._run_ir3_preflight(args)
     assert "CORTEX_KB_URL" not in seen_env
     assert args.cortex_enabled is True
     assert args.kb_degraded_reason is None
@@ -1527,8 +1527,8 @@ def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
         _write_marker(marker_path, kb_reachable=True, pr_reachable=True)
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
-        cli_module._run_ir3_preflight(args)
+    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
+        cli_preflight._run_ir3_preflight(args)
     assert seen_env.get("CORTEX_KB_URL") == "http://my-kb.example"
     assert args.cortex_enabled is True
     assert args.kb_degraded_reason is None
@@ -1536,7 +1536,7 @@ def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
 
 # Bonus: CLI flag plumbing
 def test_cli_parser_exposes_degraded_flags():
-    parser = cli_module._build_parser()
+    parser = _build_parser()
     args = parser.parse_args(["optimize", "--model", "/x", "--degraded-kb"])
     assert args.degraded_kb is True
     assert args.degraded_pr is False

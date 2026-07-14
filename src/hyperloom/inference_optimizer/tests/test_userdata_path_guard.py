@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.inference_optimizer.cli import _resolve_local_kb_root
+from hyperloom.inference_optimizer.cli.kb import _resolve_local_kb_root
 
 _DEFAULT = "/workspace/hyperloom"
 

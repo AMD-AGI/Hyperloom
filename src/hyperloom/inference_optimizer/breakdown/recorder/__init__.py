@@ -68,6 +68,6 @@ __all__ = [
     "record_singleton_section",
     "record_specialist_round",
     "record_tool_version",
-    "section_shape",
     "snapshot_state_sections",
+    "section_shape",
 ]

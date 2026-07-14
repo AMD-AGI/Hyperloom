@@ -4,7 +4,7 @@
 
 Given a :class:`framework_agent.enablement.FailureSignature`, produces (1) the
 repos to search for an enabling PR (the serving framework plus the ROCm / HIP /
-aiter bridge repos) and (2) a ranker for candidate PR titles by enablement
+aiter bridge repos) and (2) a scorer for candidate PR titles by enablement
 intent ("enable / support / add / fix / port to ROCm"). Pure-Python, no
 network.
 """
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Sequence
 
 from .enablement import FailureSignature
 from .keywords import extract_keywords, score_title_with_anti_signal
@@ -153,28 +152,9 @@ def score_enablement_title(
     return base + intent_weight * float(intent)
 
 
-def rank_titles(
-    titles: Sequence[str],
-    plan: EnablementSearchPlan,
-) -> list[tuple[str, float]]:
-    """Score and sort candidate titles by enablement relevance, descending.
-
-    Args:
-        titles: Candidate PR titles.
-        plan: The search plan carrying ranking keywords.
-
-    Returns:
-        list[tuple[str, float]]: ``(title, score)`` pairs, highest first;
-        ties keep input order (stable sort).
-    """
-    scored = [(t, score_enablement_title(t, plan)) for t in titles]
-    return sorted(scored, key=lambda pair: pair[1], reverse=True)
-
-
 __all__ = [
     "ENABLEMENT_INTENT_TERMS",
     "EnablementSearchPlan",
     "build_search_plan",
-    "rank_titles",
     "score_enablement_title",
 ]
