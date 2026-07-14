@@ -30,7 +30,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom.common.coerce import to_float as _coerce_metric
+from hyperloom.common.coerce import to_float
 
 from ..state.optimization_journal import (
     JournalEntry,
@@ -50,6 +50,22 @@ from ..state.task_registry import Task
 # (``from __future__ import annotations``) that is never evaluated at runtime.
 
 log = __import__("logging").getLogger(__name__)
+
+
+def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
+    """First non-zero ``predicted_gain_pct`` (``to_float``-parsed) across ordered sources.
+
+    Sources are checked in order; a non-zero prediction wins. Returns ``None``
+    when none carry a usable value so the journal row stays ``predicted``-free
+    for unpredicted (default-grid) changes rather than recording a fake 0.
+    """
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        val = to_float(src.get("predicted_gain_pct"))
+        if val is not None and val != 0.0:
+            return val
+    return None
 
 
 class ResultRecorder:
@@ -367,10 +383,10 @@ class ResultRecorder:
         # integrate_patch / framework_agent report their delta under ``delta_pct``;
         # fall back to it so a reverted/kept patch shows its REAL measured delta
         # in the journal instead of a null gain.
-        gain_pct = _coerce_metric(result_dict.get("gain_pct"))
+        gain_pct = to_float(result_dict.get("gain_pct"))
         if gain_pct is None:
-            gain_pct = _coerce_metric(result_dict.get("delta_pct"))
-        throughput_after = _coerce_metric(result_dict.get("output_throughput"))
+            gain_pct = to_float(result_dict.get("delta_pct"))
+        throughput_after = to_float(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
         # Journal outcome follows the executor's per-status verdict for source-
@@ -397,7 +413,7 @@ class ResultRecorder:
             reason=reason,
             task_id=task.task_id,
             tick=int(self.shared_state.tick or 0),
-            predicted_gain_pct=self._coord._predicted_gain(
+            predicted_gain_pct=_predicted_gain(
                 result_dict, getattr(task, "params", None),
             ),
         ))
@@ -501,8 +517,8 @@ class ResultRecorder:
             outcome = OUTCOME_NO_PROMOTE
         variant_name = str(variant_outcome.get("variant_name") or "")
         metrics = variant_outcome.get("metrics") or {}
-        gain_pct = _coerce_metric(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
-        throughput_after = _coerce_metric(
+        gain_pct = to_float(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
+        throughput_after = to_float(
             metrics.get("output_throughput") if isinstance(metrics, dict) else None
         )
         variant_attrs = variant_outcome.get("variant") or {}
@@ -551,7 +567,7 @@ class ResultRecorder:
             fingerprint=str(variant_outcome.get("fingerprint") or ""),
             metrics=detail_metrics,
             tick=int(self.shared_state.tick or 0),
-            predicted_gain_pct=self._coord._predicted_gain(
+            predicted_gain_pct=_predicted_gain(
                 variant_outcome,
                 variant_attrs if isinstance(variant_attrs, dict) else None,
                 getattr(task, "params", None),

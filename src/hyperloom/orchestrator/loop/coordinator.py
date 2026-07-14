@@ -1266,7 +1266,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_fact_per_task": "writeback",
         "_build_statement": "writeback",
         "_build_measured_impact": "writeback",
-        "_predicted_gain": "writeback",
         "_record_fact_per_variant": "writeback",
         "_collect_workload_tags": "writeback",
         "_build_kernel_optimizations_from_state": "writeback",

@@ -7,7 +7,6 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any
-from hyperloom.common.coerce import to_float
 from hyperloom.common.payload_aliases import read_extra_server_args
 from ..state.optimization_journal import (
     Journal,
@@ -637,25 +636,6 @@ class WritebackCollaborator:
         """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
         from .result_recorder import ResultRecorder as _RR
         return _RR._build_measured_impact(gain_pct=gain_pct, throughput_after=throughput_after, stack_depth=stack_depth, measured_at=measured_at)
-
-    @staticmethod
-    def _predicted_gain(
-        *sources: dict[str, Any] | None,
-    ) -> float | None:
-        """First parseable ``predicted_gain_pct`` across ordered sources.
-
-        Sources are checked in order (e.g. variant_outcome → variant attrs →
-        task params); a non-zero prediction wins. Returns ``None`` when none
-        carry a usable value so the journal row stays ``predicted``-free for
-        unpredicted (default-grid) changes rather than recording a fake 0.
-        """
-        for src in sources:
-            if not isinstance(src, dict):
-                continue
-            val = to_float(src.get("predicted_gain_pct"))
-            if val is not None and val != 0.0:
-                return val
-        return None
 
     def _record_fact_per_variant(
         self,
