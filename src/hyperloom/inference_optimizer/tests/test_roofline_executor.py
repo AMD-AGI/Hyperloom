@@ -419,7 +419,6 @@ import json
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
@@ -451,7 +450,7 @@ def _silent_backends() -> dict[str, object]:
     )
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

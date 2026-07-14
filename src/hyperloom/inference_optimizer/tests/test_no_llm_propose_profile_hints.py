@@ -38,8 +38,6 @@ def coord(tmp_path: Path) -> Coordinator:
     c.shared_state = _BareState()
     c.role_registry = {"kernel_agent": object()}
     c._compare_against_gpu = ""
-    # Short-circuit ``_target_analysis_baseline_exists`` so the gate doesn't mask the profile-prereq branch under test.
-    c._target_analysis_baseline_exists = lambda: True  # type: ignore[assignment]
     return c
 
 

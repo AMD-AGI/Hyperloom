@@ -62,7 +62,7 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
 
 def test_recover_is_robustness_delegate_only_with_real_executor(registry):
     """``recover`` is ROBUSTNESS_DELEGATE_ONLY: real executor + metadata, but off the Orchestration prompt surface."""
-    from hyperloom.inference_optimizer.cli import _REAL_EXECUTORS_FULL
+    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
     from hyperloom.orchestrator.actions.executors.recover import (
         RecoverExecutor,
         recover_executor,

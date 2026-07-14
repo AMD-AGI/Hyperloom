@@ -1261,7 +1261,7 @@ def test_dynamo_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypa
         dyn._dynamo_restart_server(_restart_args())
 
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: {"backend": "dynamo", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k", "framework": "sglang"})
-    monkeypatch.setattr(dyn, "_validate_extra_server_args", lambda *a, **kw: (_ for _ in ()).throw(dyn.ServerArgsRejected("denied")))
+    monkeypatch.setattr(dyn, "validate_server_args", lambda *a, **kw: (_ for _ in ()).throw(dyn.ServerArgsRejected("denied")))
     assert dyn._dynamo_restart_server(_restart_args(extra_args="--bad")) == dyn.EXIT_CONFIG_ERROR
 
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: {"backend": "dynamo", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"})

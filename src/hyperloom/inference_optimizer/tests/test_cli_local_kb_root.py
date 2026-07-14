@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import (
+from hyperloom.inference_optimizer.cli.kb import (
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
@@ -190,7 +190,7 @@ def test_build_dispatcher_idempotent(
 # Argparse parser integration — flag really is wired
 def test_parser_accepts_local_kb_root_flag() -> None:
     """End-to-end: the parser accepts ``--local-kb-root`` and exposes it on the Namespace."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     ns = parser.parse_args(
@@ -207,7 +207,7 @@ def test_parser_accepts_local_kb_root_flag() -> None:
 
 def test_parser_default_local_kb_root_is_none() -> None:
     """``Namespace.local_kb_root`` defaults to ``None`` so the resolver's flag tier works."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     ns = parser.parse_args(["optimize", "--target-tput", "1.0"])

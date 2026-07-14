@@ -3412,7 +3412,7 @@ def test_roofline_attempts_are_in_phase_timeline(tmp_path):
 
 # 6. CLI flag wiring
 def test_cli_exposes_breakdown_include_transcripts_flag():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(
@@ -3428,7 +3428,7 @@ def test_cli_exposes_breakdown_include_transcripts_flag():
 
 
 def test_cli_breakdown_include_transcripts_defaults_to_false():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
@@ -3436,7 +3436,7 @@ def test_cli_breakdown_include_transcripts_defaults_to_false():
 
 
 def test_cli_rejects_unknown_breakdown_include_transcripts():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     with pytest.raises(SystemExit):
