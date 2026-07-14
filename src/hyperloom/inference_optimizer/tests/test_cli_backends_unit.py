@@ -183,6 +183,16 @@ def test_proposal_scoring_flag_parsing() -> None:
     assert disabled.proposal_scoring is False
 
 
+def test_retired_enable_proposal_scoring_flag_rejected() -> None:
+    # The old --enable-proposal-scoring spelling is retired: it must hard-fail
+    # (exit 2) with a migration hint, not be silently accepted.
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["optimize", "--model", "x", "--enable-proposal-scoring"])
+
+
 def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     # Passing only --proposal-scorer-models (a non-empty list, which is also
     # the parser default) must NOT turn scoring on: default OFF requires an
