@@ -338,13 +338,16 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     assert args.gpu_specialist_capacity == 4
 
 
-def test_cli_research_lane_capacity_env_override(monkeypatch):
-    """An explicit env value still wins over the GPU-derived default."""
+def test_cli_research_lane_capacity_env_is_ignored(monkeypatch):
+    """The parser no longer accepts env fallback for research-lane capacity."""
     from hyperloom.inference_optimizer import cli as cli_mod
+    from hyperloom.orchestrator.policy import gate as policy_mod
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "3")
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
-    assert args.research_lane_capacity == 3
+    assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
 
 
 def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):

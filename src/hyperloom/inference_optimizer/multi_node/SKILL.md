@@ -125,12 +125,12 @@ Typical prompt fields and where they land:
 | `TP=N`, `EP=…` | `restart-server --tp N`; `optimize --tp` / `--ep`. **Always set `--tp`** (default is 1); for PD set it to the per-role TP. |
 | `MN_BACKEND=dynamo` | `optimize --mn-backend dynamo` (selects the idle DynamoDeployment + SSH backend; default `rayjob`). |
 | `PD_MODE=disaggregated` | `optimize --pd-mode disaggregated` — **must be passed as a flag**; `$PD_MODE` env is deliberately ignored (stale-env guard). Omit ⇒ aggregated. |
-| `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `optimize --pd-prefill-nodes N --pd-decode-nodes M` (or export `$PD_PREFILL_NODES`/`$PD_DECODE_NODES` — read as flag defaults). |
-| `PD_PREFILL_TP` / `PD_DECODE_TP` | `optimize --pd-prefill-tp N --pd-decode-tp M` (or export; default = `--tp`). A PD role spans nodes (LWS) only when its TP > GPUs-per-pod. |
+| `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `optimize --pd-prefill-nodes N --pd-decode-nodes M`. |
+| `PD_PREFILL_TP` / `PD_DECODE_TP` | `optimize --pd-prefill-tp N --pd-decode-tp M` (default = `--tp`). A PD role spans nodes (LWS) only when its TP > GPUs-per-pod. |
 | `PD_PREFILL_EP` / `PD_DECODE_EP` | **Dynamo PD only.** export `$PD_PREFILL_EP` / `$PD_DECODE_EP` (read by `restart-server` as defaults). Per-role expert-parallel size; `0` (default) ⇒ fall back to the shared `--ep`. Lets prefill run EP1 while decode runs EP8 (InferenceX disagg recipe). Ignored by RayJob/aggregated/single-node. |
 | `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **Dynamo PD only.** export these; appended to the **per-role** sglang launch AFTER the shared `--extra-args` base (role-specific wins on duplicate keys). Used to give prefill vs decode different server flags (e.g. decode `--enable-dp-attention --moe-a2a-backend deepep --deepep-mode normal --moe-dense-tp-size 1 --enable-dp-lm-head`; prefill `--mem-fraction-static 0.8 --disable-radix-cache`). Empty (default) ⇒ both roles use only the shared `--extra-args`. **Sandbox-only** (do NOT `--rayjob-extra-env`). |
-| `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake` (or export `$PD_TRANSFER_BACKEND`); `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
-| `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
+| `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake`; `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
+| `ISL` / `OSL` / `CONC` / `PRECISION` | `optimize --isl` / `--osl` / `--conc` / `--precision` |
 | `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
 | prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `src/hyperloom/inference_optimizer/SKILL.md` "Tool source fields". |
 | MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
@@ -274,8 +274,7 @@ After step 4 route all benchmark / Magpie traffic to
   wrap in `sleep` / `while true ...; sleep 60; done`.
 * **ADDENDUM-13** (credentials): `SAFE_API_URL` / `SAFE_API_KEY` must be
   in sandbox env at CLI start (Brain injects). CLI fans them out (plus
-  `GEAK_API_KEY` / `LLM_GATEWAY_KEY` / `ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY` / `*_BASE_URL`) to RayJob env at `create-rayjob`.
+  provider-specific runtime credentials) to RayJob env at `create-rayjob`.
   **Never pass keys on the command line.**
 * **ADDENDUM-02** (no Ray Python client in orchestration layer):
   `multi_node/cli.py` and `multi_node/_internal/` MUST use Ray Dashboard
@@ -382,8 +381,8 @@ default `--robustness-agent` was selected via
   The script (`multi_node/scripts/bootstrap.sh`) is repo-owned and
   should not be edited from the agent — failures usually point at one
   of: missing credentials in the RayJob env (verify the ADDENDUM-13
-  fan-out so `SAFE_API_KEY` / `GEAK_API_KEY` / `LLM_GATEWAY_KEY` /
-  `*_BASE_URL` actually reached the head pod), the BYOI image lacking a toolchain package,
+  fan-out so `SAFE_API_KEY` and provider runtime credentials actually
+  reached the head pod), the BYOI image lacking a toolchain package,
   or the head pod failing to reach an upstream package / model
   registry. Fix the root cause (env / image / network), then rerun;
   RayJob stays alive across the retry.

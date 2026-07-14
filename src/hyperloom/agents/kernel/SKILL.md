@@ -78,7 +78,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
   longer accepted)
 - GEAK CLI (per-kernel backend) from `GEAK_V3_REF` (default `GEAK_v3.2`) +
   `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
-  `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
+  `GEAK_MODEL_NAME` plus the gateway credentials prepared by preflight, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
   controlled by `GEAK_RUN_MODE` (`quick` or `full`; defaults to `full`,
   which selects the 2 h / 5-round `run.budgets.full` preset). Set

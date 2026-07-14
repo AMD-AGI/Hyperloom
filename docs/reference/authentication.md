@@ -79,13 +79,13 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 `SAFE_API_KEY` is the single AMD credential used by all downstream
 tooling:
 
-* GEAK → `GEAK_API_KEY` / `GEAK_BASE_URL` (auto-aliased).
+* GEAK and kernel tools inherit the resolved gateway credential from preflight.
 * Orchestration LLM → `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (auto-aliased).
 * Robustness-agent uses it for the optional LLM RCA engine.
 * Critic-agent uses it for KB summary / synthesis calls.
 
 You *never* need to copy `SAFE_API_KEY` into separate
-`GEAK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` slots in `.env`.
+provider-specific slots in `.env`.
 If those variables are unset, install and preflight fill them from
 `SAFE_API_KEY` at process-launch time. An explicitly set provider key is
 never overwritten by `SAFE_API_KEY`.
@@ -159,24 +159,6 @@ LLM base URL and API key are available (normally via the aliases above).
 Set `ROBUSTNESS_LLM_RCA_DISABLED=1` to force-disable it even when
 credentials are present.
 
-### GEAK / generic LLM endpoint overrides
-
-GEAK Ray workers may run in a network namespace that cannot reach the
-main gateway directly. By default `GEAK_BASE_URL` and `LLM_API_BASE`
-inherit the resolved OpenAI-compatible gateway URL. Set them explicitly
-when you need a host-local reverse tunnel or another routable path:
-
-```bash
-export GEAK_BASE_URL=https://127.0.0.1:18444/api/v1/llm-proxy/v1
-export LLM_API_BASE=https://127.0.0.1:18444/api/v1/llm-proxy/v1
-```
-
-Preflight preserves intentional operator overrides. If `GEAK_BASE_URL` or
-`LLM_API_BASE` is set, Hyperloom treats it as deliberate and does not rewrite it.
-Only set these variables when the target is reachable from the worker runtime.
-
----
-
 ## Path environment
 
 These are *not* secrets. In local mode you normally do not hand-export
@@ -241,9 +223,7 @@ At preflight, the inference optimizer CLI:
 
 - Resolves Anthropic and OpenAI base URLs.
 - Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
-- Fills unset alias env vars (`GEAK_*`, `LLM_*`, and so on).
-- Preserves explicit `GEAK_BASE_URL` / `LLM_API_BASE` overrides for separate
-  routable endpoints.
+- Fills the provider credentials needed by child processes.
 
 **401 recovery:**
 
@@ -254,8 +234,7 @@ At preflight, the inference optimizer CLI:
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    configured upstream gateway.
 
-GEAK uses `GEAK_API_KEY` / `GEAK_BASE_URL` (or the generated litellm config)
-directly.
+GEAK uses the generated runtime configuration directly.
 
 ---
 
@@ -289,12 +268,10 @@ Yes, in split-entrypoint mode: set `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`
 (and the matching base URLs) instead. See
 [Split entrypoints](#split-entrypoints-native-anthropic--openai).
 
-**Q: Where do `GEAK_API_KEY` / `ANTHROPIC_API_KEY` come from?**
+**Q: Where do provider-specific API keys come from?**
 
 In single-gateway mode they are derived from `SAFE_API_KEY` by
 `install.sh` and preflight. In split mode each side uses its own key.
-Set `GEAK_BASE_URL` / `LLM_API_BASE` explicitly only when you need a
-separate routable endpoint.
 
 **Q: My organization rotates the LLM gateway key weekly. How?**
 

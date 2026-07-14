@@ -12,8 +12,6 @@ import yaml
 
 from hyperloom.inference_optimizer.cli import (
     _export_workload_envs_for_optimize,
-    _parse_conc_env_default,
-    _parse_conc_sweep_default,
     _resolve_run_max_model_len,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -166,22 +164,6 @@ def test_conc_env_ladder_materializes_as_single_baseline_and_sweep_ladder(
 
     assert envs["CONC"] == 4
     assert os.environ["INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS"] == "4,16,128"
-
-
-def test_conc_env_ladder_parser_default_exports_sweep_ladder(monkeypatch):
-    monkeypatch.setenv("CONC", "4,16,128")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
-
-    assert _parse_conc_env_default() == 4
-    assert os.environ["CONC"] == "4,16,128"
-
-
-def test_conc_env_ladder_parser_default_feeds_sweep_without_env_mutation(monkeypatch):
-    monkeypatch.setenv("CONC", "4,16,128")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
-
-    assert _parse_conc_sweep_default() == "4,16,128"
-    assert os.environ["CONC"] == "4,16,128"
 
 
 def test_explicit_max_model_len_wins_over_auto(tmp_path, monkeypatch):

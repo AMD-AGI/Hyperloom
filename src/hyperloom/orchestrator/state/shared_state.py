@@ -924,7 +924,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return Path(session_dir) / "state.json"
 
     @classmethod
-    def load_or_init(cls, session_dir: Path) -> "SharedState":
+    def load_or_init(
+        cls,
+        session_dir: Path,
+        *,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
+    ) -> "SharedState":
         """Load existing ``state.json`` or return a fresh blank instance.
 
         Reads and migrates the persisted state via :meth:`from_dict` when
@@ -945,14 +951,24 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         else:
             with path.open(encoding="utf-8") as f:
                 raw = json.load(f)
-            inst = cls.from_dict(raw)
+            inst = cls.from_dict(
+                raw,
+                legacy_action_scores=legacy_action_scores,
+                migration_mode=migration_mode,
+            )
         # Remember the session dir so breakdown instrumentation can record
         # fragments at author time (non-field attr; not serialized by asdict).
         inst._session_dir = Path(session_dir)
         return inst
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+    def from_dict(
+        cls,
+        raw: dict[str, Any],
+        *,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
+    ) -> "SharedState":
         """Construct a :class:`SharedState` from a raw mapping, migrating it.
 
         Acts as the unified migration entry point: an absent
@@ -1004,14 +1020,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 legacy_seen.append((legacy, int(size)))
             filtered.pop(legacy, None)
         if legacy_seen:
-            mode = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES",
-                    "drop",
-                )
-                .strip()
-                .lower()
-            )
+            mode = str(legacy_action_scores or "drop").strip().lower()
             import logging as _logging
 
             log = _logging.getLogger(__name__)
@@ -1039,14 +1048,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         # fact-layer integrity check: strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
         if needs_migration and raw:
-            mode = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_MIGRATION_MODE",
-                    "strict",
-                )
-                .strip()
-                .lower()
-            )
+            mode = str(migration_mode or "strict").strip().lower()
             fact_layer_keys = (
                 "baseline_tput",
                 "baseline_cold_tput",

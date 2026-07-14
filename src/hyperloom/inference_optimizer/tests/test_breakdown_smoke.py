@@ -3227,17 +3227,22 @@ def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
     assert ref2.get("body") == body_text
 
 
-def test_build_respects_env_var_for_transcripts(tmp_path, monkeypatch):
-    """The CLI env var drives transcripts when ``include_transcripts`` isn't passed."""
+def test_build_respects_process_default_for_transcripts(tmp_path):
+    """The CLI process default drives transcripts when ``include_transcripts`` isn't passed."""
+    from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
+
     sd = tmp_path / "session"
     sd.mkdir()
     transcript_dir = sd / "runs" / "specialist" / "t-abc"
     transcript_dir.mkdir(parents=True)
     (transcript_dir / "specialist_done.json").write_text('{"x":1}')
     _write_state(sd, _basic_state(specialist_rounds=[_specialist_round()]))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "1")
-    b = build(sd)
-    assert b["specialist_runs"][0]["transcripts"][0].get("body") == '{"x":1}'
+    set_default_include_transcripts(True)
+    try:
+        b = build(sd)
+        assert b["specialist_runs"][0]["transcripts"][0].get("body") == '{"x":1}'
+    finally:
+        set_default_include_transcripts(False)
 
 
 # 3. capability_summary.specialist row (single source)
