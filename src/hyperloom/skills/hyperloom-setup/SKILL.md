@@ -158,17 +158,18 @@ Write only the Hyperloom configuration keys the setup backend consumes:
 
 ### AMD APIM subscription header
 
-If the chosen base URL host is `llm-api.amd.com`, that gateway requires the
-API key to also be sent as an `Ocp-Apim-Subscription-Key` header. Add the
-custom-headers key that matches the selected mode, reusing the same key value:
+For `Anthropic` or `DeepSeek`, if the chosen base URL host is `llm-api.amd.com`,
+that gateway requires the API key to also be sent as an
+`Ocp-Apim-Subscription-Key` header. Add the custom-headers key, reusing the same
+key value:
 
 - `Anthropic`: `ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <ANTHROPIC_API_KEY>`
 - `DeepSeek`: `ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <DEEPSEEK_API_KEY>`
-- `LLM Gateway`: `OPENAI_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <SAFE_API_KEY>`
 
 Write the placeholder header with `<PLEASE_FILL_IN>` when the key itself is
 still a placeholder, so the header value tracks the real key after the user
 edits `.env`. Skip this entirely when the base URL host is not `llm-api.amd.com`.
+The `LLM Gateway` mode does not need this header.
 
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
