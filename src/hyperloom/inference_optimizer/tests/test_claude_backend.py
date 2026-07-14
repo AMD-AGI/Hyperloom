@@ -226,6 +226,59 @@ def test_claude_backend_warns_on_missing_api_key(monkeypatch):
     assert any("ANTHROPIC_API_KEY" in str(c) for c in backend.calls)
 
 
+def _clear_effort_env(monkeypatch):
+    for k in (
+        "INFERENCE_OPTIMIZER_CLAUDE_EFFORT",
+        "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT",
+        "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT",
+        "INFERENCE_OPTIMIZER_CLAUDE_THINKING",
+    ):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_build_options_effort_defaults_by_role(monkeypatch):
+    _clear_effort_env(monkeypatch)
+    orch = ClaudeBackend(
+        model="m", conversational=True, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+    )
+    o = orch._build_options(tools=[], max_turns=4, system_prompt="sp")
+    assert o.kwargs["effort"] == "medium"
+    assert o.kwargs["thinking"] == {"type": "adaptive"}
+
+    kernel = ClaudeBackend(
+        model="m", conversational=False, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+    )
+    k = kernel._build_options(tools=[], max_turns=4, system_prompt="sp")
+    assert k.kwargs["effort"] == "low"
+
+
+def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
+    _clear_effort_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_THINKING", "off")
+    b = ClaudeBackend(
+        model="m", conversational=True, sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
+    )
+    o = b._build_options(tools=[], max_turns=4, system_prompt="sp")
+    assert o.kwargs["effort"] == "high"
+    assert "thinking" not in o.kwargs
+
+
+def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
+    """P0.1 compat: the pinned SDK must accept the kwargs _build_options sends."""
+    _clear_effort_env(monkeypatch)
+    sdk = pytest.importorskip("claude_agent_sdk")
+    b = ClaudeBackend(
+        model="m",
+        conversational=True,
+        sdk_query_factory=_make_query_factory([]),
+        sdk_options_cls=sdk.ClaudeAgentOptions,
+        enable_mcp_emit_intent=False,
+    )
+    # Must not raise: effort + thinking + resume all accepted by ClaudeAgentOptions.
+    b._build_options(tools=[], max_turns=4, system_prompt="sp", resume_session_id="sess-1")
+
+
 # ClaudeBackend.run — intent extraction
 @pytest.mark.asyncio
 async def test_run_extracts_single_emit_intent_tool_use():

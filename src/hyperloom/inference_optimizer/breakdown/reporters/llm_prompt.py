@@ -109,7 +109,7 @@ def build_user_prompt(
         # Skipped sections are withheld so the model can't "explain" a phantom section.
         "sections": [_section_input(s) for s in rendered if not s.skipped],
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def parse_llm_response(raw: str) -> dict[str, Any]:

@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
+from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -47,6 +47,8 @@ Rules:
   too, but the fenced form is preferred — it makes parser fallback
   unambiguous).
 - Free text outside the JSON is ignored.
+- Put only NEW information in payload bodies; do not restate context already
+  in SharedState, your inbox, or analysis.md. Keep length proportional to substance.
 - ALWAYS emit at least one intent. If you have nothing to say, emit
   {"intent_type": "send_message", "payload": {"topic": "heartbeat",
   "body_md": "ok"}}.
@@ -158,13 +160,16 @@ class CodexBackend:
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
         messages = build_chat_messages(system_prompt, full_prompt)
 
+        create_params = apply_reasoning_effort(
+            {
+                "model": self.model,
+                "messages": messages,
+                "max_completion_tokens": self.max_completion_tokens,
+            }
+        )
         try:
             resp = await asyncio.wait_for(
-                self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    max_completion_tokens=self.max_completion_tokens,
-                ),
+                self._client.chat.completions.create(**create_params),
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:

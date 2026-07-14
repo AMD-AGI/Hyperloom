@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session import manifest as mf
 
 
@@ -22,7 +23,7 @@ class _Proc:
 
 # ---- small helpers --------------------------------------------------------
 def test_utc_now_compact_and_session_id():
-    assert mf._utc_now_compact().endswith("Z")
+    assert utc_now_compact().endswith("Z")
     sid = mf.build_session_id("meta/llama")
     assert sid.startswith("meta_llama_")
     assert mf.build_session_id("").startswith("session_")
