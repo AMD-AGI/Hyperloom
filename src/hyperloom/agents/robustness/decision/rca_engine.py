@@ -235,6 +235,11 @@ class LlmRcaEngine:
                 },
             )
             self._owns_client = True
+        else:
+            if "Authorization" not in self.client.headers:
+                self.client.headers["Authorization"] = f"Bearer {self.api_key}"
+            if "Content-Type" not in self.client.headers:
+                self.client.headers["Content-Type"] = "application/json"
         if self.throttle is None:
             self.throttle = RcaThrottle()
 
@@ -345,9 +350,12 @@ class LlmRcaEngine:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 600,
-            "temperature": 0.2,
         }
+        if _uses_max_completion_tokens(self.model):
+            payload["max_completion_tokens"] = 600
+        else:
+            payload["max_tokens"] = 600
+            payload["temperature"] = 0.2
         _t0 = time.perf_counter()
         try:
             assert self.client is not None
@@ -388,6 +396,105 @@ class LlmRcaEngine:
         return str(content or "").strip()
 
 
+@dataclass
+class AnthropicRcaEngine(LlmRcaEngine):
+    """Anthropic Messages-compatible RCA engine."""
+
+    def __post_init__(self) -> None:
+        """Validate config and lazily build the Anthropic HTTP client."""
+        if not self.base_url or not self.api_key:
+            log.warning("AnthropicRcaEngine constructed without base_url/api_key; calls will be skipped")
+        if self.client is None:
+            self.client = httpx.AsyncClient(
+                base_url=self.base_url.rstrip("/"),
+                timeout=httpx.Timeout(self.timeout_s),
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+            )
+            self._owns_client = True
+        else:
+            if "x-api-key" not in self.client.headers:
+                self.client.headers["x-api-key"] = self.api_key
+            if "anthropic-version" not in self.client.headers:
+                self.client.headers["anthropic-version"] = "2023-06-01"
+            if "Content-Type" not in self.client.headers:
+                self.client.headers["Content-Type"] = "application/json"
+        if self.throttle is None:
+            self.throttle = RcaThrottle()
+
+    async def _call(self, symptom: Symptom) -> str:
+        """Issue an Anthropic Messages request and extract text content."""
+        prompt = _build_user_prompt(symptom, self.extra_evidence_provider)
+        payload = {
+            "model": self.model,
+            "system": _SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 600,
+            "temperature": 0.2,
+        }
+        _t0 = time.perf_counter()
+        try:
+            assert self.client is not None
+            resp = await self.client.post(
+                "/v1/messages",
+                json=payload,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+            )
+        except httpx.TimeoutException:
+            log.warning("AnthropicRcaEngine: messages call timed out")
+            return ""
+        except httpx.RequestError as exc:
+            log.warning("AnthropicRcaEngine: messages request failed: %s", exc)
+            return ""
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
+        if resp.status_code >= 400:
+            log.warning(
+                "AnthropicRcaEngine: messages status=%d body=%s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            return ""
+        try:
+            body = resp.json()
+        except ValueError:
+            log.warning("AnthropicRcaEngine: messages returned non-json body")
+            return ""
+        self._accumulate_anthropic_usage(
+            body.get("usage") if isinstance(body, dict) else None,
+            latency_ms=latency_ms,
+        )
+        content = body.get("content") if isinstance(body, dict) else None
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts).strip()
+
+    def _accumulate_anthropic_usage(self, usage: Any, *, latency_ms: int) -> None:
+        """Fold Anthropic ``usage`` fields into the shared accumulator."""
+        self._usage_calls += 1
+        self._usage_latency_ms += max(0, int(latency_ms))
+        if not isinstance(usage, Mapping):
+            return
+        try:
+            self._usage_in += int(usage.get("input_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            self._usage_out += int(usage.get("output_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+
 def _build_user_prompt(
     sym: Symptom,
     extra_evidence_provider: Any | None,
@@ -422,6 +529,11 @@ def _build_user_prompt(
         for entry in extra[:5]:
             lines.append(f"  - {entry}")
     return "\n".join(lines)
+
+
+def _uses_max_completion_tokens(model: str) -> bool:
+    """Return whether an OpenAI-compatible model rejects legacy max_tokens."""
+    return str(model or "").strip().lower().startswith("gpt-5")
 
 
 def _format_evidence(payload: Any, prefix: str = "  ") -> list[str]:

@@ -197,6 +197,10 @@ GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-main}"
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
+if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
+  GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-chat}"
+fi
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
 # endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
 # model names so LiteLLM uses the OpenAI-compatible transformer instead of the
@@ -1360,6 +1364,7 @@ write_env_file() {
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
+    [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && echo "export GEAK_CLAUDE_MODEL='${GEAK_CLAUDE_MODEL_VAL}'"
     # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin=""
