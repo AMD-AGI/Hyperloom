@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from . import kernel_decision_settings as _kernel_decision_settings
 
 log = logging.getLogger(__name__)
 
@@ -56,8 +56,15 @@ log = logging.getLogger(__name__)
 # recent tail; older entries age out of any sane emergency window anyway).
 _CRASH_TIMESTAMP_CAP: int = 200
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-_now_iso = now_iso
+# Compatibility aliases kept on shared_state for existing callers/tests.
+_DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
+_DEFAULT_HOT_KERNEL_GATE_TOP_N = _kernel_decision_settings._DEFAULT_HOT_KERNEL_GATE_TOP_N
+_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = _kernel_decision_settings._DEFAULT_KERNEL_OPT_MAX_FAILURES
+_DEFAULT_KERNEL_OPT_MAX_PARTIAL = _kernel_decision_settings._DEFAULT_KERNEL_OPT_MAX_PARTIAL
+_MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
+_now_iso = _kernel_decision_settings._now_iso
+resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
 def _first_positive_tput(d: Any) -> float:
@@ -119,30 +126,6 @@ def render_model_arch_compact(arch: dict | None) -> str:
     return "; ".join(parts)
 
 
-# Default partial-attempt cap for run_optimization; override via env in ``record_kernel_opt`` (1 disables second chance).
-_DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# Backend ladder infra failures can be transient; require two failed ladders
-# before retiring the kernel. Override via
-# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
-
-
-def resolve_kernel_opt_max_failures() -> int:
-    """Resolve the infra-failure retry budget (>=1).
-
-    Shared by ``record_kernel_opt``, ``kernel_work_pending``, and batch
-    dispatch so ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` stays
-    consistent across layers.
-    """
-    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
-    if env_f:
-        try:
-            return max(1, int(env_f))
-        except (TypeError, ValueError):
-            pass
-    return _DEFAULT_KERNEL_OPT_MAX_FAILURES
-
-
 # Integration faults (environment / apply / bench crashes) are distinct from a
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the
@@ -172,25 +155,10 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "subprocess_timeout",
     }
 )
-# Independent bounded budget for integration-fault *attempts* (separate from the
-# REVERT ``max_attempts`` quota). NOTE: this counts total fault attempts, not
-# retries-after-the-first — a value of 2 means "one initial fault plus one
-# retry, then reject". Total attempts are still capped globally by the
-# crash-rate emergency stop in the coordinator.
-_MAX_INTEGRATE_FAULT_ATTEMPTS = 2
-
-# Hot-kernel report gate: reusable hot kernels >= this GPU share need a kernel_opt attempt/rejection before ``report``.
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
-# Only the top-N reusable hot kernels are enforced.
-_DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
-
 # How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace
 # summary (the ``hot_kernels_top15`` / ``kernel_roofline_top15`` field names
 # reflect this value).
 _TRACE_HOT_KERNEL_TOP_N = 15
-
-# Per-action audit history cap (``<action>_attempts`` lists keep most recent N).
-_DEFAULT_ATTEMPTS_HISTORY = 20
 
 # Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 10

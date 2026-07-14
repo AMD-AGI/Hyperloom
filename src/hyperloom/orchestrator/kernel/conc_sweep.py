@@ -548,7 +548,7 @@ async def run_conc_sweep(
     # canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then
     # canonicalize through _gpu_runner_type so the selected Magpie script is a
     # shipped runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    from hyperloom.inference_optimizer.cli.model_gate import _gpu_runner_type
+    from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower()
