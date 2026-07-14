@@ -36,6 +36,47 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
+_PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_CUSTOM_HEADERS",
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+    "DEEPSEEK_BASE_URL",
+    "GEAK_BASE_URL",
+    "LLM_API_BASE",
+)
+
+
+def _provider_only_mode_before_fallback() -> str:
+    """Detect explicit single-provider intent before installer env fallback runs."""
+    has_anthropic = bool(
+        os.environ.get("ANTHROPIC_BASE_URL")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("DEEPSEEK_BASE_URL")
+    )
+    has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
+    has_gateway = bool(os.environ.get("SAFE_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
+    if has_anthropic and not has_openai and not has_gateway:
+        return "anthropic"
+    if has_openai and not has_anthropic and not has_gateway:
+        return "openai"
+    return ""
+
+
+def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
+    """Undo stale cross-provider credentials loaded from installer env fallback."""
+    if provider_mode != "anthropic":
+        return
+    for key in _PROVIDER_FALLBACK_KEYS:
+        original = snapshot.get(key)
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+
 # /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 
@@ -660,8 +701,14 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
+    # Capture explicit single-provider intent before the installer env
+    # fallbacks run, then undo any cross-provider credentials they inject so a
+    # provider-only launch is not silently rewired onto the wrong gateway.
+    provider_mode = _provider_only_mode_before_fallback()
+    provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
+    _restore_provider_only_mode(provider_mode, provider_snapshot)
 
     # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.
     _validate_credentials()
@@ -675,6 +722,7 @@ def _preflight(
             "OPENAI_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
@@ -718,9 +766,19 @@ def _preflight(
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or safe_key
         )
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
+        if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
+            geak_claude_model = (
+                os.environ.get("CLAUDE_MODEL", "").strip()
+                or os.environ.get("DEEPSEEK_MODEL", "").strip()
+                or ("deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
+                or "claude-opus-4-8"
+            )
+            os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
+            print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
 
         # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway

@@ -28,6 +28,7 @@ from typing import Any, Iterable
 import httpx
 
 from hyperloom.common.coerce import to_float
+from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
 
 from .base import SourceData, SourceUnavailable
 
@@ -1989,11 +1990,12 @@ async def _probe_gateway_health(
     url: str,
     timeout_s: float,
 ) -> dict[str, Any]:
-    """GET ``$OPENAI_BASE_URL/models`` with Bearer; classify the response.
+    """GET ``$OPENAI_BASE_URL/models`` with the same auth headers as LLM callers.
 
-    A 401 here (with the same auth token that critic + kernel-agent
-    use) means the upstream gateway has revoked / lost the key — J1
-    surfaces this distinct from generic local-server unreachable.
+    A 401 here (with the same token + custom headers that critic +
+    kernel-agent use) means the upstream gateway has revoked / lost the
+    key. Matching the main LLM auth resolver avoids false J1 alerts on
+    gateways that require ``Ocp-Apim-Subscription-Key`` for ``/models``.
 
     Args:
         url (str): The gateway ``/models`` URL to probe.
@@ -2010,25 +2012,7 @@ async def _probe_gateway_health(
         "reachable": False,
         "status": "error",
     }
-    headers: dict[str, str] = {}
-    api_key = os.environ.get("SAFE_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    # AMD LLM gateway auth: the /models catalog is gated by an APIM
-    # subscription-key header (Ocp-Apim-Subscription-Key), not Bearer. Mirror the
-    # exact header the real claude/codex CLIs send (OPENAI_CUSTOM_HEADERS /
-    # ANTHROPIC_CUSTOM_HEADERS, formatted "Name: value") so this health probe
-    # reflects the gateway's real reachability instead of a false 401 that would
-    # trip J1 gateway_auth_outage and escalate an otherwise-healthy run.
-    for _hdr_env in ("OPENAI_CUSTOM_HEADERS", "ANTHROPIC_CUSTOM_HEADERS"):
-        _raw = os.environ.get(_hdr_env, "").strip()
-        if not _raw or ":" not in _raw:
-            continue
-        _name, _, _value = _raw.partition(":")
-        _name = _name.strip()
-        _value = _value.strip()
-        if _name and _name not in headers:
-            headers[_name] = _value
+    headers = _gateway_probe_headers(url)
     timeout = httpx.Timeout(max(0.5, float(timeout_s)))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -2053,6 +2037,28 @@ async def _probe_gateway_health(
     else:
         out["status"] = "server_error"
     return out
+
+
+def _gateway_probe_headers(url: str) -> dict[str, str]:
+    """Build direct HTTP headers for the external gateway health probe."""
+    env = dict(os.environ)
+    if url and not (env.get("OPENAI_BASE_URL") or "").strip():
+        # ``resolve_openai_client_config`` uses the base URL to decide whether
+        # AMD needs Ocp-Apim-Subscription-Key. External probe overrides point
+        # directly at /models, so strip that suffix for resolver parity.
+        base = url.rstrip("/")
+        if base.endswith("/models"):
+            base = base[: -len("/models")]
+        if base:
+            env["OPENAI_BASE_URL"] = base
+    try:
+        cfg = resolve_openai_client_config(env=env)
+    except LLMConfigError:
+        return {}
+    headers = dict(cfg.default_headers)
+    if cfg.api_key and not any(name.lower() == "authorization" for name in headers):
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    return headers
 
 
 # J2 mount paths, read from env at probe time. All default to "" (no fallback):
