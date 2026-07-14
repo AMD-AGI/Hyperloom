@@ -140,14 +140,15 @@ def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_
     assert cli._claude_model_should_follow_codex() is True
 
 
-def test_anthropic_only_critic_agent_runtime_not_needed(clean_creds_env):
-    """Official Anthropic-only critic runs through ClaudeBackend, so critic-agent runtime is not required."""
+def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
+    """Official Anthropic-only now keeps the full critic-agent (native Anthropic
+    review path), so its KB prepare/commit runtime IS required."""
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", anthropic_url)
     if openai_url:
         clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
-    assert cli._critic_agent_runtime_needed("agent") is False
+    assert cli._critic_agent_runtime_needed("agent") is True
 
 
 def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
