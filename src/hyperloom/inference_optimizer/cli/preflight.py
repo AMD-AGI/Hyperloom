@@ -52,6 +52,7 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_CUSTOM_HEADERS",
     "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
+    "DEEPSEEK_BASE_URL",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
 )
@@ -63,6 +64,8 @@ def _provider_only_mode_before_fallback() -> str:
         os.environ.get("ANTHROPIC_BASE_URL")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("DEEPSEEK_BASE_URL")
     )
     has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
     has_gateway = bool(os.environ.get("SAFE_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
@@ -735,6 +738,7 @@ def _preflight(
             "OPENAI_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
@@ -778,9 +782,19 @@ def _preflight(
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or safe_key
         )
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
+        if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
+            geak_claude_model = (
+                os.environ.get("CLAUDE_MODEL", "").strip()
+                or os.environ.get("DEEPSEEK_MODEL", "").strip()
+                or ("deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
+                or "claude-opus-4-8"
+            )
+            os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
+            print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
 
         # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway
