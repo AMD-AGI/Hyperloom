@@ -54,7 +54,6 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
             "kernel_profiling",
             "kernel_decision_path",
             "geak_invocations",
-            "oob_invocations",
             "critic_robustness",
         ],
     ),

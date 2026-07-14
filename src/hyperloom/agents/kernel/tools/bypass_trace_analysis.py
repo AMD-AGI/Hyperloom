@@ -420,15 +420,12 @@ def main(argv: list[str] | None = None) -> int:
         _emit_quality_warnings(analyze, trace_health_warnings)
 
     # --- build downstream artifacts from classified device kernels ---
-    # Discover per-kernel benchmark files only when the rocprof roofline
-    # enrichment (the sole consumer) is enabled, so default runs skip the grep.
-    enrich_enabled = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower() in {"1", "true", "yes", "on"}
     candidates = _report.build_candidates(
         analyze,
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=enrich_enabled and not args.dry_run,
+        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -490,8 +487,6 @@ def main(argv: list[str] | None = None) -> int:
         generated_at=utc_now(timespec="seconds"),
         trace_health_warnings=trace_health_warnings,
     )
-    # summary.json is written below, after the optional rocprof enrichment, so
-    # its ``rocprof_enrich`` audit field reflects the enrichment outcome.
     summary["estimated"] = estimated
     summary["analysis_degraded"] = analysis_degraded
     # Always present (may be null) so the summary/manifest/result schemas match.
@@ -615,7 +610,6 @@ def main(argv: list[str] | None = None) -> int:
         "orchestrator_mode": "bypass",
         "timeline": analyze.get("timeline") or {},
         "attribution": analyze.get("attribution") or {},
-        "rocprof_enrich": rocprof_enrich,
         "trace_health_warnings": trace_health_warnings,
         "artifact_paths": {
             "trace_report_path": str(analysis_md_path),

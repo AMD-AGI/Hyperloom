@@ -166,7 +166,7 @@ def test_j2_fires_per_mount():
             "mounts": [
                 {"env_name": "TRACELENS_ROOT", "path": "/a", "ok": False, "error": "not_found", "latency_ms": 1.0},
                 {"env_name": "INFERENCEX_PATH", "path": "/b", "ok": True, "error": None, "latency_ms": 20000.0},
-                {"env_name": "OOB_SRC", "path": "/c", "ok": True, "error": None, "latency_ms": 50.0},  # healthy
+                {"env_name": "LEGACY_BACKEND_SRC", "path": "/c", "ok": True, "error": None, "latency_ms": 50.0},  # healthy
             ],
         }
     )

@@ -1344,7 +1344,7 @@ def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))
     monkeypatch.setenv("TRACELENS_INTERNAL_ROOT", str(tmp_path))
     monkeypatch.setenv("INFERENCEX_PATH", "/nonexistent/path/zzz")
-    monkeypatch.delenv("OOB_SRC", raising=False)
+    monkeypatch.delenv("LEGACY_BACKEND_SRC", raising=False)
     out = _probe_external_mounts(timeout_s=5.0)
     by_env = {row["env_name"]: row for row in out}
     assert "TRACELENS_ROOT" in by_env
@@ -1353,7 +1353,7 @@ def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
     assert by_env["TRACELENS_INTERNAL_ROOT"]["ok"] is True
     assert "INFERENCEX_PATH" in by_env
     assert by_env["INFERENCEX_PATH"]["ok"] is False
-    assert "OOB_SRC" not in by_env
+    assert "LEGACY_BACKEND_SRC" not in by_env
 
 
 def test_probe_external_mounts_skips_tracelens_root_when_unset(monkeypatch):
@@ -1361,13 +1361,13 @@ def test_probe_external_mounts_skips_tracelens_root_when_unset(monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     monkeypatch.delenv("TRACELENS_INTERNAL_ROOT", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("OOB_SRC", raising=False)
+    monkeypatch.delenv("LEGACY_BACKEND_SRC", raising=False)
     out = _probe_external_mounts(timeout_s=5.0)
     by_env = {row["env_name"]: row for row in out}
     assert "TRACELENS_ROOT" not in by_env
     assert "TRACELENS_INTERNAL_ROOT" not in by_env
     assert "INFERENCEX_PATH" not in by_env
-    assert "OOB_SRC" not in by_env
+    assert "LEGACY_BACKEND_SRC" not in by_env
 
 
 def test_probe_tracelens_cli_reports_absent(monkeypatch):

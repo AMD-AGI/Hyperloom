@@ -42,8 +42,6 @@ def test_replay_real_trace_contract_and_ranking(tmp_path, capsys, monkeypatch):
     trace = _resolve_trace()
     if not trace:
         pytest.skip("no replay trace (set HYPERLOOM_BYPASS_REPLAY_TRACE)")
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
-
     rc = bta.main([
         "--trace-input", trace,
         "--session-id", "replay",

@@ -1596,7 +1596,7 @@ def _apply_fellow_env(env: dict) -> None:
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
     # own request timeout and cut non-essential traffic / autoupdate that can
-    # also block in headless containers. Shared with oob/specialist/tracelens so
+    # also block in headless containers. Shared with forge/specialist/tracelens so
     # every claude-CLI/SDK child gets the same read-timeout protection.
     from _llm_stability_env import apply_llm_stability_env
 
@@ -1736,7 +1736,7 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     # Fellow stability defaults (IS_SANDBOX/TLS/llm-proxy) scoped to THIS child
-    # env only, so they never leak to sibling ladder backends (claude/codex).
+    # env only, so they never leak to sibling ladder backends.
     _apply_fellow_env(env)
     # Compiled-kernel rebuild (RCA compiled-kernel C): aiter ships editable +
     # JITs each op from source. Editing an aiter .cuh/.cu only takes effect if
@@ -1965,7 +1965,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         workspace, worktree_kernel, base_commit = wt_info
 
     try:
-        # Locate the Kernel-Forge code via $FORGE_PATH (like OOB_PATH for oob),
+        # Locate the Kernel-Forge code via $FORGE_PATH,
         # falling back to whatever `kernel_agents` is importable in the env. The
         # loop always runs in a hard-killable subprocess (CLI), so kernel_agents
         # need not be importable in THIS process.
@@ -2042,7 +2042,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # GPU_TARGET is passed to Kernel-Forge's MCP server tools (build/bench/pmc)
         # via the forge-loop child env (_run_loop_via_cli sets env["GPU_TARGET"]),
         # so it is NOT written to the parent os.environ -- that would leak to the
-        # sibling ladder backends (claude/codex) running in the same process.
+        # sibling ladder backends running in the same process.
         shapes = _shapes_from_candidate(candidate)
         forge_log = output_dir / "forge_loop.log"
         experiments_dir = output_dir / "forge_experiments"
