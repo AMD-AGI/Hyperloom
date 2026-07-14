@@ -121,11 +121,16 @@ Create or update `.env` in the current directory.
 - Do not write `HYPERLOOM_INSTALL_SOURCE`.
 - Do not overwrite an existing non-placeholder secret key.
 
-Write only the Hyperloom configuration keys the setup backend consumes:
+Write only the keys for the selected LLM mode, plus the common keys. Do not
+write keys that belong to a mode the user did not choose.
 
-- `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`
-- `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
-- `SAFE_API_KEY`, `OPENAI_BASE_URL`, `CLAUDE_MODEL`, `CODEX_MODEL`
+- `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+  Do not write `OPENAI_BASE_URL` in this mode.
+- `DeepSeek`: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`.
+- `LLM Gateway`: `SAFE_API_KEY`, `OPENAI_BASE_URL`, `CLAUDE_MODEL`, `CODEX_MODEL`.
+
+Common keys (all modes):
+
 - `USER_DATA_PATH`
 - `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
 
