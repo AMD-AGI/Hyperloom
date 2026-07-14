@@ -739,14 +739,13 @@ def _critic_agent_runtime_needed(
 ) -> bool:
     """Whether the selected critic path will actually instantiate critic-agent.
 
-    Anthropic-only setups (``codex_follows_claude``) run the critic as a plain
-    Claude backend, so the critic-agent KB runtime is not needed there.
+    Provider-only setups (including Anthropic-only) still run the full
+    critic-agent — its KB two-phase runtime is protocol-independent, and the
+    review inference is driven over the native provider endpoint. The runtime is
+    only skipped when the caller explicitly signals a plain Claude fallback via
+    ``codex_follows_claude``.
     """
-    return (
-        critic_choice == "agent"
-        and not codex_follows_claude
-        and not _codex_model_should_follow_claude()
-    )
+    return critic_choice == "agent" and not codex_follows_claude
 
 
 def _validate_and_resolve_claude_model(
