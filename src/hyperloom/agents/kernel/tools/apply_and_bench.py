@@ -16,7 +16,7 @@ integrate gate, the ``micro_speedup``/dead-band/parity arbitration). It does exa
      and report the A/B delta.
 
 No accept/reject verdict is emitted. The caller decides what to do with the numbers. Used by both
-the GEAK v3 and GEAK v4 clean paired runs so every E2E number is measured the SAME way.
+the GEAK clean paired runs so every E2E number is measured the SAME way.
 
 The serving stack is pluggable: ``--backend {sglang,vllm}`` selects how the server is launched and
 benchmarked; for an aiter ``.cu`` patch the prebuilt fused ``module_aiter_core*.so`` is removed and

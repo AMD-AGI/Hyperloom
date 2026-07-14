@@ -75,6 +75,7 @@ claude = [
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
+hyperloom = "hyperloom.inference_optimizer.cli.setup:main"
 # tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
 # (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
 # keep resolving after promotion into the single ``hyperloom`` distribution.
@@ -99,6 +100,11 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.data-files]
+".agents/skills/hyperloom-setup" = [
+    "src/hyperloom/inference_optimizer/agent_skills/hyperloom-setup/SKILL.md",
+]
+
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
 # orchestrator -> src/hyperloom/orchestrator promotion (stage A) and further
@@ -121,6 +127,7 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
+    "agent_skills/*/SKILL.md",
     # Slurm submission bundle (batch-scheduler counterpart to the k8s layout;
     # see docs/install/slurm.md). Shipped so wheel installs get the scripts.
     "assets/slurm/*.sh",
@@ -160,6 +167,7 @@ hyperloom = [
     "references/*.md",
     "examples/*.json",
     "examples/*.py",
+    "kb/framework_optimization/*.jsonl",
     "scripts/*.sh",
 ]
 # tree-reform.MD P2.5: quantization_agent's skill assets, promoted alongside
@@ -181,6 +189,12 @@ hyperloom = [
 ]
 "hyperloom.agents.kernel.tools" = [
     "data/*.json",
+]
+"hyperloom.inference_optimizer.multi_node" = [
+    "SKILL.md",
+]
+"hyperloom.inference_optimizer.multi_node.scripts" = [
+    "*.sh",
 ]
 
 [tool.pytest.ini_options]
