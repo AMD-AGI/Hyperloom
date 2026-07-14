@@ -71,7 +71,7 @@ Ask these questions using the agent's structured question UI when available.
 
 1. Choose one LLM mode:
    - `Anthropic`
-   - `OpenAI`
+   - `DeepSeek`
    - `LLM Gateway`
 
    Present exactly those three option labels. Do not add parenthetical
@@ -92,10 +92,10 @@ Ask these questions using the agent's structured question UI when available.
    - Ask for `ANTHROPIC_BASE_URL`; if blank, use `https://api.anthropic.com`.
    - Tell the user the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask whether to change it.
 
-   For `OpenAI`:
-   - Write `OPENAI_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask for `OPENAI_BASE_URL`; if blank, use `https://api.openai.com/v1`.
-   - Tell the user the default `CODEX_MODEL` is `gpt-4.1`; ask whether to change it.
+   For `DeepSeek`:
+   - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
+   - Ask for `DEEPSEEK_BASE_URL`; if blank, use `https://api.deepseek.com/anthropic`.
+   - Tell the user the default `DEEPSEEK_MODEL` is `deepseek-chat`; ask whether to change it.
 
    For `LLM Gateway`:
    - Write `SAFE_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
@@ -149,9 +149,23 @@ Create or update `.env` in the current directory.
 Write only the Hyperloom configuration keys the setup backend consumes:
 
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`
-- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_MODEL`
+- `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
 - `SAFE_API_KEY`, `OPENAI_BASE_URL`, `CLAUDE_MODEL`, `CODEX_MODEL`
 - `USER_DATA_PATH`
+
+### AMD APIM subscription header
+
+If the chosen base URL host is `llm-api.amd.com`, that gateway requires the
+API key to also be sent as an `Ocp-Apim-Subscription-Key` header. Add the
+custom-headers key that matches the selected mode, reusing the same key value:
+
+- `Anthropic`: `ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <ANTHROPIC_API_KEY>`
+- `DeepSeek`: `ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <DEEPSEEK_API_KEY>`
+- `LLM Gateway`: `OPENAI_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <SAFE_API_KEY>`
+
+Write the placeholder header with `<PLEASE_FILL_IN>` when the key itself is
+still a placeholder, so the header value tracks the real key after the user
+edits `.env`. Skip this entirely when the base URL host is not `llm-api.amd.com`.
 
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
@@ -234,7 +248,19 @@ In `docker` mode, do not run `--install-framework sglang` or
 `--install-framework vllm`; the serving framework must come from the chosen
 image.
 
-## Step 5: Report Result
+## Step 5: Confirm Detected Framework
+
+After setup completes, the backend writes the detected serving framework to
+`FRAMEWORK` in `.env` (`sglang` or `vllm`). Read `.env` back and check it:
+
+- If `FRAMEWORK` is set, report it. Downstream demo skills read this value.
+- If `FRAMEWORK` is missing or empty, no serving framework was importable
+  (e.g. `--install-framework none` on a host without SGLang/vLLM). Tell the
+  user that demo skills needing a framework will not run until one is
+  installed, and offer to re-run setup with `--install-framework sglang`
+  or `vllm`. Do not invent a `FRAMEWORK` value.
+
+## Step 6: Report Result
 
 Report:
 - The `.env` path.
@@ -242,6 +268,7 @@ Report:
   container name used.
 - The setup command that was run.
 - Whether setup completed or failed.
+- The detected `FRAMEWORK` value (or that it is unset).
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.
