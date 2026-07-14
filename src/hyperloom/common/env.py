@@ -3,7 +3,7 @@
 """Environment-variable readers (canonical ``env_*``).
 
 Project-standard boolean token vocabulary (``1/true/yes/on`` → ``True``,
-case-insensitive) plus int/str/float readers with safe fallbacks. Stdlib-only
+case-insensitive) plus int/float readers with safe fallbacks. Stdlib-only
 so any package may depend on it without an import cycle.
 
 Divergent readers intentionally NOT delegated here (kept local by design):
@@ -71,20 +71,4 @@ def env_float(name: str, default: float = 0.0) -> float:
         return default
 
 
-def env_str(name: str, default: str = "") -> str:
-    """Read a stripped string env var.
-
-    Args:
-        name: Environment variable name.
-        default: Value returned when the variable is unset.
-
-    Returns:
-        The stripped value, or ``default`` when unset.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip()
-
-
-__all__ = ["env_bool", "env_int", "env_float", "env_str"]
+__all__ = ["env_bool", "env_int", "env_float"]

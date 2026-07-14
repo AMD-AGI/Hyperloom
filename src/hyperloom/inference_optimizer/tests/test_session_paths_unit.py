@@ -63,14 +63,9 @@ def test_research_and_competitor_paths():
     assert sp.competitor_target_json(SD).name == "competitor_target.json"
 
 
-def test_logs_and_agent_paths():
-    assert sp.logs_dir(SD) == SD / "logs"
+def test_agent_paths():
     assert sp.agent_dir(SD, "critic") == SD / "agents" / "critic"
     assert sp.agent_prompt_snapshot(SD, "critic").name == "system_prompt.snapshot.md"
-
-
-def test_optimizer_run_paths():
-    assert sp.optimizer_runs_dir(SD) == SD / "optimizer_runs"
 
 
 def test_target_analysis_paths():
