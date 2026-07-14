@@ -167,4 +167,4 @@ def test_run_tracelens_skill_uses_fallback_model_when_default_missing(tmp_path, 
         )
     )
 
-    assert seen_model["value"] == "claude-opus-4-7"
+    assert seen_model["value"] == "claude-opus-4-8"

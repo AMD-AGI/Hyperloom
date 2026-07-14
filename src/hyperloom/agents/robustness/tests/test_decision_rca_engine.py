@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from hyperloom.agents.robustness.decision.rca_engine import (
+    AnthropicRcaEngine,
     LlmRcaEngine,
     NoopRcaEngine,
     RcaThrottle,
@@ -90,7 +93,113 @@ async def test_llm_engine_calls_chat_server_and_returns_text():
     assert "/chat/completions" in captured["url"]
     assert captured["auth"] == "Bearer secret"
     assert "crash_count=5" in captured["body"]
-    assert "claude-opus-4-7" in captured["body"]
+    assert "claude-opus-4-8" in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_llm_engine_uses_max_completion_tokens_for_gpt5_models():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        captured["body"] = body
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "root cause"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.openai.com/v1")
+    engine = LlmRcaEngine(
+        base_url="https://api.openai.com/v1",
+        api_key="openai-token",
+        model="gpt-5.5",
+        client=client,
+        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+    )
+    try:
+        engine.set_tick(1)
+        text = await engine.summarize(_sym())
+    finally:
+        await client.aclose()
+
+    assert text == "root cause"
+    assert captured["body"]["max_completion_tokens"] == 600
+    assert "max_tokens" not in captured["body"]
+    assert "temperature" not in captured["body"]
+
+
+def test_llm_engine_injected_client_uses_openai_bearer_headers():
+    client = httpx.AsyncClient(base_url="https://gateway.example/v1")
+
+    try:
+        engine = LlmRcaEngine(
+            base_url="https://gateway.example/v1",
+            api_key="openai-token",
+            model="gpt-5.5",
+            client=client,
+            throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+        )
+
+        assert engine.client is client
+        assert client.headers["Authorization"] == "Bearer openai-token"
+        assert "x-api-key" not in client.headers
+        assert "anthropic-version" not in client.headers
+    finally:
+        import anyio
+
+        anyio.run(client.aclose)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        seen["json"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "anthropic root cause"}],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.deepseek.com/anthropic")
+    engine = AnthropicRcaEngine(
+        base_url="https://api.deepseek.com/anthropic",
+        api_key="deepseek-token",
+        model="deepseek-chat",
+        client=client,
+        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+    )
+    try:
+        engine.set_tick(1)
+        text = await engine.summarize(
+            _sym(
+                name="gateway_auth_outage",
+                summary="gateway returned 401",
+                evidence={"status_code": 401},
+            )
+        )
+    finally:
+        await client.aclose()
+    usage = engine.drain_usage()
+
+    assert text == "anthropic root cause"
+    assert seen["path"] == "/anthropic/v1/messages"
+    assert seen["headers"]["x-api-key"] == "deepseek-token"
+    assert seen["headers"]["anthropic-version"] == "2023-06-01"
+    assert seen["json"]["model"] == "deepseek-chat"
+    assert usage is not None
+    assert usage["input_tokens"] == 11
+    assert usage["output_tokens"] == 7
+    assert usage["calls"] == 1
+    assert usage["model"] == "deepseek-chat"
 
 
 @pytest.mark.asyncio
@@ -119,7 +228,7 @@ async def test_drain_usage_accumulates_and_resets():
     assert usage["calls"] == 2
     assert usage["input_tokens"] == 22      # 11 * 2
     assert usage["output_tokens"] == 8      # 4 * 2
-    assert usage["model"] == "claude-opus-4-7"
+    assert usage["model"] == "claude-opus-4-8"
     assert usage["latency_ms"] >= 0
     # Draining resets the accumulator.
     assert engine.drain_usage() is None
