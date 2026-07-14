@@ -1596,7 +1596,7 @@ def _apply_fellow_env(env: dict) -> None:
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
     # own request timeout and cut non-essential traffic / autoupdate that can
-    # also block in headless containers. Shared with oob/specialist/tracelens so
+    # also block in headless containers. Shared with forge/specialist/tracelens so
     # every claude-CLI/SDK child gets the same read-timeout protection.
     from _llm_stability_env import apply_llm_stability_env
 
@@ -1965,7 +1965,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         workspace, worktree_kernel, base_commit = wt_info
 
     try:
-        # Locate the Kernel-Forge code via $FORGE_PATH (like OOB_PATH for oob),
+        # Locate the Kernel-Forge code via $FORGE_PATH,
         # falling back to whatever `kernel_agents` is importable in the env. The
         # loop always runs in a hard-killable subprocess (CLI), so kernel_agents
         # need not be importable in THIS process.

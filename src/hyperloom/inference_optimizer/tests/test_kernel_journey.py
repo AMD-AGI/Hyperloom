@@ -259,7 +259,7 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
 
 
 def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
-    # forge is its own backend (NOT folded into oob): a forge attempt keeps
+    # forge is its own backend: a forge attempt keeps
     # backend="forge" in the journey and mints a distinct versions["forge"]
     # provenance entry (via _TOOL_PROVENANCE), so A8b can group by forge version.
     sha = _init_git_repo(tmp_path)
@@ -289,11 +289,10 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     # The attempt keeps its own backend label in the journey.
     atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert atts[0]["backend"] == "forge"
-    # Distinct provenance entry, NOT merged into oob.
+    # Distinct provenance entry.
     versions = out["versions"]
     assert versions["forge"]["tool"] == "forge"
     assert versions["forge"]["version"] == sha
-    assert "oob" not in versions
 
 
 def test_geak_provenance_resolves_geak_root_env_without_explicit_root(

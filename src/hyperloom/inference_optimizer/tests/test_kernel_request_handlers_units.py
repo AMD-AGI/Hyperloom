@@ -1469,7 +1469,7 @@ class TestDefaultKernelBatchParallel:
 # ---------------------------------------------------------------------------
 # _should_parallelize_backends
 #
-# With the ladder converged to forge-only there is no second (OOB) ladder
+# With the ladder converged to forge-only there is no second (legacy backend) ladder
 # to race, so backends never auto-parallelize regardless of GPU count. The flag
 # is False unless explicitly forced via payload ``parallel_backends`` or env
 # ``KERNEL_OPT_PARALLEL_BACKENDS``.
@@ -1496,7 +1496,7 @@ class TestShouldParallelizeBackends:
     @pytest.mark.parametrize(
         "n_gpus, per_task, num_candidates",
         [
-            # No auto-parallelize regardless of GPU count: the OOB ladder that
+            # No auto-parallelize regardless of GPU count: the removed backend ladder that
             # used to be raced against GEAK has been removed, so without an
             # explicit override the decision is always sequential (False).
             (8, 1, 3),
