@@ -64,7 +64,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "params": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "sweep": {"status": "not_attempted", "attempts": 0, "keeps": 0, "grid_size": 9},
             "geak": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "oob": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "validate_stack": {"status": "not_attempted", "attempts": 0, "keeps": 0},
         },
         "kernel_lifecycle": {
@@ -127,7 +126,6 @@ def test_all_renderers_register_in_stable_order() -> None:
         "kernel_decision_path",
         "roofline",
         "geak_invocations",
-        "oob_invocations",
         "param_search",
         "decision_journal",
         "sweep",
@@ -151,12 +149,9 @@ def test_deterministic_only_path_produces_complete_report() -> None:
     assert "## Executive Summary" in md
     assert "10.99%" in md
     assert "MI300X" in md
-    # GEAK + OOB sections must mark themselves as not attempted
     geak = next(s for s in r.sections if s.section_id == "geak_invocations")
     assert geak.skipped
     assert any(d.kind == "not_attempted" for d in geak.decisions)
-    oob = next(s for s in r.sections if s.section_id == "oob_invocations")
-    assert oob.skipped
 
 
 def test_skipped_sections_do_not_emit_placeholders() -> None:
@@ -235,7 +230,6 @@ def test_legacy_source_buckets_survive_alongside_explore() -> None:
             "backends_pct_of_total": 4.5,
             "params_pct_of_total": 0.0,
             "geak_pct_of_total": 0.0,
-            "oob_pct_of_total": 0.0,
             "sweep_pct_of_total": 0.0,
         },
         "notes": [],
@@ -295,7 +289,6 @@ def test_llm_path_inserts_narratives_for_non_skipped_sections() -> None:
     prompt = json.loads(r.llm_user_prompt)
     section_ids = {s["section_id"] for s in prompt["sections"]}
     assert "geak_invocations" not in section_ids
-    assert "oob_invocations" not in section_ids
     assert "sweep" not in section_ids
 
 
@@ -356,7 +349,6 @@ def test_attribution_method_renders_from_field() -> None:
             "backends_pct_of_total": 0.0,
             "params_pct_of_total": 0.0,
             "geak_pct_of_total": 0.0,
-            "oob_pct_of_total": 0.0,
             "sweep_pct_of_total": 0.0,
         },
         "notes": [],
