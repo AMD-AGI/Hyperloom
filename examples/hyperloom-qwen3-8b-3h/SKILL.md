@@ -20,6 +20,7 @@ Read and follow `@../../inference_optimizer/SKILL.md` first. This skill provides
 - `--target-gain 30`
 - `--max-hours 3`
 - `--no-kernel`
+- `--no-enable-conc-sweep`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
@@ -47,7 +48,8 @@ export MODEL_PATH="$(pwd)/.cache/hyperloom-models/Qwen3-8B"
 1. Install packages and save artifacts to a writable folder.
 2. Run in background with `setsid nohup`.
 3. Include `--no-kernel` in the `inference_optimizer optimize` command so the Kernel Agent phase is skipped.
-4. Report the session ID, log path, PID, and initial health check result.
-5. Monitor the process every 300 seconds until work is done.
-6. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-7. If `stop_reason` in the current session `state.json` is final, stop and exit.
+4. Include `--no-enable-conc-sweep` in the `inference_optimizer optimize` command so the SWEEP-phase post-optimization concurrency sweep is skipped.
+5. Report the session ID, log path, PID, and initial health check result.
+6. Monitor the process every 300 seconds until work is done.
+7. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+8. If `stop_reason` in the current session `state.json` is final, stop and exit.
