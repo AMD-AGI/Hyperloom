@@ -6,11 +6,31 @@ import pytest
 
 from hyperloom.common.llm_config import (
     LLMConfigError,
+    apply_reasoning_effort,
     claude_sdk_env_options,
     derive_openai_base_url,
     openai_client_kwargs,
     parse_custom_headers,
 )
+
+
+def test_apply_reasoning_effort_is_noop_without_env():
+    params = {"model": "m", "messages": []}
+    out = apply_reasoning_effort(params, env={})
+    assert "reasoning_effort" not in out
+    assert out is params  # mutates in place
+
+
+def test_apply_reasoning_effort_injects_recognized_value():
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "MEDIUM"})
+    assert out["reasoning_effort"] == "medium"
+    out2 = apply_reasoning_effort({"model": "m"}, env={"OPENAI_REASONING_EFFORT": "high"})
+    assert out2["reasoning_effort"] == "high"
+
+
+def test_apply_reasoning_effort_ignores_unknown_value():
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "turbo"})
+    assert "reasoning_effort" not in out
 
 
 def test_parse_custom_headers_accepts_anthropic_env_format():
