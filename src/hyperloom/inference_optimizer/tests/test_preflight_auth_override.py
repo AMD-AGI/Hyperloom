@@ -645,7 +645,8 @@ def test_resolve_robustness_choice_env_override_still_works(monkeypatch):
 
 
 def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
-    """`--claude-model claude-opus-4-5` aborts before the catalog probe."""
+    """With custom models explicitly disabled, unsupported ids abort before the catalog probe."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
     probe_calls: list[str] = []
 
     def _no_probe(**kwargs):
@@ -719,9 +720,43 @@ def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
     assert "is empty" in capsys.readouterr().err
 
 
-def test_validate_claude_model_optout_off_still_hard_gates(monkeypatch, capsys):
-    """Default (opt-out unset): custom model still rejected by static gate."""
+def test_validate_claude_model_custom_allowed_by_default(monkeypatch, capsys):
+    """Default (env unset): custom orchestration models pass when the catalog contains them."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="my-org/custom-claude")
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "my-org/custom-claude"
+    assert "my-org/custom-claude" in catalog
+    assert "confirmed in gateway catalog" in capsys.readouterr().out
+
+
+def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
+    """DeepSeek-style orchestration models are valid when the configured gateway serves them."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"deepseek-chat"},
+    )
+    args = _make_args(claude_model="deepseek-chat")
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "deepseek-chat"
+    assert "deepseek-chat" in catalog
+    assert "confirmed in gateway catalog" in capsys.readouterr().out
+
+
+def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monkeypatch, capsys):
+    """Explicit opt-out disable: custom model is rejected by the static gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
 
     def _no_probe(**kwargs):
         raise AssertionError("probe should not run on static-gate fail")
@@ -732,7 +767,7 @@ def test_validate_claude_model_optout_off_still_hard_gates(monkeypatch, capsys):
         cli._validate_and_resolve_claude_model(args, None)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL" in err
+    assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1" in err
 
 
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
@@ -833,9 +868,9 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
 
 def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     """Dual entry: Anthropic catalog probe fails with auth/network (None, not the
-    404 sentinel) and no ALLOW_CUSTOM → refuse to start rather than silently pass."""
+    404 sentinel) and custom models are explicitly disabled → refuse to start."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
@@ -906,7 +941,8 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
 
 
 def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, capsys):
-    """Catalog probe returned None → sys.exit(2)."""
+    """With custom models explicitly disabled, catalog probe returned None → sys.exit(2)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(claude_model="claude-opus-4-7")
 

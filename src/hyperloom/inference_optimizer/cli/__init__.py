@@ -876,6 +876,21 @@ def _claude_model_should_follow_codex() -> bool:
     return has_openai and not has_anthropic
 
 
+def _custom_orch_model_allowed() -> bool:
+    """Whether orchestration may use a model outside the AMD Claude allowlist.
+
+    Custom orchestration models are enabled by default so provider-specific
+    model IDs (for example DeepSeek) can run when they are present in the
+    configured gateway catalog. Operators can set
+    ``INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`` (or false/no/off) to
+    restore the stricter AMD Claude allowlist.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
     """Whether the selected critic path will actually instantiate critic-agent."""
     return critic_choice == "agent" and not _codex_model_should_follow_claude()
@@ -906,15 +921,12 @@ def _validate_and_resolve_claude_model(
     """
     chosen = (args.claude_model or "").strip()
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
-    # may not serve the AMD-blessed opus ids. The static allowlist is
-    # an AMD-network safety default; an operator can opt out via
-    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
-    # catalog probe below is the sole gate (a typo still fails because the id
-    # won't be in the catalog). Default behavior is unchanged.
-    allow_custom = os.environ.get(
-        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL",
-        "",
-    ).strip().lower() in ("1", "true", "yes", "on") or _claude_model_should_follow_codex()
+    # may not serve the AMD-blessed opus ids. Custom orchestration models are
+    # enabled by default; the gateway catalog probe below is the sole gate (a
+    # typo still fails because the id won't be in the catalog). Operators can
+    # set INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0 to restore the stricter
+    # AMD Claude allowlist.
+    allow_custom = _custom_orch_model_allowed() or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -930,8 +942,8 @@ def _validate_and_resolve_claude_model(
     if allow_custom and not chosen:
         print(
             "ERROR: --claude-model is empty but "
-            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
-            "orchestration model id. Refusing to start.",
+            "custom orchestration model support is enabled; pass an explicit "
+            "model id. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -1017,8 +1029,8 @@ def _validate_and_resolve_claude_model(
         if allow_custom:
             print(
                 f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
-                f"--claude-model={chosen!r}. Proceeding under "
-                f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 (trusting the operator id)."
+                f"--claude-model={chosen!r}. Proceeding with custom orchestration "
+                f"model support enabled (trusting the operator id)."
             )
             return None
         print(
@@ -1032,14 +1044,15 @@ def _validate_and_resolve_claude_model(
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
 
-    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
-    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
-    # catalog miss so the operator fixes the id rather than silently running a
-    # model their gateway doesn't serve.
-    if allow_custom:
+    # #340: for non-allowlisted custom ids the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a catalog
+    # miss so the operator fixes the id rather than silently running a model
+    # their gateway doesn't serve. Preserve the legacy fallback path for
+    # allowlisted Claude ids below.
+    if allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
-            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"(custom orchestration model support enabled; catalog has "
             f"{sorted(catalog_ids)[:20]}). Refusing to start.",
             file=sys.stderr,
         )
