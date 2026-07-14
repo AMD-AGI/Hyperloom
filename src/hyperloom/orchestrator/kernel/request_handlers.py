@@ -248,10 +248,11 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Default ladder: forge first, then the per-kernel GEAK backend (geak_v3). An
-# explicit KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload
-# backend_order) still overrides this default as-is.
+# Explicit per-kernel fallback ladder used only when a user asks for legacy
+# native backends. The default phase-level backend is the whole-pipeline GEAK
+# delegate (``geak``), so this ladder is not used unless selected explicitly.
 _DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3")
+_DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
@@ -3174,7 +3175,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
 
     Precedence (highest to lowest): ``payload['backend_order']`` ->
     ``KERNEL_OPT_BACKEND_ORDER`` env -> ``KERNEL_OPT_BACKENDS`` env.  When none
-    is set an empty list is returned so callers can apply their own default.
+    is set, the phase-level GEAK delegate is the default.
 
     Args:
         payload: Optional request payload that may carry ``backend_order``.
@@ -3188,7 +3189,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
         or os.environ.get("KERNEL_OPT_BACKENDS")
     )
     if not raw:
-        return []
+        return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
     return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
 
 
@@ -3252,7 +3253,7 @@ def _backend_order(payload: dict) -> list[str]:
     2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
     3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
        ``KERNEL_OPT_BACKEND_ORDER``.
-    4. The built-in forge-first default ladder.
+    4. Empty, because the no-env default is the phase-level ``geak`` delegate.
 
     All backend names are normalized to lowercase before filtering, so
     values like ``"GEAK"`` or ``"Forge"`` are treated the same as their
@@ -3266,9 +3267,6 @@ def _backend_order(payload: dict) -> list[str]:
             ``{"geak_v3", "forge"}``).
     """
     order = _raw_kernel_backend_order(payload)
-    if not order:
-        # Ignore legacy payload["backends"]; the default ladder (forge first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
-        order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
     # `forge` (Kernel-Forge autonomous-loop backend) and the per-kernel GEAK
     # backend ``geak_v3`` are the only per-kernel backends. Bare ``geak`` (the
     # whole-pipeline e2e delegate) is intentionally absent: it is a phase-level
