@@ -50,7 +50,7 @@ class BackendType(str, Enum):
 
 # Built-in default model + API key env table
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
-DEFAULT_CODEX_MODEL = "gpt-5.4"  # litellm support pending for 5.5
+DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
