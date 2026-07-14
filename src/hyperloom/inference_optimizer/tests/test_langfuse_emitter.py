@@ -1151,7 +1151,7 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
 def test_pair_key_degrades_when_turn_absent():
     """Legacy rows without turn/task_id/dyn_id still produce a stable key
     (all the new slots are None) rather than raising."""
-    row = {"component": "oob", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
+    row = {"component": "forge", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k  # stable / deterministic
 
