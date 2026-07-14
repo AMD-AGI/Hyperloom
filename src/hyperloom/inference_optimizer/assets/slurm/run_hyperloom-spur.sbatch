@@ -10,7 +10,12 @@
 #   - the python backend uses the codex kernel-agent conversation backend
 #     (--kernel-codex, driven by CODEX_MODEL) instead of --kernel-claude.
 #
-# Args (optional, env fallback): $1 = model key, $2 = backend (python|claude)
+# Carriers (BACKEND): python runs `inference_optimizer optimize` directly;
+# claude / codex are outer CLI carriers that load SKILL.md and drive the same
+# optimize command agentically (claude = Claude Code CLI, codex = OpenAI
+# `codex exec`). Both carriers default KERNEL_OPT_BACKEND_ORDER=geak.
+#
+# Args (optional, env fallback): $1 = model key, $2 = backend (python|claude|codex)
 #
 #SBATCH --job-name=hyperloom
 #SBATCH --nodes=1
@@ -35,7 +40,20 @@ IFS=$'\t' read -r KEY REPO_ID FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODE
 # Real hardware may differ from the model's tabled target (e.g. an MI355X-only
 # cluster running an MI300X-tagged row). HL_GPU_TYPE_OVERRIDE wins when set.
 GPU_TYPE="${HL_GPU_TYPE_OVERRIDE:-$GPU_TYPE}"
-export KEY REPO_ID FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN BACKEND
+
+# Resolve the model source path. Precedence:
+#   1. REPO_ID is already an existing local dir (absolute path in models.tsv);
+#   2. HL_MODEL_BASE is set and <HL_MODEL_BASE>/<basename REPO_ID> exists;
+#   3. fall back to REPO_ID as-is (an HF repo id downloaded at launch).
+# REPO_ID stays the logical/HF identity; MODEL_PATH is what the optimizer loads.
+MODEL_PATH="$REPO_ID"
+if [ -d "$REPO_ID" ]; then
+  MODEL_PATH="$REPO_ID"
+elif [ -n "${HL_MODEL_BASE:-}" ] && [ -d "${HL_MODEL_BASE%/}/${REPO_ID##*/}" ]; then
+  MODEL_PATH="${HL_MODEL_BASE%/}/${REPO_ID##*/}"
+fi
+echo "[hl] model resolve: repo_id=$REPO_ID base=${HL_MODEL_BASE:-<none>} -> $MODEL_PATH"
+export KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN BACKEND
 
 # --- identity: end-to-end join key the optimizer reads from env ------------
 export CLAW_SESSION_ID="${CLAW_SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}"
@@ -110,12 +128,35 @@ bash src/hyperloom/inference_optimizer/assets/install.sh
 RUN_DIR="$USER_DATA_PATH/optimizer_runs"; mkdir -p "$RUN_DIR"
 LAUNCH_INFO_FILE="$RUN_DIR/launch_${CLAW_SESSION_ID}.json"
 
+# Build the carrier prompt from ci/prompt_template.md (shared by claude / codex).
+# The carrier loads SKILL.md and issues `inference_optimizer optimize` itself.
+hl_build_prompt() {
+  export TP  # ensure TP is visible to the child python
+  python3 - <<'PY'
+import os
+tpl = open("ci/prompt_template.md").read()
+tpl = tpl.replace("/wekafs/HyperloomV2/src/hyperloom/inference_optimizer/SKILL.md",
+                  os.environ["REPO_ROOT"] + "/src/hyperloom/inference_optimizer/SKILL.md")
+vals = dict(
+    model_hf=os.environ["REPO_ID"], model_path=os.environ.get("MODEL_PATH", os.environ["REPO_ID"]),
+    gpu_type=os.environ["GPU_TYPE"], gpu_type_lc=os.environ["GPU_TYPE"].lower(),
+    framework=os.environ["FRAMEWORK"], precision=os.environ["PREC"],
+    tp=os.environ["TP"], ep="1", conc=os.environ["CONC"],
+    isl=os.environ["ISL"], osl=os.environ["OSL"], nodes="1",
+    random_range_ratio="1.0", target_gain=os.environ["TARGET_GAIN"],
+    max_hours=os.environ["MAX_HOURS"], kernel_agent_build_geak_rag_index="1",
+    oob_path="", tracelens_root="", multinode_section="", inferenceX_data="(none)",
+)
+print(tpl.format(**vals))
+PY
+}
+
 case "$BACKEND" in
   python)
     # Workload envs the Coordinator reuses for baseline -> params -> sweep.
     export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
     exec inference_optimizer --verbose optimize \
-      --model "$REPO_ID" \
+      --model "$MODEL_PATH" \
       --framework "$FRAMEWORK" \
       --gpu-type "$GPU_TYPE" \
       --model-class "$MODEL_CLASS" \
@@ -127,25 +168,63 @@ case "$BACKEND" in
     ;;
   claude)
     command -v claude >/dev/null 2>&1 || { echo "[hl] claude CLI not in image" >&2; exit 3; }
-    PROMPT="$(python3 - <<'PY'
-import os
-tpl = open("ci/prompt_template.md").read()
-tpl = tpl.replace("/wekafs/HyperloomV2/inference_optimizer/SKILL.md",
-                  os.environ["REPO_ROOT"] + "/src/hyperloom/inference_optimizer/SKILL.md")
-vals = dict(
-    model_hf=os.environ["REPO_ID"], model_path=os.environ["REPO_ID"],
-    gpu_type=os.environ["GPU_TYPE"], gpu_type_lc=os.environ["GPU_TYPE"].lower(),
-    framework=os.environ["FRAMEWORK"], precision=os.environ["PREC"],
-    tp=os.environ["TP"], ep="1", conc=os.environ["CONC"],
-    isl=os.environ["ISL"], osl=os.environ["OSL"], nodes="1",
-    random_range_ratio="1.0", target_gain=os.environ["TARGET_GAIN"],
-    max_hours=os.environ["MAX_HOURS"], kernel_agent_build_geak_rag_index="1",
-    oob_path="", tracelens_root="", multinode_section="", inferenceX_data="(none)",
-)
-print(tpl.format(**vals))
-PY
-)"
+    # Kernel-opt rewrite ladder fixed to GEAK for the carrier (plan T-series).
+    export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
+    PROMPT="$(hl_build_prompt)"
     exec claude --dangerously-skip-permissions -p "$PROMPT"
+    ;;
+  codex)
+    # --- Codex CLI carrier -------------------------------------------------
+    # Outer coding-agent host: `codex exec` loads SKILL.md and drives the same
+    # `inference_optimizer optimize` command agentically (analogous to the
+    # claude carrier). node/npm come from install.sh (ensure_forge_claude_cli);
+    # install the codex CLI on top of that.
+    if ! command -v codex >/dev/null 2>&1; then
+      echo "[hl] installing codex CLI (@openai/codex) ..."
+      command -v npm >/dev/null 2>&1 || { echo "[hl] npm missing; install.sh should provide node/npm" >&2; exit 3; }
+      npm config set prefix /usr/local >/dev/null 2>&1 || true
+      CODEX_NON_INTERACTIVE=1 npm install -g @openai/codex \
+        || { echo "[hl] codex CLI install failed" >&2; exit 3; }
+    fi
+    command -v codex >/dev/null 2>&1 || { echo "[hl] codex CLI still not on PATH" >&2; exit 3; }
+    echo "[hl] codex $(codex --version 2>/dev/null || echo '?')"
+
+    # Point codex at the AMD gateway via a custom OpenAI-compatible provider.
+    # codex-cli >=0.144 dropped wire_api="chat"; it only speaks the Responses
+    # API. The gateway serves /responses for CODEX_MODEL (verified end-to-end),
+    # so default wire_api=responses; HL_CODEX_WIRE_API can override.
+    export CODEX_HOME="${CODEX_HOME:-$USER_DATA_PATH/.codex}"
+    mkdir -p "$CODEX_HOME"
+    [ -n "${SSL_CERT_FILE:-}" ] && export CODEX_CA_CERTIFICATE="${CODEX_CA_CERTIFICATE:-$SSL_CERT_FILE}"
+    cat > "$CODEX_HOME/config.toml" <<CODEX_EOF
+model = "${CODEX_MODEL:-gpt-5.4}"
+model_provider = "amdgw"
+
+[model_providers.amdgw]
+name = "AMD Primus gateway"
+base_url = "${OPENAI_BASE_URL}"
+env_key = "OPENAI_API_KEY"
+wire_api = "${HL_CODEX_WIRE_API:-responses}"
+
+# Forward the full container env to the carrier's shell tool. Without this,
+# codex-cli defaults to inherit="core" and drops USER_DATA_PATH, so the
+# carrier-launched \`inference_optimizer optimize\` falls back to the node-local
+# default (/workspace/hyperloom) and its session/patches never reach NFS.
+[shell_environment_policy]
+inherit = "all"
+CODEX_EOF
+
+    # Kernel-opt rewrite ladder fixed to GEAK for the carrier (plan T-series).
+    export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
+    PROMPT="$(hl_build_prompt)"
+    # -C $REPO_ROOT: run inside the (git) checkout so the repo-trust check
+    # passes; bypass approvals/sandbox so the carrier can run benchmarks freely
+    # (this job already runs in a dedicated container).
+    exec codex exec \
+      --dangerously-bypass-approvals-and-sandbox \
+      -C "$REPO_ROOT" \
+      -m "${CODEX_MODEL:-gpt-5.4}" \
+      "$PROMPT"
     ;;
   *)
     echo "[hl] unknown backend: $BACKEND" >&2; exit 2 ;;
@@ -172,7 +251,7 @@ case "$RUNTIME" in
   pyxis)
     # Private registry image needs enroot creds (~/.config/enroot/.credentials).
     srun --container-image="docker://${IMAGE}" \
-         --container-mounts="${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}${PROXY_MOUNTS}" \
+         --container-mounts="${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}${HL_EXTRA_MOUNTS:+,${HL_EXTRA_MOUNTS}}${PROXY_MOUNTS}" \
          --container-writable \
          --no-container-remap-root \
          --export=ALL \
@@ -186,9 +265,11 @@ case "$RUNTIME" in
              OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
-             KEY REPO_ID FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
-             MAX_HOURS TARGET_GAIN BACKEND HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
+             KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
+             MAX_HOURS TARGET_GAIN BACKEND INFERENCE_OPTIMIZER_SERVER_ARGS \
+             HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
              CURSOR_DEFAULT_MODEL GEAK_MODEL_NAME CLAUDE_MODEL CODEX_MODEL LLM_MODEL \
+             KERNEL_OPT_BACKEND_ORDER CODEX_HOME CODEX_CA_CERTIFICATE HL_CODEX_WIRE_API \
              RECIPE_KB_REMOTE GBRAIN_BASE_URL GBRAIN_TOKEN GBRAIN_KG_GUIDED \
              GBRAIN_KG_NATIVE GBRAIN_RECIPE_SCAN_BUDGET_SEC \
              HYPERLOOM_LANGFUSE_ENABLE LANGFUSE_HOST LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
@@ -200,19 +281,29 @@ case "$RUNTIME" in
     CA_MOUNT=()
     [ -n "${HL_CA_BUNDLE_HOST:-}" ] && [ -f "${HL_CA_BUNDLE_HOST}" ] \
       && CA_MOUNT=(-v "${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro")
+    # Extra read-only bind mounts (e.g. a shared model store on /it-shared).
+    # HL_EXTRA_MOUNTS is a comma-separated list of docker -v specs.
+    EXTRA_MOUNTS=()
+    if [ -n "${HL_EXTRA_MOUNTS:-}" ]; then
+      IFS=',' read -ra _em <<<"$HL_EXTRA_MOUNTS"
+      for m in "${_em[@]}"; do [ -n "$m" ] && EXTRA_MOUNTS+=(-v "$m"); done
+    fi
     # spur compute nodes give docker's default bridge network no DNS/egress, so
     # the container cannot resolve pypi.org/github.com or route to the gateway.
     # Use the host network stack (verified: gateway /models -> HTTP 200) so the
     # installer (pip/git) and the LLM gateway calls work. HL_DOCKER_NETWORK can
     # override this if a cluster ever needs a different mode.
+    # Some images (e.g. vllm-openai-rocm) set ENTRYPOINT to their CLI, which
+    # would swallow `bash "$INCONTAINER"`; clear it so the runner script runs.
     docker run --rm \
+      --entrypoint "" \
       --network "${HL_DOCKER_NETWORK:-host}" \
       --ulimit "nofile=${HL_NOFILE:-1048576}:${HL_NOFILE:-1048576}" \
       --device=/dev/kfd --device=/dev/dri \
       --security-opt seccomp=unconfined --group-add video --ipc=host \
       --shm-size="${HL_SHM_SIZE:-64g}" \
       -v "${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}" \
-      "${CA_MOUNT[@]}" "${ADD_HOST[@]}" "${DOCKER_ENV[@]}" \
+      "${EXTRA_MOUNTS[@]}" "${CA_MOUNT[@]}" "${ADD_HOST[@]}" "${DOCKER_ENV[@]}" \
       "${IMAGE}" bash "$INCONTAINER"
     ;;
   *)

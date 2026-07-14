@@ -26,7 +26,20 @@ IFS=$'\t' read -r KEY REPO_ID FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODE
 # Real hardware may differ from the model's tabled target (e.g. an MI355X-only
 # cluster running an MI300X-tagged row). HL_GPU_TYPE_OVERRIDE wins when set.
 GPU_TYPE="${HL_GPU_TYPE_OVERRIDE:-$GPU_TYPE}"
-export KEY REPO_ID FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN BACKEND
+
+# Resolve the model source path. Precedence:
+#   1. REPO_ID is already an existing local dir (absolute path in models.tsv);
+#   2. HL_MODEL_BASE is set and <HL_MODEL_BASE>/<basename REPO_ID> exists;
+#   3. fall back to REPO_ID as-is (an HF repo id downloaded at launch).
+# REPO_ID stays the logical/HF identity; MODEL_PATH is what the optimizer loads.
+MODEL_PATH="$REPO_ID"
+if [ -d "$REPO_ID" ]; then
+  MODEL_PATH="$REPO_ID"
+elif [ -n "${HL_MODEL_BASE:-}" ] && [ -d "${HL_MODEL_BASE%/}/${REPO_ID##*/}" ]; then
+  MODEL_PATH="${HL_MODEL_BASE%/}/${REPO_ID##*/}"
+fi
+echo "[hl] model resolve: repo_id=$REPO_ID base=${HL_MODEL_BASE:-<none>} -> $MODEL_PATH"
+export KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN BACKEND
 
 # --- identity: end-to-end join key the optimizer reads from env ------------
 export CLAW_SESSION_ID="${CLAW_SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}"
@@ -106,7 +119,7 @@ case "$BACKEND" in
     # Workload envs the Coordinator reuses for baseline -> params -> sweep.
     export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
     exec inference_optimizer --verbose optimize \
-      --model "$REPO_ID" \
+      --model "$MODEL_PATH" \
       --framework "$FRAMEWORK" \
       --gpu-type "$GPU_TYPE" \
       --model-class "$MODEL_CLASS" \
@@ -121,10 +134,10 @@ case "$BACKEND" in
     PROMPT="$(python3 - <<'PY'
 import os
 tpl = open("ci/prompt_template.md").read()
-tpl = tpl.replace("/wekafs/HyperloomV2/inference_optimizer/SKILL.md",
+tpl = tpl.replace("/wekafs/HyperloomV2/src/hyperloom/inference_optimizer/SKILL.md",
                   os.environ["REPO_ROOT"] + "/src/hyperloom/inference_optimizer/SKILL.md")
 vals = dict(
-    model_hf=os.environ["REPO_ID"], model_path=os.environ["REPO_ID"],
+    model_hf=os.environ["REPO_ID"], model_path=os.environ.get("MODEL_PATH", os.environ["REPO_ID"]),
     gpu_type=os.environ["GPU_TYPE"], gpu_type_lc=os.environ["GPU_TYPE"].lower(),
     framework=os.environ["FRAMEWORK"], precision=os.environ["PREC"],
     tp=os.environ["TP"], ep="1", conc=os.environ["CONC"],
@@ -177,7 +190,7 @@ case "$RUNTIME" in
              OPENAI_BASE_URL OPENAI_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
-             KEY REPO_ID FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
+             KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
              MAX_HOURS TARGET_GAIN BACKEND HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
              CURSOR_DEFAULT_MODEL GEAK_MODEL_NAME CLAUDE_MODEL CODEX_MODEL LLM_MODEL \
              RECIPE_KB_REMOTE GBRAIN_BASE_URL GBRAIN_TOKEN GBRAIN_KG_GUIDED \

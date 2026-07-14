@@ -16,7 +16,10 @@
 #   ./submit-spur.sh --all [options]
 #
 # Options (all optional; sensible defaults):
-#   -b, --backend <python|claude>   launch backend (default: python)
+#   -b, --backend <python|claude|codex>
+#                                   launch backend (default: python). python
+#                                   runs the optimizer directly; claude/codex are
+#                                   CLI carriers that load SKILL.md and drive it.
 #   -p, --partition <name>          slurm partition
 #   -A, --account <name>            slurm account
 #   -g, --gpus <n>                  GPUs to request (default: model TP; use 0 on
@@ -30,6 +33,10 @@
 #       --source-dir <path>         existing Hyperloom checkout to use instead of
 #                                   cloning (e.g. <shared-mount>/<user>/Hyperloom)
 #       --data-root <path>          artifact root (default: <shared-mount>/hyperloom-slurm)
+#       --model-base <path>         local model store; the model dir is resolved
+#                                   as <model-base>/<basename repo_id> when it
+#                                   exists, else the tsv repo_id (HF id) is used.
+#                                   remember to bind-mount it via HL_EXTRA_MOUNTS.
 #       --controller <addr>         spur controller (default: $SPUR_CONTROLLER_ADDR)
 #       --dry-run                   print the sbatch command, do not submit
 #   -h, --help                      show this help
@@ -55,6 +62,7 @@ DATA_ROOT=""
 SHARED_MOUNT=""
 SOURCE_DIR=""
 GPU_TYPE_OVERRIDE=""
+MODEL_BASE=""
 CONTROLLER=""
 DRY_RUN=0
 ALL=0
@@ -76,6 +84,7 @@ while [ "$#" -gt 0 ]; do
     --shared-mount)  SHARED_MOUNT="${2:?}"; shift 2 ;;
     --source-dir)    SOURCE_DIR="${2:?}"; shift 2 ;;
     --data-root)     DATA_ROOT="${2:?}"; shift 2 ;;
+    --model-base)    MODEL_BASE="${2:?}"; shift 2 ;;
     --controller)    CONTROLLER="${2:?}"; shift 2 ;;
     --all)           ALL=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
@@ -88,7 +97,7 @@ done
 [ -f "$MODELS_TSV" ]   || die "missing $MODELS_TSV"
 [ -f "$SBATCH_FILE" ]  || die "missing $SBATCH_FILE"
 [ "$DRY_RUN" -eq 1 ] || command -v sbatch >/dev/null 2>&1 || die "sbatch not found on PATH"
-case "$BACKEND" in python|claude) ;; *) die "backend must be python or claude" ;; esac
+case "$BACKEND" in python|claude|codex) ;; *) die "backend must be python, claude or codex" ;; esac
 
 # spur controller: --controller wins, else inherit SPUR_CONTROLLER_ADDR.
 [ -n "$CONTROLLER" ] && export SPUR_CONTROLLER_ADDR="$CONTROLLER"
@@ -120,6 +129,7 @@ for KEY in "${KEYS[@]}"; do
   [ -n "$SHARED_MOUNT" ]      && export HL_SHARED_MOUNT="$SHARED_MOUNT"
   [ -n "$SOURCE_DIR" ]        && export HYPERLOOM_SOURCE_DIR="$SOURCE_DIR"
   [ -n "$GPU_TYPE_OVERRIDE" ] && export HL_GPU_TYPE_OVERRIDE="$GPU_TYPE_OVERRIDE"
+  [ -n "$MODEL_BASE" ]        && export HL_MODEL_BASE="$MODEL_BASE"
 
   CMD=(sbatch
     --job-name "hl-${KEY}-${BACKEND}"
