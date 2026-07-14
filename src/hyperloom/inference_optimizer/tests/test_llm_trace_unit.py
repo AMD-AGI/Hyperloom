@@ -48,3 +48,20 @@ def test_llm_call_record_rejects_unknown_component(tmp_path: Path):
             session_dir=tmp_path,
             record=llm_trace.LLMCallRecord(session_id="s1", component="removed_backend"),
         )
+
+
+def test_llm_trace_handles_unusable_reviewed_ids_and_io_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    record = llm_trace.LLMCallRecord(
+        session_id="s2",
+        component="forge",
+        reviewed_msg_ids=object(),
+    )
+    row = record.to_row()
+    assert row["reviewed_msg_ids"] is None
+
+    def _raise_mkdir(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
+    llm_trace.append_llm_call(session_dir=tmp_path, record=record)
