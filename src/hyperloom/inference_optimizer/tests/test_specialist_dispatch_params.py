@@ -95,12 +95,6 @@ def test_freeform_defaults_to_research_on_cpu():
     assert prof.reserves_benchmark_lane is False
 
 
-def test_domains_scope_is_cross_domain():
-    prof = resolve_specialist_profile({"scope": "domains"})
-    assert prof.is_cross_domain is True
-    assert prof.is_freeform is False
-
-
 @pytest.mark.parametrize("truthy", [True, "true", "1", "yes", "on", 1])
 def test_bench_requires_patch_mode_truthy(truthy):
     prof = resolve_specialist_profile({"mode": "patch", "bench": truthy})

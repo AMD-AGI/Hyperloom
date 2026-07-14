@@ -77,7 +77,7 @@ def test_seen_pr_ids_capped():
     st.register_seen_pr_ids([f"pr{i}" for i in range(cap + 500)])
     assert len(st.research_scout_seen_pr_ids) == cap
     # Newest kept (FIFO eviction of oldest).
-    assert st.has_seen_pr_id(f"pr{cap + 500 - 1}")
+    assert f"pr{cap + 500 - 1}" in st.research_scout_seen_pr_ids
 
 
 def test_winners_history_capped_via_explore_update():
@@ -182,45 +182,6 @@ async def test_prune_events_protects_pending_proposal(conn):
         "SELECT msg_id FROM events WHERE topic='proposal'"
     )
     assert rows == []
-
-
-@pytest.mark.asyncio
-async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
-    """The pruning guard's pending set must agree with the resume reconstruct
-    logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to
-    its msg_id (empty/missing targets do not decide anything)."""
-    bus = MessageBus(conn)
-    p_pending = Message.new("orchestration", "*", "proposal", {"action_name": "a"})
-    p_decided = Message.new("orchestration", "*", "proposal", {"action_name": "b"})
-    await bus.append_and_seq(p_pending)
-    await bus.append_and_seq(p_decided)
-    # Decided one gets a real verdict.
-    await bus.append_and_seq(Message.new(
-        "critic", "*", "review_verdict",
-        {"target_proposal_msg_id": p_decided.msg_id, "verdict": "reject"},
-    ))
-    # An empty-target verdict must NOT decide any proposal (NULL-trap guard).
-    await bus.append_and_seq(Message.new(
-        "critic", "*", "review_verdict",
-        {"target_proposal_msg_id": "", "verdict": "approve"},
-    ))
-
-    pending = await dbm.pending_proposal_seqs(conn)
-
-    # Cross-check against the same join replay_for_resume uses.
-    proposals = await bus.tail(topic="proposal", n=1000)
-    verdicts = await bus.tail(topic="review_verdict", n=1000)
-    decided = {
-        v.payload.get("target_proposal_msg_id")
-        for v in verdicts
-        if v.payload.get("target_proposal_msg_id")
-    }
-    expected_pending_seqs = {
-        p.seq for p in proposals if p.msg_id not in decided
-    }
-    assert pending == expected_pending_seqs
-    # Concretely: only the undecided proposal is protected.
-    assert pending == {p_pending.seq}
 
 
 @pytest.mark.asyncio
@@ -359,7 +320,6 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
@@ -369,7 +329,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[]), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

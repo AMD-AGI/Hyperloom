@@ -155,25 +155,6 @@ def extract_keywords(description: str) -> list[str]:
     return sorted(keywords)
 
 
-def score_title_against_keywords(title: str, keywords: Sequence[str]) -> int:
-    """Count keywords overlapping the title's tokens, to rerank candidate PRs.
-
-    Lowercase, snake_case-aware token split mirrors :func:`extract_keywords`.
-
-    Args:
-        title: The PR title to score.
-        keywords: Keywords to match against the title.
-
-    Returns:
-        The overlap count; ``0`` for an empty title or keyword list.
-    """
-    if not keywords or not title:
-        return 0
-    title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))
-    kw_set = {k.lower() for k in keywords}
-    return len(title_tokens & kw_set)
-
-
 # Anti-correlation table: when ``gap_keyword`` (key) is in the gap, any
 # anti-set token in a PR title is evidence the PR is on the wrong axis (model
 # family / GPU vendor / precision regime) and is demoted. Activation is gated
@@ -314,6 +295,5 @@ def score_title_with_anti_signal(
 
 __all__ = [
     "extract_keywords",
-    "score_title_against_keywords",
     "score_title_with_anti_signal",
 ]

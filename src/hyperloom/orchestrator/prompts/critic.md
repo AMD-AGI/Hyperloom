@@ -1,5 +1,4 @@
-> Rules fragment consumed by `critic_prompt_builder.build_critic_prompt`
-> as section 6. Action lists / payload contract are builder-injected.
+> Static Critic system prompt fragment.
 
 ### Primary per-proposal rule (N38, May 2026)
 

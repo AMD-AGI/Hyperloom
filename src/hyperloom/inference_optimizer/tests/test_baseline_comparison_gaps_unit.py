@@ -6,7 +6,6 @@ Closes the residual uncovered branches in ``baseline_comparison`` that the
 main suite leaves out:
 
 * ``name_mapping.to_inferencex_name`` — whitespace-only input -> ``None``.
-* ``types.BaselineSummary.from_dict`` — full round-trip reconstruction.
 * ``target_analyzer._format_report_md`` — the optional-latency-field and
   all-concurrencies rendering branches (only reached when ``best`` carries the
   optional metrics).
@@ -48,7 +47,7 @@ def test_to_inferencex_name_none_on_unknown_model() -> None:
 
 
 # ---------------------------------------------------------------------------
-# types.BaselineSummary round-trip
+# target_analyzer._format_report_md optional-field branches
 # ---------------------------------------------------------------------------
 def _full_summary() -> BaselineSummary:
     best = BaselinePoint(
@@ -81,25 +80,6 @@ def _full_summary() -> BaselineSummary:
     )
 
 
-def test_baseline_summary_from_dict_roundtrip() -> None:
-    """``from_dict(to_dict(x))`` reconstructs an equal summary (nested points)."""
-    original = _full_summary()
-    restored = BaselineSummary.from_dict(original.to_dict())
-    assert restored == original
-
-
-def test_baseline_summary_from_dict_tolerates_partial() -> None:
-    """A partial / older artefact loads with defaults and no ``best``."""
-    restored = BaselineSummary.from_dict({"query": {"model": "m", "gpu": "g"}})
-    assert restored.best is None
-    assert restored.row_count == 0
-    assert restored.status == "ok"
-    assert restored.all_concurrencies == []
-
-
-# ---------------------------------------------------------------------------
-# target_analyzer._format_report_md optional-field branches
-# ---------------------------------------------------------------------------
 def test_format_report_md_renders_all_optional_fields() -> None:
     """A best with every optional latency field + all_concurrencies exercises
     the conditional render branches."""

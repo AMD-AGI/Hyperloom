@@ -27,7 +27,8 @@ Sites intentionally NOT delegated here (kept local by design):
 * ``recipe_kb/local_store._atomic_write_json`` — best-effort ``fsync`` + DEBUG
   logging for durability on journaling mounts.
 * ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run
-  standalone, so they must not gain a ``hyperloom`` import dependency.
+  standalone, so they must not gain a ``hyperloom`` import dependency (they keep
+  their own bytes writer; this module intentionally has no bytes variant).
 """
 
 from __future__ import annotations
@@ -35,7 +36,6 @@ from __future__ import annotations
 import json as _json
 import os
 import tempfile
-from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -46,50 +46,6 @@ def _best_effort_fsync(fh: Any) -> None:
     with suppress(OSError):
         fh.flush()
         os.fsync(fh.fileno())
-
-
-def atomic_write_bytes(
-    path: Path,
-    data: bytes,
-    *,
-    make_parents: bool = False,
-    fsync: bool = False,
-    mode: int | None = None,
-) -> None:
-    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``).
-
-    Args:
-        path: Destination file path.
-        data: Bytes to write.
-        make_parents: When ``True``, create ``path.parent`` (``parents=True,
-            exist_ok=True``) before writing.
-        fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
-            rename (OSError swallowed on mounts that reject the syscall).
-        mode: Optional file mode applied to the temp file before rename.
-
-    Raises:
-        Exception: Re-raised after a best-effort unlink of the temp file when
-            writing or replacing fails.
-    """
-    path = Path(path)
-    if make_parents:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            if fsync:
-                _best_effort_fsync(fh)
-        if mode is not None:
-            # Strip group/other bits: written files may hold sensitive payloads,
-            # so never expose them beyond the owner regardless of caller intent.
-            os.chmod(tmp, mode & 0o700)
-        os.replace(tmp, path)
-    except Exception:
-        with suppress(OSError):
-            tmp.unlink()
-        raise
 
 
 def atomic_write_text(
@@ -201,63 +157,8 @@ def append_jsonl(
             _best_effort_fsync(fh)
 
 
-def read_jsonl(path: Path, *, default: Any = None) -> list[Any]:
-    """Read a JSONL file into a list, skipping blank lines.
-
-    Malformed lines raise ``json.JSONDecodeError`` (callers that want tolerance
-    should catch it); a missing file returns *default* coerced to ``[]`` when
-    *default* is ``None``.
-
-    Args:
-        path: Source JSONL file.
-        default: Value returned when the file does not exist. ``None`` (the
-            default) is normalised to an empty list.
-
-    Returns:
-        The parsed rows in file order.
-    """
-    path = Path(path)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return [] if default is None else default
-    rows: list[Any] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            rows.append(_json.loads(stripped))
-    return rows
-
-
-def tail_lines(path: Path, n: int) -> list[str]:
-    """Return the last *n* lines of a text file (memory-bounded).
-
-    Uses a bounded ``deque`` so only *n* lines are held in memory regardless of
-    file size. Trailing newlines are stripped from each returned line.
-
-    Args:
-        path: Source text file.
-        n: Number of trailing lines to return. ``<= 0`` returns ``[]``.
-
-    Returns:
-        Up to *n* trailing lines, or ``[]`` when the file does not exist.
-    """
-    if n <= 0:
-        return []
-    path = Path(path)
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            tail: deque[str] = deque(fh, maxlen=n)
-    except OSError:
-        return []
-    return [line.rstrip("\n") for line in tail]
-
-
 __all__ = [
-    "atomic_write_bytes",
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
-    "read_jsonl",
-    "tail_lines",
 ]

@@ -7,8 +7,7 @@ according to the design fixed in 2026-05-28:
 
 Writes — local-only::
 
-    :meth:`put_recipe`, :meth:`append_attempt`,
-    :meth:`delete_recipe` are forwarded verbatim to
+    :meth:`put_recipe` and :meth:`append_attempt` are forwarded verbatim to
     :class:`LocalRecipeStore`. The remote client never sees a
     write request, by construction (it doesn't expose write
     methods at all). The local store is the authoritative place
@@ -21,9 +20,7 @@ through to local on absence / failure::
     ``get_recipe`` decodes the 5-tuple from the canonical_id into
     ``label_match`` and issues ONE search — the server decides
     exact-vs-relative fallback + ranking, the client takes the top
-    row. ``get_history`` / ``list_recent`` / ``list_attempts`` /
-    ``list_session_attempts`` are LOCAL-only (those routes are not
-    used). For the search-backed read:
+    row. For the search-backed read:
     1. If ``remote`` is configured AND enabled → call the central
        kb-service first.
     2. If the remote answer carries a non-empty result, return it
@@ -33,9 +30,7 @@ through to local on absence / failure::
        informative.
     3. If the remote answer is "absence" (None / empty list /
        404) we fall through to the local store. Rationale: the
-       remote can lag arbitrarily behind local writes (writes go
-       local-only under this design — the central server only
-       picks up rows via separately-scheduled bulk ingest), so
+       remote can lag arbitrarily behind local writes, so
        "remote says no" is not the same as "this row never
        existed". A local hit completes the read; a local miss
        returns the same absence shape the remote produced.
@@ -206,12 +201,13 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics.
-        # kb-extract recipes store optimized args directly in body.extra_sglang_args
-        # rather than body.best_config; synthesize best_config when absent.
+        # kb-extract recipes may store optimized args directly in
+        # body.extra_server_args rather than body.best_config; synthesize
+        # best_config when absent.
         "best_config": dict(body.get("best_config") or {})
         or (
-            {"extra_server_args": str(body.get("extra_sglang_args") or body.get("extra_server_args") or "").strip()}
-            if (body.get("extra_sglang_args") or body.get("extra_server_args"))
+            {"extra_server_args": str(body.get("extra_server_args") or "").strip()}
+            if body.get("extra_server_args")
             else {}
         ),
         "best_throughput": float(body.get("best_throughput") or metrics.get("throughput") or 0.0),
@@ -376,7 +372,7 @@ class RecipeKB:
         locally; reads fall back to local). Remote reachability is a
         separate concern handled by :meth:`_remote_active`. Exposed so
         call sites that historically probed ``client.enabled`` on the
-        v1 ``CortexKBClient`` keep working against the v2 dispatcher
+        old direct KB client keep working against the v2 dispatcher
         (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
         attribute there would silently skip the SDK-fallback T0 anchor.
 
@@ -671,18 +667,6 @@ class RecipeKB:
             attempt_at=attempt_at,
         )
 
-    def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live recipe row LOCALLY ONLY (history preserved).
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-
-        Returns:
-            bool: ``True`` iff a live row was removed.
-        """
-        return self.local.delete_recipe(canonical_id=canonical_id)
-
     # ==================================================================
     # Reads — remote-first, local fallback
     # ==================================================================
@@ -823,46 +807,6 @@ class RecipeKB:
         )
         return local_row
 
-    def get_history(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Read version history — LOCAL only.
-
-        The central kb-service is reached through the single
-        ``/recipes/search`` route only (see :meth:`get_recipe`);
-        ``/history`` is not used. The local archive is authoritative
-        for writes anyway, so the on-disk ``history/v{N}.json`` files
-        are the source of truth here.
-
-        Args:
-            canonical_id (str): Canonical recipe identity.
-            limit (int): Maximum number of archived rows to return.
-
-        Returns:
-            list[dict[str, Any]]: Archived prior versions ascending by
-                version.
-        """
-        return self.local.get_history(
-            canonical_id=canonical_id,
-            limit=limit,
-        )
-
-    def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Recent recipes — LOCAL only (remote = ``/recipes/search``
-        route only; bare ``GET /recipes`` is not used).
-
-        Args:
-            limit (int): Maximum number of recipes to return.
-
-        Returns:
-            list[dict[str, Any]]: Recent live recipes, ordered
-                ``updated_at DESC``.
-        """
-        return self.local.list_recent(limit=limit)
-
     def search(
         self,
         *,
@@ -956,48 +900,6 @@ class RecipeKB:
             )
         )
         return ranked_local
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Attempts for one recipe — LOCAL only (remote =
-        ``/recipes/search`` route only).
-
-        Args:
-            canonical_id (str): Parent recipe identity.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempt rows newest-first.
-        """
-        return self.local.list_attempts(
-            canonical_id=canonical_id,
-            limit=limit,
-        )
-
-    def list_session_attempts(
-        self,
-        *,
-        session_id: str,
-        limit: int = 500,
-    ) -> list[dict[str, Any]]:
-        """Session attempts — LOCAL only (remote = ``/recipes/search``
-        route only).
-
-        Args:
-            session_id (str): Session whose attempts to collect.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempts for the session oldest-first.
-        """
-        return self.local.list_session_attempts(
-            session_id=session_id,
-            limit=limit,
-        )
 
     # ==================================================================
     # Lifecycle
