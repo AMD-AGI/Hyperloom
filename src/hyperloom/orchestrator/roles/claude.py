@@ -217,8 +217,8 @@ class ClaudeBackend:
     # SDK session token captured last turn; replayed via ``resume`` in
     # conversational mode. ``reset_conversation()`` clears it.
     _session_id: str | None = field(default=None, init=False)
-    # Set True for a turn whose ``resume=`` was rejected by the SDK and dropped
-    # (stateless fallback). Surfaced in llm_calls.jsonl for cache diagnostics.
+    # Always False now (resume is supported by the pinned SDK floor); retained
+    # as a stable llm_calls.jsonl key for cache diagnostics / consumers.
     _resume_downgraded: bool = field(default=False, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
@@ -577,7 +577,6 @@ class ClaudeBackend:
         Returns:
             Any: A constructed ``ClaudeAgentOptions`` instance.
         """
-        self._resume_downgraded = False
         kwargs: dict[str, Any] = {"max_turns": max_turns}
         if self.model:
             kwargs["model"] = self.model
@@ -668,37 +667,19 @@ class ClaudeBackend:
             kwargs["thinking"] = {"type": thinking}
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
-        """Build options, dropping ``resume`` if the SDK can't accept it.
+        """Build the SDK options.
 
-        Older SDK builds lack ``resume``; fall back to a stateless turn
-        (with a one-time warning) rather than crashing the reactor.
+        The ``resume`` / ``effort`` / ``thinking`` kwargs are all supported by
+        the pinned ``claude-agent-sdk >= 0.2.110`` floor, so no compatibility
+        fallback is needed.
 
         Args:
             kwargs: Keyword arguments to pass to the SDK options constructor.
 
         Returns:
             A constructed SDK options instance.
-
-        Raises:
-            TypeError: If the constructor rejects a keyword other than
-                ``resume``.
         """
-        try:
-            return self.sdk_options_cls(**kwargs)
-        except TypeError as exc:
-            dropped = [k for k in ("resume", "effort", "thinking") if k in kwargs]
-            if dropped:
-                for k in dropped:
-                    kwargs.pop(k, None)
-                if "resume" in dropped:
-                    self._resume_downgraded = True
-                self.calls.append(
-                    {
-                        "warn": (f"SDK ClaudeAgentOptions rejected {dropped} ({exc!r}); retrying without"),
-                    }
-                )
-                return self.sdk_options_cls(**kwargs)
-            raise
+        return self.sdk_options_cls(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
         """Default stderr handler — append to ``self.calls`` for postmortems.

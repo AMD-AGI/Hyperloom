@@ -160,25 +160,21 @@ def test_build_options_with_context_tools(monkeypatch):
     assert cl.CONTEXT_MCP_SERVER_NAME in opts.kwargs["mcp_servers"]
 
 
-# ---- _instantiate_options resume fallback ---------------------------------
-def test_instantiate_options_resume_fallback():
-    class _PickyOptions:
+# ---- _instantiate_options --------------------------------------------------
+def test_instantiate_options_passthrough():
+    class _Options:
         def __init__(self, **kwargs):
-            if "resume" in kwargs:
-                raise TypeError("unexpected kwarg resume")
             self.kwargs = kwargs
 
-    b = _backend(sdk_options_cls=_PickyOptions)
+    b = _backend(sdk_options_cls=_Options)
     opts = b._instantiate_options({"max_turns": 4, "resume": "s"})
-    assert "resume" not in opts.kwargs
-    assert any("rejected" in c.get("warn", "") and "resume" in c.get("warn", "") for c in b.calls)
-    assert b._resume_downgraded is True
+    assert opts.kwargs == {"max_turns": 4, "resume": "s"}
 
 
-def test_instantiate_options_typeerror_no_resume():
+def test_instantiate_options_typeerror_propagates():
     class _Boom:
         def __init__(self, **kwargs):
-            raise TypeError("other error")
+            raise TypeError("boom")
 
     b = _backend(sdk_options_cls=_Boom)
     with pytest.raises(TypeError):
