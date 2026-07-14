@@ -285,7 +285,7 @@ class KernelAgentToolTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         self.assertIn("would install Node.js/npm + @anthropic-ai/claude-code", proc.stdout)
-        self.assertIn('TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"', install_text)
+        self.assertIn('TRACELENS_REF="eb3ffb1db335577ecb501fa1633bdee0dbe861af"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
  # clone AND pin the ref inside the temp sibling, then atomically
         # rename — never publish an unpinned/half-cloned $TRACELENS_ROOT.
