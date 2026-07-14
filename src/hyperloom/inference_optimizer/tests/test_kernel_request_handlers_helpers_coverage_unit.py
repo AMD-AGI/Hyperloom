@@ -83,16 +83,24 @@ def test_backend_order_explicit_payload(monkeypatch) -> None:
 
 def test_backend_order_env_alias(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # Unknown backends are filtered out; when nothing survives, the ladder is empty.
+    # Removed OOB backends are filtered out; when nothing survives, fall back to
+    # the legacy native ladder instead of running zero backend attempts.
+    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
+    assert krh._backend_order({}) == ["forge"]
+
+
+def test_backend_order_unknown_backends_yield_empty(monkeypatch) -> None:
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    # Unknown, non-OOB backends leave nothing to run and no legacy fallback.
     monkeypatch.setenv("KERNEL_OPT_BACKENDS", "foo,bar")
     assert krh._backend_order({}) == []
 
 
-def test_backend_order_default_is_forge(monkeypatch) -> None:
+def test_backend_order_default_is_empty_because_geak_owns_phase(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     out = krh._backend_order({})
-    assert out == ["forge"]
+    assert out == []
 
 
 def test_backend_order_drops_geak_from_per_kernel_ladder(monkeypatch) -> None:
@@ -117,10 +125,15 @@ def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
     assert krh.geak_selected() is True
 
 
-def test_geak_selected_false_for_native_order(monkeypatch) -> None:
+def test_geak_selected_true_by_default(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    assert krh.geak_selected() is False
+    assert krh.geak_selected() is True
+
+
+def test_geak_selected_false_for_explicit_native_order(monkeypatch) -> None:
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     assert krh.geak_selected({"backend_order": "forge,claude"}) is False
 
 
