@@ -251,6 +251,29 @@ def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
     assert args.pr_monitor_mcp_url == "https://localhost:8080/mcp/"
 
 
+def test_cli_pr_monitor_url_defaults_to_primus_cortex_pr_api_env(monkeypatch):
+    """--pr-monitor-url default resolves from the canonical $PRIMUS_CORTEX_PR_API
+    env (the legacy $PR_MONITOR_URL env is removed)."""
+    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://global.example/pr-monitor")
+    monkeypatch.delenv("PR_MONITOR_URL", raising=False)
+    args = _parse_optimize_args([])
+    assert args.pr_monitor_url == "https://global.example/pr-monitor"
+
+
+def test_cli_pr_monitor_url_ignores_legacy_pr_monitor_url_env(monkeypatch):
+    """The removed legacy $PR_MONITOR_URL env no longer feeds --pr-monitor-url."""
+    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
+    monkeypatch.setenv("PR_MONITOR_URL", "https://legacy.example/pr-monitor/v1")
+    args = _parse_optimize_args([])
+    assert args.pr_monitor_url is None
+
+
+def test_cli_pr_monitor_url_flag_wins_over_primus_cortex_pr_api_env(monkeypatch):
+    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://env.example/pr-monitor")
+    args = _parse_optimize_args(["--pr-monitor-url", "https://flag.example/pr-monitor"])
+    assert args.pr_monitor_url == "https://flag.example/pr-monitor"
+
+
 def test_cli_pr_feed_window_days_override_reaches_namespace():
     args = _parse_optimize_args(["--pr-feed-window-days", "7"])
     assert args.pr_feed_window_days == 7
