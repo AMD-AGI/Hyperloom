@@ -382,6 +382,16 @@ Multi-GPU collective kernels (`is_multigpu: True`, e.g. all-reduce / all-gather)
 are handled by `forge` — it works via standalone HIP `std::thread` simulation
 or real `torchrun --nproc=N`.
 
+### Forge prerequisite (KernelForge)
+
+The `forge` backend needs the private KernelForge (`kernel_agents`) package.
+The installer no longer clones it: provide it yourself before running forge,
+either by `pip install`-ing `kernel_agents`, or by setting `FORGE_PATH`
+(aliases `KERNEL_FORGE_ROOT` / `KERNEL_FORGE_PATH`) to a KernelForge checkout.
+When neither is present, forge resolution is a silent no-op (fail-soft), so a
+run that explicitly selects forge will do nothing — verify the checkout/env is
+in place first.
+
 ## Optimization Goals & Time Budget
 
 - **Target speedup**: `>= 1.05x` on the dominant inference shape(s). Below this
