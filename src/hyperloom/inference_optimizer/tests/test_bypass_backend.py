@@ -758,6 +758,58 @@ def test_scriptable_script_missing_returns_none(tmp_path, monkeypatch):
     assert bs.resolve_scriptable_script("xdit", "mi300x", str(tmp_path)) is None
 
 
+def test_scriptable_run_missing_script_returns_config_error(tmp_path, monkeypatch):
+    """Missing script is reported before subprocess launch."""
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    monkeypatch.delenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    rc, error = bs.run_scriptable(
+        framework="xdit",
+        runner_type="mi300x",
+        inferencex_root=str(tmp_path),
+        bench={"model": "/models/flux"},
+        workspace=tmp_path / "ws",
+        timeout_s=1.0,
+    )
+
+    assert rc == 2
+    assert error == "scriptable benchmark script not found for xdit_mi300x.sh"
+
+
+def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):
+    """Timeouts return 124 and persist a scriptable stderr marker."""
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    inferencex = tmp_path / "InferenceX"
+    scripts = inferencex / "benchmarks"
+    scripts.mkdir(parents=True)
+    (scripts / "xdit_mi300x.sh").write_text("#!/bin/bash\nsleep 999\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    def fake_run(cmd, env=None, capture_output=True, text=True, timeout=None):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    rc, error = bs.run_scriptable(
+        framework="xdit",
+        runner_type="mi300x",
+        inferencex_root=str(inferencex),
+        bench={"model": "/models/flux", "envs": {"TP": 1}},
+        workspace=workspace,
+        timeout_s=0.01,
+    )
+
+    assert rc == 124
+    assert error is None
+    assert "scriptable benchmark timed out" in (
+        workspace / "scriptable_stderr.log"
+    ).read_text(encoding="utf-8")
+
+
 def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     """xdit scriptable run produces a report carrying quality_gate; eval maps it."""
     import yaml
