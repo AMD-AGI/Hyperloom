@@ -1,12 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for cumulative extra_sglang_args merge/dedupe."""
+"""Regression tests for cumulative extra_server_args merge/dedupe."""
 
 from __future__ import annotations
 
 from hyperloom.orchestrator.loop.coordinator import (
     _dedupe_extra_server_args,
-    _merge_cumulative_extra_sglang_args,
+    _merge_cumulative_extra_server_args,
 )
 
 
@@ -18,7 +18,7 @@ _CLEAN_STACK = (
 def test_merge_does_not_double_stack_when_candidate_is_cumulative() -> None:
     base = "--schedule-policy lpm --cuda-graph-bs 1 2 4 8 16 24 32 48 64 80 --mem-fraction-static 0.92"
     candidate = _CLEAN_STACK
-    merged = _merge_cumulative_extra_sglang_args(base, candidate, candidate)
+    merged = _merge_cumulative_extra_server_args(base, candidate, candidate)
     assert merged == _CLEAN_STACK
     assert "0.92 2 4 8" not in merged
 
@@ -26,7 +26,7 @@ def test_merge_does_not_double_stack_when_candidate_is_cumulative() -> None:
 def test_merge_appends_delta_candidate() -> None:
     base = "--schedule-policy lpm"
     candidate = "--page-size 16"
-    merged = _merge_cumulative_extra_sglang_args(base, candidate, candidate)
+    merged = _merge_cumulative_extra_server_args(base, candidate, candidate)
     assert merged == "--schedule-policy lpm --page-size 16"
 
 

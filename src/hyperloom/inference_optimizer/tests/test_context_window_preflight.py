@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 
 
 def _write_config(model_dir: Path, **fields) -> None:
@@ -29,34 +29,34 @@ def _args(model: str, isl: int = 1024, osl: int = 1024) -> argparse.Namespace:
 def test_loads_max_position_embeddings(tmp_path):
     m = tmp_path / "model"
     _write_config(m, model_type="llama", max_position_embeddings=2048)
-    assert cli._load_model_max_position_embeddings(str(m)) == 2048
+    assert cli_model_gate._load_model_max_position_embeddings(str(m)) == 2048
 
 
 def test_loads_alias_and_nested_text_config(tmp_path):
     m = tmp_path / "alias"
     _write_config(m, n_positions=4096)
-    assert cli._load_model_max_position_embeddings(str(m)) == 4096
+    assert cli_model_gate._load_model_max_position_embeddings(str(m)) == 4096
     n = tmp_path / "nested"
     n.mkdir()
     (n / "config.json").write_text(
         json.dumps({"text_config": {"max_position_embeddings": 8192}}),
         encoding="utf-8",
     )
-    assert cli._load_model_max_position_embeddings(str(n)) == 8192
+    assert cli_model_gate._load_model_max_position_embeddings(str(n)) == 8192
 
 
 def test_missing_config_returns_none(tmp_path):
-    assert cli._load_model_max_position_embeddings(str(tmp_path / "nope")) is None
+    assert cli_model_gate._load_model_max_position_embeddings(str(tmp_path / "nope")) is None
 
 
 # headroom resolution
 def test_headroom_default_and_override(monkeypatch):
-    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
-    assert cli._context_headroom_tokens() == cli._CONTEXT_HEADROOM_DEFAULT
-    monkeypatch.setenv(cli._CONTEXT_HEADROOM_ENV, "1024")
-    assert cli._context_headroom_tokens() == 1024
-    monkeypatch.setenv(cli._CONTEXT_HEADROOM_ENV, "garbage")
-    assert cli._context_headroom_tokens() == cli._CONTEXT_HEADROOM_DEFAULT
+    monkeypatch.delenv(cli_model_gate._CONTEXT_HEADROOM_ENV, raising=False)
+    assert cli_model_gate._context_headroom_tokens() == cli_model_gate._CONTEXT_HEADROOM_DEFAULT
+    monkeypatch.setenv(cli_model_gate._CONTEXT_HEADROOM_ENV, "1024")
+    assert cli_model_gate._context_headroom_tokens() == 1024
+    monkeypatch.setenv(cli_model_gate._CONTEXT_HEADROOM_ENV, "garbage")
+    assert cli_model_gate._context_headroom_tokens() == cli_model_gate._CONTEXT_HEADROOM_DEFAULT
 
 
 # preflight gate
@@ -71,13 +71,13 @@ def _seed_state(session_dir: Path, monkeypatch):
 
 
 def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
-    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
+    monkeypatch.delenv(cli_model_gate._CONTEXT_HEADROOM_ENV, raising=False)
     model = tmp_path / "ctx2048"
     _write_config(model, model_type="llama", max_position_embeddings=2048)
     sd = tmp_path / "session"
     _seed_state(sd, monkeypatch)
 
-    blocked = cli._preflight_context_window(_args(str(model)), sd)
+    blocked = cli_model_gate._preflight_context_window(_args(str(model)), sd)
 
     assert blocked is True
     final = json.loads((sd / "reports" / "final.json").read_text())
@@ -94,13 +94,13 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
 
 
 def test_preflight_passes_for_4096_model(tmp_path, monkeypatch):
-    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
+    monkeypatch.delenv(cli_model_gate._CONTEXT_HEADROOM_ENV, raising=False)
     model = tmp_path / "ctx4096"
     _write_config(model, model_type="llama", max_position_embeddings=4096)
     sd = tmp_path / "session4096"
     _seed_state(sd, monkeypatch)
 
-    assert cli._preflight_context_window(_args(str(model)), sd) is False
+    assert cli_model_gate._preflight_context_window(_args(str(model)), sd) is False
     assert not (sd / "reports" / "final.json").exists()
 
 
@@ -110,17 +110,17 @@ def test_preflight_skipped_when_maxpos_unknown(tmp_path, monkeypatch):
     sd = tmp_path / "session_unknown"
     _seed_state(sd, monkeypatch)
     # No config.json -> maxpos unknown -> gate skipped (do not block).
-    assert cli._preflight_context_window(_args(str(model)), sd) is False
+    assert cli_model_gate._preflight_context_window(_args(str(model)), sd) is False
 
 
 def test_preflight_2048_passes_when_headroom_lowered(tmp_path, monkeypatch):
     """A 2048 model with ISL+OSL=2048 and headroom 0 just fits the equality boundary (2048 >= 2048)."""
-    monkeypatch.setenv(cli._CONTEXT_HEADROOM_ENV, "0")
+    monkeypatch.setenv(cli_model_gate._CONTEXT_HEADROOM_ENV, "0")
     model = tmp_path / "ctx2048b"
     _write_config(model, max_position_embeddings=2048)
     sd = tmp_path / "session2048b"
     _seed_state(sd, monkeypatch)
-    assert cli._preflight_context_window(_args(str(model), 1024, 1024), sd) is False
+    assert cli_model_gate._preflight_context_window(_args(str(model), 1024, 1024), sd) is False
 
 
 # MAX_MODEL_LEN resolution — clamp to the native window (no context stretch).
@@ -129,21 +129,27 @@ def test_max_model_len_clamped_to_native_window(tmp_path):
     model = tmp_path / "ctx4096"
     _write_config(model, max_position_embeddings=4096)
     # desired = 1024 + 1024 + 4096 = 6144, native window = 4096 -> clamp to 4096.
-    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 4096
+    assert cli_model_gate._resolve_max_model_len(1024, 1024, str(model)) == 4096
 
 
 def test_max_model_len_uses_full_headroom_when_window_large(tmp_path):
     model = tmp_path / "ctx32768"
     _write_config(model, max_position_embeddings=32768)
     # native window is comfortably above desired -> keep ISL+OSL+headroom.
-    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
+    assert (
+        cli_model_gate._resolve_max_model_len(1024, 1024, str(model))
+        == 1024 + 1024 + cli_model_gate._MAX_MODEL_LEN_HEADROOM
+    )
 
 
 def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
     model = tmp_path / "noconfig"
     model.mkdir()
     # No config.json -> cannot clamp -> keep the headroom default (prior behaviour).
-    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
+    assert (
+        cli_model_gate._resolve_max_model_len(1024, 1024, str(model))
+        == 1024 + 1024 + cli_model_gate._MAX_MODEL_LEN_HEADROOM
+    )
 
 
 # follow-up #1: the preflight stop_reason must be a canonical STOP_REASON_VOCAB term written via set_stop_reason().
@@ -159,14 +165,14 @@ def test_context_window_stop_reason_is_canonical_vocab():
 
 def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     """Under ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1`` the preflight still persists the canonical stop_reason (proving the validated writer path + vocab registration)."""
-    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
+    monkeypatch.delenv(cli_model_gate._CONTEXT_HEADROOM_ENV, raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "1")
     model = tmp_path / "ctx2048strict"
     _write_config(model, model_type="llama", max_position_embeddings=2048)
     sd = tmp_path / "session_strict"
     _seed_state(sd, monkeypatch)
 
-    assert cli._preflight_context_window(_args(str(model)), sd) is True
+    assert cli_model_gate._preflight_context_window(_args(str(model)), sd) is True
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
     final = json.loads((sd / "reports" / "final.json").read_text())
@@ -185,13 +191,13 @@ def test_monitor_offline_vocab_includes_context_window():
 
 def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):
     """The fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
-    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
+    monkeypatch.delenv(cli_model_gate._CONTEXT_HEADROOM_ENV, raising=False)
     model = tmp_path / "ctx2048reason"
     _write_config(model, max_position_embeddings=2048)
     sd = tmp_path / "session_reason"
     _seed_state(sd, monkeypatch)
 
-    assert cli._preflight_context_window(_args(str(model)), sd) is True
+    assert cli_model_gate._preflight_context_window(_args(str(model)), sd) is True
     detail = json.loads((sd / "reports" / "final.json").read_text())["stop_detail"]
-    assert f"lower {cli._CONTEXT_HEADROOM_ENV}".lower() in detail.lower()
-    assert f"raise {cli._CONTEXT_HEADROOM_ENV}".lower() not in detail.lower()
+    assert f"lower {cli_model_gate._CONTEXT_HEADROOM_ENV}".lower() in detail.lower()
+    assert f"raise {cli_model_gate._CONTEXT_HEADROOM_ENV}".lower() not in detail.lower()

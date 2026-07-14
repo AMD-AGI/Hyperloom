@@ -1144,11 +1144,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _resolve_critic_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_critic_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
@@ -1276,7 +1275,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
             ),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1361,7 +1360,7 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             ScriptedPlan(turns=[], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }

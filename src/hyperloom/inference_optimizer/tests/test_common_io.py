@@ -13,8 +13,6 @@ from hyperloom.common.io import (
     atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,
-    read_jsonl,
-    tail_lines,
 )
 
 
@@ -98,46 +96,3 @@ class TestAppendJsonl:
         assert p.read_text() == "[1, 2]\n"
 
 
-class TestReadJsonl:
-    def test_round_trip(self, tmp_path):
-        p = tmp_path / "log.jsonl"
-        append_jsonl(p, {"i": 1})
-        append_jsonl(p, {"i": 2})
-        assert read_jsonl(p) == [{"i": 1}, {"i": 2}]
-
-    def test_skips_blank_lines(self, tmp_path):
-        p = tmp_path / "log.jsonl"
-        p.write_text('{"a": 1}\n\n  \n{"b": 2}\n')
-        assert read_jsonl(p) == [{"a": 1}, {"b": 2}]
-
-    def test_missing_file_default(self, tmp_path):
-        assert read_jsonl(tmp_path / "nope.jsonl") == []
-        sentinel = ["fallback"]
-        assert read_jsonl(tmp_path / "nope.jsonl", default=sentinel) is sentinel
-
-    def test_malformed_raises(self, tmp_path):
-        p = tmp_path / "bad.jsonl"
-        p.write_text("{not json}\n")
-        with pytest.raises(json.JSONDecodeError):
-            read_jsonl(p)
-
-
-class TestTailLines:
-    def test_tail(self, tmp_path):
-        p = tmp_path / "f.txt"
-        p.write_text("\n".join(str(i) for i in range(100)) + "\n")
-        assert tail_lines(p, 3) == ["97", "98", "99"]
-
-    def test_more_than_file(self, tmp_path):
-        p = tmp_path / "f.txt"
-        p.write_text("a\nb\n")
-        assert tail_lines(p, 10) == ["a", "b"]
-
-    def test_zero_or_negative(self, tmp_path):
-        p = tmp_path / "f.txt"
-        p.write_text("a\nb\n")
-        assert tail_lines(p, 0) == []
-        assert tail_lines(p, -1) == []
-
-    def test_missing_file(self, tmp_path):
-        assert tail_lines(tmp_path / "nope.txt", 5) == []

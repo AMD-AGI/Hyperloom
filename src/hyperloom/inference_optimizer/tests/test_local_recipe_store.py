@@ -23,7 +23,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _matches_labels
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _list_jsonl, _matches_labels
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
@@ -75,6 +75,10 @@ def _cid(
         framework_version=framework_version,
         precision=precision,
     )
+
+
+def _list_attempt_rows(store: LocalRecipeStore, canonical_id: str) -> list[dict[str, Any]]:
+    return _list_jsonl(store._attempts_path(canonical_id))
 
 
 def test_cid_to_path_components_roundtrip() -> None:
@@ -194,16 +198,10 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
         provenance={"source": "second", "generator": "ut"},
     )
     assert second == {"canonical_id": cid, "version": 2, "created": False}
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    archive = history[0]
-    assert archive["version"] == 1
-    assert archive["snapshot"]["best_throughput"] == 1000.0
-    # ``replaced_by`` carries the triggering write's provenance for audit.
-    assert archive["replaced_by"] == {
-        "source": "second",
-        "generator": "ut",
-    }
+    archived = store.get_recipe(canonical_id=cid, version=1)
+    assert archived is not None
+    assert archived["version"] == 1
+    assert archived["best_throughput"] == 1000.0
     # Live row carries the new throughput and the bumped version.
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
@@ -284,53 +282,7 @@ def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
 
-# get_history
-def test_get_history_excludes_live(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
-    rows = store.get_history(canonical_id=cid)
-    assert [r["version"] for r in rows] == [1, 2]
-
-
-def test_get_history_empty_for_unknown_cid(tmp_path: Path) -> None:
-    """Mirrors the server contract: ``GET /history`` returns an empty array, never 404."""
-    store = LocalRecipeStore(root=tmp_path)
-    assert store.get_history(canonical_id=_cid(model="absent")) == []
-
-
-def test_get_history_respects_limit(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    for _ in range(5):
-        store.put_recipe(canonical_id=cid)
-    rows = store.get_history(canonical_id=cid, limit=2)
-    assert len(rows) == 2
-    assert [r["version"] for r in rows] == [1, 2]
-
-
-# delete_recipe
-def test_delete_recipe_removes_live_preserves_history(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
-    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
-    assert store.delete_recipe(canonical_id=cid) is True
-    assert store.get_recipe(canonical_id=cid) is None
-    # History survives — caller can still recover v1.
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    assert history[0]["snapshot"]["best_throughput"] == 1000.0
-
-
-def test_delete_recipe_returns_false_for_unknown_cid(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    assert store.delete_recipe(canonical_id=_cid(model="absent")) is False
-
-
-# list_recent / search
+# search
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     """Create three recipes spanning different identity/metrics, keyed by short alias."""
     cid_a = recipe_canonical_id(
@@ -391,12 +343,12 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     return {"a": cid_a, "b": cid_b, "c": cid_c}
 
 
-def test_list_recent_returns_all_ordered_by_updated_desc(
+def test_search_default_order_is_updated_desc(
     tmp_path: Path,
 ) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.list_recent(limit=10)
+    rows = store.search(limit=10)
     assert [r["canonical_id"] for r in rows] == [cids["c"], cids["b"], cids["a"]]
 
 
@@ -519,7 +471,7 @@ def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
     )
     assert out["id"] == 1
     assert out["recipe_canonical_id"] == cid
-    rows = store.list_attempts(canonical_id=cid)
+    rows = _list_attempt_rows(store, cid)
     assert len(rows) == 1
     assert rows[0]["outcome"] == "kept"
     assert rows[0]["fitness"] == 0.83
@@ -553,46 +505,6 @@ def test_append_attempt_id_is_monotonic_per_cid(tmp_path: Path) -> None:
     assert ids == [1, 2, 3]
 
 
-def test_list_attempts_returns_newest_first(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    for outcome in ("kept", "reverted", "failed"):
-        store.append_attempt(
-            canonical_id=cid,
-            session_id="s",
-            outcome=outcome,
-        )
-    rows = store.list_attempts(canonical_id=cid)
-    assert [r["outcome"] for r in rows] == ["failed", "reverted", "kept"]
-
-
-def test_list_attempts_respects_limit(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    for _ in range(5):
-        store.append_attempt(
-            canonical_id=cid,
-            session_id="s",
-            outcome="kept",
-        )
-    rows = store.list_attempts(canonical_id=cid, limit=2)
-    assert len(rows) == 2
-
-
-def test_list_session_attempts_aggregates_across_recipes(
-    tmp_path: Path,
-) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid_a = _cid(model="m-a")
-    cid_b = _cid(model="m-b")
-    store.append_attempt(canonical_id=cid_a, session_id="s1", outcome="kept")
-    store.append_attempt(canonical_id=cid_b, session_id="s1", outcome="reverted")
-    store.append_attempt(canonical_id=cid_a, session_id="s2", outcome="kept")
-    rows = store.list_session_attempts(session_id="s1")
-    assert len(rows) == 2
-    assert {r["recipe_canonical_id"] for r in rows} == {cid_a, cid_b}
-
-
 # Concurrency
 def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     tmp_path: Path,
@@ -616,8 +528,7 @@ def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == n
-    history = store.get_history(canonical_id=cid)
-    assert [r["version"] for r in history] == list(range(1, n))
+    assert [store.get_recipe(canonical_id=cid, version=i)["version"] for i in range(1, n)] == list(range(1, n))
 
 
 def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
@@ -678,14 +589,14 @@ def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
             )
             + "\n"
         )
-    rows = store.list_attempts(canonical_id=cid)
+    rows = _list_attempt_rows(store, cid)
     outcomes = [r["outcome"] for r in rows]
     assert "kept" in outcomes
     assert "reverted" in outcomes
 
 
 def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
-    """A stray directory at the wrong depth must NOT be picked up by list_recent."""
+    """A stray directory at the wrong depth must NOT be picked up by search."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
@@ -693,26 +604,10 @@ def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
     stray = tmp_path / "model" / "hw" / "fw" / RECIPE_FILENAME
     stray.parent.mkdir(parents=True)
     stray.write_text(json.dumps({"canonical_id": "stray", "version": 1}))
-    rows = store.list_recent()
+    rows = store.search()
     cids_found = {r["canonical_id"] for r in rows}
     assert cid in cids_found
     assert "stray" not in cids_found
-
-
-# Maintenance
-def test_purge_recipe_removes_everything(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
-    store.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
-    store.purge_recipe(canonical_id=cid)
-    assert store.get_recipe(canonical_id=cid) is None
-    assert store.get_history(canonical_id=cid) == []
-    assert store.list_attempts(canonical_id=cid) == []
-    # Tree above the cid is left intact (other cids may share prefix).
-    recipe_dir = tmp_path.joinpath(*cid_to_path_components(cid))
-    assert not recipe_dir.is_dir()
 
 
 def test_construction_does_not_create_root(tmp_path: Path) -> None:

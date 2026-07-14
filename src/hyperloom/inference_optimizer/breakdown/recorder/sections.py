@@ -77,22 +77,8 @@ DERIVED_SECTIONS: frozenset[str] = frozenset(
 )
 
 
-def section_shape(section: str) -> SectionShape | None:
-    """Return the declared shape for ``section`` (``None`` if unregistered).
-
-    Args:
-        section: The breakdown section name to look up.
-
-    Returns:
-        The declared section shape (``"item"`` / ``"singleton"``), or ``None``
-        when the section is not registered.
-    """
-    return SECTION_SHAPES.get(section)
-
-
 __all__ = [
     "DERIVED_SECTIONS",
     "SECTION_SHAPES",
     "SectionShape",
-    "section_shape",
 ]

@@ -219,34 +219,6 @@ def _require_state(*keys: str) -> dict[str, Any]:
     return state
 
 
-
-
-def _b64(s: str) -> str:
-    """Base64-encode a string as ASCII.
-
-    Args:
-        s (str): The text to encode (UTF-8).
-
-    Returns:
-        str: The base64-encoded value as an ASCII string.
-    """
-    return base64.b64encode(s.encode("utf-8")).decode("ascii")
-
-
-def _wrap_for_dash(body: str) -> str:
-    """Base64-wrap a bash entrypoint so it survives Ray Dashboard exec under /bin/sh (dash rejects ``set -o pipefail``).
-
-    Args:
-        body (str): The bash entrypoint body to wrap.
-
-    Returns:
-        str: A ``echo <b64> | base64 -d | bash`` command that decodes and runs
-        ``body`` under bash.
-    """
-    enc = _b64(body)
-    return f"echo {enc} | base64 -d | bash"
-
-
 def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
     """Convert ['K=V', 'K2=V2', ...] into a dict; ignore malformed entries.
 
@@ -437,22 +409,6 @@ def _dynamo_ssh_bash_with_env(
         cp = _run(known_hosts)
     return cp
 
-
-def _validate_extra_server_args(raw: str, *, context: str) -> None:
-    """Validate server args before fan-out to RayJob or Dynamo pods.
-
-    Args:
-        raw: Extra server CLI flags string.
-        context: Label for error messages.
-
-    Raises:
-        ServerArgsRejected: When a denied flag is present.
-    """
-    validate_server_args(raw, context=context)
-
-
-
-
 def _short_poll(
     *,
     label: str,
@@ -621,18 +577,6 @@ def install_geak_on_pods_best_effort() -> int:
         return 0
 
 
-def install_kernel_tools_on_pods_best_effort() -> int:
-    """Provisioner hook: install GEAK on the Dynamo GPU pods.
-
-    No-op for non-dynamo. Returns non-zero only if the install reported a
-    hard failure (best-effort; provisioning continues regardless).
-
-    Returns:
-        int: Non-zero if the install reported a hard failure, else ``0``.
-    """
-    return install_geak_on_pods_best_effort()
-
-
 # ---------------------------------------------------------------------------
 # Subcommand: bootstrap
 def cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -666,7 +610,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
     with _ray_dashboard_client(state) as ray:
         info(f"submitting bootstrap entrypoint: {entrypoint}")
-        sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
+        sub_id = ray.submit_job(entrypoint)
         info(f"submission_id={sub_id}")
 
         def _fetch():
@@ -720,10 +664,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
         "done; "
         "echo OK"
     )
-    entrypoint = script  # _wrap_for_dash will wrap as bash; -lc breaks PATH
+    entrypoint = script  # RayDashboardClient wraps as bash; -lc breaks PATH.
     with _ray_dashboard_client(state) as ray:
         info("submitting verify entrypoint")
-        sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
+        sub_id = ray.submit_job(entrypoint)
         info(f"submission_id={sub_id}")
 
         def _fetch():
@@ -901,7 +845,7 @@ def _exec_kill_submission(
         str: The Ray Dashboard submission id of the kill job.
     """
     with _ray_dashboard_client(state) as ray:
-        kill_sub = ray.submit_job(_wrap_for_dash(entrypoint))
+        kill_sub = ray.submit_job(entrypoint)
         info(f"{label} submission_id={kill_sub}")
 
         def _fetch_kill():
@@ -1006,7 +950,7 @@ def _build_multinode_launch_entrypoint(
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     extra_args = args.extra_args or ""
     try:
-        _validate_extra_server_args(extra_args, context="rayjob restart-server --extra-args")
+        validate_server_args(extra_args, context="rayjob restart-server --extra-args")
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
     # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path: $HYPERLOOM_MN_PROFILE_TRACE_DIR,
@@ -1318,7 +1262,7 @@ def _submit_and_collect_pod_json(
         JSON (or ``None``), and the raw logs.
     """
     with _ray_dashboard_client(state) as ray:
-        sub_id = ray.submit_job(_wrap_for_dash(entrypoint), runtime_env=runtime_env)
+        sub_id = ray.submit_job(entrypoint, runtime_env=runtime_env)
         info(f"{label} submission_id={sub_id}")
 
         def _fetch():
@@ -1355,8 +1299,7 @@ def _submit_and_collect_pod_json(
 
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
 # Cohesive rayjob/dynamo clusters live in commands/{rayjob,dynamo}.py. Bind
-# only the command hooks used below; legacy helper access is handled lazily by
-# ``__getattr__`` to avoid import cycles.
+# only the command hooks used below.
 from .commands.rayjob import cmd_create_rayjob as cmd_create_rayjob
 from .commands.dynamo import (
     cmd_create_dynamo as cmd_create_dynamo,
@@ -1368,45 +1311,6 @@ from .commands.dynamo import (
     _dynamo_kernel_bench as _dynamo_kernel_bench,
     cmd_install_geak as cmd_install_geak,
 )
-
-_RAYJOB_COMPAT_EXPORTS = frozenset(
-    {
-        "_SAFE_GET_WORKLOAD_404_GRACE_S",
-        "_TERMINAL_FAIL_PHASES",
-        "_TERMINAL_OK_PHASES",
-        "_checkpoint_create_rayjob_state",
-        "_write_rayjob_meta",
-        "ray_gcs_address",
-        "_is_safe_get_workload_404",
-        "_summarize_workload_failure",
-        "_find_head_pod_ip",
-    }
-)
-_DYNAMO_COMPAT_EXPORTS = frozenset(
-    {
-        "_DYNAMO_SSH_DIR",
-        "_dynamo_require_state",
-        "_FORWARD_ENV_PREFIXES",
-        "_collect_forward_env",
-        "_dynamo_fanout_launch",
-        "_dynamo_all_gpu_ips",
-        "_dynamo_ssh_node_op",
-        "_resolve_geak_src",
-    }
-)
-
-
-def __getattr__(name: str) -> Any:
-    """Lazy compatibility exports for helpers moved to command modules."""
-    if name in _RAYJOB_COMPAT_EXPORTS:
-        from .commands import rayjob
-
-        return getattr(rayjob, name)
-    if name in _DYNAMO_COMPAT_EXPORTS:
-        from .commands import dynamo
-
-        return getattr(dynamo, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:
@@ -1689,7 +1593,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     if _load_state().get("backend") == "dynamo":
         return _dynamo_restart_server(args)
     try:
-        _validate_extra_server_args(
+        validate_server_args(
             getattr(args, "extra_args", "") or "",
             context="restart-server --extra-args",
         )
@@ -1776,7 +1680,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # spawned its launcher; rank 0 /health probe is best-effort
             # (driver internal, see launch_multinode.py).
             if not launch_sub:
-                launch_sub = ray.submit_job(_wrap_for_dash(launch_ep))
+                launch_sub = ray.submit_job(launch_ep)
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # EARLY checkpoint: persist the launch identity + config NOW,
@@ -1858,7 +1762,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     pid_dir,
                     log_dir,
                 )
-                router_sub = ray.submit_job(_wrap_for_dash(router_ep))
+                router_sub = ray.submit_job(router_ep)
                 info(
                     f"router submission_id={router_sub} "
                     f"(detaches launch_router.py; dashboard exits when router is alive)"
@@ -1937,7 +1841,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
     with _ray_dashboard_client(state) as ray:
         info(f"restart-server (single-node): framework={args.framework} model={args.model} tp={args.tp}")
-        sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
+        sub_id = ray.submit_job(entrypoint)
         info(f"submission_id={sub_id} (entrypoint will exit after launch; server keeps running via nohup)")
 
         def _fetch():

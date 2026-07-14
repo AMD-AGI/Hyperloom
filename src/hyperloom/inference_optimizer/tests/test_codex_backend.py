@@ -177,8 +177,14 @@ async def test_run_records_call_metadata():
 
 # Construction
 def test_construct_without_creds_raises_backend_error(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for var in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "LLM_GATEWAY_KEY",
+        "SAFE_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
     with pytest.raises(BackendError, match="not set"):
         CodexBackend(client_factory=None)
 

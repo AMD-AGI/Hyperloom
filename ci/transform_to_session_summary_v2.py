@@ -87,8 +87,7 @@ def _patch_baseline(data: Dict) -> List[str]:
     """Mirror ``extra_server_args`` / ``extra_envs`` onto ``baseline``.
 
     Fills the fields from ``baseline.invocation`` when ``baseline`` lacks
-    them. Reads the legacy ``extra_sglang_args`` key but always writes the
-    canonical ``extra_server_args``.
+    them, and writes the canonical ``extra_server_args`` field.
 
     Args:
         data: The session summary data dict (mutated in place).
@@ -102,13 +101,8 @@ def _patch_baseline(data: Dict) -> List[str]:
         return notes
 
     if "extra_server_args" not in baseline:
-        # Back-compat: reuse the legacy key if the input predates the rename.
-        if "extra_sglang_args" in baseline:
-            baseline["extra_server_args"] = baseline.pop("extra_sglang_args")
-            notes.append("baseline.extra_server_args <- extra_sglang_args (legacy)")
-        else:
-            baseline["extra_server_args"] = ""  # legacy baseline ran with no extra flags
-            notes.append("baseline.extra_server_args=''")
+        baseline["extra_server_args"] = ""
+        notes.append("baseline.extra_server_args=''")
 
     if "extra_envs" not in baseline:
         inv_envs = safe_get(baseline, "invocation", "extra_envs", default=None)
@@ -224,11 +218,7 @@ def _patch_phase_timeline(data: Dict) -> List[str]:
         if not isinstance(extras, dict):
             continue
         if "best_extra_server_args" not in extras and "extra_server_args" not in extras and "sglang_args" not in extras:
-            # Back-compat: canonical candidate_extra_server_args wins over the
-            # legacy candidate_extra_sglang_args.
             cand = extras.get("candidate_extra_server_args")
-            if cand is None:
-                cand = extras.get("candidate_extra_sglang_args")
             if isinstance(cand, str):
                 extras["best_extra_server_args"] = cand
                 notes.append("phase_timeline.extras.best_extra_server_args <- candidate_extra_server_args")
@@ -340,12 +330,7 @@ def is_already_v2(data: Dict) -> bool:
         bool: True if baseline, capability_summary, phase_timeline, and
         detected-kernel fields are all already in their V2 shape.
     """
-    # Back-compat: a legacy session_breakdown.json carries
-    # ``extra_sglang_args`` instead of ``extra_server_args``; treat
-    # either as evidence the field is present.
-    baseline_ok = isinstance(data.get("baseline"), dict) and (
-        "extra_server_args" in data["baseline"] or "extra_sglang_args" in data["baseline"]
-    )
+    baseline_ok = isinstance(data.get("baseline"), dict) and "extra_server_args" in data["baseline"]
 
     cs = data.get("capability_summary") or {}
     cs_ok = all(
@@ -356,8 +341,7 @@ def is_already_v2(data: Dict) -> bool:
     pt_ok = True
     for entry in pt:
         extras = (entry or {}).get("extras") or {}
-        # Back-compat: accept either canonical or legacy key.
-        has_candidate = "candidate_extra_server_args" in extras or "candidate_extra_sglang_args" in extras
+        has_candidate = "candidate_extra_server_args" in extras
         if has_candidate and not (
             "best_extra_server_args" in extras or "extra_server_args" in extras or "sglang_args" in extras
         ):
