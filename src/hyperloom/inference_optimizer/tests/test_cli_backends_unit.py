@@ -78,17 +78,88 @@ def test_build_backends_critic_agent_with_root() -> None:
     assert b["critic"][0] == "critic_agent"
 
 
-def test_build_backends_anthropic_only_uses_claude_for_critic_and_kernel(monkeypatch) -> None:
+def _clear_provider_env(monkeypatch) -> None:
+    for key in (
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
         kernel_codex=True,
     )
     assert b["orchestration"][0] == "claude"
-    assert b["critic"][0] == "claude"
+    # Provider-only keeps the full KB+tools critic-agent, driven over the native
+    # Anthropic Messages protocol with the Claude model (not degraded to Claude
+    # tool-use, not Codex).
+    assert b["critic"][0] == "critic_agent"
+    assert b["critic"][1]["protocol"] == "anthropic"
+    assert b["critic"][1]["claude_model"] == "claude-x"
     assert b["kernel_agent"][0] == "claude"
+
+
+def test_build_backends_anthropic_only_degrades_to_claude_without_root(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    # No critic_agent_root: the runtime is unavailable, so critic degrades to
+    # Claude tool-use rather than raising.
+    b = _build(critic_choice="agent", critic_agent_root=None)
+    assert b["critic"][0] == "claude"
+
+
+def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+    )
+    # DeepSeek is natively OpenAI-compatible: keep the critic-agent on the
+    # OpenAI review path, pointed at DeepSeek via an injected client factory.
+    assert b["critic"][0] == "critic_agent"
+    assert b["critic"][1]["protocol"] == "openai"
+    assert b["critic"][1]["codex_model"] == "claude-x"
+    assert callable(b["critic"][1]["codex_client_factory"])
+
+
+def test_deepseek_factory_default_base_url_carries_v1(monkeypatch) -> None:
+    """The OpenAI SDK appends the route verbatim (no /v1 auto-insertion), so the
+    DeepSeek default base URL must carry the conventional /v1 suffix."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    clib._deepseek_openai_client_factory()()
+    assert captured["base_url"] == "https://api.deepseek.com/v1"
+    assert captured["api_key"] == "test-deepseek-key"
+
+
+def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
+    """An explicit DEEPSEEK_BASE_URL is used as-is (custom gateways may not use /v1)."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.example/openai/v2/")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    clib._deepseek_openai_client_factory()()
+    assert captured["base_url"] == "https://gw.example/openai/v2"
 
 
 def test_build_backends_openai_only_uses_codex_for_orchestration_and_kernel(monkeypatch) -> None:
