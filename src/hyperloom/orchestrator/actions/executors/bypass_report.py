@@ -69,6 +69,7 @@ def build_report(
     workspace_dir: str,
     execution_time: float,
     errors: list[str] | None = None,
+    analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a Magpie-compatible ``benchmark_report.json`` dict.
 
@@ -83,6 +84,9 @@ def build_report(
         workspace_dir: Absolute workspace path.
         execution_time: Wall-clock seconds of the run.
         errors: Optional list of error strings.
+        analysis: Optional bypass-specific analysis block; emitted under
+            ``report["bypass_analysis"]`` only when provided so the
+            serving schema stays unchanged.
 
     Returns:
         A report dict matching the fields Hyperloom consumes.
@@ -144,6 +148,8 @@ def build_report(
         for key in ("workload_kind", "throughput_unit", "quality_gate", "latency_s"):
             if raw.get(key) is not None:
                 report[key] = raw[key]
+    if analysis:
+        report["bypass_analysis"] = analysis
     return report
 
 

@@ -31,6 +31,7 @@ from typing import Any
 
 import yaml
 
+from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 
@@ -188,7 +189,20 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
         errors.append(f"benchmark client exited {rc}")
     if raw is None:
         errors.append("inferencex_result.json not produced")
-    _write_report(workspace, framework, model, success, start, errors, raw=raw)
+    # Additive analysis block (steady-state throughput, failure root cause,
+    # eval summary). Never overrides the InferenceX-reported measurements.
+    client_stderr = _read_log(workspace / "client_stderr.log")
+    analysis = bypass_analysis.build_analysis(
+        workspace=workspace,
+        server_log=server_log,
+        success=success,
+        stderr_text=client_stderr,
+        run_eval=_run_eval_enabled(bench_envs),
+    )
+    _write_report(
+        workspace, framework, model, success, start, errors,
+        raw=raw, analysis=analysis,
+    )
     return 0 if success else (rc or 1)
 
 
@@ -287,6 +301,7 @@ def _write_report(
     errors: list[str],
     *,
     raw: dict[str, Any] | None = None,
+    analysis: dict[str, Any] | None = None,
 ) -> None:
     """Build and write the Magpie-compatible report."""
     report = bypass_report.build_report(
@@ -297,8 +312,17 @@ def _write_report(
         workspace_dir=str(workspace),
         execution_time=time.time() - start,
         errors=errors,
+        analysis=analysis,
     )
     bypass_report.write_report(workspace, report)
+
+
+def _read_log(path: Path) -> str:
+    """Read a log file for analysis, tolerating absence (best-effort)."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _emit_failure(
