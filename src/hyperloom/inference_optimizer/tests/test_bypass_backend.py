@@ -802,6 +802,108 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     assert out["accuracy"] == 1.0
 
 
+def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
+    """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1.
+
+    The serving path injects PROFILE/profiler-dir env, but the scriptable
+    (xDiT) path previously dropped it, so profiler never engaged. The fake
+    script records the PROFILE env + profiler dir it received.
+    """
+    import yaml
+
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "benchmarks").mkdir(parents=True)
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    # Fake xdit script: echo the PROFILE env + profiler dir into the result JSON.
+    (scripts_dir / "xdit_mi300x.sh").write_text(
+        "#!/bin/bash\n"
+        "PROF_DIR=\"${VLLM_TORCH_PROFILER_DIR:-${SGLANG_TORCH_PROFILER_DIR:-}}\"\n"
+        "cat > \"$RESULT_DIR/$RESULT_FILENAME.json\" <<JSON\n"
+        "{\"framework\": \"xdit\", \"workload_kind\": \"scriptable\", "
+        "\"throughput_unit\": \"img/s\", \"output_throughput\": 1.5, "
+        "\"latency_s\": 0.66, \"seen_profile\": \"${PROFILE:-unset}\", "
+        "\"seen_profile_dir\": \"${PROF_DIR}\", "
+        "\"quality_gate\": {\"passed\": true}}\n"
+        "JSON\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts_dir))
+    monkeypatch.delenv("PROFILE", raising=False)
+
+    cfg = {
+        "benchmark": {
+            "framework": "xdit",
+            "model": "/primus/models/FLUX",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "workload_kind": "scriptable",
+            "envs": {"TP": 1},
+            "profiler": {"torch_profiler": {"enabled": True}},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    ws = sorted((tmp_path / "out").glob("benchmark_xdit_*"))[-1]
+    raw = json.loads((ws / "inferencex_result.json").read_text(encoding="utf-8"))
+    # The script must have observed PROFILE=1 and a profiler dir.
+    assert raw["seen_profile"] == "1"
+    assert raw["seen_profile_dir"]
+    assert "torch_trace" in raw["seen_profile_dir"]
+    # The profiler dir must have been created under the workspace.
+    assert (ws / "torch_trace").is_dir()
+
+
+def test_scriptable_profile_disabled_by_default(tmp_path, monkeypatch):
+    """Without torch_profiler, the scriptable script sees no PROFILE=1."""
+    import yaml
+
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "benchmarks").mkdir(parents=True)
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "xdit_mi300x.sh").write_text(
+        "#!/bin/bash\n"
+        "cat > \"$RESULT_DIR/$RESULT_FILENAME.json\" <<JSON\n"
+        "{\"framework\": \"xdit\", \"workload_kind\": \"scriptable\", "
+        "\"throughput_unit\": \"img/s\", \"output_throughput\": 1.5, "
+        "\"latency_s\": 0.66, \"seen_profile\": \"${PROFILE:-unset}\", "
+        "\"quality_gate\": {\"passed\": true}}\n"
+        "JSON\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts_dir))
+    monkeypatch.delenv("PROFILE", raising=False)
+
+    cfg = {
+        "benchmark": {
+            "framework": "xdit",
+            "model": "/primus/models/FLUX",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "workload_kind": "scriptable",
+            "envs": {"TP": 1},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    ws = sorted((tmp_path / "out").glob("benchmark_xdit_*"))[-1]
+    raw = json.loads((ws / "inferencex_result.json").read_text(encoding="utf-8"))
+    assert raw["seen_profile"] in ("unset", "0")
+
+
 def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
     """NUM_PROMPTS/NUM_WARMUPS from YAML envs reach the client command."""
     inferencex = tmp_path / "InferenceX"

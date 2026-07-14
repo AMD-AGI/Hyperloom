@@ -386,11 +386,19 @@ def _run_scriptable_benchmark(
     runner_type = str(
         bench.get("runner_type") or os.environ.get("RUNNER_TYPE") or "mi300x"
     ).lower()
+    # Profiler parity with the serving path: honor torch_profiler.enabled so
+    # scriptable scripts (xDiT) trace into the workspace torch_trace dir.
+    profiler = (bench.get("profiler") or {}).get("torch_profiler") or {}
+    profile = bool(profiler.get("enabled"))
+    profile_dir = str(workspace / "torch_trace") if profile else None
+    if profile_dir:
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
     start = time.time()
     rc, error = bypass_scriptable.run_scriptable(
         framework=framework, runner_type=runner_type,
         inferencex_root=str(inferencex_root or ""), bench=bench,
         workspace=workspace, timeout_s=timeout_s,
+        profile=profile, profile_dir=profile_dir,
     )
     if error is not None:
         _write_report(workspace, framework, model, False, start, [error])

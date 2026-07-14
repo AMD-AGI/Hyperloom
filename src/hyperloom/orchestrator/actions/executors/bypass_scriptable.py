@@ -55,7 +55,12 @@ def resolve_scriptable_script(framework: str, runner_type: str, inferencex_root:
 
 
 def build_scriptable_env(
-    bench: dict[str, Any], runner_type: str, workspace: Path
+    bench: dict[str, Any],
+    runner_type: str,
+    workspace: Path,
+    *,
+    profile: bool = False,
+    profile_dir: str | None = None,
 ) -> dict[str, str]:
     """Build the env for a scriptable benchmark script.
 
@@ -63,6 +68,8 @@ def build_scriptable_env(
         bench: The ``benchmark`` section of the config.
         runner_type: Resolved runner type.
         workspace: Per-run workspace directory.
+        profile: Whether the torch profiler is enabled for this run.
+        profile_dir: Directory the profiler traces should be written to.
 
     Returns:
         The environment mapping for the scriptable subprocess.
@@ -76,6 +83,15 @@ def build_scriptable_env(
     env["RUNNER_TYPE"] = runner_type
     env["RESULT_FILENAME"] = "inferencex_result"
     env["RESULT_DIR"] = str(workspace)
+    # Profiler: scriptable scripts (e.g. xDiT) gate tracing on PROFILE=1 and
+    # read the trace dir from VLLM/SGLANG_TORCH_PROFILER_DIR (mirrors the
+    # serving path's _server_env). Only set when enabled so default runs are
+    # untouched.
+    if profile:
+        env["PROFILE"] = "1"
+        if profile_dir:
+            env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
+            env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
     return env
 
 
@@ -87,6 +103,8 @@ def run_scriptable(
     bench: dict[str, Any],
     workspace: Path,
     timeout_s: float,
+    profile: bool = False,
+    profile_dir: str | None = None,
 ) -> tuple[int, str | None]:
     """Run the scriptable benchmark script.
 
@@ -97,6 +115,8 @@ def run_scriptable(
         bench: The ``benchmark`` section of the config.
         workspace: Per-run workspace directory.
         timeout_s: Subprocess timeout.
+        profile: Whether the torch profiler is enabled for this run.
+        profile_dir: Directory the profiler traces should be written to.
 
     Returns:
         ``(returncode, error)`` — error is a string when a pre-run problem
@@ -105,7 +125,9 @@ def run_scriptable(
     script = resolve_scriptable_script(framework, runner_type, inferencex_root)
     if script is None:
         return 2, f"scriptable benchmark script not found for {framework}_{runner_type}.sh"
-    env = build_scriptable_env(bench, runner_type, workspace)
+    env = build_scriptable_env(
+        bench, runner_type, workspace, profile=profile, profile_dir=profile_dir
+    )
     cmd = ["bash", str(script)]
     try:
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout_s)
