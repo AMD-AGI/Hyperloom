@@ -845,9 +845,11 @@ class CriticAgentBackend:
 
         # Propagate the --cortex-kb-url flag into the subprocess so the critic
         # runtime's optional /v2/reasoning/assess enrichment can reach the same
-        # cortex KB recipe-snapshot uses. An explicit env var still wins.
+        # cortex KB recipe-snapshot uses. The flag is authoritative: the CLI no
+        # longer reads a CORTEX_KB_URL env fallback in the parent, so the flag
+        # value is the single source of truth for the subprocess env.
         cortex_kb_url = (self.cortex_kb_url or "").strip()
-        if cortex_kb_url and not env.get("CORTEX_KB_URL"):
+        if cortex_kb_url:
             env["CORTEX_KB_URL"] = cortex_kb_url
 
         if self.kb_mode == "live":
