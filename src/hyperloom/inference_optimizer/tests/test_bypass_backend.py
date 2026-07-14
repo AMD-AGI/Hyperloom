@@ -1142,6 +1142,75 @@ def test_client_phase_requires_pid_dir(tmp_path, monkeypatch):
     assert any("phase=client requires pid_dir" in e for e in rep["errors"])
 
 
+def test_run_benchmark_unsupported_framework(tmp_path, monkeypatch):
+    """A non-serving, non-scriptable framework fails fast with rc=2 + report."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    import yaml
+    cfg = {
+        "benchmark": {
+            "framework": "tensorrt",  # unknown serving framework
+            "model": "/m", "run_mode": "local",
+            "inferencex_path": str(inferencex), "timeout_seconds": 60,
+            "envs": {"TP": 1},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 2
+    ws = sorted((tmp_path / "out").glob("benchmark_tensorrt_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+    assert any("unsupported framework" in e for e in rep["errors"])
+
+
+def test_run_benchmark_unresolvable_inferencex(tmp_path):
+    """An InferenceX path that is not a usable dir fails fast with rc=2."""
+    import yaml
+    cfg = {
+        "benchmark": {
+            "framework": "sglang", "model": "/m", "run_mode": "local",
+            "inferencex_path": str(tmp_path / "does-not-exist"),
+            "timeout_seconds": 60, "envs": {"TP": 1},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 2
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+    assert any("InferenceX path not resolvable" in e for e in rep["errors"])
+
+
+def test_run_benchmark_remote_base_url_skips_local_server(tmp_path, monkeypatch):
+    """BENCHMARK_BASE_URL: client runs against the remote server, none is launched."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "http://head-pod:8888")
+    launched = {"n": 0}
+    monkeypatch.setattr(
+        bypass_runner, "_launch_server",
+        lambda cmd, env, log: launched.__setitem__("n", launched["n"] + 1),
+    )
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert launched["n"] == 0  # remote server: nothing launched locally
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is True
+
+
 def test_write_report_emits_magpie_compat_artifacts(tmp_path):
     """summary.txt, log aliases, and profiling_enabled mirror Magpie outputs."""
     workspace = tmp_path / "ws"
