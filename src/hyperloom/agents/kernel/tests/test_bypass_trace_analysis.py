@@ -7,7 +7,7 @@
 """End-to-end tests for the bypass CLI (bypass_trace_analysis.main).
 
 Covers the failure-fallback contract (bad/missing trace still yields valid
-artifacts + health warnings), the opt-in rocprof enrichment wiring, and the
+artifacts + health warnings), the
 stdout-is-a-single-result-JSON invariant the handler relies on.
 """
 
@@ -53,7 +53,6 @@ def _run(argv, capsys):
     assert lines, "no stdout produced"
     # The handler consumes stdout as a single JSON object; enrichment logs must
     # not leak here.
-    assert "[rocprof_enrich]" not in out.out
     result = json.loads(lines[-1])
     return rc, result, out
 
@@ -78,11 +77,9 @@ def _assert_artifacts(result):
 
 
 def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     rc, result, _ = _run(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]), capsys)
     assert rc == 0
     assert result["status"] == "ok" and result["route"] == "bypass"
-    assert result["rocprof_enrich"]["status"] == "disabled"
     _assert_artifacts(result)
 
 
@@ -90,7 +87,6 @@ def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
     # F1: the coordinator forwards --num-denoise-steps for scriptable workloads;
     # bypass must accept it (no argparse crash -> no degraded roofline) and surface
     # it in the result (effective = requested when the trace infers no steps).
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     rc, result, _ = _run(
         _base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run", "--num-denoise-steps", "20"]),
         capsys,
@@ -101,7 +97,6 @@ def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
 
 
 def test_missing_trace_falls_back_gracefully(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     rc, result, _ = _run(_base_argv(tmp_path, str(tmp_path / "does_not_exist.trace.json")), capsys)
     assert rc == 0
     assert result["status"] == "ok"
@@ -112,7 +107,6 @@ def test_missing_trace_falls_back_gracefully(tmp_path, capsys, monkeypatch):
 
 
 def test_real_trace_end_to_end(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     trace = tmp_path / "t.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
     rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
@@ -127,7 +121,6 @@ def test_real_trace_end_to_end(tmp_path, capsys, monkeypatch):
 
 
 def test_gzip_trace_end_to_end(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     trace = tmp_path / "t.trace.json.gz"
     with gzip.open(trace, "wb") as f:
         f.write(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -137,7 +130,6 @@ def test_gzip_trace_end_to_end(tmp_path, capsys, monkeypatch):
 
 
 def test_multi_rank_provenance_and_warning(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
@@ -158,7 +150,6 @@ def test_high_gpu_idle_gate_suppresses_hot_kernels(tmp_path, capsys, monkeypatch
     # F3: contract parity with the TraceLens route -- when the GPU is idle beyond
     # the shared threshold, bypass suppresses every candidate list and surfaces a
     # high_gpu_idle_pct warning so the Coordinator routes to parameter opt.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
     trace = tmp_path / "idle.trace.json"
@@ -182,7 +173,6 @@ def test_high_gpu_idle_gate_suppresses_hot_kernels(tmp_path, capsys, monkeypatch
 
 def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
     # A high threshold disables the gate: the same idle trace keeps its hot kernels.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     monkeypatch.setenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", "99.999")
     trace = tmp_path / "idle.trace.json"
@@ -248,7 +238,6 @@ def test_bypass_diffusion_report_shape_without_steps():
 def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
     # F4: parity with the TraceLens route -- the xDiT/scriptable path emits a
     # workload-level diffusion_roofline.json that consumes --num-denoise-steps.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "t.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -286,7 +275,6 @@ def test_bypass_cli_accepts_forwarded_diffusion_flags():
 
 
 def test_non_xdit_omits_diffusion_roofline(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "t.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -322,7 +310,6 @@ def test_should_enable_steady_legacy_and_xdit_and_env():
 
 
 def test_non_kineto_json_yields_valid_artifacts_and_warns(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     # A valid JSON that is not a Kineto trace: the pipeline must still emit the
     # full artifact set + a no-GPU-kernels warning instead of crashing.
@@ -337,7 +324,6 @@ def test_non_kineto_json_yields_valid_artifacts_and_warns(tmp_path, capsys, monk
 
 
 def test_empty_trace_events_end_to_end(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "empty.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": []}).encode("utf-8"))
@@ -465,27 +451,7 @@ def test_quality_warning_bad_env_falls_back_to_default(monkeypatch):
     assert "bypass_high_unclassified_share" not in _codes(warnings)
 
 
-def test_rocprof_enrich_disabled_by_default(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
-    trace = tmp_path / "t.trace.json"
-    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
-    _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
-    assert result["rocprof_enrich"]["status"] == "disabled"
-    summ = json.loads(Path(result["artifact_paths"]["tracelens_summary"]).read_text())
-    assert summ["rocprof_enrich"]["status"] == "disabled"
-
-
-_STEADY_EVENTS = [
-    {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#1", "ts": 0, "dur": 100},
-    {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#2", "ts": 100, "dur": 100},
-    {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#3", "ts": 200, "dur": 100},
-    {"cat": "kernel", "ph": "X", "name": "warmup_gemm", "ts": 50, "dur": 40, "args": {"correlation": 1}},
-    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 250, "dur": 30, "args": {"correlation": 2}},
-]
-
-
 def test_steady_state_mode_flag_enables_windowing(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "s.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _STEADY_EVENTS}).encode("utf-8"))
@@ -502,7 +468,6 @@ def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
     # xDiT auto-enables steady-state; when the repeating ProfilerStep window is
     # found the per-step kernel shares are trace-anchored, so the result is NOT
     # estimated (parity with text-gen) and carries a steady-anchored info signal.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _STEADY_EVENTS}).encode("utf-8"))
@@ -531,7 +496,6 @@ def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
 def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
     # No per-step annotations -> steady-state windowing falls back to full_trace,
     # so the xDiT result is estimated and flags bypass_xdit_estimated.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -558,7 +522,6 @@ def test_parse_failure_flags_analysis_degraded(tmp_path, capsys, monkeypatch):
     # analysis: the pipeline still degrades gracefully (status=ok, no abort) but
     # flags analysis_degraded so record_trace_analyze / the LLM know it actually
     # failed (rather than trusting the forced-empty result).
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     missing = tmp_path / "does_not_exist.trace.json"  # resolve_trace_file -> None -> status failed
     rc, result, _ = _run(_base_argv(tmp_path, str(missing)), capsys)
     assert rc == 0
@@ -573,18 +536,25 @@ def test_parse_failure_flags_analysis_degraded(tmp_path, capsys, monkeypatch):
 
 
 def test_healthy_trace_is_not_degraded(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     trace = tmp_path / "ok.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
     _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
     assert result["analysis_degraded"] is False
 
 
+_STEADY_EVENTS = [
+    {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#1", "ts": 0, "dur": 100},
+    {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#2", "ts": 100, "dur": 100},
+    {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#3", "ts": 200, "dur": 100},
+    {"cat": "kernel", "ph": "X", "name": "warmup_gemm", "ts": 50, "dur": 40, "args": {"correlation": 1}},
+    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 250, "dur": 30, "args": {"correlation": 2}},
+]
+
+
 def test_text_gen_steady_fallback_is_estimated(tmp_path, capsys, monkeypatch):
     # Parity with xDiT: when steady-state windowing is requested for text-gen but
     # no repeating window is found, the full-trace shares are equally a mixed
     # estimate -> estimated=True (not silently False).
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "ng.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))  # no ProfilerStep
@@ -597,7 +567,6 @@ def test_text_gen_steady_fallback_is_estimated(tmp_path, capsys, monkeypatch):
 def test_text_gen_default_full_trace_not_estimated(tmp_path, capsys, monkeypatch):
     # Default text-gen (no steady-state requested): full-trace IS the norm, so it
     # is NOT flagged estimated.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "d.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -619,7 +588,6 @@ _FUSION_EVENTS = [
 def test_fusion_artifact_and_result(tmp_path, capsys, monkeypatch):
     # Two consecutive Elementwise launches -> one fusable cluster; emitted both in
     # the result summary and the kernel_sequence.json artifact.
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     trace = tmp_path / "f.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
     _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
@@ -633,7 +601,6 @@ def test_fusion_artifact_and_result(tmp_path, capsys, monkeypatch):
 
 
 def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
     trace = tmp_path / "m.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
     _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
@@ -648,17 +615,3 @@ def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
     assert srows and "kernel_category" in srows[0]
 
 
-def test_rocprof_enrich_opt_in_runs_and_degrades(tmp_path, capsys, monkeypatch):
-    # Enrichment on: with no benchmark files / no rocprof, it degrades to a
-    # summary (rows skipped) but never aborts and never leaks logs to stdout.
-    monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "1")
-    trace = tmp_path / "t.trace.json"
-    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
-    _, result, out = _run(_base_argv(tmp_path, str(trace)), capsys)
-    enr = result["rocprof_enrich"]
-    assert isinstance(enr, dict) and "status" in enr
-    # rows equals hot-kernel count; nothing matched (no benchmark files / rocprof)
-    assert enr.get("rows", 0) == len(result["hot_kernels"])
-    assert enr.get("matched", 0) == 0
-    # progress logged to stderr, not stdout
-    assert "[rocprof_enrich]" in out.err

@@ -305,21 +305,19 @@ def build(
         warnings,
         default=[],
     )
-    geak_c, oob_c, forge_c = _safe_collect(
+    geak_c, forge_c = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
         warnings,
-        default=([], [], []),
+        default=([], []),
     )
     geak_invocations = _pick("geak_invocations", geak_c)
-    oob_invocations = _pick("oob_invocations", oob_c)
     forge_invocations = _pick("forge_invocations", forge_c)
     capability_summary = _safe_collect(
         "capability_summary",
         lambda: collectors.collect_capability_summary(
             state,
             geak_invocations,
-            oob_invocations,
             warnings,
             forge_invocations,
         ),
@@ -331,7 +329,6 @@ def build(
             sd,
             state,
             geak_invocations,
-            oob_invocations,
             warnings,
             forge_invocations,
         ),
@@ -366,7 +363,6 @@ def build(
         lambda: collectors.collect_attribution(
             state,
             geak_invocations,
-            oob_invocations,
             kernel_lifecycle.get("adopted") or [],
             warnings,
             forge_invocations,
@@ -560,7 +556,6 @@ def build(
         "action_timeline": phase_timeline,
         "capability_summary": capability_summary,
         "geak_invocations": geak_invocations,
-        "oob_invocations": oob_invocations,
         "forge_invocations": forge_invocations,
         "kernel_lifecycle": kernel_lifecycle,
         "param_search": explore_search,

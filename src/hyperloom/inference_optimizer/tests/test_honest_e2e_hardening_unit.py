@@ -115,40 +115,33 @@ def test_confirm_source_present_no_cue_is_unknown(tmp_path: Path) -> None:
     assert krh._confirm_source_imported("my_kernel.py", tmp_path) is None
 
 
-# -- _kernel_result_rank: umbrella-driven GEAK promotion ------------------
-def _geak_nr_result() -> dict:
+# -- _kernel_result_rank ---------------------------------------------------
+def _needs_review_result() -> dict:
     return {
         "status": "ok",
         "proposal": {"decision": "NEEDS_REVIEW"},
         "verification": {
-            "best_backend": "geak_v3",
             "correctness_passed": True,
             "micro_speedup": 1.5,
         },
     }
 
 
-def test_rank_geak_nr_not_promoted_when_off(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
-    monkeypatch.delenv("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW", raising=False)
-    keep, verified_nr, micro = krh._kernel_result_rank(_geak_nr_result())
-    assert (keep, verified_nr) == (0, 0)
+def test_rank_needs_review_keeps_micro_speedup() -> None:
+    keep, micro = krh._kernel_result_rank(_needs_review_result())
+    assert keep == 0
     assert micro == 1.5
 
 
-def test_rank_geak_nr_promoted_via_umbrella(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    monkeypatch.delenv("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW", raising=False)
-    keep, verified_nr, micro = krh._kernel_result_rank(_geak_nr_result())
-    assert (keep, verified_nr) == (0, 1)
+def test_rank_keep_beats_needs_review() -> None:
+    keep_result = _needs_review_result()
+    keep_result["proposal"]["decision"] = "KEEP"
+    keep_result["verification"]["micro_speedup"] = 1.1
+    assert krh._kernel_result_rank(keep_result) > krh._kernel_result_rank(_needs_review_result())
 
 
-def test_rank_nongeak_nr_never_promoted(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    r = _geak_nr_result()
-    r["verification"]["best_backend"] = "claude"
-    keep, verified_nr, _ = krh._kernel_result_rank(r)
-    assert (keep, verified_nr) == (0, 0)
+def test_rank_invalid_result_is_zero() -> None:
+    assert krh._kernel_result_rank(None) == (0, 0.0)
 
 
 # -- C2a op-fanout de-dup in _batch_kernel_candidates ---------------------
