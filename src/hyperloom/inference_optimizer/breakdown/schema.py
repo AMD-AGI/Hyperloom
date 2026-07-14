@@ -407,9 +407,9 @@ class PhaseEvent(TypedDict, total=False):
 class CapabilityEntry(TypedDict, total=False):
     status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
-    keeps: int  # geak/oob: kernels adopted at integrate (NOT micro-only KEEP)
-    reverts: int  # geak/oob: micro-KEPT kernels reverted at integrate (e2e regressed)
-    e2e_gain_pct: float | None  # geak/oob: best end-to-end integrate gain for this lane's kernel
+    keeps: int  # kernels adopted at integrate (NOT micro-only KEEP)
+    reverts: int  # micro-KEPT kernels reverted at integrate (e2e regressed)
+    e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
     tested: int  # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str  # human readable, e.g. "kernel-claude only this run"
@@ -430,7 +430,6 @@ class CapabilitySummary(TypedDict, total=False):
 
     Attributes:
         geak (CapabilityEntry): GEAK kernel-generation capability.
-        oob (CapabilityEntry): Out-of-box kernel backend capability.
         explore (CapabilityEntry): Primary explore (param/backend search) row.
         backends (CapabilityEntry): Compatibility alias for backend exploration.
         params (CapabilityEntry): Compatibility alias for param exploration.
@@ -442,7 +441,6 @@ class CapabilitySummary(TypedDict, total=False):
     """
 
     geak: CapabilityEntry
-    oob: CapabilityEntry
     # primary explore row; backends/params/validate_stack are compat aliases.
     explore: CapabilityEntry
     backends: CapabilityEntry
@@ -453,7 +451,7 @@ class CapabilitySummary(TypedDict, total=False):
     specialist: CapabilityEntry
 
 
-# GEAK / OOB invocations
+# Kernel backend invocations
 class KernelMetadata(TypedDict, total=False):
     """Descriptive metadata for a kernel targeted by a backend invocation.
 
@@ -479,7 +477,7 @@ class Invocation(TypedDict, total=False):
     attempt_id: str
     run_id: str
     ts: str
-    backend: str  # forge / geak_v3 / historical backend names
+    backend: str  # forge / geak / backend name
     model: str | None
     kernel_metadata: KernelMetadata
     prompt_path: str | None
@@ -525,8 +523,7 @@ class DetectedKernel(TypedDict, total=False):
     # lifecycle stamps (added by _collect_detected_kernels)
     selected_for_optimization: bool
     geak: dict[str, Any] | None  # {attempts, best_speedup, decision, last_status}
-    oob: dict[str, Any] | None
-    adopted_by: str | None  # geak / oob / kernel_agent / None
+    adopted_by: str | None  # geak / forge / kernel_agent / None
     final_decision: str  # kept / reverted / rejected / attempted / not_optimized
     integrate_gain_pct: float | None  # e2e (integrate) gain; negative => regressed -> reverted
 
@@ -558,7 +555,7 @@ class OptimizedKernel(TypedDict, total=False):
 
     Attributes:
         kernel_id (str): Kernel identifier.
-        backend (str): Winning backend (for example ``forge`` / ``geak_v3``, best-of).
+        backend (str): Winning backend (for example ``forge`` / ``geak``, best-of).
         total_attempts (int): Total optimization attempts.
         successful_attempts (int): Attempts that succeeded.
         best_micro_speedup (float | None): Best micro-benchmark speedup, or None.
@@ -568,7 +565,7 @@ class OptimizedKernel(TypedDict, total=False):
     """
 
     kernel_id: str
-    backend: str  # forge / geak_v3 / historical backend names (best-of)
+    backend: str  # forge / geak / backend name (best-of)
     total_attempts: int
     successful_attempts: int
     best_micro_speedup: float | None
@@ -648,7 +645,7 @@ class KernelLifecycle(TypedDict, total=False):
 
 # Kernel journey — kernel-major unified lifecycle view
 class KernelToolMetadata(TypedDict, total=False):
-    """Provenance for an external kernel tool (tracelens / geak / oob / kernel_agent).
+    """Provenance for an external kernel tool (tracelens / geak / forge / kernel_agent).
 
     Attributes:
         tool (str): Tool/backend name (``tracelens`` / ``geak`` / ``claude`` / ...).
@@ -851,7 +848,7 @@ class KernelJourney(TypedDict, total=False):
     """Kernel-major unified lifecycle view.
 
     Consolidates what was previously scattered across ``kernel_roofline``,
-    ``geak_invocations`` / ``oob_invocations``, ``kernel_lifecycle`` and the
+    ``geak_invocations`` / ``forge_invocations``, ``kernel_lifecycle`` and the
     attribution sections into a single per-kernel record threading discovery ->
     dispatch -> backend attempts -> end-to-end integrate. Composed at assembly
     from four recorder substreams; empty/absent on sessions that predate them.
@@ -1265,7 +1262,6 @@ class SourceBreakdown(TypedDict, total=False):
 
     Attributes:
         geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
-        oob_pct_of_total (float): Gain share from out-of-box backends.
         explore_pct_of_total (float): Gain share from the primary explore family.
         replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
             replay (cortex best_config replay); 0.0 when none was adopted.
@@ -1279,7 +1275,6 @@ class SourceBreakdown(TypedDict, total=False):
     """
 
     geak_pct_of_total: float
-    oob_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
     # REPLAY_WARM_RECIPE (warm-recipe / cortex best_config replay) contribution,
@@ -2147,9 +2142,7 @@ class SessionBreakdown(TypedDict, total=False):
         action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
         capability_summary (CapabilitySummary): Per-capability roll-up.
         geak_invocations (list[Invocation]): GEAK backend invocations.
-        oob_invocations (list[Invocation]): Out-of-box backend invocations.
-        forge_invocations (list[Invocation]): Forge (Kernel-Forge) backend
-            invocations — its own lane, NOT folded into ``oob_invocations``.
+        forge_invocations (list[Invocation]): Forge backend invocations.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
         explore_search (ParamSearch): Merged explore-search ledger.
@@ -2192,7 +2185,6 @@ class SessionBreakdown(TypedDict, total=False):
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
-    oob_invocations: list[Invocation]
     forge_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
     # explore_search is the native merged ledger; param_search is a v1 alias.
