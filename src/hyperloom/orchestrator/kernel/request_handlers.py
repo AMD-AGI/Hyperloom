@@ -28,6 +28,9 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from hyperloom.common.env import env_bool
+from hyperloom.common.io import append_jsonl
+
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.parse_usage import (
     parse_forge_steps,
@@ -40,8 +43,6 @@ from ..trace.parse_usage import (
 # namespace + monkeypatch surface is intact.
 from ._kernel_decisions import (
     _HONEST_E2E_UMBRELLA_ENV as _HONEST_E2E_UMBRELLA_ENV,
-    _TRUEY as _TRUEY,
-    _FALSEY as _FALSEY,
     _honest_flag as _honest_flag,
     _format_last_kernel_opt as _format_last_kernel_opt,
     _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
@@ -2633,10 +2634,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:
-        path = gemm_tuning_steps_path(session_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, sort_keys=True) + "\n")
+        append_jsonl(gemm_tuning_steps_path(session_dir), row, make_parents=True, sort_keys=True)
     except OSError:
         log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
@@ -4609,9 +4607,8 @@ def _trace_kernel_attempt_steps(
     try:
         path = forge_steps_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
+        for row in rows:
+            append_jsonl(path, row, sort_keys=True)
     except OSError:
         log.debug("full-trace: forge_steps append failed", exc_info=True)
 
@@ -5356,7 +5353,7 @@ async def integrate_handler(
     paired_ab: dict[str, Any] | None = None
     paired_pristine_revert: HandlerResult | None = None
     if (
-        os.environ.get("HL_INTEGRATE_PAIRED_AB", "").strip().lower() in _TRUEY
+        env_bool("HL_INTEGRATE_PAIRED_AB", False)
         and decision == "KEEP"
         and apply_result.get("status") == "ok"
     ):
@@ -5563,7 +5560,6 @@ __all__ = [
     # monkeypatch surface (referenced via ``request_handlers.<name>``).
     # Declared so the re-exports are intentional, not flagged imports.
     "_HONEST_E2E_UMBRELLA_ENV",
-    "_FALSEY",
     "_format_last_kernel_opt",
     "_resolve_kernel_patch_identity",
     "kernel_patch_key",
