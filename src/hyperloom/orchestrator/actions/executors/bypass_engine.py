@@ -99,6 +99,14 @@ def build_server_command(
         ]
         if max_model_len:
             cmd += ["--max-model-len", str(max_model_len)]
+        if profile_dir:
+            # vllm 0.24 enables the torch profiler via --profiler-config
+            # (the legacy VLLM_TORCH_PROFILER_DIR env is ignored), without
+            # which /start_profile returns 404 and no trace is written.
+            cmd += [
+                "--profiler-config.profiler", "torch",
+                "--profiler-config.torch_profiler_dir", profile_dir,
+            ]
         return cmd + list(extra_args)
     if fw == "atom":
         cmd = [

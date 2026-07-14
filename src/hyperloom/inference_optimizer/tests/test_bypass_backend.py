@@ -373,3 +373,29 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
     assert rc == 0
     assert captured.get("tasks") == "gsm8k"
     assert captured.get("limit") is None
+
+
+def test_vllm_server_command_enables_torch_profiler():
+    """vllm 0.24 needs --profiler-config flags to enable the torch profiler.
+
+    Regression: setting only VLLM_TORCH_PROFILER_DIR env is ignored by vllm
+    0.24 (Unknown env var), so /start_profile returns 404 and no trace lands.
+    """
+    cmd = bypass_engine.build_server_command(
+        framework="vllm", model="/m", tp=1, port=8888,
+        max_model_len=2048, extra_args=[], profile_dir="/ws/torch_trace",
+    )
+    joined = " ".join(cmd)
+    assert "--profiler-config.profiler" in joined
+    assert "torch" in cmd
+    assert "--profiler-config.torch_profiler_dir" in joined
+    assert "/ws/torch_trace" in cmd
+
+
+def test_vllm_server_command_no_profiler_when_dir_none():
+    """No profiler flags when profiling is off (profile_dir=None)."""
+    cmd = bypass_engine.build_server_command(
+        framework="vllm", model="/m", tp=1, port=8888,
+        max_model_len=2048, extra_args=[], profile_dir=None,
+    )
+    assert not any("profiler-config" in c for c in cmd)
