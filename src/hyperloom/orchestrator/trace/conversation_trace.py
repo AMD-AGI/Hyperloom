@@ -177,17 +177,6 @@ class ConversationRecord:
         }
 
 
-def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the conversations closed schema."""
-    validate_closed_row(
-        row,
-        fields=_ROW_FIELDS,
-        valid_components=VALID_COMPONENTS,
-        error_cls=ConversationRowError,
-        label="conversations",
-    )
-
-
 def append_conversation(
     *,
     session_dir: Path,
@@ -214,7 +203,13 @@ def append_conversation(
         ConversationRowError: If the serialized row violates the schema.
     """
     row = record.to_row()
-    _validate_row(row)
+    validate_closed_row(
+        row,
+        fields=_ROW_FIELDS,
+        valid_components=VALID_COMPONENTS,
+        error_cls=ConversationRowError,
+        label="conversations",
+    )
     dest = target if target is not None else conversations_path(session_dir)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)

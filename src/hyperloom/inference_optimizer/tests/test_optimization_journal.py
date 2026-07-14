@@ -328,14 +328,14 @@ def test_classify_change_kind_explore_variant_dimensions():
     assert (
         classify_change_kind(
             "explore",
-            {"extra_sglang_args": "--attention-backend FOO"},
+            {"extra_server_args": "--attention-backend FOO"},
         )
         == KIND_BACKEND
     )
     assert (
         classify_change_kind(
             "explore",
-            {"extra_sglang_args": "--max-num-batched-tokens 8192"},
+            {"extra_server_args": "--max-num-batched-tokens 8192"},
         )
         == KIND_PARAM
     )
@@ -346,7 +346,7 @@ def test_summarize_change_prefers_variant_args_and_envs():
     s = summarize_change(
         "explore",
         {
-            "extra_sglang_args": "--attention-backend AITER",
+            "extra_server_args": "--attention-backend AITER",
             "extra_envs": {"K": "1"},
         },
     )

@@ -287,7 +287,7 @@ def test_orchestration_md_has_no_score_view():
 # 6. CLI flag presence
 def test_cli_exposes_legacy_action_scores_flag():
     """``--legacy-action-scores`` must be wired (drop / warn)."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(
@@ -311,7 +311,7 @@ def test_cli_exposes_legacy_action_scores_flag():
 
 
 def test_cli_rejects_unknown_legacy_action_scores_value():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     with pytest.raises(SystemExit):

@@ -106,7 +106,8 @@ def test_post_init_imports_sdk(monkeypatch):
 def test_post_init_emit_intent_setup_failure(monkeypatch):
     monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
     b = _backend()
-    assert b.has_emit_intent_tool is False
+    assert b.mcp_server_config is None
+    assert b.mcp_tool_name is None
     assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
@@ -122,14 +123,14 @@ def test_set_context_provider_success(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
-    assert b.has_context_tools is True
+    assert b._context_server_config is not None
 
 
 def test_set_context_provider_failure(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
-    assert b.has_context_tools is False
+    assert b._context_server_config is None
     assert any("context tools MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
@@ -234,12 +235,12 @@ async def test_run_conversational_session_capture(monkeypatch):
     b = _backend(messages=[msg], conversational=True)
     b.sdk_query_factory = _query([msg])
     res = await b.run("hi")
-    assert b.conversation_session_id == "sess-9"
+    assert b._session_id == "sess-9"
     assert res.metadata["input_tokens"] == 5
     assert len(res.intents) == 1
     # reset clears it
     b.reset_conversation()
-    assert b.conversation_session_id is None
+    assert b._session_id is None
 
 
 # ---- run(): no-intent raises ----------------------------------------------

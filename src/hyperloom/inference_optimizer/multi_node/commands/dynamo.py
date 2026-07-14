@@ -33,7 +33,6 @@ from .._internal import ssh_client, dynamo_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
-from ..state_paths import resolve_state_file
 
 import logging
 log = logging.getLogger(__name__)
@@ -61,25 +60,6 @@ from .rayjob import (
     _is_safe_get_workload_404,
     _summarize_workload_failure,
 )
-
-
-# Session-scoped SSH key dir (sandbox-local, next to the state file).
-# Computed once at import time for backward-compat callers of this symbol;
-# prefer :func:`_dynamo_ssh_dir` when the session may have changed since import.
-_DYNAMO_SSH_DIR = resolve_state_file().parent / "mn_ssh"
-
-
-def _validate_extra_server_args(raw: str, *, context: str) -> None:
-    """Validate server args before fan-out to Dynamo pods.
-
-    Args:
-        raw: Extra server CLI flags string.
-        context: Label for error messages.
-
-    Raises:
-        ServerArgsRejected: When a denied flag is present.
-    """
-    validate_server_args(raw, context=context)
 
 
 def cmd_create_dynamo(args: argparse.Namespace) -> int:
@@ -449,14 +429,14 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         raise RuntimeError(f"unsupported framework: {framework!r}")
     shared_extra = getattr(args, "extra_args", "") or ""
     try:
-        _validate_extra_server_args(shared_extra, context="dynamo restart-server --extra-args")
+        validate_server_args(shared_extra, context="dynamo restart-server --extra-args")
         if getattr(args, "pd_prefill_extra_args", ""):
-            _validate_extra_server_args(
+            validate_server_args(
                 getattr(args, "pd_prefill_extra_args", "") or "",
                 context="dynamo restart-server --pd-prefill-extra-args",
             )
         if getattr(args, "pd_decode_extra_args", ""):
-            _validate_extra_server_args(
+            validate_server_args(
                 getattr(args, "pd_decode_extra_args", "") or "",
                 context="dynamo restart-server --pd-decode-extra-args",
             )

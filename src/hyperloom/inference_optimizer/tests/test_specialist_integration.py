@@ -61,7 +61,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 
 def test_build_specialist_executor_returns_callable(tmp_path: Path):
     """The cli factory must produce a callable executor."""
-    from hyperloom.inference_optimizer.cli import _build_specialist_executor
+    from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
 
     plane = _FakeKnowledgePlane()
     args = _build_args()
@@ -77,7 +77,7 @@ def test_build_specialist_executor_returns_callable(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_register_executors_registers_specialist_kind(tmp_path: Path):
     """``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
-    from hyperloom.inference_optimizer.cli import (
+    from hyperloom.inference_optimizer.cli.executors import (
         _build_specialist_executor,
         _register_executors,
     )
@@ -118,7 +118,7 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     tmp_path: Path,
 ):
     """``--research-lane-capacity 0`` leaves the specialist executor unregistered (fails closed)."""
-    from hyperloom.inference_optimizer.cli import _register_executors
+    from hyperloom.inference_optimizer.cli.executors import _register_executors
 
     class _StubSub:
         def __init__(self):
@@ -199,7 +199,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
 @pytest.mark.asyncio
 async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     """The cli adapter returns a dict carrying runner_status + specialist_done + on-disk artefacts."""
-    from hyperloom.inference_optimizer.cli import _build_specialist_executor
+    from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
 
     done_payload = {
         "gap_canonical_id": "gap.scheduler.moe",
@@ -297,7 +297,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
     tmp_path: Path,
 ):
     """When the runner exhausts max_turns without a specialist_done, the adapter synthesises a well-formed empty dict."""
-    from hyperloom.inference_optimizer.cli import _build_specialist_executor
+    from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
 
     # Backend keeps emitting heartbeats; never produces a done.
     heartbeat = Intent(

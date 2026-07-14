@@ -28,7 +28,7 @@ def test_retired_flag_exits_with_enable_roofline_hint(
     flag: str,
 ):
     """Each retired spelling raises ``SystemExit`` and names ``--enable-roofline``."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     with pytest.raises(SystemExit) as ei:
@@ -43,7 +43,7 @@ def test_retired_flag_exits_with_enable_roofline_hint(
 
 def test_enable_roofline_still_works():
     """Sanity guard: the surviving ``--enable-roofline`` mode-select still parses."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     ns = parser.parse_args(_minimal_optimize_args() + ["--no-enable-roofline"])

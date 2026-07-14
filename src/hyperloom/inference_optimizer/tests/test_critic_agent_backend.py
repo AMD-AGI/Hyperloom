@@ -226,7 +226,10 @@ def test_cortex_kb_url_propagated_to_runtime_env(fake_critic_root, fake_session_
     assert env["CORTEX_KB_URL"] == "http://kb.local/"
 
 
-def test_explicit_cortex_kb_url_env_wins(fake_critic_root, fake_session_dir, monkeypatch):
+def test_explicit_cortex_kb_url_flag_wins_over_inherited_env(fake_critic_root, fake_session_dir, monkeypatch):
+    # The --cortex-kb-url flag is authoritative: the endpoint is a CLI concern
+    # with no env fallback, so the flag value overrides any inherited
+    # CORTEX_KB_URL in the parent env when building the subprocess env.
     monkeypatch.setenv("CORTEX_KB_URL", "http://from-env.local")
     backend = CriticAgentBackend(
         critic_agent_root=fake_critic_root,
@@ -236,7 +239,7 @@ def test_explicit_cortex_kb_url_env_wins(fake_critic_root, fake_session_dir, mon
         cortex_kb_url="http://from-flag.local",
     )
     env = backend._build_runtime_env()
-    assert env["CORTEX_KB_URL"] == "http://from-env.local"
+    assert env["CORTEX_KB_URL"] == "http://from-flag.local"
 
 
 def test_no_cortex_kb_url_leaves_env_unset(fake_critic_root, fake_session_dir, monkeypatch):
@@ -1145,11 +1148,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _resolve_critic_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_critic_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
@@ -1277,7 +1279,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
             ),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1362,7 +1364,7 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             ScriptedPlan(turns=[], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }

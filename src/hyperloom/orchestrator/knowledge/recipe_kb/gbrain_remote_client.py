@@ -2,12 +2,10 @@
 
 """Gbrain-backed read-only remote for the recipe-snapshot KB.
 
-The sole read-side remote for the recipe KB. It exposes the read
-surface (``health`` / ``get_recipe`` / ``get_history`` / ``list_recent``
-/ ``search`` / ``list_attempts`` / ``list_session_attempts`` /
-``session_summary`` / ``close`` plus the ``enabled`` attribute) so
-:class:`recipe_kb.RecipeKB` can hold it in the ``remote`` slot. The
-corpus is the gbrain page store (JSON-RPC MCP over HTTP).
+The sole read-side remote for the recipe KB. It exposes ``get_recipe``,
+``search``, ``close``, and the ``enabled`` attribute so
+:class:`recipe_kb.RecipeKB` can hold it in the ``remote`` slot. The corpus is
+the gbrain page store (JSON-RPC MCP over HTTP).
 
 Design fit: this honours the recipe_kb local-first contract verbatim —
 writes still go local-only through the dispatcher; gbrain is consulted
@@ -41,7 +39,6 @@ import urllib.request
 from typing import Any, Mapping
 
 from hyperloom.inference_optimizer import recipe_snapshot_constants as C
-from hyperloom.common.payload_aliases import CANONICAL_KEY
 from .canonical_id import recipe_canonical_id
 from .remote_client import RemoteRecipeClientError
 
@@ -62,6 +59,7 @@ _LIST_PAGE_SIZE = 100
 _SCAN_CACHE_TTL_SEC = 60.0
 _DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
 _RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
+_EXTRA_SERVER_ARGS_KEY = "extra_server_args"
 
 # Wall-clock budget for one full ``_scan_recipes`` pass. ``search`` fetches the
 # whole recipe corpus (list_pages + a get_page per slug) and filters
@@ -379,7 +377,7 @@ def _as_float(value: Any) -> float:
 def _json_list(value: Any) -> list[Any]:
     """Decode a recipe-page list field stored as a JSON string.
 
-    The ingest/mirror writer (``gbrain_ingest.recipe_to_page``) encodes
+    The mirror writer (``gbrain_ingest.recipe_to_page``) encodes
     structured list-of-dict fields (``what_failed`` / ``pitfalls`` /
     ``lessons`` / ...) as JSON strings because the minimal YAML emitter
     only renders scalar lists. Tolerates an already-decoded list (in case
@@ -427,7 +425,7 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     args = str(attrs.get("best_config_args") or "").strip()
     if args:
-        out[CANONICAL_KEY] = args
+        out[_EXTRA_SERVER_ARGS_KEY] = args
     envs = attrs.get("best_config_envs")
     if isinstance(envs, Mapping) and envs:
         out[_ENVS_KEY] = {str(key): str(val) for key, val in envs.items()}
@@ -672,22 +670,6 @@ class GbrainRemoteRecipeClient:
     def close(self) -> None:
         """Release the underlying MCP client."""
         self._mcp = None
-
-    def health(self) -> bool:
-        """Probe gbrain reachability with a tiny ``list_pages`` call.
-
-        Returns:
-            ``True`` if the probe succeeds; ``False`` when disabled or the
-            probe errors.
-        """
-        if not self.enabled or self._mcp is None:
-            return False
-        try:
-            self._mcp.call("list_pages", {"type": "recipe", "limit": 1})
-            return True
-        except GbrainRemoteError as exc:
-            log.info("gbrain-remote health probe failed: %s", exc)
-            return False
 
     # -- internal scan -----------------------------------------------------
     def _scan_cache_ttl(self) -> float:
@@ -978,33 +960,6 @@ class GbrainRemoteRecipeClient:
         rows = self.search(label_match=label_match, limit=1)
         return rows[0] if rows else None
 
-    def get_history(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        """Return the version history for a recipe.
-
-        Args:
-            canonical_id: Canonical recipe id.
-            limit: Maximum number of history entries.
-
-        Returns:
-            Always ``[]`` — gbrain does not retain a versioned recipe archive
-            (provided for interface parity).
-        """
-        # gbrain does not retain a versioned recipe archive.
-        return []
-
-    def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Return the most recently updated recipes.
-
-        Args:
-            limit: Maximum number of recipes to return.
-
-        Returns:
-            Recent recipe rows, or ``[]`` when the client is disabled.
-        """
-        if not self.enabled:
-            return []
-        return self._scan_recipes(limit=limit)
-
     def search(
         self,
         *,
@@ -1064,45 +1019,6 @@ class GbrainRemoteRecipeClient:
         if order_by in (C.ORDER_BY_UPDATED_AT_ASC, C.ORDER_BY_CREATED_AT_ASC):
             rows = list(reversed(rows))
         return rows[: int(limit)] if limit and limit > 0 else rows
-
-    def list_attempts(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        """Return attempt rows for a recipe.
-
-        Args:
-            canonical_id: Canonical recipe id.
-            limit: Maximum number of attempts.
-
-        Returns:
-            Always ``[]`` — attempt rows live in the local store, so the
-            dispatcher falls through to local on gbrain absence.
-        """
-        # Attempt rows live on local store under this design; gbrain
-        # absence falls the dispatcher through to local.
-        return []
-
-    def list_session_attempts(self, *, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
-        """Return attempt rows for a session.
-
-        Args:
-            session_id: Session identifier.
-            limit: Maximum number of attempts.
-
-        Returns:
-            Always ``[]`` — session attempts are served from the local store.
-        """
-        return []
-
-    def session_summary(self, *, session_id: str) -> dict[str, Any] | None:
-        """Return a session summary.
-
-        Args:
-            session_id: Session identifier.
-
-        Returns:
-            Always ``None`` — gbrain does not serve session summaries.
-        """
-        return None
-
 
 def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[str, Any]) -> bool:
     """Apply ``{metric: {min,max}}`` filters against the recipe's metrics.
