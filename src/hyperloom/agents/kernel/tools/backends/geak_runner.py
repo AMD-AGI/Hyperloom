@@ -33,14 +33,22 @@ def _resolve_runner() -> str:
     runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
     if runner and Path(runner).is_file():
         return runner
+    roots: list[str] = []
     root = os.environ.get("GEAK_ROOT", "").strip()
     if root:
+        roots.append(root)
+    open_source_root = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT", "").strip()
+    if open_source_root:
+        roots.append(str(Path(open_source_root) / "GEAK"))
+    roots.append("/opt/hyperloom/open-source-repos/GEAK")
+    for root in dict.fromkeys(roots):
         cand = Path(root) / "interface" / "run_e2e.py"
         if cand.is_file():
             return str(cand)
     raise FileNotFoundError(
         "e2e runner not found. Set GEAK_E2E_RUNNER to "
-        "<GEAK checkout>/interface/run_e2e.py (the installer exports it)."
+        "<GEAK checkout>/interface/run_e2e.py (the installer exports it), "
+        "or set GEAK_ROOT/HYPERLOOM_OPEN_SOURCE_ROOT."
     )
 
 

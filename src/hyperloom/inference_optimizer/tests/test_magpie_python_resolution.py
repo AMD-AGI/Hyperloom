@@ -102,7 +102,7 @@ def test_probe_requires_yaml_dependency(monkeypatch):
 
 
 def test_falls_back_to_opt_venv_when_path_python_cannot_import(monkeypatch, tmp_path):
-    """When neither the env value nor PATH python3 can import Magpie, return /opt/venv/bin/python as the last resort."""
+    """When /opt/venv is absent, fall back to PATH python3 so preflight can install Magpie."""
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     monkeypatch.setattr(
         _grid_runner,
@@ -110,4 +110,5 @@ def test_falls_back_to_opt_venv_when_path_python_cannot_import(monkeypatch, tmp_
         lambda *a, **k: type("P", (), {"returncode": 1})(),
     )
     monkeypatch.setattr(_grid_runner.shutil, "which", lambda _n: "/usr/bin/python3")
-    assert _grid_runner._resolve_magpie_python() == "/opt/venv/bin/python"
+    monkeypatch.setattr(_grid_runner.Path, "is_file", lambda self: False)
+    assert _grid_runner._resolve_magpie_python() == "/usr/bin/python3"
