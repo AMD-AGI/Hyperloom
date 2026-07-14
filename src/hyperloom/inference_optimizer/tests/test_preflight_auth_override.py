@@ -982,6 +982,27 @@ def test_probe_llm_catalog_passes_anthropic_custom_headers(monkeypatch):
     assert seen["headers"]["Authorization"] == "Bearer dummy"
 
 
+def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatch):
+    """Strict per-side: probing the OpenAI base uses OPENAI_CUSTOM_HEADERS (not
+    ANTHROPIC_CUSTOM_HEADERS)."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: anthropic-key")
+    seen: dict[str, Any] = {}
+
+    def _get(url, **kwargs):
+        seen["headers"] = kwargs.get("headers") or {}
+        return _FakeResp(200, {"data": [{"id": "gpt-5.4"}]})
+
+    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    ids = cli._probe_llm_catalog(base_url="https://llm-api.amd.com/Unified/v1", api_key="dummy")
+    assert ids == {"gpt-5.4"}
+    assert seen["headers"]["Ocp-Apim-Subscription-Key"] == "openai-key"
+
+
 def test_probe_llm_catalog_normalizes_claude_catalog_ids(monkeypatch):
     """AMD gateway may return title-case dot-version Claude IDs."""
     monkeypatch.setattr("time.sleep", lambda s: None)
@@ -1244,7 +1265,9 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch
     if codex_follows_before:
         args.codex_model = args.claude_model
 
-    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/anthropic")
+    # The OpenAI/Codex side derives the /Unified/v1 chat-completions base from
+    # the single Anthropic-compatible gateway (was previously the raw /anthropic).
+    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/Unified/v1")
     assert cli._codex_model_should_follow_claude() is False
     assert args.codex_model == "claude-sonnet-5"
 
