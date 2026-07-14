@@ -202,13 +202,13 @@ def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
 # 6. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
     """``--reset-state`` renames state.json so the next load starts blank."""
-    from hyperloom.inference_optimizer.cli import _reset_state_file
+    import hyperloom.inference_optimizer.cli as optimizer_cli
 
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
     (sd / "state.json").write_text(json.dumps(payload))
-    _reset_state_file(sd)
+    optimizer_cli._reset_state_file(sd)
     assert not (sd / "state.json").exists()
     backups = [p for p in sd.iterdir() if p.name.startswith("state.json.preReset.")]
     assert len(backups) == 1, "exactly one pre-reset backup expected"
@@ -219,17 +219,17 @@ def test_reset_state_backs_up_state_json(tmp_path):
 
 
 def test_reset_state_is_safe_when_no_state_file(tmp_path):
-    from hyperloom.inference_optimizer.cli import _reset_state_file
+    import hyperloom.inference_optimizer.cli as optimizer_cli
 
     sd = tmp_path / "session"
     sd.mkdir()
-    _reset_state_file(sd)
+    optimizer_cli._reset_state_file(sd)
     assert not (sd / "state.json").exists()
 
 
 # 7. CLI flag wiring
 def test_cli_exposes_migration_mode_flag():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(
@@ -253,7 +253,7 @@ def test_cli_exposes_migration_mode_flag():
 
 
 def test_cli_rejects_unknown_migration_mode():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     with pytest.raises(SystemExit):
@@ -269,7 +269,7 @@ def test_cli_rejects_unknown_migration_mode():
 
 
 def test_cli_exposes_reset_state_flag():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(

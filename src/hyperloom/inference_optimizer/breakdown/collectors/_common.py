@@ -10,7 +10,7 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 

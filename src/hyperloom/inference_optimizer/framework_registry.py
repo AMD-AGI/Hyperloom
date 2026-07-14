@@ -140,22 +140,6 @@ def is_supported(framework: str | None) -> bool:
     return str(framework or "").strip().lower() in FRAMEWORKS
 
 
-def get(framework: str | None) -> FrameworkSpec:
-    """Return the :class:`FrameworkSpec` for ``framework``.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        FrameworkSpec: The matching spec.
-
-    Raises:
-        KeyError: When the name is not registered.
-    """
-    key = str(framework or "").strip().lower()
-    return FRAMEWORKS[key]
-
-
 def _spec_or_default(framework: str | None) -> FrameworkSpec:
     """Return the spec for ``framework`` or the default's spec when unknown.
 
@@ -167,19 +151,6 @@ def _spec_or_default(framework: str | None) -> FrameworkSpec:
     """
     key = str(framework or "").strip().lower()
     return FRAMEWORKS.get(key, FRAMEWORKS[DEFAULT_FRAMEWORK])
-
-
-def kind(framework: str | None) -> str:
-    """Return the execution ``kind`` for ``framework``.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str: ``"serving"`` or ``"scriptable"`` (default framework's kind for
-        unknown names).
-    """
-    return _spec_or_default(framework).kind
 
 
 def is_scriptable(framework: str | None) -> bool:
@@ -310,26 +281,3 @@ def format_primary_metric(
     return f"{value:.{precision}f} {unit}"
 
 
-def supports_server_reuse(framework: str | None) -> bool:
-    """Return whether ``framework`` supports the server_lifecycle reuse path.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        bool: ``True`` only for serving frameworks that ship a reusable server.
-    """
-    return _spec_or_default(framework).supports_server_reuse
-
-
-def repo_url(framework: str | None) -> str | None:
-    """Return the canonical upstream repo URL for ``framework``.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str | None: The repo URL, or ``None`` when not registered / unset.
-    """
-    spec = FRAMEWORKS.get(str(framework or "").strip().lower())
-    return spec.repo_url if spec is not None else None

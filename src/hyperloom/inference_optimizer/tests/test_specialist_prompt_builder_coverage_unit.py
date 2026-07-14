@@ -9,7 +9,6 @@ import pytest
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
-    build_specialist_prompts_for_domain,
     _render_measured_impact,
     _format_version_note,
 )
@@ -30,9 +29,11 @@ _DOMAIN_KEYS = (
 @pytest.mark.parametrize("domain_key", _DOMAIN_KEYS)
 @pytest.mark.parametrize("framework", ["vllm", "atom"])
 def test_build_for_each_domain_and_framework(domain_key, framework):
-    sys_p, user_p = build_specialist_prompts_for_domain(
+    domain = get_domain(domain_key)
+    assert domain is not None
+    sys_p, user_p = build_specialist_prompts(SpecialistPromptInputs(
         task_id="t1",
-        domain_key=domain_key,
+        domain=domain,
         framework=framework,
         gpu_type="MI300X",
         tp=2,
@@ -49,15 +50,10 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
         gap_layer="kernel_agent",
         gap_symptom="slow",
         gap_evidence={"k": 1},
-    )
+    ))
     assert sys_p
     assert "## 2. HARDWARE CONTEXT" in user_p
     assert "concurrency: 64" in user_p
-
-
-def test_unknown_domain_raises():
-    with pytest.raises(ValueError):
-        build_specialist_prompts_for_domain(task_id="t", domain_key="nope")
 
 
 def _rich_inputs(**overrides):
