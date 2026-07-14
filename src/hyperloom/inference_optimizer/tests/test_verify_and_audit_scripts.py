@@ -105,6 +105,25 @@ def _write(session_dir: Path, state: dict) -> None:
         json.dumps(state),
         encoding="utf-8",
     )
+    # Cache metrics now come from the real per-call ledger, not state.json. Mirror
+    # any tick_cache_metrics fixture into one llm_calls.jsonl row so the derived
+    # cache_hit_rate matches what these tests assert.
+    tcm = state.get("tick_cache_metrics")
+    if isinstance(tcm, dict):
+        trace_dir = session_dir / "reports" / "trace"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        (trace_dir / "llm_calls.jsonl").write_text(
+            json.dumps(
+                {
+                    "cache_creation_input_tokens": tcm.get("cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": tcm.get("cache_read_input_tokens", 0),
+                    "input_tokens": tcm.get("input_tokens", 0),
+                    "output_tokens": tcm.get("output_tokens", 0),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
 
 # verify_roofline_v2 — exit codes
