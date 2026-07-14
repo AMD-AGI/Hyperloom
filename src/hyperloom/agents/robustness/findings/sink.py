@@ -10,13 +10,14 @@ Best-effort: write failures log one WARN per error class, never raise.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 import asyncio
+
+from hyperloom.common.io import append_jsonl
 
 from ..decision.action_ladder import Finding
 
@@ -94,11 +95,8 @@ class FindingSink:
         """
         path = self._config.file_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                for row in rows:
-                    handle.write(json.dumps(row, ensure_ascii=False))
-                    handle.write("\n")
+            for row in rows:
+                append_jsonl(path, row, make_parents=True, ensure_ascii=False)
         except OSError as exc:
             self._warn_once("io", f"finding sink io error: {exc}")
 

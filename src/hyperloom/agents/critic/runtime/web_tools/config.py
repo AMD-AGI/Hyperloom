@@ -13,31 +13,16 @@ can build a config object directly without touching ``os.environ``.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Literal
 
-from hyperloom.common.env import env_bool, env_int
+from hyperloom.common.env import env_bool, env_int, env_str
 
 ProviderName = Literal["disabled", "tavily", "serper", "brave"]
 KNOWN_PROVIDERS: frozenset[str] = frozenset({"disabled", "tavily", "serper", "brave"})
 # Providers with a working backend in ``runtime.web_tools`` today. ``brave``
 # is recognized in env/config for forward-compat but not yet implemented.
 IMPLEMENTED_SEARCH_PROVIDERS: frozenset[str] = frozenset({"tavily", "serper"})
-
-
-def _env(name: str, default: str = "") -> str:
-    """Read a string environment variable.
-
-    Args:
-        name (str): Environment variable name.
-        default (str): Value returned when the variable is unset.
-
-    Returns:
-        str: The variable's value, or ``default``.
-    """
-    val = os.environ.get(name)
-    return val if val is not None else default
 
 
 def _parse_csv(raw: str) -> tuple[str, ...]:
@@ -109,8 +94,8 @@ class WebToolsConfig:
         Returns:
             WebToolsConfig: The resolved, immutable configuration.
         """
-        provider = _normalize_provider(_env("WEB_SEARCH_PROVIDER", "disabled"))
-        fallback_raw = _env("WEB_SEARCH_FALLBACK", "")
+        provider = _normalize_provider(env_str("WEB_SEARCH_PROVIDER", "disabled"))
+        fallback_raw = env_str("WEB_SEARCH_FALLBACK", "")
         fallback = tuple(
             p
             for p in (s.strip().lower() for s in fallback_raw.split(","))
@@ -121,15 +106,15 @@ class WebToolsConfig:
             critic_web_max_tool_turns=max(1, env_int("CRITIC_WEB_MAX_TOOL_TURNS", 4)),
             search_provider=provider,
             search_fallback=fallback,
-            search_domain_denylist=_parse_csv(_env("WEB_SEARCH_DOMAIN_DENYLIST", "")),
+            search_domain_denylist=_parse_csv(env_str("WEB_SEARCH_DOMAIN_DENYLIST", "")),
             search_max_results_cap=max(1, env_int("WEB_SEARCH_MAX_RESULTS_CAP", 10)),
             search_rate_limit_per_min=max(
                 1,
                 env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
             ),
-            tavily_api_key=_env("TAVILY_API_KEY", ""),
-            serper_api_key=_env("SERPER_API_KEY", ""),
-            brave_api_key=_env("BRAVE_API_KEY", ""),
+            tavily_api_key=env_str("TAVILY_API_KEY", ""),
+            serper_api_key=env_str("SERPER_API_KEY", ""),
+            brave_api_key=env_str("BRAVE_API_KEY", ""),
             fetch_enabled=env_bool("WEB_FETCH_ENABLED", False),
             fetch_max_bytes=max(1024, env_int("WEB_FETCH_MAX_BYTES", 10 * 1024 * 1024)),
             fetch_max_output_chars=max(
@@ -137,7 +122,7 @@ class WebToolsConfig:
                 env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
             ),
             fetch_timeout_s=max(1, env_int("WEB_FETCH_TIMEOUT_S", 60)),
-            fetch_domain_denylist=_parse_csv(_env("WEB_FETCH_DOMAIN_DENYLIST", "")),
+            fetch_domain_denylist=_parse_csv(env_str("WEB_FETCH_DOMAIN_DENYLIST", "")),
             fetch_cache_ttl_s=max(0, env_int("WEB_FETCH_CACHE_TTL_S", 15 * 60)),
             fetch_cache_max_entries=max(
                 1,

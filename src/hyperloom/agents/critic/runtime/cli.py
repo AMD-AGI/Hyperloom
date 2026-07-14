@@ -31,8 +31,7 @@ import os
 import sys
 from typing import Any
 
-from hyperloom.common.subprocess_bridge import emit_json as _emit_json
-from hyperloom.common.subprocess_bridge import read_json as _read_json
+from hyperloom.common.subprocess_bridge import emit_json, read_json
 
 from .cortex_kb_client import CortexKBClient
 from .dead_letter import DeadLetter
@@ -43,12 +42,6 @@ from .kb_client import HTTPKBClient, KBClient
 from .kb_writer import KBWriter, WriteContext
 from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
-
-
-# ---------------------------------------------------------------------------
-# _read_json / _emit_json are re-exported from hyperloom.common.subprocess_bridge
-# above; kept as module-level bindings so monkeypatches on this module still
-# resolve through its own __dict__.
 
 
 def _resolve_kb_client() -> KBClient:
@@ -113,10 +106,10 @@ def _cmd_init_session(args: argparse.Namespace) -> None:
     Args:
         args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
     """
-    request = _read_json(args.request)
+    request = read_json(args.request)
     reviewer = _resolve_reviewer()
     out = reviewer.init_session(request)
-    _emit_json(out, args.out)
+    emit_json(out, args.out)
 
 
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
@@ -125,10 +118,10 @@ def _cmd_prepare_review(args: argparse.Namespace) -> None:
     Args:
         args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
     """
-    request = _read_json(args.request)
+    request = read_json(args.request)
     reviewer = _resolve_reviewer()
     bundle = reviewer.prepare_review(request)
-    _emit_json(bundle.to_dict(), args.out)
+    emit_json(bundle.to_dict(), args.out)
 
 
 def _cmd_commit_review(args: argparse.Namespace) -> None:
@@ -141,13 +134,13 @@ def _cmd_commit_review(args: argparse.Namespace) -> None:
     Raises:
         RuntimeAdapterError: If ``--review`` is not a JSON object.
     """
-    request = _read_json(args.request)
-    review = _read_json(args.review)
+    request = read_json(args.request)
+    review = read_json(args.review)
     if not isinstance(review, dict):
         raise RuntimeAdapterError("--review must be a JSON object")
     reviewer = _resolve_reviewer()
     outcome = reviewer.commit_review(request, review)
-    _emit_json(outcome.to_dict(), args.out)
+    emit_json(outcome.to_dict(), args.out)
 
 
 def _cmd_close_session(args: argparse.Namespace) -> None:
@@ -157,11 +150,11 @@ def _cmd_close_session(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``request``, ``kb_draft``,
             ``out``).
     """
-    request = _read_json(args.request)
-    kb_draft = _read_json(args.kb_draft) if args.kb_draft else None
+    request = read_json(args.request)
+    kb_draft = read_json(args.kb_draft) if args.kb_draft else None
     reviewer = _resolve_reviewer()
     outcome = reviewer.close_session(request, kb_draft)
-    _emit_json(outcome.to_dict(), args.out)
+    emit_json(outcome.to_dict(), args.out)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +165,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``packet``, ``kind``,
             ``topic``, ``limit``, ``session``, ``out``).
     """
-    packet = _read_json(args.packet) or {}
+    packet = read_json(args.packet) or {}
     context = packet.get("context") or packet.get("environment") or {}
     scope = build_scope(context, require_critical=False)
     scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
@@ -186,7 +179,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
         ctx=WriteContext(session_id=args.session or "cli", review_id="cli"),
     )
     priors["scope_cache_key"] = scope_cache_key(scope_filter, topic=args.topic)
-    _emit_json(priors, args.out)
+    emit_json(priors, args.out)
 
 
 def _cmd_write_verdict(args: argparse.Namespace) -> None:
@@ -196,9 +189,9 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``packet``, ``verdict``,
             ``ctx``, ``out``).
     """
-    packet = _read_json(args.packet) or {}
-    verdict = _read_json(args.verdict) or {}
-    ctx_raw = _read_json(args.ctx) or {}
+    packet = read_json(args.packet) or {}
+    verdict = read_json(args.verdict) or {}
+    ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
     ctx = WriteContext(
@@ -215,7 +208,7 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
         session_context=ctx_raw.get("session_context") or {},
         ctx=ctx,
     )
-    _emit_json(res.to_dict(), args.out)
+    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
@@ -225,9 +218,9 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``packet``, ``kb_draft``,
             ``ctx``, ``out``).
     """
-    packet = _read_json(args.packet) or {}
-    kb_draft = _read_json(args.kb_draft) or {}
-    ctx_raw = _read_json(args.ctx) or {}
+    packet = read_json(args.packet) or {}
+    kb_draft = read_json(args.kb_draft) or {}
+    ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
     ctx = WriteContext(
@@ -243,7 +236,7 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
         session_context=ctx_raw.get("session_context") or {},
         ctx=ctx,
     )
-    _emit_json(res.to_dict(), args.out)
+    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_add_contradiction(args: argparse.Namespace) -> None:
@@ -253,7 +246,7 @@ def _cmd_add_contradiction(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``new_id``, ``old_ids``
             comma-separated, ``ctx``, ``out``).
     """
-    ctx_raw = _read_json(args.ctx) or {}
+    ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
     ctx = WriteContext(
@@ -263,7 +256,7 @@ def _cmd_add_contradiction(args: argparse.Namespace) -> None:
     )
     old_ids = [oid.strip() for oid in args.old_ids.split(",") if oid.strip()]
     res = writer.add_contradiction(new_id=args.new_id, old_ids=old_ids, ctx=ctx)
-    _emit_json(res.to_dict(), args.out)
+    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
@@ -279,7 +272,7 @@ def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
         lambda endpoint, payload: _replay_dispatch(client, endpoint, payload),
         delete_on_success=not args.keep_on_success,
     )
-    _emit_json(summary.to_dict(), args.out)
+    emit_json(summary.to_dict(), args.out)
 
 
 def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -> None:
