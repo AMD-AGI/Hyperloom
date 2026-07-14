@@ -5,7 +5,7 @@ description: Run a long-horizon Hyperloom Qwen3-8B optimization session. Use whe
 
 # Hyperloom Qwen3-8B Long-Horizon Run
 
-Read and follow `@../../inference_optimizer/SKILL.md` first. This skill provides the concrete workload and launch constraints for a long-horizon Qwen3-8B demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@../../inference_optimizer/SKILL.md`. This skill provides the concrete workload and launch constraints for a long-horizon Qwen3-8B demo.
 
 ## Run Mode
 
