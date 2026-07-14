@@ -14,8 +14,8 @@ Behaviour-preserving flags let each legacy call site delegate here without any
 observable change:
 
 * ``make_parents`` — create ``path.parent`` first (some sites did, some did not).
-* ``atomic_write_json``: ``indent`` / ``sort_keys`` / ``trailing_newline`` mirror
-  the exact ``json.dump`` shape each site used.
+* ``atomic_write_json``: ``indent`` / ``sort_keys`` / ``ensure_ascii`` /
+  ``trailing_newline`` mirror the exact ``json.dump`` shape each site used.
 
 Sites intentionally NOT delegated here (kept local by design):
 
@@ -35,12 +35,27 @@ from __future__ import annotations
 import json as _json
 import os
 import tempfile
+from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 
-def atomic_write_bytes(path: Path, data: bytes, *, make_parents: bool = False) -> None:
+def _best_effort_fsync(fh: Any) -> None:
+    """``os.fsync`` the file handle, swallowing OSError (tmpfs/wekafs reject it)."""
+    with suppress(OSError):
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def atomic_write_bytes(
+    path: Path,
+    data: bytes,
+    *,
+    make_parents: bool = False,
+    fsync: bool = False,
+    mode: int | None = None,
+) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``).
 
     Args:
@@ -48,6 +63,9 @@ def atomic_write_bytes(path: Path, data: bytes, *, make_parents: bool = False) -
         data: Bytes to write.
         make_parents: When ``True``, create ``path.parent`` (``parents=True,
             exist_ok=True``) before writing.
+        fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
+            rename (OSError swallowed on mounts that reject the syscall).
+        mode: Optional file mode applied to the temp file before rename.
 
     Raises:
         Exception: Re-raised after a best-effort unlink of the temp file when
@@ -61,6 +79,12 @@ def atomic_write_bytes(path: Path, data: bytes, *, make_parents: bool = False) -
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+            if fsync:
+                _best_effort_fsync(fh)
+        if mode is not None:
+            # Strip group/other bits: written files may hold sensitive payloads,
+            # so never expose them beyond the owner regardless of caller intent.
+            os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
         with suppress(OSError):
@@ -74,6 +98,8 @@ def atomic_write_text(
     *,
     encoding: str = "utf-8",
     make_parents: bool = False,
+    fsync: bool = False,
+    mode: int | None = None,
 ) -> None:
     """Atomically write ``text`` to ``path`` (temp file in same dir + ``os.replace``).
 
@@ -82,6 +108,9 @@ def atomic_write_text(
         text: Full file contents to write.
         encoding: Text encoding for the temp file (default ``utf-8``).
         make_parents: When ``True``, create ``path.parent`` before writing.
+        fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
+            rename (OSError swallowed on mounts that reject the syscall).
+        mode: Optional file mode applied to the temp file before rename.
 
     Raises:
         Exception: Re-raised after a best-effort unlink of the temp file when
@@ -95,6 +124,12 @@ def atomic_write_text(
     try:
         with os.fdopen(fd, "w", encoding=encoding) as fh:
             fh.write(text)
+            if fsync:
+                _best_effort_fsync(fh)
+        if mode is not None:
+            # Strip group/other bits: written files may hold sensitive payloads,
+            # so never expose them beyond the owner regardless of caller intent.
+            os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
         with suppress(OSError):
@@ -108,8 +143,11 @@ def atomic_write_json(
     *,
     indent: int | None = 2,
     sort_keys: bool = True,
+    ensure_ascii: bool = True,
     trailing_newline: bool = False,
     make_parents: bool = True,
+    fsync: bool = False,
+    mode: int | None = None,
 ) -> None:
     """Atomically write ``data`` as JSON to ``path``.
 
@@ -118,13 +156,108 @@ def atomic_write_json(
         data: JSON-serialisable object.
         indent: ``json.dumps`` indent (default ``2``).
         sort_keys: ``json.dumps`` ``sort_keys`` (default ``True``).
+        ensure_ascii: ``json.dumps`` ``ensure_ascii`` (default ``True``).
         trailing_newline: Append a final ``"\\n"`` after the JSON body.
         make_parents: When ``True`` (default), create ``path.parent`` first.
+        fsync: When ``True``, best-effort ``os.fsync`` before the rename.
+        mode: Optional file mode applied to the temp file before rename.
     """
-    text = _json.dumps(data, indent=indent, sort_keys=sort_keys)
+    text = _json.dumps(data, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
     if trailing_newline:
         text += "\n"
-    atomic_write_text(path, text, make_parents=make_parents)
+    atomic_write_text(path, text, make_parents=make_parents, fsync=fsync, mode=mode)
 
 
-__all__ = ["atomic_write_bytes", "atomic_write_text", "atomic_write_json"]
+def append_jsonl(
+    path: Path,
+    row: Any,
+    *,
+    make_parents: bool = False,
+    fsync: bool = False,
+    ensure_ascii: bool = True,
+    sort_keys: bool = False,
+) -> None:
+    """Append one JSON object as a line to a JSONL file.
+
+    Serialises *row* with ``json.dumps`` and writes it plus a trailing newline
+    in ``"a"`` mode. Not atomic across processes, but a single ``write`` of a
+    compact single-line record is the standard append-log idiom.
+
+    Args:
+        path: Destination JSONL file.
+        row: JSON-serialisable value to append.
+        make_parents: When ``True``, create ``path.parent`` first.
+        fsync: When ``True``, best-effort ``os.fsync`` after the write.
+        ensure_ascii: ``json.dumps`` ``ensure_ascii`` (default ``True``).
+        sort_keys: ``json.dumps`` ``sort_keys`` (default ``False``).
+    """
+    path = Path(path)
+    if make_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    line = _json.dumps(row, ensure_ascii=ensure_ascii, sort_keys=sort_keys)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+        if fsync:
+            _best_effort_fsync(fh)
+
+
+def read_jsonl(path: Path, *, default: Any = None) -> list[Any]:
+    """Read a JSONL file into a list, skipping blank lines.
+
+    Malformed lines raise ``json.JSONDecodeError`` (callers that want tolerance
+    should catch it); a missing file returns *default* coerced to ``[]`` when
+    *default* is ``None``.
+
+    Args:
+        path: Source JSONL file.
+        default: Value returned when the file does not exist. ``None`` (the
+            default) is normalised to an empty list.
+
+    Returns:
+        The parsed rows in file order.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return [] if default is None else default
+    rows: list[Any] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            rows.append(_json.loads(stripped))
+    return rows
+
+
+def tail_lines(path: Path, n: int) -> list[str]:
+    """Return the last *n* lines of a text file (memory-bounded).
+
+    Uses a bounded ``deque`` so only *n* lines are held in memory regardless of
+    file size. Trailing newlines are stripped from each returned line.
+
+    Args:
+        path: Source text file.
+        n: Number of trailing lines to return. ``<= 0`` returns ``[]``.
+
+    Returns:
+        Up to *n* trailing lines, or ``[]`` when the file does not exist.
+    """
+    if n <= 0:
+        return []
+    path = Path(path)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            tail: deque[str] = deque(fh, maxlen=n)
+    except OSError:
+        return []
+    return [line.rstrip("\n") for line in tail]
+
+
+__all__ = [
+    "atomic_write_bytes",
+    "atomic_write_text",
+    "atomic_write_json",
+    "append_jsonl",
+    "read_jsonl",
+    "tail_lines",
+]
