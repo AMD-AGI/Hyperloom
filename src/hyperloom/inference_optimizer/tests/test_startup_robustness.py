@@ -137,6 +137,24 @@ def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_
     assert cli._claude_model_should_follow_codex() is True
 
 
+def test_anthropic_only_critic_agent_runtime_not_needed(clean_creds_env):
+    """Official Anthropic-only critic runs through ClaudeBackend, so critic-agent runtime is not required."""
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", anthropic_url)
+    if openai_url:
+        clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
+    assert cli._critic_agent_runtime_needed("agent") is False
+
+
+def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
+    """Official OpenAI-only keeps the critic-agent path."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
+    openai_url = cli._resolve_llm_endpoints()[1]
+    clean_creds_env.setenv("OPENAI_BASE_URL", openai_url)
+    assert cli._critic_agent_runtime_needed("agent") is True
+
+
 def test_resolve_llm_endpoints_deepseek_key_only(clean_creds_env):
     clean_creds_env.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-fake-token")
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
