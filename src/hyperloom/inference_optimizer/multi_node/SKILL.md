@@ -131,7 +131,7 @@ Typical prompt fields and where they land:
 | `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **Dynamo PD only.** export these; appended to the **per-role** sglang launch AFTER the shared `--extra-args` base (role-specific wins on duplicate keys). Used to give prefill vs decode different server flags (e.g. decode `--enable-dp-attention --moe-a2a-backend deepep --deepep-mode normal --moe-dense-tp-size 1 --enable-dp-lm-head`; prefill `--mem-fraction-static 0.8 --disable-radix-cache`). Empty (default) ⇒ both roles use only the shared `--extra-args`. **Sandbox-only** (do NOT `--rayjob-extra-env`). |
 | `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake` (or export `$PD_TRANSFER_BACKEND`); `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
 | `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
-| `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
+| `KERNEL_OPT_*` | `export` before `install.sh` / `optimize` |
 | prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `src/hyperloom/inference_optimizer/SKILL.md` "Tool source fields". |
 | MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
 
@@ -147,7 +147,7 @@ These are consumed by `install.sh` / `inference_optimizer optimize` /
 RayJob pod reads them. Forwarding them pollutes the pod env and risks
 shadowing real values.
 
-- `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_OPT_*`
+- `KERNEL_OPT_*`
 - `NODE_TLS_REJECT_UNAUTHORIZED`
 - `RANDOM_RANGE_RATIO`, `RUN_EVAL`
 - `MODEL_PATH`, `FRAMEWORK`, `TP`, `EP`, `ISL`, `OSL`, `CONC`, `PRECISION`,
@@ -176,8 +176,7 @@ Environment block / `setup_env.sh`; do not treat literals below as defaults):
 export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
 export HYPERLOOM_MN_HEALTH_WAIT_S=1800
 # Optional kernel exports — only when the prompt specifies them
-export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-forge,geak_v3}"
-export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
+export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-forge}"
 
 setsid nohup inference_optimizer --verbose optimize \
   --model "$MODEL_PATH" \

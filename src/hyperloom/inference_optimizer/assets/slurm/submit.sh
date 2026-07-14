@@ -21,6 +21,10 @@
 #       --source-dir <path>         existing Hyperloom checkout to use instead of
 #                                   cloning (e.g. /mnt/vast/hyperloom)
 #       --data-root <path>          artifact root (default: <shared-mount>/hyperloom-slurm)
+#       --model-base <path>         local model store; the model dir is resolved
+#                                   as <model-base>/<basename repo_id> when it
+#                                   exists, else the tsv repo_id (HF id) is used.
+#                                   remember to bind-mount it via HL_EXTRA_MOUNTS.
 #       --dry-run                   print the sbatch command, do not submit
 #   -h, --help                      show this help
 #
@@ -45,6 +49,7 @@ DATA_ROOT=""
 SHARED_MOUNT=""
 SOURCE_DIR=""
 GPU_TYPE_OVERRIDE=""
+MODEL_BASE=""
 DRY_RUN=0
 ALL=0
 KEYS=()
@@ -65,6 +70,7 @@ while [ "$#" -gt 0 ]; do
     --shared-mount)  SHARED_MOUNT="${2:?}"; shift 2 ;;
     --source-dir)    SOURCE_DIR="${2:?}"; shift 2 ;;
     --data-root)     DATA_ROOT="${2:?}"; shift 2 ;;
+    --model-base)    MODEL_BASE="${2:?}"; shift 2 ;;
     --all)           ALL=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     -h|--help)       usage ;;
@@ -101,6 +107,7 @@ for KEY in "${KEYS[@]}"; do
   [ -n "$SHARED_MOUNT" ]       && EXPORT_KV="$EXPORT_KV,HL_SHARED_MOUNT=$SHARED_MOUNT"
   [ -n "$SOURCE_DIR" ]         && EXPORT_KV="$EXPORT_KV,HYPERLOOM_SOURCE_DIR=$SOURCE_DIR"
   [ -n "$GPU_TYPE_OVERRIDE" ]  && EXPORT_KV="$EXPORT_KV,HL_GPU_TYPE_OVERRIDE=$GPU_TYPE_OVERRIDE"
+  [ -n "$MODEL_BASE" ]         && EXPORT_KV="$EXPORT_KV,HL_MODEL_BASE=$MODEL_BASE"
 
   CMD=(sbatch
     --job-name "hl-${KEY}-${BACKEND}"

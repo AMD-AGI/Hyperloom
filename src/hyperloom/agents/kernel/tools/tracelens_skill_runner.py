@@ -329,7 +329,7 @@ Important requirements:
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
    - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
-6. Do not run GEAK, OOB kernel optimization, or modify model/framework source.
+6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
 """
