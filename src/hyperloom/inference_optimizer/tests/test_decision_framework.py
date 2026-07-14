@@ -40,6 +40,9 @@ def _silent_backends() -> dict[str, object]:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # This file exercises legacy/native KERNEL entry behavior; default GEAK is
+    # covered separately.
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers resolve from disk even when the host env is unset.
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
@@ -61,6 +64,7 @@ async def test_run_optimization_response_records_to_shared_state(
     session_dir,
     monkeypatch,
 ):
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
@@ -146,8 +150,10 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
     session_dir,
     monkeypatch,
 ):
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -194,6 +200,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
     """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -215,6 +222,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -266,6 +274,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0

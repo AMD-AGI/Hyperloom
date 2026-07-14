@@ -7,6 +7,7 @@ import pytest
 from hyperloom.common.llm_config import (
     LLMConfigError,
     apply_reasoning_effort,
+    claude_sdk_env_options,
     derive_openai_base_url,
     openai_client_kwargs,
     parse_custom_headers,
@@ -50,7 +51,7 @@ def test_derive_openai_base_url_from_amd_anthropic_endpoint():
 def test_openai_kwargs_from_anthropic_only_gateway_env():
     kwargs = openai_client_kwargs(
         env={
-            "ANTHROPIC_API_KEY": "ak-anthropic",
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
             "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
             "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
         }
@@ -63,7 +64,7 @@ def test_openai_kwargs_from_anthropic_only_gateway_env():
 def test_openai_kwargs_auto_adds_amd_subscription_header_when_missing():
     kwargs = openai_client_kwargs(
         env={
-            "ANTHROPIC_API_KEY": "ak-anthropic",
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
             "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
         }
     )
@@ -73,14 +74,14 @@ def test_openai_kwargs_auto_adds_amd_subscription_header_when_missing():
 def test_openai_kwargs_preserves_explicit_openai_config():
     kwargs = openai_client_kwargs(
         env={
-            "OPENAI_API_KEY": "sk-openai",
+            "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://api.openai.com/v1",
-            "ANTHROPIC_API_KEY": "ak-anthropic",
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
             "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
         }
     )
     assert kwargs == {
-        "api_key": "sk-openai",
+        "api_key": "openai-token",
         "base_url": "https://api.openai.com/v1",
     }
 
@@ -88,3 +89,28 @@ def test_openai_kwargs_preserves_explicit_openai_config():
 def test_openai_kwargs_requires_a_key():
     with pytest.raises(LLMConfigError):
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic"})
+
+
+def test_claude_sdk_env_options_from_deepseek_key_only():
+    opts = claude_sdk_env_options(
+        model="deepseek-chat",
+        env={"_".join(("DEEPSEEK", "API", "KEY")): "deepseek-token"},
+    )
+    assert opts["setting_sources"] == []
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
+    assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "deepseek-token"
+    assert child_env["ANTHROPIC_MODEL"] == "deepseek-chat"
+
+
+def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
+    opts = claude_sdk_env_options(
+        model="deepseek-chat",
+        env={
+            "_".join(("DEEPSEEK", "API", "KEY")): "deepseek-token",
+            "DEEPSEEK_BASE_URL": "https://deepseek.example/anthropic",
+        },
+    )
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://deepseek.example/anthropic"

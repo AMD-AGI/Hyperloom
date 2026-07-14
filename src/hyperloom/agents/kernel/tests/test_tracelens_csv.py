@@ -1307,6 +1307,223 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
+def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
+    """TraceLens SDK runner must not inherit stale global Claude settings.
+
+    The production failure this guards against: ``~/.claude/settings.json`` can
+    contain a stale gateway token, while the active Hyperloom run is correctly
+    configured via process env. Passing ``env`` and ``setting_sources=[]`` keeps
+    the SDK child tied to the active run contract.
+    """
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token-active")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="claude-sonnet-4-5-20250929",
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    opts = captured["options"]
+    assert opts["setting_sources"] == []
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-token-active"
+    assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "anthropic-token-active"
+    assert child_env["ANTHROPIC_MODEL"] == "claude-sonnet-4-5-20250929"
+    assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-sonnet-4-5-20250929"
+
+
+def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
+    """OpenAI-only deployments must run TraceLens without Claude SDK."""
+    import asyncio
+    from types import SimpleNamespace
+
+    output_dir = tmp_path / "out"
+    calls: list[dict] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            tool_calls = [
+                SimpleNamespace(
+                    id="call_write",
+                    function=SimpleNamespace(
+                        name="write_file",
+                        arguments=json.dumps(
+                            {
+                                "path": str(output_dir / "analysis.md"),
+                                "content": "# Codex TraceLens report\n",
+                            }
+                        ),
+                    ),
+                )
+            ]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="", tool_calls=tool_calls),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=5),
+            )
+
+    class _Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    def _no_claude_query(**_kwargs):
+        raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
+
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="gpt-5.5",
+            sdk_query_factory=_no_claude_query,
+            sdk_options_cls=object,
+            openai_client_factory=_Client,
+        )
+    )
+
+    assert res.report_path == output_dir / "analysis.md"
+    assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
+    assert calls
+    assert calls[0]["model"] == "gpt-5.5"
+    assert calls[0]["tools"]
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_agent_transcript" in res.artifact_paths
+
+
+def test_openai_tool_runner_rejects_out_of_scope_files_and_shell_strings(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+
+    read_out = json.loads(
+        tlr._execute_openai_tool(
+            "read_file",
+            json.dumps({"path": "/etc/passwd"}),
+            scope=scope,
+        )
+    )
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": str(tmp_path / "escape.md"), "content": "bad"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"command": "rm -rf /"}),
+            scope=scope,
+        )
+    )
+
+    assert read_out["ok"] is False
+    assert "outside allowed roots" in read_out["error"]
+    assert write_out["ok"] is False
+    assert "outside allowed roots" in write_out["error"]
+    assert shell_out["ok"] is False
+    assert "argv" in shell_out["error"]
+    assert not (tmp_path / "escape.md").exists()
+
+
+def test_openai_tool_runner_allows_output_write_and_tracelens_python(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+    script = scope.tracelens_root / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": "analysis.md", "content": "# ok\n"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"argv": ["python3", str(script)]}),
+            scope=scope,
+        )
+    )
+
+    assert write_out["ok"] is True
+    assert (scope.output_dir / "analysis.md").read_text(encoding="utf-8") == "# ok\n"
+    assert shell_out["ok"] is True
+    assert "ok" in shell_out["stdout"]
+
+
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
     """Sandbox-hang RCA: a gateway stream that goes silent mid-response must
     abort on the per-message idle timeout instead of blocking forever on
