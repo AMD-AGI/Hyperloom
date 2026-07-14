@@ -48,6 +48,71 @@ def test_bypass_backend_selected(monkeypatch):
     ]
 
 
+def test_bypass_runner_scalar_coercions():
+    assert bypass_runner._as_int("7", 1) == 7
+    assert bypass_runner._as_int("bad", 3) == 3
+    assert bypass_runner._as_int(None, 4) == 4
+
+    assert bypass_runner._as_opt_int("9") == 9
+    assert bypass_runner._as_opt_int("") is None
+    assert bypass_runner._as_opt_int(None) is None
+    assert bypass_runner._as_opt_int("bad") is None
+
+    assert bypass_runner._as_float("1.25", 0.0) == 1.25
+    assert bypass_runner._as_float("bad", 2.5) == 2.5
+    assert bypass_runner._as_float(None, 3.5) == 3.5
+
+
+def test_run_eval_enabled_env_and_yaml(monkeypatch):
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    assert bypass_runner._run_eval_enabled({}) is False
+    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "true"}) is True
+    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "0"}) is False
+
+    monkeypatch.setenv("RUN_EVAL", "yes")
+    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "false"}) is True
+    monkeypatch.setenv("RUN_EVAL", "off")
+    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "true"}) is False
+
+
+def test_server_reusable_classifies_boot_reuse_and_foreign(monkeypatch, tmp_path):
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda base_url: False)
+    assert (
+        bypass_runner._server_reusable("http://127.0.0.1:8888", str(tmp_path), "sglang", 8888)
+        == bypass_runner._BOOT
+    )
+
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda base_url: True)
+    monkeypatch.setattr(
+        bypass_engine, "lifecycle_files_present",
+        lambda pid_dir, framework, port: True,
+    )
+    assert (
+        bypass_runner._server_reusable("http://127.0.0.1:8888", str(tmp_path), "sglang", 8888)
+        == bypass_runner._REUSE
+    )
+
+    monkeypatch.setattr(
+        bypass_engine, "lifecycle_files_present",
+        lambda pid_dir, framework, port: False,
+    )
+    assert (
+        bypass_runner._server_reusable("http://127.0.0.1:8888", str(tmp_path), "sglang", 8888)
+        == bypass_runner._FOREIGN
+    )
+    assert (
+        bypass_runner._server_reusable("http://127.0.0.1:8888", None, "sglang", 8888)
+        == bypass_runner._FOREIGN
+    )
+
+
+def test_read_log_present_and_missing(tmp_path):
+    assert bypass_runner._read_log(tmp_path / "missing.log") == ""
+    path = tmp_path / "client_stderr.log"
+    path.write_text("hello\n", encoding="utf-8")
+    assert bypass_runner._read_log(path) == "hello\n"
+
+
 def test_server_command_sglang():
     cmd = bypass_engine.build_server_command(
         framework="sglang", model="/m", tp=2, port=8888,
