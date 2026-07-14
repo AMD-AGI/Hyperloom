@@ -1,24 +1,15 @@
-# Quickstart — Local Mode (Cursor)
+# Quickstart — Using a Docker container
 
-Local Mode runs Hyperloom inside a Docker container on an AMD GPU machine. You attach Cursor to that container and launch the optimization loop from Cursor Chat.
-
-There are two ways to get a GPU environment:
-
-- **[Your own GPU machine](#quickstart--your-own-gpu-machine)** — the primary, fully self-serve path.
-- **[Primus-SaFE platform](#optional-quickstart--primus-safe-platform)** — an optional path for AMD-internal users on the Primus-SaFE Authoring platform.
-
----
-
-## Quickstart — Your own GPU machine
+These instructions allow you to run Hyperloom inside a Docker container on an AMD GPU machine. You attach Cursor to that container and launch the optimization loop from Cursor Chat.
 
 **Prerequisites:**
 
-- An AMD GPU machine supporting **MI300X / MI308X / MI325X / MI355X** (MI308X and MI325X run with the MI300X runner scripts).
-- Access to an OpenAI-compatible (LiteLLM-style) LLM gateway: set **both** `SAFE_API_KEY` (your gateway API key) and `OPENAI_BASE_URL` (your gateway’s `/v1` endpoint). The Primus-SaFE LiteLLM gateway is one option (get your key via the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)), but any compatible gateway works.
+- A supported AMD GPU: **MI300X / MI308X / MI325X / MI355X** (MI308X and MI325X run with the MI300X runner scripts).
+- Access to an OpenAI-compatible (LiteLLM-style) LLM gateway: set **both** `OPENAI_BASE_URL` (your gateway’s `/v1` endpoint) and `ANTHROPIC_BASE_URL`.
 
 ### 1. Start the container
 
-Pick the ROCm image matching your GPU (browse all tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)**):
+Pick the ROCm image matching your GPU (browse SGLang tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)** and vLLM tages at [hub.docker.com/r/primussafe/vllm-openai-rocm/tags](https://hub.docker.com/r/primussafe/vllm-openai-rocm/tags)):
 
 - SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
@@ -68,7 +59,24 @@ Select the container you started (`hyperloom-local`):
 
 Cursor opens a new window attached to the running container. Open a workspace folder inside the container to continue.
 
-### 3. Clone Hyperloom and configure credentials
+### 3. Install Hyperloom
+
+#### 3.2 Install with an agent (Recommended)
+
+In the container, make sure GitHub authentication is available, then clone
+Hyperloom:
+
+```bash
+git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
+```
+
+Start a coding agent from the repo root (i.e. run `cluade` here or open this folder in Cursor) and install Hyperloom using the following prompt:
+
+> Follow the tutorial `examples/hyperloom-local-demo.md` and run the hyperloom demo.
+
+#### 3.2 Install from source
+
+##### 3.2.1 Clone Hyperloom and configure credentials
 
 In the container, make sure GitHub authentication is available, then clone
 Hyperloom:
@@ -78,15 +86,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 cp .env.template .env
 ```
 
-Configure one of the supported LLM gateway layouts:
-
-**Single gateway (default).** One OpenAI-compatible endpoint serves both Claude
-and GPT-style models. This is the usual AMD Primus-SaFE setup:
-
-```bash
-export SAFE_API_KEY=ak-your-safe-apikey
-export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
-```
+Configure the LLM gateway layouts:
 
 **Split Anthropic + OpenAI entrypoints.** Use this when Claude and GPT models
 live on different upstream providers or gateways:
@@ -98,15 +98,15 @@ export OPENAI_BASE_URL=https://api.openai.com/v1
 export OPENAI_API_KEY=sk-...
 ```
 
-**Model IDs.** The AMD defaults work on the Primus-SaFE gateway. For split
-entrypoints or a self-hosted gateway, pin model IDs that your gateway serves:
+**Model IDs.** For split entrypoints or a self-hosted gateway, pin model IDs
+that your gateway serves:
 
 ```bash
 export CLAUDE_MODEL=your-orchestration-model
 export CODEX_MODEL=your-kernel-model
 ```
 
-For non-AMD/self-hosted gateways, also opt out of the AMD-only model gate so
+Also opt out of the AMD-only model gate so
 preflight validates against your gateway's `/models` catalog:
 
 ```bash
@@ -114,11 +114,11 @@ export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
 ```
 
 Shell exports are enough for one session. To persist them, put the same values
-in `.env`; shell exports still win over `.env`. For non-AMD gateways, model
-overrides, Cursor keys, and endpoint overrides, see
+in `.env`; shell exports still win over `.env`. For model overrides, Cursor
+keys, and endpoint overrides, see
 [Authentication and credentials](../reference/authentication.md).
 
-### 4. Install runtime dependencies
+##### 3.2.2. Install runtime dependencies
 
 Run `install.sh` after credentials are available:
 
@@ -128,7 +128,6 @@ bash src/hyperloom/inference_optimizer/assets/install.sh
 source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
-- `SAFE_API_KEY` — your key from the [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). Exporting it in the shell is enough; to persist it instead, use the `.env` appendix below.
 - `USER_DATA_PATH` — Hyperloom's runtime directory for dependency code, logs, state, and results (not the source directory). Use an absolute path pointing at any location with enough space.
 
 When it finishes, source `kernel-agent.env.sh` before launching.
@@ -181,16 +180,18 @@ cp .env.template .env
 Edit `.env`:
 
 ```text
-SAFE_API_KEY=ak-your-safe-apikey
-OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
 ```
 
 Shell `export` always wins over `.env` — see [Credential precedence](../reference/authentication.md#credential-precedence).
 
-For setups beyond the single-gateway default above, see [Authentication and credentials](../reference/authentication.md):
+For more information, see [Authentication and credentials](../reference/authentication.md):
 
 - **Split Anthropic + OpenAI entrypoints** — [Split entrypoints](../reference/authentication.md#split-entrypoints-native-anthropic-openai)
-- **Non-AMD / self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd-self-hosted-gateway)
+- **Self-hosted gateway + custom models** — [Non-AMD / self-hosted gateway](../reference/authentication.md#non-amd-self-hosted-gateway)
 - **Optional `TRACELENS_INTERNAL_ROOT`** — [Dependency checkout variables](../reference/authentication.md#dependency-checkout-variables)
 
 </details>

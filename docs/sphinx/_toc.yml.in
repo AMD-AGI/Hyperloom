@@ -5,8 +5,6 @@ root: index
 
 subtrees:
 - entries:
-  - file: what-is-hyperloom.md
-    title: What is Hyperloom?
   - file: release-notes.md
     title: Release notes
   - file: compatibility.md
@@ -14,10 +12,10 @@ subtrees:
 
 - caption: Install
   entries:
-  - file: install/quickstart.md
-    title: Quickstart — hosted UI
+  - file: install/local-mode.md
+    title: Quickstart — Docker
   - file: install/bare-metal.md
-    title: Quickstart — bare metal
+    title: Quickstart — Bare metal
   - file: install/slurm.md
     title: Quickstart — Slurm
 
@@ -37,6 +35,8 @@ subtrees:
         title: GEAK
       - file: components/agentkernelarena.md
         title: AgentKernelArena
+  - file: conceptual/optimization-loop.md
+    title: Hyperloom optimization loop
 
 - caption: How to
   entries:
@@ -44,11 +44,6 @@ subtrees:
     title: Run a Hyperloom optimization
   - file: how-to/quantization-quark.md
     title: Quantization with AMD Quark
-
-- caption: Conceptual
-  entries:
-  - file: conceptual/optimization-loop.md
-    title: Hyperloom optimization loop
 
 - caption: Reference
   entries:
