@@ -47,6 +47,16 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _as_opt_int(value: Any) -> int | None:
+    """Coerce to int, or None when unset/blank/invalid."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _as_float(value: Any, default: float) -> float:
     """Coerce to float, tolerating None/str; return default on failure."""
     try:
@@ -220,7 +230,7 @@ def run_benchmark(
         )
 
     # phase == "all": start server, run client, always teardown.
-    server_env = _server_env(profile, profile_dir)
+    server_env = _server_env(profile, profile_dir, bench_envs)
     extra_args = _tokenize_extra_args(bench_envs, framework)
     try:
         server_cmd = bypass_engine.build_server_command(
@@ -256,7 +266,7 @@ def _run_server_phase(
     bench_envs, server_log, base_url, timeout_s, pid_dir, workspace, output_dir,
 ) -> int:
     """Start a persistent server, write pid/meta, and exit without teardown."""
-    server_env = _server_env(profile, profile_dir)
+    server_env = _server_env(profile, profile_dir, bench_envs)
     extra_args = _tokenize_extra_args(bench_envs, framework)
     try:
         server_cmd = bypass_engine.build_server_command(
@@ -318,7 +328,7 @@ def _run_lifecycle_all(
     left running (pid/meta written) so a later reuse round can attach; the
     server is only torn down when this round requests cleanup.
     """
-    server_env = _server_env(profile, profile_dir)
+    server_env = _server_env(profile, profile_dir, bench_envs)
     extra_args = _tokenize_extra_args(bench_envs, framework)
     try:
         server_cmd = bypass_engine.build_server_command(
@@ -394,10 +404,16 @@ def _run_client_and_eval(
     bench_envs, workspace, timeout_s,
 ) -> int:
     """Run the InferenceX client, then optional eval; return client rc."""
+    # Honor materializer-computed request sizing (env then YAML envs) so the
+    # benchmark scale matches Magpie; fall back to build_client_command
+    # defaults (conc*10 / 2*conc) when unset.
+    num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
+    num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
     client_cmd = bypass_engine.build_client_command(
         inferencex_root=inferencex_root, python_exe=sys.executable, model=model,
         base_url=base_url, isl=isl, osl=osl, conc=conc, random_range_ratio=rrr,
         result_dir=str(workspace), result_filename="inferencex_result",
+        num_prompts=num_prompts, num_warmups=num_warmups,
         profile=profile, trust_remote_code=True,
     )
     rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
@@ -431,9 +447,17 @@ def _finalize_report(*, workspace, framework, model, server_log, bench_envs, sta
 
 
 
-def _server_env(profile: bool, profile_dir: str | None) -> dict[str, str]:
-    """Build the server subprocess env (inherits parent + profiler dirs)."""
+def _server_env(
+    profile: bool, profile_dir: str | None, bench_envs: dict | None = None,
+) -> dict[str, str]:
+    """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
     env = os.environ.copy()
+    # GPU pin: the materializer writes ROCR_VISIBLE_DEVICES into benchmark.envs
+    # (reconciled against TP). Inject it so the server binds the same cards
+    # Magpie would; missing on single-GPU pods (harmless).
+    rocr = str((bench_envs or {}).get("ROCR_VISIBLE_DEVICES") or "").strip()
+    if rocr:
+        env["ROCR_VISIBLE_DEVICES"] = rocr
     if profile and profile_dir:
         env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
         env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir

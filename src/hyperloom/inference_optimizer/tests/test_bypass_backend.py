@@ -10,6 +10,7 @@ Magpie-compatible report contract, and end-to-end orchestration.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -739,3 +740,64 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     # parse_eval_results maps a passing quality_gate onto accuracy=1.0 for xdit.
     out = parse_eval_results(ws, framework="xdit")
     assert out["accuracy"] == 1.0
+
+
+def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
+    """NUM_PROMPTS/NUM_WARMUPS from YAML envs reach the client command."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    import yaml
+    cfg = {
+        "benchmark": {
+            "framework": "sglang", "model": "/m", "precision": "bf16",
+            "runner_type": "mi300x", "run_mode": "local",
+            "inferencex_path": str(inferencex), "timeout_seconds": 60,
+            "envs": {"TP": 1, "CONC": 4, "ISL": 128, "OSL": 64, "RUN_EVAL": "false",
+                     "NUM_PROMPTS": 37, "NUM_WARMUPS": 3},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    class _FakeServer:
+        pid = 1
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        if "--num-prompts" in cmd:
+            captured["num_prompts"] = cmd[cmd.index("--num-prompts") + 1]
+            captured["num_warmups"] = cmd[cmd.index("--num-warmups") + 1]
+            rd = Path(cmd[cmd.index("--result-dir") + 1])
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "inferencex_result.json").write_text(
+                json.dumps({"output_throughput": 1.0, "completed": 1, "duration": 1.0}), encoding="utf-8"
+            )
+
+        class _P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert captured.get("num_prompts") == "37"
+    assert captured.get("num_warmups") == "3"
+
+
+def test_server_env_injects_rocr_visible_devices():
+    env = bypass_runner._server_env(False, None, {"ROCR_VISIBLE_DEVICES": "0,1,2,3"})
+    assert env["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+    env2 = bypass_runner._server_env(False, None, {})
+    # No pin in bench_envs: whatever the parent env had (may be unset).
+    assert env2.get("ROCR_VISIBLE_DEVICES") == os.environ.get("ROCR_VISIBLE_DEVICES")
