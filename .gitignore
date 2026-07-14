@@ -79,10 +79,8 @@ ci/candidates/*.json
 !ci/candidates/inferencex_daily_fixed.json
 
 # temp file
-code_functions_guidance
-tree-reform.MD
-tree-reform-lessons.MD
 code_functions_guidance_v2
 .gen_funcdocs.wf.js
 .gen_funcdocs_reboot.wf.js
+evaluation_analysis
 

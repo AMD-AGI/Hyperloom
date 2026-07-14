@@ -171,3 +171,17 @@ def cache_hit_rate(obj: _CacheCounts) -> float:
     if total <= 0:
         return 0.0
     return obj.cache_read_input_tokens / total
+
+
+def aggregate_cache_tokens(session_dir: Path) -> tuple[int, int]:
+    """Return (cache_creation, cache_read) summed over the session LLM ledger.
+
+    Reads ``reports/trace/llm_calls.jsonl`` (+ ext shards) via the breakdown
+    collector, so the figures match ``session_breakdown.json``. This replaces the
+    never-written ``state["tick_cache_metrics"]`` source. Best-effort ``(0, 0)``.
+    """
+    from hyperloom.inference_optimizer.breakdown.collectors.decision import (
+        aggregate_session_cache_tokens,
+    )
+
+    return aggregate_session_cache_tokens(session_dir)
