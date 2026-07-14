@@ -64,8 +64,6 @@ from _paths import workspace_root
 # TraceLens and bypass routes gate on identical semantics (kept as private
 # aliases to preserve existing references/tests in this module).
 from _idle_gate import (
-    HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
-    HIGH_IDLE_PCT_THRESHOLD_ENV,
     build_high_idle_warning as _build_high_idle_warning,
     resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
 )

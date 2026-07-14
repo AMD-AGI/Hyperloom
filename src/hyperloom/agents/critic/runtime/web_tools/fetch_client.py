@@ -325,7 +325,6 @@ class WebFetchClient:
     config: WebToolsConfig
     http_client: httpx.Client
     _cache: TTLCache = field(init=False, repr=False)
-    call_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Initialise the per-instance TTL+LRU cache from the config."""
@@ -349,7 +348,6 @@ class WebFetchClient:
         Returns:
             str: The formatted fetch output, or an ``Error: ...`` message.
         """
-        self.call_count += 1
         url_raw = payload.get("url")
         raw_param = bool(payload.get("raw"))
         max_bytes_raw = payload.get("max_bytes")

@@ -69,18 +69,13 @@ def test_merge_context_fills_from_memory(sm):
     assert "workload" in result.explicit_keys
 
 
-def test_list_decisions_and_events_empty(sm):
-    assert sm.list_decisions("s_empty") == []
-    assert sm.list_events("s_empty") == []
-
-
-def test_append_decision_and_event_roundtrip(sm):
+def test_append_decision_and_event_write_jsonl(sm):
     sm.append_decision("s1", {"verdict": "approve"})
     sm.append_event("s1", {"kind": "note", "text": "hi"})
-    decisions = sm.list_decisions("s1")
-    events = sm.list_events("s1")
-    assert decisions and decisions[0]["decision_review"]["verdict"] == "approve"
-    assert events and events[0]["kind"] == "note"
+    decision = json.loads(sm._decisions_path("s1").read_text("utf-8").splitlines()[0])
+    event = json.loads(sm._events_path("s1").read_text("utf-8").splitlines()[0])
+    assert decision["decision_review"]["verdict"] == "approve"
+    assert event["kind"] == "note"
 
 
 def test_append_decision_rejects_non_dict(sm):
@@ -120,11 +115,7 @@ def test_put_cached_priors_rejects_non_list(sm):
 
 
 def test_reviewed_helpers_roundtrip(sm):
-    assert sm.is_msg_already_reviewed("s1", "m1") is False
-    assert sm.reviewed_verdict_for("s1", "m1") is None
     sm.mark_reviewed("s1", "m1", "approve", decision_id="d1")
-    assert sm.is_msg_already_reviewed("s1", "m1") is True
-    assert sm.reviewed_verdict_for("s1", "m1") == "approve"
     assert sm.filter_unreviewed("s1", ["m1", "m2"]) == ["m2"]
 
 
@@ -135,19 +126,10 @@ def test_mark_reviewed_requires_msg_and_verdict(sm):
         sm.mark_reviewed("s1", "m1", "")
 
 
-def test_reviewed_verdict_for_non_dict_entry(sm):
-    sm._ensure_session_dir("s1")
-    path = sm._reviewed_path("s1")
-    path.write_text(json.dumps({"m1": "just-a-string"}), encoding="utf-8")
-    assert sm.reviewed_verdict_for("s1", "m1") is None
-
-
 def test_reviewed_helpers_tolerate_non_dict_top_level(sm):
     sm._ensure_session_dir("s1")
     path = sm._reviewed_path("s1")
     path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
-    assert sm.is_msg_already_reviewed("s1", "m1") is False
-    assert sm.reviewed_verdict_for("s1", "m1") is None
     assert sm.filter_unreviewed("s1", ["m1"]) == ["m1"]
 
 
@@ -156,7 +138,7 @@ def test_mark_reviewed_resets_non_dict_data(sm):
     path = sm._reviewed_path("s1")
     path.write_text(json.dumps(["corrupt"]), encoding="utf-8")
     sm.mark_reviewed("s1", "m1", "reject")
-    assert sm.reviewed_verdict_for("s1", "m1") == "reject"
+    assert json.loads(path.read_text("utf-8"))["m1"]["verdict"] == "reject"
 
 
 def test_read_json_corrupt_raises(sm):
@@ -167,12 +149,13 @@ def test_read_json_corrupt_raises(sm):
         sm.load_context("s1")
 
 
-def test_read_jsonl_skips_blank_and_flags_corrupt(sm):
+def test_event_jsonl_records_are_parseable(sm):
     sm._ensure_session_dir("s1")
     path = sm._events_path("s1")
     path.write_text('{"kind": "a"}\n\n   \n', encoding="utf-8")
-    assert [e["kind"] for e in sm.list_events("s1")] == ["a"]
+    rows = [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]
+    assert [e["kind"] for e in rows] == ["a"]
 
     path.write_text('{"kind": "a"}\n{bad json}\n', encoding="utf-8")
-    with pytest.raises(SessionMemoryError):
-        sm.list_events("s1")
+    with pytest.raises(json.JSONDecodeError):
+        [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]

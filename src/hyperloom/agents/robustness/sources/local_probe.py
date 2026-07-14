@@ -191,20 +191,6 @@ class LocalProbeConfig:
             return None
         return self.session_dir / "storage" / "coordinator.db"
 
-
-@dataclass
-class _ProbeOutcome:
-    """Result of a single sub-probe attempt.
-
-    Attributes:
-        success (bool): Whether the sub-probe produced usable data.
-        detail (str): Optional human-readable detail / failure reason.
-    """
-
-    success: bool
-    detail: str = ""
-
-
 class LocalProbeSource:
     """Minimum-effort local data source for the reactor.
 
