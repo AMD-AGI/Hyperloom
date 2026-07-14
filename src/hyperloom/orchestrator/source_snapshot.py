@@ -110,4 +110,3 @@ def snapshot_source_layer(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
     return {"snapshot_dir": str(dest_dir), **manifest}
-
