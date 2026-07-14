@@ -7,6 +7,48 @@ description: Run a 3-hour Hyperloom Qwen3-8B optimization session without the Ke
 
 Read and follow `@../../inference_optimizer/SKILL.md` first. This skill provides the concrete workload and launch constraints for a short Qwen3-8B demo.
 
+## Run Mode
+
+Resolve the run mode before launching Hyperloom:
+
+1. If `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly on the host.
+2. If `HYPERLOOM_RUN_MODE=docker`, this skill owns the Docker setup. Ask the user whether they want a `vllm` or `sglang` Docker image unless `HYPERLOOM_IMAGE` is already set. Use a ROCm image that already contains the selected framework; do not install the framework inside Docker.
+
+Suggested Docker images:
+
+- `vllm`: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
+- `sglang` MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
+- `sglang` MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
+
+In Docker mode, start a long-running container from the host before running setup or optimize:
+
+```bash
+docker run -d \
+  --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
+  --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --device /dev/kfd \
+  --device /dev/dri \
+  --group-add video \
+  -v "$PWD:$PWD" \
+  "$HYPERLOOM_IMAGE" \
+  tail -f /dev/null
+```
+
+Mount the Hyperloom workspace at the same path (`-v "$PWD:$PWD"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
+
+Then run the setup backend inside the container:
+
+```bash
+docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
+  'PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+```
+
+After that, run all remaining commands for this demo inside the same container with `docker exec -w "$PWD" ...`; do not run `inference_optimizer optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
+
+```bash
+docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
+```
+
 ## Environment
 
 - `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-8B from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
