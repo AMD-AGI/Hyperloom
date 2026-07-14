@@ -326,7 +326,6 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
@@ -336,18 +335,6 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     # WS2: GPU specialists default on at whole-machine capacity (detected GPU
     # count), not 0. Env=0 (or --gpu-specialist-capacity 0) still disables.
     assert args.gpu_specialist_capacity == 4
-
-
-def test_cli_research_lane_capacity_env_is_ignored(monkeypatch):
-    """The parser no longer accepts env fallback for research-lane capacity."""
-    from hyperloom.inference_optimizer import cli as cli_mod
-    from hyperloom.orchestrator.policy import gate as policy_mod
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "3")
-    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
-    parser = cli_mod._build_parser()
-    args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
-    assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
 
 
 def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):

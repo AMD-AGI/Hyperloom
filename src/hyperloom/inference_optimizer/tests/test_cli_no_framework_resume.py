@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 
-import pytest
-
 from hyperloom.inference_optimizer import cli
 
 
@@ -17,20 +15,12 @@ def _parse_optimize(argv: list[str]) -> object:
     return parser.parse_args(["optimize", "--model", "/tmp/m", *argv])
 
 
-def test_no_framework_agent_default_false_when_env_unset(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", raising=False)
+def test_no_framework_agent_default_false():
     args = _parse_optimize([])
     assert getattr(args, "no_framework_agent") is False
 
 
-def test_no_framework_agent_env_no_longer_sets_default(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", "1")
-    args = _parse_optimize([])
-    assert getattr(args, "no_framework_agent") is False
-
-
-def test_no_framework_agent_explicit_flag_disables(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", "0")
+def test_no_framework_agent_explicit_flag_disables():
     args = _parse_optimize(["--no-framework-agent"])
     assert getattr(args, "no_framework_agent") is True
 

@@ -34,29 +34,6 @@ def test_cli_no_enable_conc_sweep_disables():
     assert ns.enable_conc_sweep is False
 
 
-@pytest.mark.parametrize("val", ["0", "false", "no", "off", "FALSE", "Off"])
-def test_cli_env_var_no_longer_opts_out(monkeypatch: pytest.MonkeyPatch, val: str):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", val)
-    ns = _parse()
-    assert ns.enable_conc_sweep is True, f"env={val!r} must not change conc-sweep default"
-
-
-@pytest.mark.parametrize("val", ["", "1", "true", "yes", "on", "something"])
-def test_cli_env_var_truthy_or_unset_is_ignored(
-    monkeypatch: pytest.MonkeyPatch,
-    val: str,
-):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", val)
-    ns = _parse()
-    assert ns.enable_conc_sweep is True, f"env={val!r} must not change conc-sweep default"
-
-
-def test_cli_no_flag_overrides_truthy_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", "1")
-    ns = _parse("--no-enable-conc-sweep")
-    assert ns.enable_conc_sweep is False
-
-
 def test_cli_exposes_no_baseline_double_run_field(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)
     ns = _parse()

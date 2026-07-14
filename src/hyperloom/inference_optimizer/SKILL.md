@@ -712,8 +712,8 @@ Operator server flags have one supported CLI entry point:
 `EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` for baseline,
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
-`4,16,128` is treated as a sweep ladder: baseline uses the first value and the
-ladder is forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
+`4,16,128` is accepted for compatibility; baseline uses the first value.
+Use `--conc-sweep-concs` for the explicit sweep ladder.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
