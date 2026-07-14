@@ -262,7 +262,7 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
             install`` invocation (e.g. index flags).
     """
     candidates = (
-        ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
+        ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
         ("openai", "openai>=1.50"),
         ("httpx", "httpx>=0.27"),
     )

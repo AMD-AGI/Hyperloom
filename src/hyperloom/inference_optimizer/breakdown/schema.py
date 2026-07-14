@@ -1949,6 +1949,8 @@ class TokenUsageBucket(TypedDict, total=False):
     calls: int
     total_in_out: int
     grand_total: int
+    # cache_read / (cache_creation + cache_read); 0.0 when no split cache data.
+    cache_hit_rate: float
 
 
 class TokenUsageAttribution(TypedDict, total=False):

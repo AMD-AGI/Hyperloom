@@ -59,3 +59,7 @@ from reaching you.
 ## Output protocol
 
 Every reply MUST include exactly one `emit_intent` tool_use block carrying a `response`. Free-text replies are dropped.
+
+Put only NEW information in the `result` — do not restate the request, SharedState,
+or trace context already available to the Coordinator; summarize what your run
+produced or changed. Keep length proportional to substance.
