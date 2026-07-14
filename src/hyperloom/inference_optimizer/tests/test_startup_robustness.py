@@ -112,12 +112,14 @@ def test_resolve_llm_endpoints_legacy_openai_only(clean_creds_env):
     assert anthropic_url == "https://gateway.example"
 
 
-def test_resolve_llm_endpoints_anthropic_only_reused_for_openai(clean_creds_env):
-    """Only a non-official ANTHROPIC_BASE_URL: the OpenAI/Codex side reuses the same gateway URL."""
+def test_resolve_llm_endpoints_anthropic_only_derives_openai_v1(clean_creds_env):
+    """Only a non-official ANTHROPIC_BASE_URL: the OpenAI/Codex side derives the
+    ``/Unified/v1`` chat-completions base (not the raw ``/anthropic`` value,
+    which 404s on ``/chat/completions``)."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
     anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == "https://gateway.example/anthropic"
-    assert openai_url == "https://gateway.example/anthropic"
+    assert openai_url == "https://gateway.example/Unified/v1"
 
 
 def test_resolve_llm_endpoints_official_anthropic_key_only(clean_creds_env):
