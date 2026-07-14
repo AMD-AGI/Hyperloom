@@ -49,9 +49,8 @@ Ask these questions using the agent's structured question UI when available.
 1. Choose one LLM mode:
    - `Anthropic`
    - `DeepSeek`
-   - `LLM Gateway`
 
-   Present exactly those three option labels. Do not add parenthetical
+   Present exactly those two option labels. Do not add parenthetical
    descriptions, vendor examples, or base URLs to this first question.
 
 2. Ask the base URL as a separate follow-up question after the mode is chosen.
@@ -73,13 +72,6 @@ Ask these questions using the agent's structured question UI when available.
    - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
    - Ask for `DEEPSEEK_BASE_URL`; if blank, use `https://api.deepseek.com/anthropic`.
    - Tell the user the default `DEEPSEEK_MODEL` is `deepseek-chat`; ask whether to change it.
-
-   For `LLM Gateway`:
-   - Write `SAFE_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask for `OPENAI_BASE_URL`; if blank, use `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`.
-   - Tell the user the default `CLAUDE_MODEL` is `claude-opus-4-8`; ask whether to change it.
-   - Tell the user the default `CODEX_MODEL` is `gpt-4.1`; ask whether to change it.
-
 5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
@@ -125,9 +117,7 @@ Write only the keys for the selected LLM mode, plus the common keys. Do not
 write keys that belong to a mode the user did not choose.
 
 - `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
-  Do not write `OPENAI_BASE_URL` in this mode.
 - `DeepSeek`: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`.
-- `LLM Gateway`: `SAFE_API_KEY`, `OPENAI_BASE_URL`, `CLAUDE_MODEL`, `CODEX_MODEL`.
 
 Common keys (all modes):
 
@@ -152,7 +142,6 @@ with a shell `source`, so an unquoted value containing a space and a colon
 Write the placeholder header with `<PLEASE_FILL_IN>` when the key itself is
 still a placeholder, so the header value tracks the real key after the user
 edits `.env`. Skip this entirely when the base URL host is not `llm-api.amd.com`.
-The `LLM Gateway` mode does not need this header.
 
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
