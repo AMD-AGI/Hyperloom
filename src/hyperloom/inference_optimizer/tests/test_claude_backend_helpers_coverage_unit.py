@@ -153,7 +153,9 @@ def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> N
     assert opts.kwargs["setting_sources"] == []
     assert child_env["ANTHROPIC_API_KEY"] == "openai-key"
     assert child_env["ANTHROPIC_AUTH_TOKEN"] == "openai-key"
-    assert child_env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: openai-key"
+    # Strict header separation: OPENAI_CUSTOM_HEADERS is NOT copied to the
+    # Anthropic side (the claude path reads only ANTHROPIC_CUSTOM_HEADERS).
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in child_env
 
 
 # -- block helpers ---------------------------------------------------------

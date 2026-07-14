@@ -27,7 +27,6 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import parse_custom_headers
 from .executors import (  # noqa: F401 - re-exported for callers/tests
@@ -816,20 +815,19 @@ def _probe_llm_catalog(
 def _catalog_probe_headers(*, base_url: str, api_key: str) -> dict[str, str]:
     """Build headers for direct ``/models`` probes.
 
-    The Anthropic SDK supports ``ANTHROPIC_CUSTOM_HEADERS`` for gateways that
-    require subscription headers; the preflight catalog probe is a direct httpx
-    request, so it must apply the same env-specified headers itself.
+    Applies the operator's gateway custom headers (``OPENAI_CUSTOM_HEADERS`` /
+    ``ANTHROPIC_CUSTOM_HEADERS``) plus a Bearer token. Gateway-specific headers
+    (e.g. an AMD ``Ocp-Apim-Subscription-Key``) must be supplied via those env
+    vars — the probe applies no host-specific auto-injection. ``base_url`` is
+    kept for signature stability with the caller.
     """
+    del base_url  # no longer used for header selection (env-driven only)
     headers = parse_custom_headers(os.environ.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
         os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
     )
     lower_names = {name.lower() for name in headers}
     if api_key and "authorization" not in lower_names:
         headers["Authorization"] = f"Bearer {api_key}"
-    if api_key and "ocp-apim-subscription-key" not in lower_names:
-        parts = urlsplit(base_url)
-        if parts.hostname == "llm-api.amd.com":
-            headers["Ocp-Apim-Subscription-Key"] = api_key
     return headers
 
 
