@@ -84,7 +84,7 @@ class Config:
     agent_stall_timeout_s: float = 300.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
-    llm_model: str = "claude-opus-4-7"
+    llm_model: str = "claude-opus-4-8"
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_provider: str = "openai"
