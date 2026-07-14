@@ -61,13 +61,12 @@ from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float
 from _paths import workspace_root
 
 # Idle-gate threshold + high-idle warning: shared single source of truth so the
-# TraceLens and bypass routes gate on identical semantics (kept as private
-# aliases to preserve existing references/tests in this module).
+# TraceLens and bypass routes gate on identical semantics.
 from _idle_gate import (
     HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
     HIGH_IDLE_PCT_THRESHOLD_ENV,
     build_high_idle_warning as _build_high_idle_warning,
-    resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
+    resolve_idle_pct_threshold,
 )
 
 # Canonical roofline_source provenance enum, shared with the bypass route so both
@@ -79,7 +78,7 @@ from _roofline_source import (
 
 # Shared canonical analysis.md renderer so the deterministic route emits the same
 # section structure + table schemas as the bypass route.
-from _analysis_md import render_report as _render_canonical_report
+from _analysis_md import render_report
 
 
 # Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
@@ -713,11 +712,11 @@ def _resolve_arch_benchmark_timeout_s() -> int:
 def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple[float, dict[str, Any] | None]:
     """Return the idle threshold plus a warning when the gate is exceeded.
 
-    ``_build_high_idle_warning`` and ``_resolve_idle_pct_threshold`` are the
-    shared ``_idle_gate`` helpers (imported as private aliases at module top), so
-    the threshold, gate semantics, and warning shape stay unified across routes.
+    ``_build_high_idle_warning`` and ``resolve_idle_pct_threshold`` are the
+    shared ``_idle_gate`` helpers imported at module top, so the threshold, gate
+    semantics, and warning shape stay unified across routes.
     """
-    threshold = _resolve_idle_pct_threshold()
+    threshold = resolve_idle_pct_threshold()
     if idle_pct is None or idle_pct <= threshold:
         return threshold, None
     return threshold, _build_high_idle_warning(
@@ -4542,13 +4541,13 @@ def generate_minimal_analysis_md(
         ]
         p_items.append({"rank": rank, "category": cat, "rows": rows})
 
-    body = _render_canonical_report(
+    body = render_report(
         route="deterministic",
         model_name=model_name,
         provenance_detail="Deterministic hot-kernel extraction from structured *_metrics.json / priority_data.json.",
         exec_summary=exec_summary,
         system_signals=system_signals,
-        idle_threshold=_resolve_idle_pct_threshold(),
+        idle_threshold=resolve_idle_pct_threshold(),
         hot_kernels=hot_rows,
         p_items=p_items,
     )

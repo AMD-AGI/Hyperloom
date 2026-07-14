@@ -26,6 +26,7 @@ from _io_utils import (  # noqa: E402
     append_log,
     atomic_write_json,
     kernel_row_matches,
+    read_json,
     read_last_lines,
     safe_float,
     source_text_looks_complete,
@@ -3279,17 +3280,6 @@ def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str 
         return None
 
 
-def _read_json_file(path: str | Path) -> Any | None:
-    """Read a JSON file, returning ``None`` when missing or unparseable."""
-    text = _read_text_file(path, errors=None)
-    if text is None:
-        return None
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
-
-
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     """Scan an OOB ``optimization_report.md`` for a speedup figure.
 
@@ -3333,7 +3323,7 @@ def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
         float | None: The reported ``best_speedup`` when positive, else None
             (also None when the file is missing or unparseable).
     """
-    d = _read_json_file(final_report_path)
+    d = read_json(final_report_path)
     if not isinstance(d, dict):
         return None
     try:
@@ -3467,7 +3457,7 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
         bool | None: False if any correctness key is falsy, True if only
             truthy ones are found, or None when nothing relevant is present.
     """
-    data = _read_json_file(final_report_path)
+    data = read_json(final_report_path)
     if data is None:
         return None
 
