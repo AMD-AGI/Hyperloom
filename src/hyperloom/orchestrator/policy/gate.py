@@ -1455,7 +1455,11 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Enforce one sweep per SWEEP phase (Inv-9.4): deny agent sweeps once the auto-enqueued sweep landed (concurrent sweeps crash both vllm engines). Escape: ``params.bypass_sweep_singleton=True``.
+        """Deny agent workload sweeps once SWEEP auto-dispatched conc_sweep.
+
+        The automatic phase path now runs ``conc_sweep`` directly, so a later
+        LLM-proposed full ``sweep`` would only burn extra GPU time. Escape:
+        ``params.bypass_sweep_singleton=True``.
 
         Args:
             payload (dict[str, Any]): the intent payload;
@@ -1466,25 +1470,22 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
-                sweep task and no bypass flag is set.
+                conc_sweep task and no bypass flag is set.
         """
         self._validate_sweep_family_singleton(
             payload,
             bypass_key="bypass_sweep_singleton",
-            evidence_key="auto_sweep_task_id",
+            evidence_key="auto_conc_sweep_task_id",
             rule="sweep_phase_singleton",
             message_fn=lambda auto_id: (
-                f"sweep: SWEEP phase already has an auto-enqueued sweep "
-                f"task (auto_sweep_task_id={auto_id!r}); concurrent "
-                f"sweep proposals would race for the same GPUs and "
-                f"port and crash both vllm engines on init."
+                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
+                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
+                f"sweep is no longer part of the automatic closeout path."
             ),
             hint=(
-                "The Coordinator's SWEEP-entry hook already covers "
-                "the SKILL.md default grid plus the Cortex "
-                "recipe.sweep_grid field — no further sweep "
-                "proposal is needed. Wait for the auto-sweep to "
-                "finish (SWEEP→CLOSE transitions automatically). "
+                "The Coordinator's SWEEP-entry hook already dispatches "
+                "conc_sweep directly; no full workload sweep proposal is "
+                "needed. Wait for SWEEP→CLOSE. "
                 "If you genuinely need a second grid for debug, "
                 f"set params.bypass_sweep_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
@@ -1525,7 +1526,7 @@ class PolicyGate:
                 f"of GPU time."
             ),
             hint=(
-                "Coordinator's post-sweep hook already dispatched "
+                "Coordinator's SWEEP-entry hook already dispatched "
                 "conc_sweep — wait for SWEEP→CLOSE. If you need a "
                 "second run for debug, set "
                 f"params.bypass_conc_sweep_singleton=True on the "

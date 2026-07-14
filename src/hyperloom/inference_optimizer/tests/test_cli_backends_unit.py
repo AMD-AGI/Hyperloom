@@ -78,6 +78,32 @@ def test_build_backends_critic_agent_with_root() -> None:
     assert b["critic"][0] == "critic_agent"
 
 
+def test_build_backends_anthropic_only_uses_claude_for_critic_and_kernel(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        kernel_codex=True,
+    )
+    assert b["orchestration"][0] == "claude"
+    assert b["critic"][0] == "claude"
+    assert b["kernel_agent"][0] == "claude"
+
+
+def test_build_backends_openai_only_uses_codex_for_orchestration_and_kernel(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        kernel_codex=False,
+    )
+    assert b["orchestration"][0] == "codex"
+    assert b["critic"][0] == "critic_agent"
+    assert b["kernel_agent"][0] == "codex"
+
+
 def test_build_backends_invalid_robustness_choice() -> None:
     with pytest.raises(ValueError, match="robustness_choice"):
         _build(robustness_choice="bogus")
@@ -96,6 +122,13 @@ def test_build_backends_robustness_agent_with_root() -> None:
 # -- _build_proposal_scorer ------------------------------------------------
 def test_proposal_scorer_disabled() -> None:
     args = argparse.Namespace(no_proposal_scoring=True)
+    assert clib._build_proposal_scorer(args) is None
+
+
+def test_proposal_scorer_disabled_for_anthropic_only(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    args = argparse.Namespace(no_proposal_scoring=False, proposal_scorer_models=None)
     assert clib._build_proposal_scorer(args) is None
 
 
