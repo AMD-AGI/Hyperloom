@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any
+from hyperloom.common.coerce import to_float
 from hyperloom.common.payload_aliases import read_extra_server_args
 from ..state.optimization_journal import (
     Journal,
@@ -673,14 +674,8 @@ class WritebackCollaborator:
         for src in sources:
             if not isinstance(src, dict):
                 continue
-            raw = src.get("predicted_gain_pct")
-            if raw is None:
-                continue
-            try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if val != 0.0:
+            val = to_float(src.get("predicted_gain_pct"))
+            if val is not None and val != 0.0:
                 return val
         return None
 

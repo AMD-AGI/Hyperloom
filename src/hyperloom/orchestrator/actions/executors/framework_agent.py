@@ -88,11 +88,12 @@ from ._workload_envs import (
 from .integrate_patch import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
-    _git_apply,
+    _git_apply_collect_feedback,
     _git_stash_if_dirty,
     _with_stash_restore,
     _resolve_framework_root,
 )
+from ._apply_feedback import ApplyFeedback
 from ._nogit_patch import (
     _apply_patch_no_git,
     _is_git_tree,
@@ -726,22 +727,18 @@ class FrameworkAgentExecutor:
         # backup-based apply for non-git roots like pip wheel installs).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
+        apply_feedbacks: list[ApplyFeedback] = []
         for patch in patch_paths:
             if git_tree:
-                ok, err = _git_apply(framework_root, patch, three_way=False)
+                ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
                 if not ok:
-                    ok2, err2 = _git_apply(framework_root, patch, three_way=True)
-                    if not ok2:
-                        apply_errors.append(
-                            {
-                                "patch": str(patch),
-                                "stderr": err + " | -3 retry: " + err2,
-                            }
-                        )
-                        break
+                    apply_errors.append({"patch": str(patch), "stderr": err})
+                    if fb is not None:
+                        apply_feedbacks.append(fb)
+                    break
             else:
                 nogit_backup_root = output_root / "patch_backups"
-                ok, err, backups = _apply_patch_no_git(
+                ok, err, backups, fb = _apply_patch_no_git(
                     framework_root,
                     patch,
                     nogit_backup_root,
@@ -750,6 +747,8 @@ class FrameworkAgentExecutor:
                 self._nogit_patch_backups.extend(backups)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
+                    if fb is not None:
+                        apply_feedbacks.append(fb)
                     break
             applied.append(patch)
         if apply_errors:
@@ -769,6 +768,9 @@ class FrameworkAgentExecutor:
                 "patch_source_mode": patch_source_mode,
                 "reason": "git apply failed (see error)",
                 "workspace": str(output_root),
+                "lane": "perf_framework",
+                "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
+                "prior_patches": [str(p) for p in patch_paths],
             })
 
         if params.get("apply_only"):
