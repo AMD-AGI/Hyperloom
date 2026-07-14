@@ -891,9 +891,17 @@ def _custom_orch_model_allowed() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _critic_agent_runtime_needed(critic_choice: str) -> bool:
+def _critic_agent_runtime_needed(
+    critic_choice: str,
+    *,
+    codex_follows_claude: bool = False,
+) -> bool:
     """Whether the selected critic path will actually instantiate critic-agent."""
-    return critic_choice == "agent" and not _codex_model_should_follow_claude()
+    return (
+        critic_choice == "agent"
+        and not codex_follows_claude
+        and not _codex_model_should_follow_claude()
+    )
 
 
 def _validate_and_resolve_claude_model(
@@ -2032,7 +2040,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if _critic_agent_runtime_needed(critic_choice):
+    if _critic_agent_runtime_needed(
+        critic_choice,
+        codex_follows_claude=codex_follows_claude,
+    ):
         critic_agent_root = _resolve_critic_agent_root()
         if critic_agent_root is None:
             print(
@@ -2089,6 +2100,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         no_kernel=no_kernel,
+        codex_follows_claude=codex_follows_claude,
     )
     # Expose active session_dir to in-process executors via the canonical
     # pin env var (read by paths.session_dir() -> report.py, sweep.py, etc.).

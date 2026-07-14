@@ -96,6 +96,7 @@ def _build_backends(
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
     no_kernel: bool = False,
+    codex_follows_claude: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
@@ -132,8 +133,8 @@ def _build_backends(
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
-    provider_anthropic_only = _official_anthropic_only()
-    provider_openai_only = _official_openai_only()
+    provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
+    provider_openai_only = (not codex_follows_claude) and _official_openai_only()
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()

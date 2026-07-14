@@ -24,6 +24,16 @@ _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _INSTALL_BAREMETAL_SH = _ASSETS_DIR / "install_baremetal.sh"
 _PACKAGE_SKILL = Path(__file__).resolve().parent / "SKILL.md"
 
+_AMBIENT_LLM_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "DEEPSEEK_")
+_AMBIENT_LLM_ENV_KEYS = {
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+    "CLAUDE_MODEL",
+    "CODEX_MODEL",
+    "DEEPSEEK_MODEL",
+    "GEAK_CLAUDE_MODEL",
+}
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -44,6 +54,33 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _setup_dotenv_is_authoritative(env_file: Path) -> bool:
+    """Whether .env came from the interactive setup skill flow."""
+    if not env_file.is_file():
+        return False
+    try:
+        dotenv_text = env_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "HYPERLOOM_RUN_MODE=" in dotenv_text
+
+
+def _scrub_ambient_llm_env(env: dict[str, str], env_file: Path) -> None:
+    """Keep the setup skill's freshly-written .env authoritative.
+
+    Interactive setup collects the user's provider choice, writes .env, and then
+    invokes this backend. Ambient shell variables left behind by local Claude /
+    LiteLLM setup must not override that file and get persisted back into it by
+    install_baremetal.sh. Only scrub when the .env already exists so standalone
+    non-interactive installer use can still rely on process env.
+    """
+    if not _setup_dotenv_is_authoritative(env_file):
+        return
+    for key in list(env):
+        if key in _AMBIENT_LLM_ENV_KEYS or key.startswith(_AMBIENT_LLM_ENV_PREFIXES):
+            env.pop(key, None)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     installer = _INSTALL_BAREMETAL_SH
@@ -52,10 +89,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     root = Path.cwd().resolve()
+    env_file = root / ".env"
     env = os.environ.copy()
-    env.setdefault("REPO_ROOT", str(root))
-    env.setdefault("HYPERLOOM_ENV_FILE", str(root / ".env"))
-    env.setdefault("HYPERLOOM_SKILL_PATH", str(_PACKAGE_SKILL))
+    _scrub_ambient_llm_env(env, env_file)
+    env["REPO_ROOT"] = str(root)
+    env["HYPERLOOM_ENV_FILE"] = str(env_file)
+    env["HYPERLOOM_SKILL_PATH"] = str(_PACKAGE_SKILL)
+    if _setup_dotenv_is_authoritative(env_file):
+        env["HYPERLOOM_SETUP_ENV_AUTHORITATIVE"] = "1"
 
     cmd: list[str] = ["bash", str(installer)]
     if args.check_only:
