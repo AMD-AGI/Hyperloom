@@ -1215,6 +1215,36 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
     assert args.codex_model == "claude-opus-4-6"
 
 
+def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch, tmp_path, clean_url_env, stub_install_steps):
+    """Single Anthropic-compatible gateways may populate OPENAI_BASE_URL during preflight; model-follow intent is preflight-time."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-sonnet-5")
+    args = cli._build_parser().parse_args(
+        [
+            "optimize",
+            "--model",
+            "/m",
+            "--framework",
+            "vllm",
+            "--codex-model",
+            "gpt-5.5",
+        ]
+    )
+
+    codex_follows_before = cli._codex_model_should_follow_claude()
+    resolved = cli._preflight()
+    if codex_follows_before:
+        args.codex_model = args.claude_model
+
+    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/anthropic")
+    assert cli._codex_model_should_follow_claude() is False
+    assert args.codex_model == "claude-sonnet-5"
+
+
 def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     """With only OpenAI configured, an empty CLAUDE_MODEL follows CODEX_MODEL."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
