@@ -18,6 +18,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import _idle_gate as idle_gate  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
@@ -3597,23 +3598,23 @@ def test_extract_idle_pct_against_llama70b_fixture():
 
 
 def test_resolve_idle_pct_threshold_uses_default_when_env_unset(monkeypatch):
-    monkeypatch.delenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
 
 
 def test_resolve_idle_pct_threshold_honours_env_override(monkeypatch):
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
-    assert tla._resolve_idle_pct_threshold() == pytest.approx(35.5)
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
+    assert idle_gate.resolve_idle_pct_threshold() == pytest.approx(35.5)
 
 
 def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
     """Garbage / negative / empty env values fall back to the default, not a crash."""
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
 
 
 def test_build_high_idle_warning_shape(tmp_path):

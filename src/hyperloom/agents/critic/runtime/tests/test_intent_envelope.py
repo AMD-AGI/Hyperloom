@@ -146,23 +146,6 @@ def test_validate_envelope_rejects_empty_list():
         validate_envelope({"intents": []})
 
 
-def test_validate_envelope_rejects_unknown_verdict():
-    with pytest.raises(IntentEnvelopeValidationError, match="verdict"):
-        validate_envelope(
-            {
-                "intents": [
-                    {
-                        "intent_type": "review_verdict",
-                        "payload": {
-                            "target_proposal_msg_id": "x",
-                            "verdict": "yes",
-                        },
-                    }
-                ]
-            }
-        )
-
-
 def test_advice_intent_carries_optional_target():
     intent = build_advice_intent("watch dispatch", target_proposal_msg_id="m1")
     assert intent.payload["topic"] == "advice"

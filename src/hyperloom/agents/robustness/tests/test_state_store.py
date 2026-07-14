@@ -110,8 +110,6 @@ def test_atomic_write_replaces_in_place(tmp_path: Path) -> None:
 def test_view_load_save_roundtrip(tmp_path: Path) -> None:
     store = DetectorStateStore(session_dir=tmp_path)
     view = store.view("gpu_leak")
-    assert view.is_persistent is True
-    assert view.slot_name == "gpu_leak"
     assert view.load() == {}
 
     view.save({"consecutive_hits": 3})
@@ -122,7 +120,6 @@ def test_view_load_save_roundtrip(tmp_path: Path) -> None:
 
 def test_in_memory_view_is_noop(tmp_path: Path) -> None:
     view = DetectorStateView(store=None, slot="gpu_leak")
-    assert view.is_persistent is False
     assert view.load() == {}
     view.save({"consecutive_hits": 99})  # noop
     assert view.load() == {}

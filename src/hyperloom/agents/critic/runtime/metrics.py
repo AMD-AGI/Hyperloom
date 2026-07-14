@@ -7,7 +7,6 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any
 
 
 @dataclass
@@ -100,25 +99,6 @@ class MetricsRegistry:
                 hist = _Histogram(name=name)
                 self._histograms[name] = hist
             return hist
-
-    def snapshot(self) -> dict[str, Any]:
-        """Return a deep-copied view of all metric values.
-
-        Returns:
-            dict[str, Any]: A mapping with ``counters`` and ``histograms``
-            keys holding copies of the current values per series.
-        """
-        return {
-            "counters": {n: dict(c.values) for n, c in self._counters.items()},
-            "histograms": {n: {k: list(v) for k, v in h.samples.items()} for n, h in self._histograms.items()},
-        }
-
-    def reset(self) -> None:
-        """Clear all registered counters and histograms."""
-        with self._lock:
-            self._counters.clear()
-            self._histograms.clear()
-
 
 _registry = MetricsRegistry()
 
