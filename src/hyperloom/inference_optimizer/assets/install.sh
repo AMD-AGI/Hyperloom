@@ -498,8 +498,8 @@ export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; install.sh of kernel-agent writes geak-config /
-# kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
+# under MAGPIE_PATH; kernel-agent install.sh writes kernel-agent.env.sh into
+# HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
