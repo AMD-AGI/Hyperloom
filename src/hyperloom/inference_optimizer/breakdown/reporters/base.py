@@ -180,4 +180,3 @@ def fmt_pct(v: Any, *, plus: bool = False) -> str:
     sign = "+" if (plus and x > 0) else ""
     return f"{sign}{x:.2f}%"
 
-

@@ -64,4 +64,3 @@ class TestAppendJsonl:
         append_jsonl(p, [1, 2], fsync=True)
         assert p.read_text() == "[1, 2]\n"
 
-

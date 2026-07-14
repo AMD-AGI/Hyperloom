@@ -371,4 +371,3 @@ def test_mcp_call_raises_on_tool_iserror(monkeypatch) -> None:
     mcp = grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
     with pytest.raises(GbrainRemoteError):
         mcp.call("list_pages", {"type": "recipe"})
-
