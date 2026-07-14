@@ -256,7 +256,7 @@ def test_models_compatible_empty_is_ungated():
 # ── _resolve_reference_recipe gating (discovery only when flag is given) ──────
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.cli import _resolve_reference_recipe
+from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
 
 
 def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):

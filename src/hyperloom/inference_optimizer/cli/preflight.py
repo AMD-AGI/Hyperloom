@@ -2,19 +2,9 @@
 
 """CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts.
 
-Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). Four
-functions in this cluster (``_load_dotenv_fallback``,
-``_load_kernel_agent_env_fallback``, ``_clone_inferencex``, and — still in
-``__init__.py`` — ``_probe_llm_catalog``) are directly monkeypatched by name
-in ``test_preflight_auth_override.py`` via
-``monkeypatch.setattr(cli, "<name>", ...)``. Per tree-reform-lessons.MD §3.2/
-§3.3, a bare-name call from inside this module would resolve THIS module's
-own binding and silently bypass such a patch — even for a function defined in
-this same file (verified empirically; see the inline comments at each call
-site below). Every call to one of those four names is therefore a lazy,
-package-qualified ``from . import <name>`` read at call time instead of a
-bare-name reference, so the patched value on the ``cli`` package is always
-picked up (same technique used for coordinator.py's cross-collaborator calls).
+Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). Tests and
+callers that need private preflight hooks should import this concrete module
+instead of relying on package-root re-exports.
 """
 
 from __future__ import annotations
@@ -30,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .credentials import (  # noqa: F401 - re-exported for callers/tests
+from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
@@ -670,17 +660,8 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
-    # Lazy, package-qualified lookups (not bare-name calls): tests monkeypatch
-    # these by name on the ``cli`` package (``monkeypatch.setattr(cli,
-    # "_load_dotenv_fallback", ...)``), and since this function now lives in a
-    # sibling module, a bare-name call would resolve this module's own
-    # (un-patched) binding and silently bypass the patch. Re-reading the
-    # current package attribute at call time picks up the patched version.
-    from . import _load_dotenv_fallback as _load_dotenv_fallback_current
-    from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
-
-    _load_dotenv_fallback_current()
-    _load_kernel_agent_env_fallback_current()
+    _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
 
     # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.
     _validate_credentials()
@@ -866,14 +847,7 @@ def _preflight(
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
-        # Lazy package-qualified lookup (see the comment above the
-        # _load_dotenv_fallback/_load_kernel_agent_env_fallback calls): tests
-        # monkeypatch ``cli._clone_inferencex`` directly, and a bare-name call
-        # -- even to a function defined in this same module -- resolves this
-        # module's own binding and misses that patch (verified empirically).
-        from . import _clone_inferencex as _clone_inferencex_current
-
-        inferencex_path = _clone_inferencex_current(dest)
+        inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
             print(
                 "Preflight: ERROR — InferenceX checkout missing and clone "

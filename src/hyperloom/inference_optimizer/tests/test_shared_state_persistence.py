@@ -12,7 +12,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
@@ -37,7 +36,7 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

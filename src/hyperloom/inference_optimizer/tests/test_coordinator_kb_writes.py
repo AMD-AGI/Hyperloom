@@ -381,7 +381,7 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
 
 # A bare-baseline CLOSE whose tput happens to exceed a historical
 # best must NOT overwrite the validated best_config. Regression: a flagless
-# baseline clobbered the warm_replay recipe, dropping every extra_sglang_arg.
+# baseline clobbered the warm_replay recipe, dropping every extra_server_arg.
 def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     tmp_path: Path,
 ) -> None:
@@ -396,7 +396,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
         precision=_PREC,
         best_config={
             "name": "warm_replay",
-            "extra_sglang_args": "--schedule-policy lpm --page-size 16",
+            "extra_server_args": "--schedule-policy lpm --page-size 16",
             "tput": "2532",
         },
         best_throughput=2532.0,
@@ -411,7 +411,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     coord.cortex_finalize_recipe_and_journal()
     row = coord.cortex_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2532.0, "bare-baseline CLOSE clobbered a validated best_throughput"
-    assert row["best_config"].get("extra_sglang_args") == ("--schedule-policy lpm --page-size 16"), (
+    assert row["best_config"].get("extra_server_args") == ("--schedule-policy lpm --page-size 16"), (
         "warm_replay launch flags were dropped by a flagless baseline overwrite"
     )
 
@@ -437,10 +437,10 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
     ]
     ss.cumulative_gain_validated = 10.0
     attrs = coord._build_recipe_attrs_from_state()
-    assert attrs["best_config"]["extra_sglang_args"] == ("--page-size 32 --schedule-policy lpm"), (
+    assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
-        f"{attrs['best_config'].get('extra_sglang_args')!r}"
+        f"{attrs['best_config'].get('extra_server_args')!r}"
     )
 
 
@@ -455,27 +455,27 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
         framework_name=_FW,
         framework_version=_FWV,
         precision=_PREC,
-        best_config={"name": "old", "extra_sglang_args": "--page-size 16", "tput": "2000"},
+        best_config={"name": "old", "extra_server_args": "--page-size 16", "tput": "2000"},
         best_throughput=2000.0,
     )
     ss = coord.shared_state
     ss.current_best = {
         "name": "tuned",
-        "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
+        "extra_server_args": "--page-size 32 --schedule-policy lpm",
         "tput": 2200.0,
     }
     ss.optimization_stack = [
         {
             "action": "explore",
             "variant_name": "page32",
-            "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
+            "extra_server_args": "--page-size 32 --schedule-policy lpm",
         }
     ]
     ss.cumulative_gain_validated = 10.0
     coord.cortex_finalize_recipe_and_journal()
     row = coord.cortex_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
-    assert "--page-size 32" in row["best_config"].get("extra_sglang_args", "")
+    assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
 
 
 # kernel_optimizations[].e2e_decision must carry the integrate
@@ -547,7 +547,7 @@ def test_session_entry_carries_throughput_date_and_actions(
     ss.current_best = {
         "name": "tuned",
         "tput": 2150.0,
-        "extra_sglang_args": "--page-size 32",
+        "extra_server_args": "--page-size 32",
     }
     ss.optimization_stack = [
         {"action": "explore", "variant_name": "page32"},

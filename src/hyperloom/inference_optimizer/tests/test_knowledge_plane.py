@@ -96,7 +96,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 
 
 def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
-    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     args = _build_args(pr_monitor_enabled=False)
@@ -109,7 +109,7 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
 
 
 def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
-    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
@@ -209,7 +209,7 @@ def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
 # CLI flag plumbing reaches _bootstrap_knowledge_plane.
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     return parser.parse_args(["optimize", "--degraded-kb", *extra])
@@ -261,7 +261,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     monkeypatch,
 ):
     """Argparse ``args`` values propagate into the KnowledgePlane."""
-    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     constructed_urls: list[str] = []
