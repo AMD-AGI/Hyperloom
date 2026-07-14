@@ -204,43 +204,36 @@ docker run -d \
 > 1. **Reuse** the existing container (skip `docker run`).
 > 2. **Recreate** it: `docker rm -f hyperloom-local`, then run the command above.
 
-### 2b. Check GitHub connectivity for the dependency repos
+### 2b. Check GitHub connectivity for the public dependency repos
 
-`local_setup.sh` clones three repos; confirm the container can reach all of them
-*before* running setup (a mid-clone auth failure is painful to debug). Test both
-HTTPS and SSH from inside the container:
+The default demo uses the open GEAK whole-pipeline optimizer (`geak`, formerly
+GEAK v4). It must **not** require private KernelForge access. Confirm the
+container can reach the public repos that `install.sh` and the chained
+kernel-agent installer clone:
 
 ```bash
 docker exec hyperloom-local bash -lc '
-for r in AMD-AGI/KernelForge AMD-AGI/TraceLens SemiAnalysisAI/InferenceX; do
+for r in AMD-AGI/Magpie AMD-AGI/TraceLens AMD-AGI/GEAK SemiAnalysisAI/InferenceX; do
   h=$(GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/$r.git HEAD >/dev/null 2>&1 && echo OK || echo FAIL)
-  s=$(GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" git ls-remote git@github.com:$r.git HEAD >/dev/null 2>&1 && echo OK || echo FAIL)
-  echo "$r https=$h ssh=$s"
+  echo "$r https=$h"
 done'
 ```
 
-If a repo is unreachable, check for an SSH key in the container; if there is
-none, copy the host machine's `.ssh` into the container and re-test:
-
-```bash
-docker exec hyperloom-local bash -lc 'ls /root/.ssh/id_* 2>/dev/null || echo "no ssh key in container"'
-docker cp ~/.ssh hyperloom-local:/root/          # copy host keys -> container /root/.ssh
-docker exec hyperloom-local bash -lc 'chown root:root -R  /root/.ssh'
-```
-
 > **Agent:** print the results as the table below. If **any** repo is still
-> unreachable, offer the user these choices and **loop until all three are
-> reachable**:
-> 1. Authorize your own SSH key for these repos (e.g. GitHub org SSO / access),
->    then re-test.
-> 2. Point to a specific SSH key that works; copy it into the container, re-test.
-> 3. Stop the demo.
+> unreachable, ask the user whether to fix network/proxy access and re-test or
+> stop the demo. Do **not** copy SSH keys into the container by default.
 
-| Repo | HTTPS | SSH |
-|---|---|---|
-| AMD-AGI/KernelForge | _fill in_ | _fill in_ |
-| AMD-AGI/TraceLens | _fill in_ | _fill in_ |
-| SemiAnalysisAI/InferenceX | _fill in_ | _fill in_ |
+| Repo | HTTPS |
+|---|---|
+| AMD-AGI/Magpie | _fill in_ |
+| AMD-AGI/TraceLens | _fill in_ |
+| AMD-AGI/GEAK | _fill in_ |
+| SemiAnalysisAI/InferenceX | _fill in_ |
+
+> **Optional private Forge path:** only if the user explicitly wants the private
+> KernelForge backend and has repo access, set a Forge backend order and run
+> `local_setup.sh`. The default tutorial path below stays on `geak` and skips
+> KernelForge.
 
 ### 2c. Set up the Claude & Codex accounts in the container
 
@@ -288,9 +281,10 @@ of Claude account they will use:
   have one, they can get it from <https://llm.amd.com/key-management>. Then:
 
 ```bash
+export LLM_GATEWAY_KEY="xxxxx"   # <- the user's LLM gateway key
 export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"   # or the user's override
 export ANTHROPIC_API_KEY="dummy"
-export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: LLM_GATEWAY_KEY"   # <- the user's LLM_GATEWAY_KEY
+export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: $LLM_GATEWAY_KEY"
 ```
 
 - **Personal Anthropic account:** ask the user (a question) for their
@@ -309,7 +303,12 @@ works and list the models it can use:
 docker exec \
   -e ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  hyperloom-local bash -lc 'curl -sS -m 30 "$ANTHROPIC_BASE_URL/v1/models" -H "anthropic-version: 2023-06-01" -H "x-api-key: $ANTHROPIC_API_KEY"'
+  -e ANTHROPIC_CUSTOM_HEADERS="$ANTHROPIC_CUSTOM_HEADERS" \
+  hyperloom-local bash -lc '
+    headers=(-H "anthropic-version: 2023-06-01" -H "x-api-key: $ANTHROPIC_API_KEY")
+    [ -n "${ANTHROPIC_CUSTOM_HEADERS:-}" ] && headers+=(-H "$ANTHROPIC_CUSTOM_HEADERS")
+    curl -sS -m 30 "$ANTHROPIC_BASE_URL/v1/models" "${headers[@]}"
+  '
 ```
 
 > **Agent:**
@@ -343,16 +342,17 @@ of OpenAI account they will use:
   unless they provide their own. `LLM_GATEWAY_KEY` is **required**. Then:
 
 ```bash
+export LLM_GATEWAY_KEY="xxxxx"   # <- the user's LLM gateway key
 export OPENAI_BASE_URL="https://llm-api.amd.com/Unified/v1"   # or the user's override
 export OPENAI_API_KEY="dummy"
-export OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: LLM_GATEWAY_KEY"   # <- the user's LLM_GATEWAY_KEY
+export OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: $LLM_GATEWAY_KEY"
 ```
 
 - **Personal OpenAI account:** ask the user (a question) for their
   `OPENAI_API_KEY`, then:
 
 ```bash
-export OPENAI_BASE_URL="https://api.openai.com"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
 export OPENAI_API_KEY="xxxxx"   # <- the user's OPENAI_API_KEY
 ```
 
@@ -364,11 +364,13 @@ works and list its models:
 docker exec \
   -e OPENAI_BASE_URL="$OPENAI_BASE_URL" \
   -e OPENAI_API_KEY="$OPENAI_API_KEY" \
-  hyperloom-local bash -lc 'curl -sS -m 30 "$OPENAI_BASE_URL/v1/models" -H "Authorization: Bearer $OPENAI_API_KEY"'
+  -e OPENAI_CUSTOM_HEADERS="$OPENAI_CUSTOM_HEADERS" \
+  hyperloom-local bash -lc '
+    headers=(-H "Authorization: Bearer $OPENAI_API_KEY")
+    [ -n "${OPENAI_CUSTOM_HEADERS:-}" ] && headers+=(-H "$OPENAI_CUSTOM_HEADERS")
+    curl -sS -m 30 "${OPENAI_BASE_URL%/}/models" "${headers[@]}"
+  '
 ```
-
-(For the personal endpoint the correct models path is `/v1/models`; add the
-`/v1` suffix if `OPENAI_BASE_URL` does not already include it.)
 
 > **Agent:**
 > - If connectivity **fails** (non-200 / timeout / empty model list): go back to
@@ -406,32 +408,44 @@ mkdir -p "$DEMO_OUT/2-container-claude-setup"
 ## Step 3 — Configure Hyperloom
 
 Create the runtime `.env`, point it at this run's workspace and the Claude +
-Codex accounts you set up in Step 2c, then bootstrap Hyperloom's dependency
-checkouts with `local_setup.sh`.
+Codex accounts you set up in Step 2c, then bootstrap Hyperloom's public
+dependency checkouts with `install.sh`.
 
 ### 3a. Create and fill `.env`
 
-Run from the repo root (the repo is bind-mounted, so this `.env` is shared with
-the container):
+Run from the repo root. Compute the run workspace on the host, then write `.env`
+from inside the container so the Claude / Codex values come from the container
+environment you configured in Step 2c:
 
 ```bash
-cp .env.template .env
+export USER_DATA_PATH="$(pwd)/$DEMO_OUT/workspace"
 
-# Append the demo's optimizer + LLM settings. The Claude & Codex values come
-# straight from the container environment you configured in Step 2c (written to
-# /root/.bashrc) — nothing is hardcoded here. The UNQUOTED heredoc expands each
-# $VAR inside the container; -w keeps the write in this bind-mounted repo root.
+docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -ic '
+set -e
+: "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL missing; redo setup-claude}"
+: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing; redo setup-claude}"
+: "${CLAUDE_MODEL:?CLAUDE_MODEL missing; redo setup-claude}"
+: "${OPENAI_BASE_URL:?OPENAI_BASE_URL missing; redo setup-codex}"
+: "${OPENAI_API_KEY:?OPENAI_API_KEY missing; redo setup-codex}"
+: "${CODEX_MODEL:?CODEX_MODEL missing; redo setup-codex}"
+
+cp .env.template .env
 cat >> .env <<EOF
 
 # --- Hyperloom demo settings ---
-# Opt out of the AMD-only orchestration-model gate: the /models catalog probe
-# authenticates with Bearer only and cannot send Ocp-Apim-Subscription-Key, so
-# it 401s through the gateway even though real Claude calls succeed.
+# Opt out of the AMD-only orchestration-model gate when using a custom gateway
+# model id. The current catalog probe also applies custom headers, so this is
+# about model selection rather than a workaround for missing auth headers.
 export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+# Default to the open GEAK whole-pipeline optimizer. Do not use geak_v3 here:
+# geak_v3 is the legacy per-kernel fallback token, while geak owns the full
+# KERNEL_AGENT phase.
+export KERNEL_OPT_BACKEND_ORDER=geak
 # Claude (orchestration) — the values you validated in setup-claude-3.
 export ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL"
 export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 export ANTHROPIC_CUSTOM_HEADERS="$ANTHROPIC_CUSTOM_HEADERS"
+export CLAUDE_MODEL="$CLAUDE_MODEL"
 export ANTHROPIC_MODEL="$CLAUDE_MODEL"
 # Codex (critic) — the values you validated in setup-codex-3.
 export OPENAI_BASE_URL="$OPENAI_BASE_URL"
@@ -443,50 +457,54 @@ export CODEX_MODEL="$CODEX_MODEL"
 export PORT=8899
 EOF
 
-# Runtime workspace for THIS run: <repo>/output/sglang-hyperloom-date-XXXX/workspace.
-# Use an absolute path and replace the template's USER_DATA_PATH in place (do not
-# append a second one — the loader takes the first occurrence).
-export USER_DATA_PATH="$(pwd)/$DEMO_OUT/workspace"
 sed -i "s#^USER_DATA_PATH=.*#USER_DATA_PATH=$USER_DATA_PATH#" .env
 echo "USER_DATA_PATH=$USER_DATA_PATH"
+'
 ```
 
 > **Agent:** `$DEMO_OUT` is the output dir from Step 1. The `ANTHROPIC_*` /
-> `OPENAI_*` / model lines are pulled from the container env you set in Step 2c —
-> do **not** re-type any keys here. After writing `.env`, `cat` it back and
-> confirm those values are populated (not empty); if any are blank, re-run the
-> matching setup-claude-* / setup-codex-* step, then regenerate `.env`. Also
+> `OPENAI_*` / model lines are pulled from the container env you set in Step 2c.
+> The command fails fast if required values are missing; if that happens, re-run
+> the matching setup-claude-* / setup-codex-* step, then regenerate `.env`. Also
 > confirm `PORT` is free — `ss -ltn | grep -w ":$PORT"` should print nothing;
 > pick another port if it is taken.
 
 ### 3b. Bootstrap dependency checkouts
 
-Create the workspace and run the setup script **inside the container** (it uses
-the container's git + the SSH keys from Step 2b to clone the dependency repos):
+Create the workspace and run the installer **inside the container**. This clones
+Magpie / InferenceX and chains the kernel-agent installer, which prepares
+TraceLens plus both GEAK checkouts. With `KERNEL_OPT_BACKEND_ORDER=geak`, the
+demo uses the open whole-pipeline GEAK path and does not require KernelForge.
 
 ```bash
-docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e KERNEL_FORGE_REPO="git@github.com:AMD-AGI/KernelForge.git" hyperloom-local bash -lc '
+docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc '
   mkdir -p "$USER_DATA_PATH"
-  bash src/hyperloom/inference_optimizer/assets/local_setup.sh
+  ulimit -Sn 65536 || true
+  bash src/hyperloom/inference_optimizer/assets/install.sh
 '
 ```
 
-`local_setup.sh` clones KernelForge / InferenceX / TraceLens, writes
-`$USER_DATA_PATH/runtime/local-setup.env.sh`, and prints the workspace path plus
-a launch prompt.
+`install.sh` is idempotent. It writes
+`$USER_DATA_PATH/runtime/kernel-agent.env.sh`, which is the env file to source
+before launching or resuming.
+
+> **Optional private Forge path:** only if the user explicitly requests Forge,
+> set `KERNEL_OPT_BACKEND_ORDER=forge,geak_v3`, ensure KernelForge access, and
+> run `src/hyperloom/inference_optimizer/assets/local_setup.sh` before
+> `install.sh`. Keep this out of the default demo.
 
 ### Report — save and pause
 
 Summarize Step 3, save a copy, and stop:
 
 1. **Show** the user: the key `.env` values (**redact** the gateway key), the
-   resolved `USER_DATA_PATH` / `PORT`, and `local_setup.sh`'s result (repos
-   cloned, env file written).
-2. **Render `local-setup.env.sh`** — the resolved dependency paths the bootstrap
-   wrote — as a table (one row per `export` line in the file):
+   resolved `USER_DATA_PATH` / `PORT`, `KERNEL_OPT_BACKEND_ORDER`, and
+   `install.sh`'s result.
+2. **Render `kernel-agent.env.sh`** — the resolved kernel-agent dependency paths
+   the installer wrote — as a table (one row per relevant `export` line):
 
 ```bash
-docker exec hyperloom-local cat "$USER_DATA_PATH/runtime/local-setup.env.sh"
+docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc 'cat "$USER_DATA_PATH/runtime/kernel-agent.env.sh"'
 ```
 
 | Variable | Value |
@@ -494,19 +512,20 @@ docker exec hyperloom-local cat "$USER_DATA_PATH/runtime/local-setup.env.sh"
 | REPO_ROOT | _fill in_ |
 | USER_DATA_PATH | _fill in_ |
 | HYPERLOOM_RUNTIME_DIR | _fill in_ |
-| HYPERLOOM_DEPS_ROOT | _fill in_ |
-| FORGE_PATH / KERNEL_FORGE_ROOT | _fill in_ |
-| OOB_SRC | _fill in_ |
+| MAGPIE_PATH | _fill in_ |
 | INFERENCEX_PATH | _fill in_ |
 | TRACELENS_ROOT | _fill in_ |
+| GEAK_ROOT | _fill in_ |
+| GEAK_V3_ROOT | _fill in_ |
+| GEAK_CONFIG | _fill in_ |
 
-3. **Save** the summary — the `.env` highlights **and** the `local-setup.env.sh`
+3. **Save** the summary — the `.env` highlights **and** the `kernel-agent.env.sh`
    table above:
 
 ```bash
 mkdir -p "$DEMO_OUT/3-configure-hyperloom"
 # Agent: write the Step 3 summary (.env highlights with the key redacted,
-# USER_DATA_PATH, PORT, local_setup.sh outcome, and the local-setup.env.sh
+# USER_DATA_PATH, PORT, install.sh outcome, and the kernel-agent.env.sh
 # variable table) to:
 #   $DEMO_OUT/3-configure-hyperloom/configure-hyperloom.md
 ```
@@ -525,10 +544,11 @@ configured model still work **before** downloading anything:
 ```bash
 docker exec hyperloom-local bash -ic '
 command -v claude >/dev/null || { echo "claude MISSING"; exit 1; }
+headers=(-H "content-type: application/json" -H "anthropic-version: 2023-06-01" -H "x-api-key: $ANTHROPIC_API_KEY")
+[ -n "${ANTHROPIC_CUSTOM_HEADERS:-}" ] && headers+=(-H "$ANTHROPIC_CUSTOM_HEADERS")
 curl -sS -m 30 -o /dev/null -w "opus http=%{http_code}\n" "$ANTHROPIC_BASE_URL/v1/messages" \
-  -H "content-type: application/json" -H "anthropic-version: 2023-06-01" \
-  -H "x-api-key: $ANTHROPIC_API_KEY" -H "$ANTHROPIC_CUSTOM_HEADERS" \
-  -d "{\"model\":\"$ANTHROPIC_MODEL\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"' 2>/dev/null
+  "${headers[@]}" \
+  -d "{\"model\":\"${CLAUDE_MODEL:-$ANTHROPIC_MODEL}\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"' 2>/dev/null
 ```
 
 > **Agent:** if `claude` is missing or the call is not `http=200`, **stop** and
@@ -587,13 +607,14 @@ Launch by following [`docs/how-to/optimize.md`](../docs/how-to/optimize.md).
 Inside the container, re-run `install.sh` (IR-2) **with a raised file-descriptor
 limit — run `ulimit -Sn 65536` first** (the install and the optimizer open many
 files; the default soft limit can cause "too many open files" errors), source
-the env files, then
-start `inference_optimizer optimize` in the background (`setsid nohup` — the run
-is long). Both the Claude and Codex accounts were wired up in Step 2c, so drive
-the kernel agent with Claude (`--kernel-claude`) and run the **real** critic —
-the in-tree critic-agent backend (`--critic-agent`), which reviews with your
-`CODEX_MODEL` over the OpenAI/Unified gateway (point `CRITIC_AGENT_ROOT` at the
-in-tree runtime under `src/hyperloom/agents/critic`).
+`.env` plus `kernel-agent.env.sh`, then start `inference_optimizer optimize` in
+the background (`setsid nohup` — the run is long). The default backend order is
+`KERNEL_OPT_BACKEND_ORDER=geak`, which delegates the whole KERNEL_AGENT phase to
+the open GEAK e2e optimizer. Both the Claude and Codex accounts were wired up in
+Step 2c, so drive the kernel agent with Claude (`--kernel-claude`) and run the
+**real** critic — the in-tree critic-agent backend (`--critic-agent`), which
+reviews with your `CODEX_MODEL` over the OpenAI/Unified gateway (point
+`CRITIC_AGENT_ROOT` at the in-tree runtime under `src/hyperloom/agents/critic`).
 `--robustness-disable-server-probe` avoids false "server unreachable" stops when
 the single node restarts the server between benchmarks. **The run parameters
 below are a reference example** — set `--gpu-type`, `--tp`, `--conc`, `--isl`,
@@ -602,11 +623,11 @@ Step 1, TP = GPU count, and the values from the 4c prompt), not the literals
 shown:
 
 ```bash
-chmod -R 777 src && \
 docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e MODEL_PATH="$MODEL_PATH" hyperloom-local bash -lc '
   set -e
-  . "$USER_DATA_PATH/runtime/local-setup.env.sh"
   set -a; . ./.env; set +a
+  export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
   ulimit -Sn 65536                                                  # raise fd limit (avoid "too many open files")
   bash src/hyperloom/inference_optimizer/assets/install.sh          # IR-2 (idempotent)
   . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
@@ -634,10 +655,22 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e MODEL_PATH="$MODEL_PATH" hype
     --model "$MODEL_PATH" --framework sglang --gpu-type "$GPU_TYPE" \
     --tp "$TP" --conc "$CONC" --isl "$ISL" --osl "$OSL" \
     --target-gain "$TARGET_GAIN" --max-hours "$MAX_HOURS" --tick-interval-sec 30 \
+    --claude-model "$CLAUDE_MODEL" --codex-model "$CODEX_MODEL" \
     --kernel-claude --critic-agent --robustness-disable-server-probe \
     --launch-info-file "$RUN_DIR/launch_$TAG.json" \
     > "$RUN_DIR/run_$TAG.log" 2>&1 < /dev/null &
-  echo "pid=$!  log=$RUN_DIR/run_$TAG.log  launch_info=$RUN_DIR/launch_$TAG.json"
+  WRAPPER_PID=$!
+
+  read_json() {
+    python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], \"\"))" "$1" "$2" 2>/dev/null || true
+  }
+  for _ in $(seq 1 15); do
+    [ -s "$RUN_DIR/launch_$TAG.json" ] && break
+    sleep 2
+  done
+  REAL_PID="$(read_json "$RUN_DIR/launch_$TAG.json" pid)"
+  SESSION_DIR="$(read_json "$RUN_DIR/launch_$TAG.json" session_dir)"
+  echo "wrapper_pid=$WRAPPER_PID real_pid=$REAL_PID session_dir=$SESSION_DIR log=$RUN_DIR/run_$TAG.log launch_info=$RUN_DIR/launch_$TAG.json"
 '
 ```
 
