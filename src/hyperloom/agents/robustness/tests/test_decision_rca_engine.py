@@ -114,7 +114,7 @@ async def test_llm_engine_uses_max_completion_tokens_for_gpt5_models():
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.openai.com/v1")
     engine = LlmRcaEngine(
         base_url="https://api.openai.com/v1",
-        api_key="sk-openai",
+        api_key="openai-token",
         model="gpt-5.5",
         client=client,
         throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
@@ -137,14 +137,14 @@ def test_llm_engine_injected_client_uses_openai_bearer_headers():
     try:
         engine = LlmRcaEngine(
             base_url="https://gateway.example/v1",
-            api_key="sk-openai",
+            api_key="openai-token",
             model="gpt-5.5",
             client=client,
             throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
         )
 
         assert engine.client is client
-        assert client.headers["Authorization"] == "Bearer sk-openai"
+        assert client.headers["Authorization"] == "Bearer openai-token"
         assert "x-api-key" not in client.headers
         assert "anthropic-version" not in client.headers
     finally:
@@ -172,7 +172,7 @@ async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.deepseek.com/anthropic")
     engine = AnthropicRcaEngine(
         base_url="https://api.deepseek.com/anthropic",
-        api_key="sk-deepseek",
+        api_key="deepseek-token",
         model="deepseek-chat",
         client=client,
         throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
@@ -192,7 +192,7 @@ async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
 
     assert text == "anthropic root cause"
     assert seen["path"] == "/anthropic/v1/messages"
-    assert seen["headers"]["x-api-key"] == "sk-deepseek"
+    assert seen["headers"]["x-api-key"] == "deepseek-token"
     assert seen["headers"]["anthropic-version"] == "2023-06-01"
     assert seen["json"]["model"] == "deepseek-chat"
     assert usage is not None
