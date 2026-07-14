@@ -260,8 +260,11 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
 # type mimo_v2_flash to instantiate a model of type ." + Unknown attention
 # backend TRITON) — the unrecognized arch leaves an empty model type.
-# deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
-# validation failure.
+# deepseek_v4: removed from the blocklist. The original entry assumed the
+# framework did not recognize DeepSeek V4, but the current runtime
+# (transformers 5.8.1 + vLLM 0.21.0 rocm722) resolves it successfully:
+# AutoConfig and vLLM's get_config both load DeepseekV4Config for the local
+# model, so keeping it here falsely blocks launch before baseline.
 # gemma4: removed from the blocklist. The original entry assumed the framework
 # did not recognize gemma4, but the current runtime (transformers 5.5.0 +
 # vLLM 0.18.2rc1 rocm721) registers it: CONFIG_MAPPING contains "gemma4",
@@ -277,10 +280,10 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # deepseek_v2 module; gfx942 sparse-MLA ops fall back to Triton via
 # vllm-project/vllm#45782). Keeping it here would falsely block GLM-5.x.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
+    "glm4_moe_lite", "mimo_v2_flash",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
-    "deepseekv4forcausallm", "glm4moeliteforcausallm",
+    "glm4moeliteforcausallm",
     "mimov2flashforcausallm",
 })
 # Some model_type values only appear inside nested decoder configs carried by a
