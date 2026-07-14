@@ -15,6 +15,9 @@
 set -u
 
 : "${CORTEX_KB_URL:=}"
+# PR_MONITOR_URL is injected by the CLI preflight (derived from --pr-monitor-url /
+# $PRIMUS_CORTEX_PR_API, normalised to end in /v1). This in-cluster default only
+# applies when the probe is run standalone without the CLI setting it.
 : "${PR_MONITOR_URL:=http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1}"
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _build_parser
+from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

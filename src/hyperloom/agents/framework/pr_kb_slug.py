@@ -7,8 +7,9 @@ Byte-for-byte parity with the writer at
 miss. ``tests/test_pr_kb.py`` pins the algorithm; update both in
 lock-step when the writer changes.
 
-Prefix root defaults to ``pr-kb`` (= ``PR_KB_SLUG_PREFIX``). Three page
-families share it: ``<prefix>-meta/ <prefix>-files/ <prefix>-index/``.
+Prefix root defaults to ``pr-kb`` (= ``PR_KB_SLUG_PREFIX``). Files/index
+helpers use ``<prefix>-files/`` and ``<prefix>-index/``; discovery filters
+``<prefix>-meta/`` prefixes directly.
 """
 
 from __future__ import annotations
@@ -66,12 +67,6 @@ def repo_slug(repo_full_name: str) -> str:
     return _NON_ALNUM.sub("-", lowered).strip("-")
 
 
-def meta_slug(repo_full_name: str, pr_number: int | str, *, prefix: str | None = None) -> str:
-    """Return the ``<prefix>-meta/<repo-slug>/pr/<n>`` slug."""
-    p = prefix or slug_prefix()
-    return f"{p}-meta/{repo_slug(repo_full_name)}/pr/{pr_number}"
-
-
 def files_slug(repo_full_name: str, pr_number: int | str, *, prefix: str | None = None) -> str:
     """Return the ``<prefix>-files/<repo-slug>/pr/<n>`` slug."""
     p = prefix or slug_prefix()
@@ -89,7 +84,6 @@ __all__ = [
     "slug_prefix",
     "normalise_repo",
     "repo_slug",
-    "meta_slug",
     "files_slug",
     "index_slug",
 ]

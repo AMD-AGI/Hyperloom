@@ -109,11 +109,11 @@ def test_scout_counters_and_seen_pr_roundtrip():
     assert s.research_scout_runs == 0
     assert s.bump_research_scout_runs() == 1
     assert s.register_seen_pr_ids(["a", "b", "a", ""]) == 2
-    assert s.has_seen_pr_id("a") is True
-    assert s.has_seen_pr_id("zzz") is False
+    assert "a" in s.research_scout_seen_pr_ids
+    assert "zzz" not in s.research_scout_seen_pr_ids
     restored = SharedState.from_dict(s.to_dict())
     assert restored.research_scout_runs == 1
-    assert restored.has_seen_pr_id("b") is True
+    assert "b" in restored.research_scout_seen_pr_ids
 
 
 @pytest.mark.asyncio

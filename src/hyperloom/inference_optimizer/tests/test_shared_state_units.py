@@ -174,22 +174,6 @@ class TestKernelPatchIdentity:
         assert target == ""
         assert args == ""
 
-    def test_kernel_patch_key_empty_when_payload_incomplete(self):
-        s = SharedState()
-        assert s.kernel_patch_key(None) == ""
-        assert s.kernel_patch_key({"kernel_id": "k1"}) == ""
-
-    def test_kernel_patch_key_concatenates_fields(self):
-        s = SharedState()
-        key = s.kernel_patch_key(
-            {
-                "kernel_id": "k1",
-                "patch_path": "/srv/k1.py",
-                "extra_server_args": "--a 1",
-            }
-        )
-        assert key == "k1|/srv/k1.py|--a 1"
-
     def test_find_rejected_kernel_patch_lookup(self):
         s = SharedState()
         s.rejected_kernel_patches.append(

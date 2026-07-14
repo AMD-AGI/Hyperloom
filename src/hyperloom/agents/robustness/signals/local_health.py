@@ -35,8 +35,6 @@ class LocalHealthConfig:
             (stricter thresholds, handled separately from disk).
         shm_used_warn_pct (float): SHM used-percent for a MEDIUM symptom.
         shm_used_crit_pct (float): SHM used-percent for a HIGH symptom.
-        ray_head_unreachable_severity (str): Severity label used when the Ray
-            head is unreachable.
         fd_warn_used_pct (float): File-descriptor used-percent for a MEDIUM
             symptom.
         fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
@@ -52,8 +50,6 @@ class LocalHealthConfig:
     shm_mountpoints: tuple[str, ...] = ("/dev/shm",)
     shm_used_warn_pct: float = 75.0
     shm_used_crit_pct: float = 90.0
-    # Ray-head severity kept here for a single source of truth (rule lives below).
-    ray_head_unreachable_severity: str = "high"
     fd_warn_used_pct: float = 80.0
     fd_crit_used_pct: float = 95.0
 
