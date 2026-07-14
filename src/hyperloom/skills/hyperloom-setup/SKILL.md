@@ -105,11 +105,13 @@ Ask these questions using the agent's structured question UI when available.
 
 5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
+   - Offer `<workspace>/session` (the current workspace directory plus a
+     `session` subdirectory) as the default/recommended option, using its
+     absolute path. Each optimizer run still creates its own UTC-stamped
+     subdirectory under it.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
-   - Always offer the current workspace directory as an option.
    - Always offer a custom path option.
-   - Do not assume or auto-select any option; write `USER_DATA_PATH` only after the user explicitly chooses.
-   - If the user selects the current workspace directory, write its absolute path.
+   - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
 6. Ask where to run Hyperloom (sets `HYPERLOOM_RUN_MODE` for this session). Skip
    this question if the run mode was already resolved from a command argument or
@@ -152,6 +154,7 @@ Write only the Hyperloom configuration keys the setup backend consumes:
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
 - `SAFE_API_KEY`, `OPENAI_BASE_URL`, `CLAUDE_MODEL`, `CODEX_MODEL`
 - `USER_DATA_PATH`
+- `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
 
 ### AMD APIM subscription header
 
