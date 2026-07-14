@@ -21,13 +21,14 @@ _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# Hard model allowlist (_CLAUDE_ALLOWED_MODELS): orchestration MUST resolve to Opus 4-7 (preferred)
-# or 4-6 (fallback) before Coordinator boots; other models drifted behaviour measurably (operator 2026-05-09).
-_CLAUDE_PREFERRED_MODEL = "claude-opus-4-7"
+# Hard model allowlist (_CLAUDE_ALLOWED_MODELS): orchestration MUST resolve to Opus 4-8
+# (preferred) or a known-good fallback before Coordinator boots; other models drifted
+# behaviour measurably (operator 2026-05-09).
+_CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
 
 _CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
 
-_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
+_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, "claude-opus-4-7", _CLAUDE_FALLBACK_MODEL)
 
 # Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
