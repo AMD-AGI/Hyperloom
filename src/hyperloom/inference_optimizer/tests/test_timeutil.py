@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import re
 
-from hyperloom.common.timeutil import iso_z, now_iso, parse_iso_unix, utc_now_compact
+from hyperloom.common.timeutil import iso_z, now_iso, utc_now_compact
 
 
 def test_now_iso_z_suffix():
@@ -36,21 +35,3 @@ class TestIsoZ:
     def test_unparseable_returned_unchanged(self):
         assert iso_z("not-a-timestamp") == "not-a-timestamp"
 
-
-class TestParseIsoUnix:
-    def test_z_suffix(self):
-        v = parse_iso_unix("2021-01-01T00:00:00Z")
-        assert v is not None
-        assert math.isclose(v, 1_609_459_200.0)
-
-    def test_offset(self):
-        v = parse_iso_unix("2021-01-01T00:00:00+00:00")
-        assert v is not None
-        assert math.isclose(v, 1_609_459_200.0)
-
-    def test_non_string_default(self):
-        assert parse_iso_unix(123) is None
-        assert parse_iso_unix(None, default=-1.0) == -1.0
-
-    def test_unparseable_default(self):
-        assert parse_iso_unix("garbage", default=0.0) == 0.0

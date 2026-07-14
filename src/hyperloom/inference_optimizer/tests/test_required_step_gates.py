@@ -12,7 +12,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
@@ -43,7 +42,7 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -95,7 +94,7 @@ def test_baseline_first_still_blocks_other_actions(session_dir):
 def test_integrate_gate_inactive_without_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def _seed_kernel_opt_state(
@@ -128,7 +127,7 @@ def test_integrate_gate_inactive_when_decision_not_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-1", decision="REVERT")
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def test_integrate_gate_fires_when_keep_pending(session_dir):
@@ -141,7 +140,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
         micro=4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     )
-    assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
+    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
 
 
 def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
@@ -156,7 +155,7 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
     coord.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k-rmsnorm", "target_file": "/p/rmsnorm.py"},
     ]
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
@@ -164,7 +163,7 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-bad", decision="KEEP")
     coord.shared_state.rejected_kernel_ids = ["k-bad"]
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def test_pending_keep_no_longer_blocks_other_actions(session_dir):
@@ -177,7 +176,7 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
+    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
     for action in ("explore", "sweep", "integrate", "report"):
         assert coord._sequence_denial_for_action(action) is None, (
             f"{action!r} must not be sequence-denied by a pending KEEP"

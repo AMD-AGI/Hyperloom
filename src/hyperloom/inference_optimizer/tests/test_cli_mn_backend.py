@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _build_parser, _resolve_mn_backend
+from hyperloom.inference_optimizer.cli.multi_node import _resolve_mn_backend
+from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
 def _args(*extra: str) -> list[str]:

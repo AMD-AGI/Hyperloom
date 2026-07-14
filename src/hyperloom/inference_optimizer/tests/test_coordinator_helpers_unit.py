@@ -198,9 +198,9 @@ def test_dedupe_leaves_json_arg_untouched():
     assert ch._dedupe_extra_server_args(args) == args
 
 
-# ---- _merge_cumulative_extra_*_args (name built to dodge the rename guard) ----
+# ---- _merge_cumulative_extra_server_args ----
 
-_merge = getattr(ch, "_merge_cumulative_extra_" + "sglang_args")
+_merge = ch._merge_cumulative_extra_server_args
 
 
 def test_merge_prefers_full():
