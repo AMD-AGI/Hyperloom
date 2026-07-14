@@ -1502,6 +1502,78 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert "tracelens_agent_transcript" in res.artifact_paths
 
 
+def test_openai_tool_runner_rejects_out_of_scope_files_and_shell_strings(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+
+    read_out = json.loads(
+        tlr._execute_openai_tool(
+            "read_file",
+            json.dumps({"path": "/etc/passwd"}),
+            scope=scope,
+        )
+    )
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": str(tmp_path / "escape.md"), "content": "bad"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"command": "rm -rf /"}),
+            scope=scope,
+        )
+    )
+
+    assert read_out["ok"] is False
+    assert "outside allowed roots" in read_out["error"]
+    assert write_out["ok"] is False
+    assert "outside allowed roots" in write_out["error"]
+    assert shell_out["ok"] is False
+    assert "argv" in shell_out["error"]
+    assert not (tmp_path / "escape.md").exists()
+
+
+def test_openai_tool_runner_allows_output_write_and_tracelens_python(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+    script = scope.tracelens_root / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": "analysis.md", "content": "# ok\n"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"argv": ["python3", str(script)]}),
+            scope=scope,
+        )
+    )
+
+    assert write_out["ok"] is True
+    assert (scope.output_dir / "analysis.md").read_text(encoding="utf-8") == "# ok\n"
+    assert shell_out["ok"] is True
+    assert "ok" in shell_out["stdout"]
+
+
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
     """Sandbox-hang RCA: a gateway stream that goes silent mid-response must
     abort on the per-message idle timeout instead of blocking forever on
