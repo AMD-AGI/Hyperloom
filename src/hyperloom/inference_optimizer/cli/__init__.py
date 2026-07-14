@@ -1949,6 +1949,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _reset_state_file(session_dir)
     from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
 
+    legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+    migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
     transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
     set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
@@ -1969,6 +1971,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
+        legacy_action_scores=legacy_mode,
+        migration_mode=migration_mode,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer. Disabled by

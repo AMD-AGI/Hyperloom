@@ -107,7 +107,7 @@ def test_escape_env_no_longer_allows_empty_shape(tmp_path: Path, monkeypatch):
         session_dir=tmp_path,
     )
     assert result is not None
-    assert result["error_class"] == "missing_kernel_shape"
+    assert result["error_class"] == "empty_kernel_shape"
 
 
 def test_escape_process_flag_allows_empty_shape(tmp_path: Path):

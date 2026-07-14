@@ -54,6 +54,33 @@ def test_v06_state_without_schema_version_is_migrated(tmp_path):
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
+def test_legacy_extra_sglang_args_are_renamed_on_load(tmp_path):
+    """Old state.json launch-arg fields migrate to canonical ``extra_server_args``."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    legacy = {
+        "session_id": "legacy-args",
+        "current_best": {
+            "variant_name": "warm",
+            "extra_sglang_args": "--enable-foo",
+        },
+        "optimization_stack": [
+            {
+                "action": "kernel_opt",
+                "candidate_extra_sglang_args": "--candidate-foo",
+            },
+        ],
+    }
+    (sd / "state.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = SharedState.load_or_init(sd)
+
+    assert loaded.current_best["extra_server_args"] == "--enable-foo"
+    assert "extra_sglang_args" not in loaded.current_best
+    assert loaded.optimization_stack[0]["candidate_extra_server_args"] == "--candidate-foo"
+    assert "candidate_extra_sglang_args" not in loaded.optimization_stack[0]
+
+
 # 2. Inv-10.1 — fact-layer survives migration unchanged
 _FACT_LAYER_PAYLOAD: dict = {
     "session_id": "legacy",

@@ -583,6 +583,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
@@ -639,7 +641,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         )
 
         # Persistent session state (state.json) — load existing for resume.
-        self.shared_state = SharedState.load_or_init(self.session_dir)
+        self.shared_state = SharedState.load_or_init(
+            self.session_dir,
+            legacy_action_scores=legacy_action_scores,
+            migration_mode=migration_mode,
+        )
         # #266 lifecycle save debounce: terminal events (END/ERROR) flush
         # immediately so operators see produced artifacts promptly; bursty
         # non-terminal markers (START/ENTER) coalesce within a short window to

@@ -311,7 +311,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
 # Regression — short-run path unchanged (12h single-cycle behaviour)
 # ==========================================================================
 def test_regression_sweep_to_close_evidence_carries_no_loopback():
-    st = _sweep_state()
+    st = _sweep_state(max_minutes=12 * 60)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
     assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")
     assert "loopback" not in evidence
