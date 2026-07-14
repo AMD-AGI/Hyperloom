@@ -206,7 +206,7 @@ class LlmRcaEngine:
 
     base_url: str
     api_key: str
-    model: str = "claude-opus-4-7"
+    model: str = "claude-opus-4-8"
     timeout_s: float = 8.0
     max_chars: int = 1500
     throttle: RcaThrottle | None = None
@@ -488,10 +488,12 @@ class AnthropicRcaEngine(LlmRcaEngine):
         try:
             self._usage_in += int(usage.get("input_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Usage accounting is best-effort; malformed provider metadata counts as zero.
             pass
         try:
             self._usage_out += int(usage.get("output_tokens", 0) or 0)
         except (TypeError, ValueError):
+            # Usage accounting is best-effort; malformed provider metadata counts as zero.
             pass
 
 

@@ -93,7 +93,7 @@ async def test_llm_engine_calls_chat_server_and_returns_text():
     assert "/chat/completions" in captured["url"]
     assert captured["auth"] == "Bearer secret"
     assert "crash_count=5" in captured["body"]
-    assert "claude-opus-4-7" in captured["body"]
+    assert "claude-opus-4-8" in captured["body"]
 
 
 @pytest.mark.asyncio
@@ -228,7 +228,7 @@ async def test_drain_usage_accumulates_and_resets():
     assert usage["calls"] == 2
     assert usage["input_tokens"] == 22      # 11 * 2
     assert usage["output_tokens"] == 8      # 4 * 2
-    assert usage["model"] == "claude-opus-4-7"
+    assert usage["model"] == "claude-opus-4-8"
     assert usage["latency_ms"] >= 0
     # Draining resets the accumulator.
     assert engine.drain_usage() is None

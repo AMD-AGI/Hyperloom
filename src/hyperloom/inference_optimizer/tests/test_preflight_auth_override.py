@@ -886,7 +886,7 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
 
 
 def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
-    """Catalog missing both 4-7 and 4-6 → sys.exit(2)."""
+    """Catalog missing all allowed Claude models -> sys.exit(2)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
@@ -899,6 +899,7 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
         cli._validate_and_resolve_claude_model(args, None)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
+    assert "claude-opus-4-8" in err
     assert "claude-opus-4-7" in err
     assert "claude-opus-4-6" in err
     assert "claude-opus-4-5" in err
