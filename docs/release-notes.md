@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "Hyperloom release notes"
-    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, Local Mode, kernel optimization"
+    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
@@ -51,7 +51,6 @@ core of the current runtime:
   results back through a data flywheel that continuously improves the agent's KB
   and scoring heuristics.
 
-- **Local Mode for self-hosted deployments** — External users can install
+- **Bare-metal setup for self-hosted deployments** — External users can install
   Hyperloom on their own AMD GPU hardware and run the full optimization loop
-  locally, with Cursor as the agent interface and the same phase structure as the
-  hosted tier.
+  with an agent-driven setup flow and the same phase structure as the hosted tier.

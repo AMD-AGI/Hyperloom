@@ -731,7 +731,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help=(
             "Use Codex for the Kernel-agent conversation backend (default — "
-            "faster). This does not select the forge/geak_v3 kernel rewrite "
+            "faster). This does not select the forge kernel rewrite "
             "ladder; use KERNEL_OPT_BACKEND_ORDER for that. Pass --kernel-claude "
             "to switch the conversation backend."
         ),
@@ -742,7 +742,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="kernel_codex",
         help=(
             "Use Claude for the Kernel-agent conversation backend. This does not "
-            "select the forge/geak_v3 kernel rewrite ladder."
+            "select the forge kernel rewrite ladder."
         ),
     )
     # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.
