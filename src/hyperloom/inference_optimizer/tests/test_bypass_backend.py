@@ -1121,3 +1121,58 @@ def test_lifecycle_reuse_with_metadata_reuses(tmp_path, monkeypatch):
     assert rc == 0
     assert launched["n"] == 0  # reused existing server
     assert teardown["called"] is True  # cleanup=true -> torn down
+
+
+def test_client_phase_requires_pid_dir(tmp_path, monkeypatch):
+    """phase=client without pid_dir must fail with a configuration error."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
+
+    rc = bypass_runner.run_benchmark(
+        cfg_path, tmp_path / "out", phase="client", pid_dir=None, cleanup=True,
+    )
+    assert rc == 1
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+    assert any("phase=client requires pid_dir" in e for e in rep["errors"])
+
+
+def test_write_report_emits_magpie_compat_artifacts(tmp_path):
+    """summary.txt, log aliases, and profiling_enabled mirror Magpie outputs."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "client_stdout.log").write_text("client-out\n", encoding="utf-8")
+    (workspace / "client_stderr.log").write_text("client-err\n", encoding="utf-8")
+
+    report = bypass_report.build_report(
+        {
+            "output_throughput": 123.4,
+            "request_throughput": 12.3,
+            "total_token_throughput": 200.0,
+            "completed": 10,
+            "duration": 5.0,
+            "mean_ttft_ms": 11.0,
+            "mean_tpot_ms": 2.0,
+        },
+        framework="sglang",
+        model="/models/x",
+        success=True,
+        workspace_dir=str(workspace),
+        execution_time=42.0,
+        profiling_enabled=True,
+    )
+    bypass_report.write_report(workspace, report)
+
+    rep = json.loads((workspace / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["profiling_enabled"] is True
+    summary = (workspace / "summary.txt").read_text(encoding="utf-8")
+    assert "success: True" in summary
+    assert "output_throughput: 123.4" in summary
+    assert "profiling_enabled: True" in summary
+    assert (workspace / "benchmark_stdout.log").read_text(encoding="utf-8") == "client-out\n"
+    assert (workspace / "benchmark_stderr.log").read_text(encoding="utf-8") == "client-err\n"

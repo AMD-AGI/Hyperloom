@@ -24,6 +24,9 @@ def test_backend_resolution_controls_magpie_need(monkeypatch):
     assert bb.resolve_backend_name() == "magpie"
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
     assert bb.resolve_backend_name() == "bypass"
+    # Unknown typos normalize to magpie so preflight still installs Magpie.
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpiee")
+    assert bb.resolve_backend_name() == "magpie"
 
 
 def test_preflight_gates_magpie_on_backend():

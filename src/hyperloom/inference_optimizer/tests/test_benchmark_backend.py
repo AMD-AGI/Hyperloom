@@ -27,6 +27,7 @@ def test_blank_backend_resolves_to_magpie(monkeypatch):
 
 def test_unknown_backend_falls_back_to_magpie(monkeypatch):
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "does-not-exist")
+    assert bb.resolve_backend_name() == "magpie"
     assert bb.resolve_backend().name == "magpie"
 
 

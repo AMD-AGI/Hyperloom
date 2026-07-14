@@ -24,6 +24,7 @@ from typing import Protocol
 # backend so existing deployments keep their current behavior.
 BENCHMARK_BACKEND_ENV = "HYPERLOOM_BENCHMARK_BACKEND"
 DEFAULT_BENCHMARK_BACKEND = "magpie"
+KNOWN_BENCHMARK_BACKENDS = frozenset({"magpie", "bypass"})
 
 
 class BenchmarkBackend(Protocol):
@@ -183,11 +184,16 @@ class BypassBackend:
 def resolve_backend_name() -> str:
     """Resolve the active backend name from the environment.
 
+    Unknown values normalize to ``magpie`` so preflight gates (which key off
+    this name) stay aligned with :func:`resolve_backend` runtime selection.
+
     Returns:
-        The lowercased backend name; magpie when unset/blank.
+        The lowercased backend name; ``magpie`` when unset/blank/unknown.
     """
     raw = (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
-    return raw or DEFAULT_BENCHMARK_BACKEND
+    if not raw or raw not in KNOWN_BENCHMARK_BACKENDS:
+        return DEFAULT_BENCHMARK_BACKEND
+    return raw
 
 
 def resolve_backend() -> BenchmarkBackend:
@@ -203,10 +209,6 @@ def resolve_backend() -> BenchmarkBackend:
     name = resolve_backend_name()
     if name == "bypass":
         return BypassBackend()
-    if name == "magpie":
-        return MagpieBackend()
-    # Unknown backend: fall back to Magpie (defensive) so a typo cannot
-    # silently disable benchmarking.
     return MagpieBackend()
 
 

@@ -70,6 +70,7 @@ def build_report(
     execution_time: float,
     errors: list[str] | None = None,
     analysis: dict[str, Any] | None = None,
+    profiling_enabled: bool = False,
 ) -> dict[str, Any]:
     """Build a Magpie-compatible ``benchmark_report.json`` dict.
 
@@ -87,6 +88,7 @@ def build_report(
         analysis: Optional bypass-specific analysis block; emitted under
             ``report["bypass_analysis"]`` only when provided so the
             serving schema stays unchanged.
+        profiling_enabled: Whether torch_profiler was enabled for this run.
 
     Returns:
         A report dict matching the fields Hyperloom consumes.
@@ -106,6 +108,7 @@ def build_report(
         "workspace_dir": workspace_dir,
         "execution_time": _f(execution_time),
         "errors": list(errors or []),
+        "profiling_enabled": bool(profiling_enabled),
     }
     if raw:
         report["throughput"] = {
@@ -153,8 +156,70 @@ def build_report(
     return report
 
 
+def format_summary_text(report: dict[str, Any]) -> str:
+    """Build a Magpie-compatible human-readable ``summary.txt`` body."""
+    lines = [
+        f"success: {report.get('success')}",
+        f"framework: {report.get('framework')}",
+        f"model: {report.get('model')}",
+        f"profiling_enabled: {report.get('profiling_enabled', False)}",
+        f"execution_time_s: {report.get('execution_time')}",
+    ]
+    throughput = report.get("throughput")
+    if isinstance(throughput, dict):
+        lines.extend([
+            f"output_throughput: {throughput.get('output_throughput')}",
+            f"request_throughput: {throughput.get('request_throughput')}",
+            f"total_token_throughput: {throughput.get('total_token_throughput')}",
+            f"completed_requests: {throughput.get('completed_requests')}",
+            f"duration_seconds: {throughput.get('duration_seconds')}",
+        ])
+    latency = report.get("latency")
+    if isinstance(latency, dict):
+        ttft = latency.get("ttft") or {}
+        tpot = latency.get("tpot") or {}
+        lines.extend([
+            f"mean_ttft_ms: {ttft.get('mean_ms')}",
+            f"mean_tpot_ms: {tpot.get('mean_ms')}",
+        ])
+    errors = report.get("errors") or []
+    if errors:
+        lines.append("errors:")
+        lines.extend(f"  - {err}" for err in errors)
+    return "\n".join(lines) + "\n"
+
+
+def write_log_aliases(workspace: Path) -> None:
+    """Write Magpie-compatible ``benchmark_stdout/stderr.log`` aliases (best-effort)."""
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    for tag in ("client", "eval", "scriptable"):
+        for stream, parts in (("stdout", stdout_parts), ("stderr", stderr_parts)):
+            path = workspace / f"{tag}_{stream}.log"
+            if not path.exists():
+                continue
+            try:
+                parts.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+    try:
+        if stdout_parts:
+            (workspace / "benchmark_stdout.log").write_text(
+                "\n".join(stdout_parts), encoding="utf-8",
+            )
+        if stderr_parts:
+            (workspace / "benchmark_stderr.log").write_text(
+                "\n".join(stderr_parts), encoding="utf-8",
+            )
+    except OSError:
+        pass
+
+
 def write_report(workspace: Path, report: dict[str, Any]) -> Path:
-    """Write ``benchmark_report.json`` into the workspace.
+    """Write Magpie-compatible report artifacts into the workspace.
+
+    Emits ``benchmark_report.json``, ``summary.txt``, and aggregated
+    ``benchmark_stdout.log`` / ``benchmark_stderr.log`` aliases.
 
     Args:
         workspace: Benchmark workspace directory.
@@ -165,4 +230,9 @@ def write_report(workspace: Path, report: dict[str, Any]) -> Path:
     """
     report_path = workspace / "benchmark_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    try:
+        (workspace / "summary.txt").write_text(format_summary_text(report), encoding="utf-8")
+    except OSError:
+        pass
+    write_log_aliases(workspace)
     return report_path

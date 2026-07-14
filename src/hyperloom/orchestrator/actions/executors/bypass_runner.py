@@ -102,7 +102,7 @@ def _server_reusable(base_url: str, pid_dir: str | None, framework: str, port: i
 
     Reuse requires BOTH a healthy ``/health`` and this run's pid/meta files, so
     a port held by a server bypass did not launch (foreign/zombie) is never
-    silently reused or booted over ΓÇö it is reported so the caller fails loudly.
+    silently reused or booted over - it is reported so the caller fails loudly.
 
     Returns one of ``_REUSE`` / ``_BOOT`` / ``_FOREIGN``.
     """
@@ -205,7 +205,7 @@ def run_benchmark(
         )
         return _finalize_report(
             workspace=workspace, framework=framework, model=model, server_log=server_log,
-            bench_envs=bench_envs, start=start, rc=rc,
+            bench_envs=bench_envs, start=start, rc=rc, profile=profile,
         )
 
     # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle,
@@ -258,6 +258,7 @@ def run_benchmark(
             _write_report(
                 workspace, framework, model, False, time.time(),
                 [f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"],
+                profiling_enabled=profile,
             )
             return 1
         # verdict == _BOOT: no server yet. Start + persist, run this round's
@@ -288,7 +289,10 @@ def run_benchmark(
     server_proc = _launch_server(server_cmd, server_env, server_log)
     try:
         if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout):
-            _write_report(workspace, framework, model, False, start, ["server did not become ready"])
+            _write_report(
+                workspace, framework, model, False, start,
+                ["server did not become ready"], profiling_enabled=profile,
+            )
             return 1
         rc = _run_client_and_eval(
             inferencex_root=inferencex_root, model=model, base_url=base_url,
@@ -300,7 +304,7 @@ def run_benchmark(
 
     return _finalize_report(
         workspace=workspace, framework=framework, model=model, server_log=server_log,
-        bench_envs=bench_envs, start=start, rc=rc,
+        bench_envs=bench_envs, start=start, rc=rc, profile=profile,
     )
 
 
@@ -322,7 +326,10 @@ def _run_server_phase(
     proc = _launch_server(server_cmd, server_env, server_log)
     if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
         _terminate_server(proc)
-        _write_report(workspace, framework, model, False, time.time(), ["server did not become ready"])
+        _write_report(
+            workspace, framework, model, False, time.time(),
+            ["server did not become ready"], profiling_enabled=profile,
+        )
         return 1
     try:
         pgid = os.getpgid(proc.pid)
@@ -340,13 +347,20 @@ def _run_client_phase(
     inferencex_root, base_url, server_log, timeout_s, workspace, pid_dir, cleanup, start,
 ) -> int:
     """Reuse a running server; run client (+eval); teardown when cleanup."""
+    if not pid_dir:
+        _write_report(
+            workspace, framework, model, False, start,
+            ["phase=client requires pid_dir"],
+            profiling_enabled=profile,
+        )
+        return 1
     verdict = _server_reusable(base_url, pid_dir, framework, port)
     if verdict != _REUSE:
         reason = (
             "no healthy server to reuse" if verdict == _BOOT
             else f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"
         )
-        _write_report(workspace, framework, model, False, start, [reason])
+        _write_report(workspace, framework, model, False, start, [reason], profiling_enabled=profile)
         return 1
     try:
         rc = _run_client_and_eval(
@@ -361,7 +375,7 @@ def _run_client_phase(
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
     return _finalize_report(
         workspace=workspace, framework=framework, model=model, server_log=server_log,
-        bench_envs=bench_envs, start=start, rc=rc,
+        bench_envs=bench_envs, start=start, rc=rc, profile=profile,
     )
 
 
@@ -390,7 +404,10 @@ def _run_lifecycle_all(
     proc = _launch_server(server_cmd, server_env, server_log)
     if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
         _terminate_server(proc)
-        _write_report(workspace, framework, model, False, start, ["server did not become ready"])
+        _write_report(
+            workspace, framework, model, False, start,
+            ["server did not become ready"], profiling_enabled=profile,
+        )
         return 1
     try:
         pgid = os.getpgid(proc.pid)
@@ -411,7 +428,7 @@ def _run_lifecycle_all(
         teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
     return _finalize_report(
         workspace=workspace, framework=framework, model=model, server_log=server_log,
-        bench_envs=bench_envs, start=start, rc=rc,
+        bench_envs=bench_envs, start=start, rc=rc, profile=profile,
     )
 
 
@@ -440,7 +457,7 @@ def _run_scriptable_benchmark(
         profile=profile, profile_dir=profile_dir,
     )
     if error is not None:
-        _write_report(workspace, framework, model, False, start, [error])
+        _write_report(workspace, framework, model, False, start, [error], profiling_enabled=profile)
         return 2
     raw = _load_raw_result(workspace)
     success = rc == 0 and raw is not None
@@ -451,6 +468,7 @@ def _run_scriptable_benchmark(
         errors.append("inferencex_result.json not produced")
     _write_report(
         workspace, framework, model, success, start, errors, raw=raw,
+        profiling_enabled=profile,
     )
     return 0 if success else (rc or 1)
 
@@ -483,7 +501,7 @@ def _run_client_and_eval(
         eval_rc = _run_subprocess(eval_cmd, timeout_s, workspace, "eval")
         # Magpie's ``run_eval ... || exit $?`` aborts the benchmark when the
         # accuracy pass fails, so a healthy client run with a failed eval is a
-        # failed run ΓÇö not a silently-passing one. Propagate the eval exit code
+        # failed run - not a silently-passing one. Propagate the eval exit code
         # so _finalize_report fails the run and emits the same marker baseline's
         # eval-rooted RUN_EVAL=false fallback keys on (_EVAL_FAILURE_MARKERS).
         if eval_rc != 0:
@@ -492,7 +510,7 @@ def _run_client_and_eval(
     return rc
 
 
-def _finalize_report(*, workspace, framework, model, server_log, bench_envs, start, rc) -> int:
+def _finalize_report(*, workspace, framework, model, server_log, bench_envs, start, rc, profile=False) -> int:
     """Parse raw result, build analysis, write report; return exit code."""
     raw = _load_raw_result(workspace)
     eval_rc = _read_eval_returncode(workspace)
@@ -511,7 +529,10 @@ def _finalize_report(*, workspace, framework, model, server_log, bench_envs, sta
         workspace=workspace, server_log=server_log, success=success,
         stderr_text=client_stderr, run_eval=_run_eval_enabled(bench_envs),
     )
-    _write_report(workspace, framework, model, success, start, errors, raw=raw, analysis=analysis)
+    _write_report(
+        workspace, framework, model, success, start, errors,
+        raw=raw, analysis=analysis, profiling_enabled=profile,
+    )
     if success:
         return 0
     return rc or eval_rc or 1
@@ -657,6 +678,7 @@ def _write_report(
     *,
     raw: dict[str, Any] | None = None,
     analysis: dict[str, Any] | None = None,
+    profiling_enabled: bool = False,
 ) -> None:
     """Build and write the Magpie-compatible report."""
     report = bypass_report.build_report(
@@ -668,6 +690,7 @@ def _write_report(
         execution_time=time.time() - start,
         errors=errors,
         analysis=analysis,
+        profiling_enabled=profiling_enabled,
     )
     bypass_report.write_report(workspace, report)
 
