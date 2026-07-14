@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
+from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -84,6 +84,8 @@ Reply with EXACTLY ONE JSON object that matches this review schema:
 Rules (mirror SKILL.md Hard Rules + Approve Standard):
 - Wrap the JSON in a ```json fenced block. Bare JSON is also accepted.
 - Free text outside the JSON is ignored.
+- Keep `reasoning`/`notes` to new, decision-relevant points; do not restate the
+  proposal or context already in the judge_bundle.
 - Emit one verdict object PER proposal in `judge_bundle.proposals`.
 - If `judge_bundle.required_context` is non-empty, every verdict MUST be
   `needs_review` with `source = "critic_unavailable"` and list the
@@ -1044,7 +1046,7 @@ class CriticAgentBackend:
         # prompt so they cannot steer the decision.
         if self._kb_assess_inject_enabled():
             bundle_view["kb_assess_by_proposal"] = judge_bundle.get("kb_assess_by_proposal")
-        bundle_text = json.dumps(bundle_view, ensure_ascii=False, indent=2)
+        bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
         user_prompt = (
             f"{preamble}\n\n"
             f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"
@@ -1115,6 +1117,7 @@ class CriticAgentBackend:
             if tools and turn < max_turns:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
+            apply_reasoning_effort(kwargs)
 
             _t0 = time.perf_counter()
             try:
@@ -1153,13 +1156,16 @@ class CriticAgentBackend:
                 )
 
         # Exhausted max_turns mid-tool-use: force a final no-tool reply.
+        final_kwargs = apply_reasoning_effort(
+            {
+                "model": self.codex_model,
+                "messages": messages,
+                "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+            }
+        )
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.chat.completions.create(
-                model=self.codex_model,
-                messages=messages,
-                max_completion_tokens=CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-            )
+            resp = await self._client.chat.completions.create(**final_kwargs)
         except Exception as exc:  # noqa: BLE001
             raise BackendError(
                 f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",

@@ -67,6 +67,10 @@ Tool input shape:
 
 If you have nothing to say, call once with intent_type=send_message and
 payload={{"topic":"heartbeat","body_md":"ok"}}.
+
+Keep payload bodies focused on NEW information. Do not restate context already
+in SharedState, your inbox, or analysis.md — reference it and summarize only
+what changed. Match length to substance.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -119,6 +123,16 @@ _CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
 )
+
+# Env-driven reasoning effort / extended thinking (P0.2). Role is inferred from
+# ``conversational`` (True => orchestration). A per-role override wins over the
+# shared override; kernel defaults to ``low`` and orchestration to ``medium``.
+# Thinking defaults to adaptive; set the thinking env to ``off`` to omit it.
+_EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
+_EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
+_EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
+_THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
+_VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -203,6 +217,9 @@ class ClaudeBackend:
     # SDK session token captured last turn; replayed via ``resume`` in
     # conversational mode. ``reset_conversation()`` clears it.
     _session_id: str | None = field(default=None, init=False)
+    # Always False now (resume is supported by the pinned SDK floor); retained
+    # as a stable llm_calls.jsonl key for cache diagnostics / consumers.
+    _resume_downgraded: bool = field(default=False, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -443,6 +460,7 @@ class ClaudeBackend:
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "resume_downgraded": self._resume_downgraded,
                 # Full conversation text so the caller (which holds the
                 # session_dir / component / tick context the stateless
                 # backend lacks) can persist it to conversations.jsonl.
@@ -568,6 +586,7 @@ class ClaudeBackend:
             # Resume an existing session by id (claude-agent-sdk >= 0.2).
             kwargs["resume"] = resume_session_id
         self._apply_sdk_env_options(kwargs)
+        self._apply_effort_options(kwargs)
         if self.raw_completion:
             # Single text turn: no MCP tools, all built-ins disallowed.
             kwargs["allowed_tools"] = []
@@ -632,34 +651,35 @@ class ClaudeBackend:
         kwargs["env"] = child_env
         kwargs["setting_sources"] = []
 
-    def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
-        """Build options, dropping ``resume`` if the SDK can't accept it.
+    def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
+        """Add env-driven reasoning effort + adaptive thinking to the options.
 
-        Older SDK builds lack ``resume``; fall back to a stateless turn
-        (with a one-time warning) rather than crashing the reactor.
+        Role is inferred from ``conversational`` (True => orchestration). Unknown
+        SDK builds that reject these kwargs degrade via ``_instantiate_options``.
+        """
+        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
+        default = "medium" if self.conversational else "low"
+        effort = (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+        if effort in _VALID_EFFORT:
+            kwargs["effort"] = effort
+        thinking = (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()
+        if thinking and thinking != "off":
+            kwargs["thinking"] = {"type": thinking}
+
+    def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
+        """Build the SDK options.
+
+        The ``resume`` / ``effort`` / ``thinking`` kwargs are all supported by
+        the pinned ``claude-agent-sdk >= 0.2.110`` floor, so no compatibility
+        fallback is needed.
 
         Args:
             kwargs: Keyword arguments to pass to the SDK options constructor.
 
         Returns:
             A constructed SDK options instance.
-
-        Raises:
-            TypeError: If the constructor rejects a keyword other than
-                ``resume``.
         """
-        try:
-            return self.sdk_options_cls(**kwargs)
-        except TypeError as exc:
-            if "resume" in kwargs:
-                kwargs.pop("resume", None)
-                self.calls.append(
-                    {
-                        "warn": (f"SDK ClaudeAgentOptions rejected resume= ({exc!r}); falling back to stateless turn"),
-                    }
-                )
-                return self.sdk_options_cls(**kwargs)
-            raise
+        return self.sdk_options_cls(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
         """Default stderr handler — append to ``self.calls`` for postmortems.
