@@ -4,6 +4,8 @@
 
 - [`hyperloom-local-demo.md`](hyperloom-local-demo.md) — end-to-end SGLang
   inference-optimization walkthrough for Local Mode on a single AMD GPU host.
+  The demo defaults to the open GEAK e2e flow
+  (`KERNEL_OPT_BACKEND_ORDER=geak`).
 
 ## Quick start
 
