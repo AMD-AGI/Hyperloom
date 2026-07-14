@@ -841,8 +841,17 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     return None
 
 
+_ALLOW_EMPTY_KERNEL_SHAPE = False
+
+
+def set_allow_empty_kernel_shape(value: bool) -> None:
+    """Set the process-local empty-shape escape hatch used by CLI runs."""
+    global _ALLOW_EMPTY_KERNEL_SHAPE
+    _ALLOW_EMPTY_KERNEL_SHAPE = bool(value)
+
+
 def _allow_empty_kernel_shape(payload: dict) -> bool:
-    """Escape hatch (default off) via ``payload['allow_empty_kernel_shape']`` or ``HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1``.
+    """Escape hatch (default off) via ``payload['allow_empty_kernel_shape']`` or the CLI process flag.
 
     Args:
         payload: Request payload that may carry ``allow_empty_kernel_shape``.
@@ -852,7 +861,7 @@ def _allow_empty_kernel_shape(payload: dict) -> bool:
     """
     if bool(payload.get("allow_empty_kernel_shape")):
         return True
-    return str(os.environ.get("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    return _ALLOW_EMPTY_KERNEL_SHAPE
 
 
 def _validate_kernel_shape_and_paths(

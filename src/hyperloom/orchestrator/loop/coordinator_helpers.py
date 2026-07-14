@@ -174,7 +174,6 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
 )
 
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-_ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
 
 
 def effective_closing_grace_sec(
@@ -322,22 +321,12 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
 
 
 def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10).
+    """Resolve the roofline watermark ratio.
 
     Returns:
-        The watermark ratio (> 1.0), falling back to ``1.10`` when unset,
-        unparseable, or not greater than 1.0.
+        The fixed watermark ratio (> 1.0).
     """
-    raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
-    if not raw:
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    if val <= 1.0:
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    return val
+    return _DEFAULT_ROOFLINE_WATERMARK_RATIO
 
 
 def _merge_cumulative_extra_server_args(
@@ -496,23 +485,13 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
 # optimization to count as "engaged" (i.e. the tuned config actually took
 # effect). Only used to detect a collapse back to ~baseline (an un-optimized
 # relaunch), never to gate a specific optimization — kept general across all
-# winner kinds. Overridable via env for tuning.
-try:
-    _MIN_KERNEL_ENGAGED_GAIN_PCT: float = float(
-        os.environ.get("INFERENCE_OPTIMIZER_MIN_ENGAGED_GAIN_PCT", "").strip() or "2.0"
-    )
-except (TypeError, ValueError):
-    _MIN_KERNEL_ENGAGED_GAIN_PCT = 2.0
+# winner kinds.
+_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 # |measurement_divergence_pct| above this (GEAK vs orchestrator on the SAME
 # config) is logged as a measurement-mismatch warning at geak promote.
-# Reporting only — never gates scheduling. Overridable via env.
-try:
-    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = float(
-        os.environ.get("INFERENCE_OPTIMIZER_MEASUREMENT_DIVERGENCE_WARN_PCT", "").strip() or "3.0"
-    )
-except (TypeError, ValueError):
-    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT = 3.0
+# Reporting only — never gates scheduling.
+_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 
 def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:

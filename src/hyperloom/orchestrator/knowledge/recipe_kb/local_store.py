@@ -428,66 +428,7 @@ class LocalRecipeStore:
         # can pass them via ``extras`` to avoid losing data on rewrite.
         extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Atomically upsert a recipe row in the arbor schema.
-
-        Atomicity is the same as before:
-
-        1. read live ``recipe.json`` (may be missing on first put);
-        2. archive prior live to ``history/v{prior_version}.json``,
-           stamping ``replaced_by = provenance`` so the archive
-           carries the triggering write's audit footprint;
-        3. write new live ``recipe.json`` at ``version = prior + 1``
-           with refreshed ``updated_at`` (and ``created_at`` carried
-           over on update / set to ``now`` on first write).
-
-        ``what_worked`` / ``what_failed`` / etc. accept either
-        already-shaped dicts (``{"description": ..., "measured_impact":
-        ...}``) or arbor dataclass instances; everything is
-        normalised through ``Recipe.from_dict`` so the on-disk JSON
-        is always the documented arbor shape.
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-            model (str): Model identity slot, stamped top-level for
-                arbor-compat.
-            hardware (str): Hardware identity slot.
-            framework_name (str): Framework identity slot.
-            framework_version (str): Framework version identity slot.
-            precision (str): Precision identity slot.
-            best_config (dict[str, str] | None): Best-known config
-                mapping; ``None`` becomes ``{}``.
-            best_throughput (float): Best measured throughput.
-            what_worked (list[Any] | None): Findings that helped, as
-                dicts or arbor dataclasses.
-            what_failed (list[Any] | None): Findings that failed.
-            remaining_gaps (list[Any] | None): Known remaining gaps.
-            prs_tested (list[Any] | None): PRs tested for this recipe.
-            pitfalls (list[Any] | None): Known pitfalls.
-            lessons (list[Any] | None): Lessons learned.
-            last_profiled (str): Timestamp of last profiling run.
-            stack_fingerprint (dict[str, str] | None): Stack
-                fingerprint mapping.
-            sessions (list[Any] | None): Per-session optimization
-                records.
-            authority (str): Authority tier for the row (default
-                ``"EXPERIENTIAL"``).
-            confidence (float): Confidence score in ``[0, 1]``.
-            evidence_refs (list[Any] | None): Supporting evidence
-                references.
-            provenance (dict[str, Any] | None): Audit provenance for
-                this write; recorded in the archived row's
-                ``replaced_by``.
-            extras (dict[str, Any] | None): Free-form arbor keys
-                splatted at the top level of the on-disk row.
-
-        Returns:
-            dict[str, Any]: ``{"canonical_id", "version", "created"}``,
-                identical to the central server's PUT response shape.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
+        """Atomically upsert a recipe row and archive the prior live version."""
         if not canonical_id:
             raise ValueError("put_recipe requires a non-empty canonical_id")
         recipe_dir = self._recipe_dir(canonical_id)
