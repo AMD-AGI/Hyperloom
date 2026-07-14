@@ -136,8 +136,13 @@ that gateway requires the API key to also be sent as an
 `Ocp-Apim-Subscription-Key` header. Add the custom-headers key, reusing the same
 key value:
 
-- `Anthropic`: `ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <ANTHROPIC_API_KEY>`
-- `DeepSeek`: `ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: <DEEPSEEK_API_KEY>`
+- `Anthropic`: `ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <ANTHROPIC_API_KEY>"`
+- `DeepSeek`: `ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <DEEPSEEK_API_KEY>"`
+
+The value **must** be wrapped in double quotes: the setup backend loads `.env`
+with a shell `source`, so an unquoted value containing a space and a colon
+(`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and fails with exit
+127. Any `.env` value containing spaces or `:` must be double-quoted.
 
 Write the placeholder header with `<PLEASE_FILL_IN>` when the key itself is
 still a placeholder, so the header value tracks the real key after the user
@@ -219,3 +224,28 @@ Report:
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.
+
+## Step 7: Hand Off to a Demo Skill
+
+Only when setup completed and `FRAMEWORK` is set, ask the user whether they want
+to run a demo optimization now, and if so which length:
+
+- `3h` — short, no-kernel run. Best for a first end-to-end check.
+- `8h` — medium-length run.
+- `24h` — long-horizon cyclic run.
+
+If the user declines, stop here. If `FRAMEWORK` is unset, do not offer a demo;
+tell the user to install a serving framework first (see Step 5).
+
+When the user picks a length, load the matching demo skill and follow it — you
+stop acting on this setup skill and run the demo skill's instructions instead:
+
+- `3h` → `@.agents/skills/hyperloom-qwen3-8b-3h/SKILL.md`
+- `8h` → `@.agents/skills/hyperloom-qwen3-8b-8h/SKILL.md`
+- `24h` → `@.agents/skills/hyperloom-qwen3-8b-24h/SKILL.md`
+
+The demo skill reads the values already in `.env` (LLM keys/base URLs,
+`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. Where the demo
+skill references `@../../inference_optimizer/SKILL.md`, that relative path does
+not resolve in an installed workspace; use the absolute optimizer skill path
+from `.env` `HYPERLOOM_SKILL_PATH` instead.

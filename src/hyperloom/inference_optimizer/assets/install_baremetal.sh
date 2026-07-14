@@ -1204,7 +1204,7 @@ write_combined_env() {
 }
 
 print_next_steps() {
-  local combined_env="$1" framework_hint
+  local framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
   [ "$framework_hint" = "none" ] && framework_hint="sglang"
   cat <<EOF
@@ -1213,9 +1213,6 @@ print_next_steps() {
 
 Open this folder in Cursor as the workspace:
   ${REPO_ROOT}
-
-Before launching, source the single combined env file:
-  source '${combined_env}'
 
 Then paste this into Cursor Chat and fill in your workload:
 
@@ -1231,11 +1228,6 @@ Optimize inference for this workload:
 - OSL: 1024
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
-
-Before launch, run exactly:
-\`\`\`bash
-source '${combined_env}'
-\`\`\`
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
@@ -1325,7 +1317,7 @@ main() {
   if [ "$DRY_RUN" -eq 1 ]; then log "done (dry-run: no changes made)"; return 0; fi
   if [ "$CHECK_ONLY" -eq 1 ]; then log "done (check-only: verification pass complete)"; return 0; fi
 
-  print_next_steps "$combined_env"
+  print_next_steps
 }
 
 main "$@"
