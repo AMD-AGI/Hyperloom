@@ -222,4 +222,3 @@ def test_inbox_and_coordinator_events_combined():
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3
 
-
