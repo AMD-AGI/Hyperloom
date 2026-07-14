@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
+from hyperloom.common.env import env_bool
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
@@ -193,9 +194,13 @@ def _build_backends(
         elif provider_openai_only or kernel_codex:
             backends["kernel_agent"] = CodexBackend(model=codex_model)
         else:
+            # Opt-in (default off): resume the kernel Claude session across LLM
+            # turns for prompt-cache continuity. Prompt composition is unchanged
+            # (still full state per turn) — this is resume-only, no delta.
             backends["kernel_agent"] = ClaudeBackend(
                 model=claude_model,
                 max_turns_default=_resolve_kernel_agent_max_turns(),
+                conversational=env_bool("INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL", False),
             )
     return backends
 

@@ -51,9 +51,9 @@ def _content(*, mfma_actual=900.0, hbm_actual=1000.0, real_peak=3000.0, include_
 
 
 def test_safe_float():
-    assert rr._safe_float("3.5") == 3.5
-    assert rr._safe_float("nan-ish") is None
-    assert rr._safe_float(None) is None
+    assert rr.safe_float("3.5", default=None) == 3.5
+    assert rr.safe_float("nan-ish", default=None) is None
+    assert rr.safe_float(None, default=None) is None
 
 
 @pytest.mark.parametrize(
@@ -155,10 +155,10 @@ def test_build_text_report():
 
 def test_kernel_name_matches():
     row = {"matched_kernel_name": "foo", "name": "bar"}
-    assert rr._kernel_name_matches(row, "")
-    assert rr._kernel_name_matches(row, "foo")
-    assert rr._kernel_name_matches(row, "bar")
-    assert not rr._kernel_name_matches(row, "nope")
+    assert rr.kernel_row_matches(row, "")
+    assert rr.kernel_row_matches(row, "foo")
+    assert rr.kernel_row_matches(row, "bar")
+    assert not rr.kernel_row_matches(row, "nope")
 
 
 def test_project_payload_empty():
@@ -198,7 +198,7 @@ def test_profile_workdir_prefers_existing(tmp_path):
 
 def test_atomic_write_json(tmp_path):
     p = tmp_path / "out" / "x.json"
-    rr._atomic_write_json(p, {"a": 1})
+    rr.atomic_write_json(p, {"a": 1})
     assert json.loads(p.read_text())["a"] == 1
 
 

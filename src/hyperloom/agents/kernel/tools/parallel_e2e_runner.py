@@ -29,7 +29,7 @@ OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 # Local sibling import for the collective-name fallback (tools/ on sys.path).
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
-from _io_utils import utc_now  # noqa: E402
+from _io_utils import extract_last_json, utc_now  # noqa: E402
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
@@ -85,38 +85,6 @@ def load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
-def _extract_trailing_json(text: str) -> dict[str, Any]:
-    """Parse the last top-level JSON object from mixed stdout text."""
-    if not text:
-        raise ValueError("empty stdout")
-    end = text.rfind("}")
-    if end == -1:
-        return json.loads(text)
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(end, -1, -1):
-        ch = text[i]
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "}":
-            depth += 1
-        elif ch == "{":
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[i : end + 1])
-    return json.loads(text)
-
-
 def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: Path) -> dict[str, Any]:
     """Run a subprocess, tee output to a log, and parse trailing JSON."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +102,10 @@ def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: P
         log.write(f"\n[exit_code] {proc.returncode}\n")
     if proc.returncode != 0:
         raise RuntimeError(f"command failed: {' '.join(cmd)}; see {log_path}")
-    return _extract_trailing_json(proc.stdout or "")
+    parsed = extract_last_json(proc.stdout or "")
+    if parsed is None:
+        raise ValueError("no trailing JSON object in stdout")
+    return parsed
 
 
 def _ensure_ray_via_helper(num_gpus: int, log_path: Path) -> bool:
