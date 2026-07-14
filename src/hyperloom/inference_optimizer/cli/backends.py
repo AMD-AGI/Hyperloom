@@ -229,17 +229,26 @@ def _build_proposal_scorer(
 ) -> ProposalScorer | None:
     """Construct the advisory specialist-proposal scorer, or ``None``.
 
-    Returns ``None`` when ``--no-proposal-scoring`` is set or the resolved
-    model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
-    scorer is purely advisory and never gates anything.
+    Disabled by default: returns ``None`` unless ``--enable-proposal-scoring``
+    is passed. Even when enabled, still returns ``None`` when
+    ``--no-proposal-scoring`` is set, in Anthropic-only deployments (the
+    scorer is OpenAI-compatible only), or when the resolved model list is
+    empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The scorer is purely
+    advisory and never gates anything.
+
+    The flag is not persisted across ``--resume``: a resumed session must
+    re-pass ``--enable-proposal-scoring`` to keep scoring on. This is
+    intentional -- scoring is advisory (it never gates or alters the search),
+    so a resume that omits it simply drops the reference signal without
+    affecting optimization correctness.
 
     ``session_dir`` is forwarded so the scorer can append its per-model
     token usage to the full-trace ledger (component=proposal_scorer); when
     omitted the scorer simply skips trace writes.
 
     Args:
-        args: Parsed CLI args (``no_proposal_scoring`` /
-            ``proposal_scorer_models``).
+        args: Parsed CLI args (``enable_proposal_scoring`` /
+            ``no_proposal_scoring`` / ``proposal_scorer_models``).
         session_dir: Optional session directory for token-usage trace writes.
 
     Returns:
@@ -247,6 +256,8 @@ def _build_proposal_scorer(
         disabled or no models resolve.
     """
     if getattr(args, "no_proposal_scoring", False):
+        return None
+    if not getattr(args, "enable_proposal_scoring", False):
         return None
     if _official_anthropic_only():
         # ProposalScorer is OpenAI-compatible only; avoid calling official
