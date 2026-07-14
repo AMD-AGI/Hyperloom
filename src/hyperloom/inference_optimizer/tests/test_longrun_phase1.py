@@ -125,18 +125,19 @@ def test_short_bounded_run_never_reloops(monkeypatch):
     assert "loopback" not in evidence
 
 
-def test_exactly_24h_is_short_run(monkeypatch):
+def test_exactly_24h_is_long_run(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
     st = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
-    assert ps.is_long_run(st) is False
+    assert ps.is_long_run(st) is True
     reloop, ev = ps.should_reloop_to_explore(st)
-    assert reloop is False
-    assert ev["reloop_blocked"] == "short_run_single_pass"
+    assert reloop is True
+    assert ev["reloop"] is True
+    assert ev["next_cycle"] == 1
 
 
 def test_long_and_unbounded_runs_are_long():
-    # > 24h bounded → long.
-    st_long = _sweep_state(max_minutes=24 * 60 + 1, started_hours_ago=1.0)
+    # >= 24h bounded → long.
+    st_long = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st_long) is True
     # Unbounded (max_minutes == 0) → long (14-day ceiling).
     st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
@@ -200,7 +201,7 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 
 
 def test_budget_minutes_ignores_cycle_window_for_short_run():
-    # Short bounded run (10h ≤ 24h): the per-cycle window must NOT apply, so
+    # Short bounded run (10h < 24h): the per-cycle window must NOT apply, so
     # phase budgets stay anchored on the whole session (legacy behaviour) even
     # if cycle_minutes was pinned.
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=600, cycle_minutes=360.0)
