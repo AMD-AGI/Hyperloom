@@ -70,9 +70,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from . import RemoteRecipeClientError
 from .canonical_id import InvalidCanonicalIdError, cid_to_path_components
 from .local_store import LocalRecipeStore
-from .remote_client import RemoteRecipeClientError
 
 
 log = logging.getLogger(__name__)

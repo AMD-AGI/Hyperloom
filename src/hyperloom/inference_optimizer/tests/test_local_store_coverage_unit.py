@@ -46,19 +46,28 @@ def test_coerce_dict_variants():
 
 
 def test_normalise_findings_and_failures():
-    assert ls._normalise_findings([{"description": "d", "measured_impact": "i"}, "skip"]) == [
+    assert ls._normalise_str_dicts(
+        [{"description": "d", "measured_impact": "i"}, "skip"],
+        keys=("description", "measured_impact"),
+    ) == [
         {"description": "d", "measured_impact": "i"},
     ]
-    assert ls._normalise_failures([{"description": "d", "reason": "r"}]) == [
+    assert ls._normalise_str_dicts(
+        [{"description": "d", "reason": "r"}], keys=("description", "reason")
+    ) == [
         {"description": "d", "reason": "r"},
     ]
 
 
 def test_normalise_gaps_pitfalls_lessons():
-    assert ls._normalise_gaps([{"description": "d", "metrics": "m"}]) == [
+    assert ls._normalise_str_dicts(
+        [{"description": "d", "metrics": "m"}], keys=("description", "metrics")
+    ) == [
         {"description": "d", "metrics": "m"},
     ]
-    assert ls._normalise_pitfalls([{"description": "d", "severity": "high"}]) == [
+    assert ls._normalise_str_dicts(
+        [{"description": "d", "severity": "high"}], keys=("description", "severity")
+    ) == [
         {"description": "d", "severity": "high"},
     ]
     out = ls._normalise_lessons([{"statement": "s", "measured_impact": {"x": 1}}])
@@ -286,10 +295,10 @@ def test_coerce_dict_dataclass():
 
 
 def test_normalisers_skip_uncoercible():
-    assert ls._normalise_failures(["x", None]) == []
-    assert ls._normalise_gaps(["x"]) == []
+    assert ls._normalise_str_dicts(["x", None], keys=("description", "reason")) == []
+    assert ls._normalise_str_dicts(["x"], keys=("description", "metrics")) == []
     assert ls._normalise_prs([None]) == []
-    assert ls._normalise_pitfalls(["x"]) == []
+    assert ls._normalise_str_dicts(["x"], keys=("description", "severity")) == []
     assert ls._normalise_lessons([None]) == []
     assert ls._normalise_sessions(["x"]) == []
 

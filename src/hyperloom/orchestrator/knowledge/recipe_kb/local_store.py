@@ -579,11 +579,11 @@ class LocalRecipeStore:
                 "precision": precision,
                 "best_config": dict(best_config or {}),
                 "best_throughput": float(best_throughput),
-                "what_worked": _normalise_findings(what_worked),
-                "what_failed": _normalise_failures(what_failed),
-                "remaining_gaps": _normalise_gaps(remaining_gaps),
+                "what_worked": _normalise_str_dicts(what_worked, keys=("description", "measured_impact")),
+                "what_failed": _normalise_str_dicts(what_failed, keys=("description", "reason")),
+                "remaining_gaps": _normalise_str_dicts(remaining_gaps, keys=("description", "metrics")),
                 "prs_tested": _normalise_prs(prs_tested),
-                "pitfalls": _normalise_pitfalls(pitfalls),
+                "pitfalls": _normalise_str_dicts(pitfalls, keys=("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
                 "last_profiled": last_profiled,
                 "stack_fingerprint": dict(stack_fingerprint or {}),
@@ -1349,21 +1349,6 @@ def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list
     return out
 
 
-def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce findings into arbor ``{description, measured_impact}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "measured_impact"))
-
-
-def _normalise_failures(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce failures into arbor ``{description, reason}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "reason"))
-
-
-def _normalise_gaps(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce gaps into arbor ``{description, metrics}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "metrics"))
-
-
 def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
     """Coerce PRs into arbor ``{repo, number, outcome, notes}`` dicts.
 
@@ -1396,11 +1381,6 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
             }
         )
     return out
-
-
-def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce pitfalls into arbor ``{description, severity}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "severity"))
 
 
 def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
