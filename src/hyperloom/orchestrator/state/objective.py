@@ -179,7 +179,89 @@ class TargetGainObjective(Objective):
 
 
 @dataclass
-class TargetTputObjective(Objective):
+class _RatioObjective(Objective):
+    """Shared ratio-progress boilerplate for targets compared against current throughput.
+
+    Subclasses supply a positive ``_target()`` and a ``_current(state)`` metric; this
+    base implements the four ratio methods (progress capped at 1.0, remaining gap,
+    reached, and pressure = progress). ``progress()`` short-circuits to 0.0 when the
+    current metric is non-positive, so subclasses whose target is guaranteed positive
+    (via ``__post_init__``) get correct behavior for all real (non-negative) inputs.
+    """
+
+    @abstractmethod
+    def _target(self) -> float:
+        """Return the positive target value the current metric is compared against.
+
+        Returns:
+            float: The target throughput; guaranteed ``> 0`` by the subclass' ``__post_init__``.
+        """
+
+    @abstractmethod
+    def _current(self, state: "SharedState") -> float:
+        """Resolve the current metric to compare against the target.
+
+        Args:
+            state (SharedState): Current shared optimization state.
+
+        Returns:
+            float: The current throughput (best-so-far, else baseline).
+        """
+
+    def progress(self, state: "SharedState") -> float:
+        """Compute progress as current divided by target, capped at 1.0.
+
+        Args:
+            state (SharedState): Current shared optimization state.
+
+        Returns:
+            float: Fraction of the target achieved, in the range 0.0 → 1.0; 0.0 when
+            the current metric is non-positive.
+        """
+        cur = self._current(state)
+        if cur <= 0:
+            return 0.0
+        tgt = self._target()
+        if tgt <= 0:
+            return 0.0
+        return min(1.0, cur / tgt)
+
+    def remaining_gap(self, state: "SharedState") -> float:
+        """Compute the remaining amount needed to reach the target.
+
+        Args:
+            state (SharedState): Current shared optimization state.
+
+        Returns:
+            float: Non-negative distance still required to reach the target.
+        """
+        return max(0.0, self._target() - self._current(state))
+
+    def reached(self, state: "SharedState") -> bool:
+        """Report whether the current metric has met or exceeded the target.
+
+        Args:
+            state (SharedState): Current shared optimization state.
+
+        Returns:
+            bool: ``True`` once the current metric ``>=`` the target.
+        """
+        return self._current(state) >= self._target()
+
+    def pressure_input(self, state: "SharedState") -> float:
+        """Compute urgency, equal to current progress toward the target.
+
+        Args:
+            state (SharedState): Current shared optimization state.
+
+        Returns:
+            float: Urgency in the range 0.0 → 1.0.
+        """
+        return self.progress(state)
+
+
+@dataclass
+class TargetTputObjective(_RatioObjective):
     """Reach an absolute per-GPU throughput number (progress against best-so-far tput, not baseline).
 
     The unit is framework-dependent: tok/s/GPU for serving frameworks, img/s
@@ -207,57 +289,13 @@ class TargetTputObjective(Objective):
         """
         return "tput"
 
-    def _current_tput(self, state: "SharedState") -> float:
+    def _target(self) -> float:
+        """Return the configured absolute throughput target."""
+        return self.target_tput_per_gpu
+
+    def _current(self, state: "SharedState") -> float:
         """Resolve current throughput (best-so-far, else baseline)."""
         return _resolve_current_tput(state)
-
-    def progress(self, state: "SharedState") -> float:
-        """Compute progress as current throughput divided by the target, capped at 1.0.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Fraction of the target throughput achieved, in the range 0.0 → 1.0.
-        """
-        cur = self._current_tput(state)
-        if cur <= 0:
-            return 0.0
-        return min(1.0, cur / self.target_tput_per_gpu)
-
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Compute the remaining throughput needed to hit the target.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Non-negative per-GPU throughput still required to reach the
-            target (tok/s for serving, img/s for scriptable xDiT).
-        """
-        return max(0.0, self.target_tput_per_gpu - self._current_tput(state))
-
-    def reached(self, state: "SharedState") -> bool:
-        """Report whether the current throughput has met or exceeded the target.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            bool: ``True`` once current throughput ``>= target_tput_per_gpu``.
-        """
-        return self._current_tput(state) >= self.target_tput_per_gpu
-
-    def pressure_input(self, state: "SharedState") -> float:
-        """Compute urgency, equal to current progress toward the target.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Urgency in the range 0.0 → 1.0.
-        """
-        return self.progress(state)
 
     def describe(self) -> str:
         """Return a one-line summary of the configured throughput target.
@@ -269,7 +307,7 @@ class TargetTputObjective(Objective):
 
 
 @dataclass
-class TargetBaselineObjective(Objective):
+class TargetBaselineObjective(_RatioObjective):
     """Match (or beat) the throughput recorded in another session's baseline (reads ``output_throughput``)."""
 
     baseline_dir: str
@@ -307,56 +345,13 @@ class TargetBaselineObjective(Objective):
         """
         return "baseline"
 
-    def _cur(self, state: "SharedState") -> float:
+    def _target(self) -> float:
+        """Return the reference throughput loaded from the baseline directory."""
+        return self._ref_tput
+
+    def _current(self, state: "SharedState") -> float:
         """Resolve current throughput (best-so-far, else baseline)."""
         return _resolve_current_tput(state)
-
-    def progress(self, state: "SharedState") -> float:
-        """Compute progress as current throughput divided by the reference, capped at 1.0.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Fraction of the reference throughput achieved, in the range 0.0 → 1.0.
-        """
-        cur = self._cur(state)
-        if self._ref_tput <= 0:
-            return 0.0
-        return min(1.0, cur / self._ref_tput)
-
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Compute the remaining throughput needed to match the reference baseline.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Non-negative throughput still required to reach the reference.
-        """
-        return max(0.0, self._ref_tput - self._cur(state))
-
-    def reached(self, state: "SharedState") -> bool:
-        """Report whether the current throughput matches or beats the reference.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            bool: ``True`` once current throughput ``>= _ref_tput``.
-        """
-        return self._cur(state) >= self._ref_tput
-
-    def pressure_input(self, state: "SharedState") -> float:
-        """Compute urgency, equal to current progress toward the reference.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Urgency in the range 0.0 → 1.0.
-        """
-        return self.progress(state)
 
     def describe(self) -> str:
         """Return a one-line summary of the configured baseline target.

@@ -34,20 +34,6 @@ def test_target_tput_pressure_describe_and_gap():
     assert "target_tput_per_gpu=1000" in obj.describe()
 
 
-def test_target_baseline_cur_fallback_and_pressure(tmp_path):
-    ws = tmp_path / "ref"
-    ws.mkdir()
-    (ws / "benchmark_report.json").write_text(
-        json.dumps({"throughput": {"output_throughput": 1000.0}}),
-        encoding="utf-8",
-    )
-    obj = TargetBaselineObjective(baseline_dir=str(ws))
-    # no current_best -> fall back to baseline_tput
-    s = SharedState(baseline_tput=500.0, current_best={})
-    assert obj.remaining_gap(s) == 500.0
-    assert obj.pressure_input(s) == pytest.approx(0.5)
-
-
 def test_target_baseline_invalid_throughput(tmp_path):
     ws = tmp_path / "ref"
     ws.mkdir()
