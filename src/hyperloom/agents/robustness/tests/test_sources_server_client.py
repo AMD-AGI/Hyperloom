@@ -44,35 +44,6 @@ def _client(handler) -> RobustnessServerClient:
 
 
 @pytest.mark.asyncio
-async def test_get_session_returns_none_on_404():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, json={"detail": "session not found"})
-
-    client = _client(handler)
-    try:
-        result = await client.get_session("missing")
-    finally:
-        await client.aclose()
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_get_session_returns_dict_on_200():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"session_id": "sess-1", "model_name": "qwen3-8b"},
-        )
-
-    client = _client(handler)
-    try:
-        result = await client.get_session("sess-1")
-    finally:
-        await client.aclose()
-    assert result == {"session_id": "sess-1", "model_name": "qwen3-8b"}
-
-
-@pytest.mark.asyncio
 async def test_list_session_events_unwraps_envelope():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"events": [{"id": 1}, {"id": 2}]})
@@ -106,35 +77,9 @@ async def test_connect_error_raises_source_unavailable():
     client = _client(handler)
     try:
         with pytest.raises(SourceUnavailable):
-            await client.list_sessions(limit=10)
+            await client.list_session_pods("sess-1")
     finally:
         await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_metrics_window_query_params_are_unix_seconds():
-    seen: dict[str, str] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        return httpx.Response(200, json={"pods": []})
-
-    client = _client(handler)
-    from hyperloom.agents.robustness.sources.server_client import _MetricsWindow
-
-    try:
-        await client.get_session_metrics(
-            "sess-1",
-            _MetricsWindow(start_unix=100, end_unix=200),
-            categories=["gpu", "cpu"],
-            step="15s",
-        )
-    finally:
-        await client.aclose()
-    assert "start=100" in seen["url"]
-    assert "end=200" in seen["url"]
-    assert "categories=gpu%2Ccpu" in seen["url"] or "categories=gpu,cpu" in seen["url"]
-    assert "step=15s" in seen["url"]
 
 
 # ---------------------------------------------------------------------------
@@ -253,28 +198,6 @@ async def test_get_cluster_pod_metrics_forwards_window_and_categories():
     assert "step=15s" in seen["query"]
     assert "categories=gpu" in seen["query"]
     assert body == {"data": {"pods": []}}
-
-
-@pytest.mark.asyncio
-async def test_list_cluster_pod_metric_categories_unwraps_available():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "namespace": "ns1",
-                "name": "podA",
-                "available": [{"name": "gpu_temp", "category": "gpu"}],
-            },
-        )
-
-    client = _client(handler)
-    from hyperloom.agents.robustness.sources.server_client import _MetricsWindow
-
-    try:
-        out = await client.list_cluster_pod_metric_categories("ns1", "podA", _MetricsWindow(start_unix=10, end_unix=20))
-    finally:
-        await client.aclose()
-    assert out == [{"name": "gpu_temp", "category": "gpu"}]
 
 
 @pytest.mark.asyncio

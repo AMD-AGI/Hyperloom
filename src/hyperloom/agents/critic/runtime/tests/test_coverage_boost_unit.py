@@ -120,24 +120,25 @@ def test_validate_envelope_structural() -> None:
 
 
 def test_validate_envelope_payload_rules() -> None:
-    # payload not a dict (line 144).
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope({"intents": [{"intent_type": "alert", "payload": "x"}]})
 
-    # review_verdict empty target (line 159).
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope(
-            {"intents": [{"intent_type": "review_verdict", "payload": {"verdict": "approve", "target_proposal_msg_id": ""}}]}
+            {"intents": [{"intent_type": "review_verdict", "payload": {"target_proposal_msg_id": "m1"}}]}
         )
 
-    # review_verdict bad source (line 162).
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope(
             {
                 "intents": [
                     {
                         "intent_type": "review_verdict",
-                        "payload": {"verdict": "approve", "target_proposal_msg_id": "m1", "source": "bogus"},
+                        "payload": {
+                            "verdict": "approve",
+                            "verdict_map": {"v1": {"verdict": "reject"}},
+                            "target_proposal_msg_id": "m1",
+                        },
                     }
                 ]
             }
