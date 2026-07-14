@@ -212,6 +212,7 @@ def test_phase_exit_reasons_includes_required_vocab():
         "sweep_budget_cap",
         "sweep_done",
         "conc_sweep_done",
+        "conc_sweep_failed",
         "sweep_budget_exhausted",
         "kernel_phase_aborted_no_trace",
         "explore_force_exit_low_budget",
@@ -259,6 +260,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "user_stop_requested",
         "cortex_drain_failed",
         "plateau_explore",
+        "conc_sweep_failed",
  # fast baseline arg-error stop reason
         "baseline_arg_error",
     ):

@@ -73,6 +73,81 @@ async def test_factory_uses_noop_engine_when_credentials_missing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_config_discover_uses_deepseek_anthropic_defaults(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
+
+    config = await Config.discover()
+
+    assert config.llm_provider == "anthropic"
+    assert config.llm_base_url == "https://api.deepseek.com/anthropic"
+    assert config.llm_api_key == "deepseek-token"
+    assert config.llm_model == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_config_discover_anthropic_model_follows_claude_model(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
+
+    config = await Config.discover()
+
+    assert config.llm_provider == "anthropic"
+    assert config.llm_model == "claude-opus-4-6"
+
+
+@pytest.mark.asyncio
+async def test_config_discover_openai_model_follows_codex_model(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-5.5")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
+
+    config = await Config.discover()
+
+    assert config.llm_provider == "openai"
+    assert config.llm_model == "gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_config_discover_does_not_treat_gateway_key_as_official_openai(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-token")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
+
+    config = await Config.discover()
+
+    assert config.llm_base_url == ""
+    assert config.llm_api_key == ""
+    assert config.llm_provider == "openai"
+
+
+async def _async_value(value):
+    return value
+
+
+@pytest.mark.asyncio
 async def test_factory_uses_llm_engine_when_credentials_present(tmp_path: Path):
     from hyperloom.agents.robustness.decision.rca_engine import LlmRcaEngine
 
@@ -87,6 +162,28 @@ async def test_factory_uses_llm_engine_when_credentials_present(tmp_path: Path):
         engine = bundle.components.rca
         assert isinstance(engine, LlmRcaEngine)
         assert engine.model == config.llm_model
+        await engine.aclose()
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
+    from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
+
+    config = Config(
+        session_dir=tmp_path,
+        robustness_server_url="",
+        llm_base_url="https://api.deepseek.com/anthropic",
+        llm_api_key="secret",
+        llm_provider="anthropic",
+        llm_model="deepseek-chat",
+    )
+    bundle = build_reactor_components(config)
+    try:
+        engine = bundle.components.rca
+        assert isinstance(engine, AnthropicRcaEngine)
+        assert engine.model == "deepseek-chat"
         await engine.aclose()
     finally:
         await bundle.aclose()
