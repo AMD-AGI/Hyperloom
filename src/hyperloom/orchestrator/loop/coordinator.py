@@ -23,20 +23,18 @@ _SEVERITY_REGRESS: str = "regress"
 # Bounded transient-failure auto-retry for specialist dispatches: a subprocess
 # timeout / crash / stale-heartbeat re-dispatches up to this many times before
 # the failure is recorded normally. Infra-only (see classify_specialist_failure);
-# semantic empties are left for the orchestrator. Env override / disable via
-# INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY (set "0" to disable).
+# semantic empties are left for the orchestrator.
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention). Runs
 # every N coordinator ticks: actively reaps expired serving + GPU leases and
 # prunes the events/tasks DB so a multi-day single-session run never leaks
-# capacity or grows the DB unbounded (no process restart clears them). Env
-# override via INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS ("0" disables).
+# capacity or grows the DB unbounded (no process restart clears them).
 MAINTENANCE_EVERY_TICKS: int = 50
 
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode. Each
 # phase's budget fraction (DEFAULT_PHASE_BUDGET_PCT) applies to this window
-# rather than the whole run. Env override: INFERENCE_OPTIMIZER_CYCLE_HOURS.
+# rather than the whole run.
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop: the threshold counts only
 # crashes within this many seconds so old crashes age out on long runs/resume.
@@ -49,13 +47,11 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # loop with stop_reason ``enablement_stalled`` instead of re-deriving the same
 # fix until the wall-clock deadline. A *progressing* round resets the streak, so
 # an N-gap serial enablement is bounded by N + this cap, not capped at N.
-_ENABLEMENT_MAX_STALL: int = int(os.environ.get("INFERENCE_OPTIMIZER_ENABLEMENT_MAX_STALL", "3") or "3")
+_ENABLEMENT_MAX_STALL: int = 3
 # Unified authored-lane max attempts: applies to apply-failure retries across
 # all non-enablement lanes (perf_framework, perf_explore).  Also used as the
 # new cap for Critic reauthor attempts (raised from 1 → 3).
-_AUTHORED_LANE_MAX_ATTEMPTS: int = int(
-    os.environ.get("INFERENCE_OPTIMIZER_AUTHORED_LANE_MAX_ATTEMPTS", "3") or "3"
-)
+_AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
@@ -587,57 +583,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
     ):
-        """Construct the single per-session Coordinator and wire its plane.
-
-        Builds the persistence layer (SQLite connection, MessageBus,
-        ResourceLockManager, TaskRegistry, CursorStore), the PolicyGate,
-        the phase machine, and the per-agent reactor bookkeeping, then
-        detects whether this session is a resume and anchors the Cortex KB.
-
-        Args:
-            session_dir (Path): Directory holding this session's state.json,
-                SQLite DB and artifacts.
-            backends (dict[str, Backend]): Map of agent-role name to its
-                Backend; every role in ``role_registry`` must be present.
-            role_registry (dict[str, AgentRole] | None): Agent-role registry;
-                ``None`` uses :func:`default_role_registry`.
-            sub_agent_runner (SubAgentRunner | None): Runner for delegated
-                sub-agent tasks; ``None`` constructs a default one.
-            bus_class (type[MessageBus]): MessageBus class to instantiate.
-            compare_against_gpu (str | None): Reference GPU id for target
-                analysis priors; ``None``/blank disables external comparison.
-            model_class (str | None): Model-class override seeded into
-                SharedState when none is already persisted.
-            cortex_kb (RecipeKB | None): Recipe-snapshot KB dispatcher; ``None``
-                makes the fact-write hooks no-ops.
-            phase_budget_pct (dict[str, float] | None): Per-phase wall-clock
-                budget percentages; ``None`` uses library defaults.
-            knowledge_plane (Any): Optional KnowledgePlane facade used to
-                pre-warm specialist knowledge before enqueue.
-            warm_replay_enabled (bool): Whether warm-recipe replay may
-                auto-apply the KB best_config.
-            warm_replay_min_confidence (float): Minimum KB confidence required
-                to fire a warm replay.
-            warm_replay_min_reproduce_pct (float): Minimum reproduce fraction
-                required to fire a warm replay.
-
-        Raises:
-            ValueError: If a role in ``role_registry`` has no matching backend.
-
-        Attributes:
-            session_dir (Path): Session working directory.
-            backends (dict[str, Backend]): Wired per-role backends.
-            db (SqliteConnection): Session persistence connection.
-            bus (MessageBus): Message routing bus.
-            locks (ResourceLockManager): Lane/resource lease manager.
-            tasks (TaskRegistry): Delegated-task registry.
-            cursors (CursorStore): Per-agent message cursors.
-            sub (SubAgentRunner): Sub-agent task runner.
-            shared_state (SharedState): Persistent session state (state.json).
-            policy (PolicyGate): Intent-validation choke-point.
-            state (CoordinatorState): In-memory reactor/dispatcher state.
-        """
+        """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # Recipe-snapshot KB dispatcher; ``None`` makes fact-write hooks no-ops.
@@ -692,7 +641,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         )
 
         # Persistent session state (state.json) — load existing for resume.
-        self.shared_state = SharedState.load_or_init(self.session_dir)
+        self.shared_state = SharedState.load_or_init(
+            self.session_dir,
+            legacy_action_scores=legacy_action_scores,
+            migration_mode=migration_mode,
+        )
         # #266 lifecycle save debounce: terminal events (END/ERROR) flush
         # immediately so operators see produced artifacts promptly; bursty
         # non-terminal markers (START/ENTER) coalesce within a short window to
@@ -729,13 +682,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # frees (instead of waiting out a long specialist / integrate_patch that
         # was already being awaited). FIRST_COMPLETED handles lane frees that
         # coincide with a task completion; the poll covers TTL/external releases.
-        try:
-            self._dispatcher_poll_sec = max(
-                0.05,
-                float(os.environ.get("INFERENCE_OPTIMIZER_DISPATCHER_POLL_SECONDS", "10") or 10.0),
-            )
-        except (TypeError, ValueError):
-            self._dispatcher_poll_sec = 10.0
+        self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
             from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
@@ -808,12 +755,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # tick, so allowing two compactions back-to-back can wedge the run in a
         # checkpoint-every-tick loop (the SEED's own tokens re-trip the budget).
         # A true near-window emergency bypasses this floor (see _maybe_checkpoint).
-        try:
-            self._checkpoint_min_tick_gap: int = max(
-                1, int(os.environ.get("INFERENCE_OPTIMIZER_CHECKPOINT_MIN_TICK_GAP", "").strip() or 3)
-            )
-        except (TypeError, ValueError):
-            self._checkpoint_min_tick_gap = 3
+        self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies (#1); resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.

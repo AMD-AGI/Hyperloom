@@ -251,6 +251,32 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
+# Legacy key renames applied once on load: ``extra_sglang_args`` -> ``extra_server_args``.
+_PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
+    "extra_sglang_args": "extra_server_args",
+    "candidate_extra_sglang_args": "candidate_extra_server_args",
+}
+
+
+def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
+    """Rewrite legacy launch-arg field names in-place; canonical keys win."""
+    migrated = 0
+    if isinstance(obj, dict):
+        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
+            if legacy_key in obj:
+                if canonical_key not in obj:
+                    obj[canonical_key] = obj.pop(legacy_key)
+                else:
+                    del obj[legacy_key]
+                migrated += 1
+        for value in obj.values():
+            migrated += _migrate_legacy_extra_sglang_args_keys(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            migrated += _migrate_legacy_extra_sglang_args_keys(item)
+    return migrated
+
+
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
     """Bound the explore_search negative ledger for multi-day runs.
 
@@ -889,7 +915,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return Path(session_dir) / "state.json"
 
     @classmethod
-    def load_or_init(cls, session_dir: Path) -> "SharedState":
+    def load_or_init(
+        cls,
+        session_dir: Path,
+        *,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
+    ) -> "SharedState":
         """Load existing ``state.json`` or return a fresh blank instance.
 
         Reads and migrates the persisted state via :meth:`from_dict` when
@@ -910,14 +942,24 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         else:
             with path.open(encoding="utf-8") as f:
                 raw = json.load(f)
-            inst = cls.from_dict(raw)
+            inst = cls.from_dict(
+                raw,
+                legacy_action_scores=legacy_action_scores,
+                migration_mode=migration_mode,
+            )
         # Remember the session dir so breakdown instrumentation can record
         # fragments at author time (non-field attr; not serialized by asdict).
         inst._session_dir = Path(session_dir)
         return inst
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+    def from_dict(
+        cls,
+        raw: dict[str, Any],
+        *,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
+    ) -> "SharedState":
         """Construct a :class:`SharedState` from a raw mapping, migrating it.
 
         Acts as the unified migration entry point: an absent
@@ -935,6 +977,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         incoming_version = int(raw.get("schema_version") or 1)
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
+
+        legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
+        if legacy_migrations:
+            migration_events.append(
+                f"extra_server_args rename: migrated {legacy_migrations} legacy "
+                "extra_sglang_args / candidate_extra_sglang_args key(s)"
+            )
 
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
@@ -960,14 +1009,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 legacy_seen.append((legacy, int(size)))
             filtered.pop(legacy, None)
         if legacy_seen:
-            mode = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES",
-                    "drop",
-                )
-                .strip()
-                .lower()
-            )
+            mode = str(legacy_action_scores or "drop").strip().lower()
             import logging as _logging
 
             log = _logging.getLogger(__name__)
@@ -995,14 +1037,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         # fact-layer integrity check: strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
         if needs_migration and raw:
-            mode = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_MIGRATION_MODE",
-                    "strict",
-                )
-                .strip()
-                .lower()
-            )
+            mode = str(migration_mode or "strict").strip().lower()
             fact_layer_keys = (
                 "baseline_tput",
                 "baseline_cold_tput",

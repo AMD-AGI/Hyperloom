@@ -373,10 +373,6 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     # research-lane-capacity default is GPU-derived; pin the GPU count for determinism.
-    monkeypatch.delenv(
-        "INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY",
-        raising=False,
-    )
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(
