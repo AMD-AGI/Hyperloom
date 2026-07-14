@@ -1054,8 +1054,7 @@ class KernelPhase(PhaseHandler):
         # assembler backfills each kernel's discovery-sourced fields
         # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
         # not tracelens, so the route is ``bypass``; ``tool="geak"`` keeps the
-        # version provenance under the canonical GEAK e2e optimizer (the legacy
-        # per-kernel backend is the distinct ``geak_v3`` token).
+        # version provenance under the canonical GEAK e2e optimizer.
         for run in (journey.get("discovery_runs") or []):
             if not isinstance(run, dict):
                 continue

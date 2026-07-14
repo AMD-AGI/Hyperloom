@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""GEAK + OOB invocation renderer — one ``_render_pair`` feeding two section ids (geak/oob share the shape)."""
+"""Kernel invocation renderers."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _render_pair(
     invocations_key: str,
     legacy_key: str,
 ) -> RenderedSection:
-    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback).
+    """Render a kernel invocation section.
 
     Args:
         breakdown: The full ``session_breakdown.json`` dict.
@@ -120,20 +120,3 @@ def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
     )
 
 
-@register_renderer("oob_invocations")
-def render_oob(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the OOB (out-of-box) invocations section.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered OOB invocations section.
-    """
-    return _render_pair(
-        breakdown,
-        section_id="oob_invocations",
-        title="OOB Invocations",
-        invocations_key="oob",
-        legacy_key="oob_invocations",
-    )

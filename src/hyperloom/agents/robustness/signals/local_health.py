@@ -425,7 +425,7 @@ def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
             source="local",
             suggestion=(
                 "prune_branch(kernel_opt); escalate to restart Ray head — "
-                "GEAK + OOB submissions are pending until ray is back"
+                "GEAK + kernel submissions are pending until ray is back"
             ),
         )
     ]

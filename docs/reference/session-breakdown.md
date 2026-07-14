@@ -93,8 +93,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "phase_timeline":     [ /* §7  PhaseEvent[] */ ],
   "capability_summary": { /* §8  Capability cards */ },
   "geak_invocations":   [ /* §9  Invocation[] */ ],
-  "oob_invocations":    [ /* §10 Invocation[] */ ],
-  "forge_invocations":  [ /* §9–10 Invocation[] — Kernel-Forge lane */ ],
+  "forge_invocations":  [ /* §10 Invocation[] */ ],
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
@@ -233,7 +232,7 @@ T+90 min" charts.
 
 ## `capability_summary` — `CapabilitySummary`
 
-One card per live capability (`geak`, `oob`, `explore`, `sweep`,
+One card per live capability (`geak`, `forge`, `explore`, `sweep`,
 `specialist`) with: `status`, `attempts`, `keeps`, `tested`,
 `best_gain_pct`, `reason`. Legacy `backends`, `params`, and
 `validate_stack` rows can appear when archived sessions are rebuilt.
@@ -241,12 +240,10 @@ Drives the per-session UI cards in Primus-Claw.
 
 ---
 
-## `geak_invocations` / `oob_invocations` / `forge_invocations` — `Invocation[]`
+## `geak_invocations` / `forge_invocations` — `Invocation[]`
 
-Same `Invocation` shape across all three lists; `backend` distinguishes
-(`geak` / `claude` / `codex` / `cursor` / `forge`). `forge_invocations` is the
-Kernel-Forge lane and is kept separate — it is not folded into
-`oob_invocations`. One entry per attempt-on-a-kernel. The `decision` enum is
+Same `Invocation` shape across both lists; `backend` distinguishes
+(`geak` / `forge`). One entry per attempt-on-a-kernel. The `decision` enum is
 `KEEP` / `PARTIAL` / `REVERT` / `FAILED`.
 
 ---
@@ -314,7 +311,7 @@ artifacts (for example, for a replay) should resolve relative paths against
 
 Gain attribution per stack entry: a list of `StackGainEntry`
 (per-validation incremental contribution) plus a `SourceBreakdown`
-that splits the validated total across geak / oob / explore / sweep,
+that splits the validated total across geak / forge / explore / sweep,
 with legacy alias buckets populated only when the source session
 contains archived action names.
 

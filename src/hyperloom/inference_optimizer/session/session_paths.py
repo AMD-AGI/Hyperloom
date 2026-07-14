@@ -265,7 +265,7 @@ def reports_dir(session_dir: Path) -> Path:
 # compute paths (callers mkdir the parent before writing). The parent process
 # is the sole writer of llm_calls.jsonl, so there is no concurrent-writer
 # fan-in to coordinate on that file. Out-of-process children (specialist /
-# geak / oob / robustness / critic-agent CLI) do NOT append to it; they write
+# geak / forge / robustness / critic-agent CLI) do NOT append to it; they write
 # their own ext/*.jsonl shard under ``trace_ext_dir`` which the collector
 # (``_load_llm_calls``) and the Langfuse emitter (``_flush_ext_shards``)
 # backfill at read time. The ext shards are a legacy/child-compatibility path:
