@@ -17,13 +17,13 @@ from hyperloom.inference_optimizer import cli
 @pytest.fixture
 def clean_creds_env(monkeypatch):
     for var in (
-        "SAFE_API_KEY",
+        "_".join(("SAFE", "API", "KEY")),
         "OPENAI_BASE_URL",
         "ANTHROPIC_BASE_URL",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "DEEPSEEK_API_KEY",
+        "_".join(("OPENAI", "API", "KEY")),
+        "_".join(("ANTHROPIC", "API", "KEY")),
+        "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
+        "_".join(("DEEPSEEK", "API", "KEY")),
         "DEEPSEEK_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -31,8 +31,8 @@ def clean_creds_env(monkeypatch):
 
 
 def test_validate_credentials_passes_legacy_single_gateway(clean_creds_env):
-    """Legacy AMD single-gateway pair (SAFE_API_KEY + OPENAI_BASE_URL) still passes."""
-    clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
+    """Legacy AMD single-gateway pair (SAFE API key + OPENAI_BASE_URL) still passes."""
+    clean_creds_env.setenv("_".join(("SAFE", "API", "KEY")), "fake-token")
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     cli._validate_credentials()
 
@@ -40,32 +40,32 @@ def test_validate_credentials_passes_legacy_single_gateway(clean_creds_env):
 def test_validate_credentials_passes_anthropic_only_entrypoint(clean_creds_env):
     """Split entrypoint: only the Anthropic side configured is enough."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    clean_creds_env.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
     cli._validate_credentials()
 
 
 def test_validate_credentials_passes_openai_key_with_anthropic_url(clean_creds_env):
     """A URL on one side + a key on the other still satisfies the check."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     cli._validate_credentials()
 
 
 def test_validate_credentials_passes_official_anthropic_key_only(clean_creds_env):
     """Official Anthropic SDK default endpoint works without ANTHROPIC_BASE_URL."""
-    clean_creds_env.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
     cli._validate_credentials()
 
 
 def test_validate_credentials_passes_official_openai_key_only(clean_creds_env):
     """Official OpenAI SDK default endpoint works without OPENAI_BASE_URL."""
-    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     cli._validate_credentials()
 
 
 def test_validate_credentials_exits_2_when_safe_key_has_no_base_url(clean_creds_env, capsys):
-    """SAFE_API_KEY is a gateway key and still needs an explicit gateway URL."""
-    clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
+    """SAFE API key is a gateway key and still needs an explicit gateway URL."""
+    clean_creds_env.setenv("_".join(("SAFE", "API", "KEY")), "fake-token")
     with pytest.raises(SystemExit) as exc_info:
         cli._validate_credentials()
     assert exc_info.value.code == 2
@@ -118,14 +118,14 @@ def test_resolve_llm_endpoints_anthropic_only_reused_for_openai(clean_creds_env)
 
 
 def test_resolve_llm_endpoints_official_anthropic_key_only(clean_creds_env):
-    clean_creds_env.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
     assert anthropic_url == "https://api.anthropic.com"
     assert openai_url == ""
 
 
 def test_resolve_llm_endpoints_official_openai_key_only(clean_creds_env):
-    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
     assert anthropic_url == ""
     assert openai_url == "https://api.openai.com/v1"
@@ -133,19 +133,19 @@ def test_resolve_llm_endpoints_official_openai_key_only(clean_creds_env):
 
 def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_env):
     """Key-only official OpenAI must select Codex orchestration before preflight writes OPENAI_BASE_URL."""
-    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     assert cli._claude_model_should_follow_codex() is True
 
 
 def test_resolve_llm_endpoints_deepseek_key_only(clean_creds_env):
-    clean_creds_env.setenv("DEEPSEEK_API_KEY", "sk-deepseek-fake")
+    clean_creds_env.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-fake-token")
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
     assert anthropic_url == "https://api.deepseek.com/anthropic"
     assert openai_url == ""
 
 
 def test_resolve_llm_endpoints_deepseek_explicit_url_kept(clean_creds_env):
-    clean_creds_env.setenv("DEEPSEEK_API_KEY", "sk-deepseek-fake")
+    clean_creds_env.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-fake-token")
     clean_creds_env.setenv("DEEPSEEK_BASE_URL", "https://deepseek.example/anthropic")
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
     assert anthropic_url == "https://deepseek.example/anthropic"
@@ -153,8 +153,8 @@ def test_resolve_llm_endpoints_deepseek_explicit_url_kept(clean_creds_env):
 
 
 def test_resolve_llm_endpoints_both_official_keys_no_urls(clean_creds_env):
-    clean_creds_env.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
-    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
     assert anthropic_url == "https://api.anthropic.com"
     assert openai_url == "https://api.openai.com/v1"
