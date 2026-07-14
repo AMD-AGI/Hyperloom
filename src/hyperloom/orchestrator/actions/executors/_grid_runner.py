@@ -116,14 +116,14 @@ def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
     Order: $MAGPIE_PYTHON (only when it can ``import Magpie``) > first PATH
-    ``python3`` that can ``import Magpie`` > /opt/venv/bin/python (canonical
-    Magpie venv) as unconditional last resort. A stale ``$MAGPIE_PYTHON``
+    ``python3`` that can ``import Magpie`` > /opt/venv/bin/python when present
+    > first PATH ``python3``. A stale ``$MAGPIE_PYTHON``
     resolved before Magpie was pip-installed (e.g. ``/usr/bin/python3``) is
     validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
 
     Returns:
         str: Path to a Python interpreter that can import Magpie, falling back
-        to ``/opt/venv/bin/python``.
+        to an existing interpreter that preflight can install Magpie into.
     """
 
     def _can_import_magpie(py: str) -> bool:
@@ -173,7 +173,12 @@ def _resolve_magpie_python() -> str:
     if candidate and _can_import_magpie(candidate):
         return candidate
 
-    return "/opt/venv/bin/python"
+    opt_venv = "/opt/venv/bin/python"
+    if Path(opt_venv).is_file():
+        return opt_venv
+    if candidate:
+        return candidate
+    return "python3"
 
 
 def _resolve_probe_python() -> str:

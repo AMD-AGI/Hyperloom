@@ -23,6 +23,8 @@ def clean_creds_env(monkeypatch):
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
     return monkeypatch
@@ -127,6 +129,27 @@ def test_resolve_llm_endpoints_official_openai_key_only(clean_creds_env):
     anthropic_url, openai_url = cli._resolve_llm_endpoints()
     assert anthropic_url == ""
     assert openai_url == "https://api.openai.com/v1"
+
+
+def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_env):
+    """Key-only official OpenAI must select Codex orchestration before preflight writes OPENAI_BASE_URL."""
+    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    assert cli._claude_model_should_follow_codex() is True
+
+
+def test_resolve_llm_endpoints_deepseek_key_only(clean_creds_env):
+    clean_creds_env.setenv("DEEPSEEK_API_KEY", "sk-deepseek-fake")
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.deepseek.com/anthropic"
+    assert openai_url == ""
+
+
+def test_resolve_llm_endpoints_deepseek_explicit_url_kept(clean_creds_env):
+    clean_creds_env.setenv("DEEPSEEK_API_KEY", "sk-deepseek-fake")
+    clean_creds_env.setenv("DEEPSEEK_BASE_URL", "https://deepseek.example/anthropic")
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    assert anthropic_url == "https://deepseek.example/anthropic"
+    assert openai_url == ""
 
 
 def test_resolve_llm_endpoints_both_official_keys_no_urls(clean_creds_env):
