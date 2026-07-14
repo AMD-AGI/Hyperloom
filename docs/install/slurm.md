@@ -201,7 +201,7 @@ hard-allowlisted:
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | `claude-opus-4-7` (preferred) or `claude-opus-4-6` | Enforced by the optimizer's model gate; other names are rejected. |
-| Kernel agent (GEAK) | `GEAK_MODEL_NAME` | for example `claude-opus-4-8` | Not subject to the orchestration gate. |
+| Kernel agent (GEAKv4 Claude Code workflow) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different Claude Code model. |
 | Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
 
 - Do **not** use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
