@@ -947,6 +947,9 @@ class WritebackCollaborator:
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
                 changed = True
+            elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
+                self.shared_state.baseline_warm_runtime_sec = 0.0
+                changed = True
             # current_best.tput follows the same hot baseline contract.
             # run_grid/explore/integrate_patch measure optimization candidates
             # on the same warm second-round basis when lifecycle reuse is

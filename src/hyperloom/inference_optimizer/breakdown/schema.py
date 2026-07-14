@@ -1852,6 +1852,8 @@ class ConcSweepSummary(TypedDict, total=False):
     elapsed_sec: float
     total_budget_sec: int  # None when budget gate disabled
     budget_exhausted: bool
+    budget_skip_reason: str  # why budget-gated variants were skipped, when budget_exhausted=true
+    budget_remaining_sec: float
     report_json_path: str
     report_csv_path: str  # for the "download CSV" button
     roofline_ceiling: dict[str, Any]  # per-CONC theoretical peak + MBU%; may be absent on old products

@@ -870,6 +870,9 @@ def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     assert {p["status"] for p in all_points} == {"skipped"}
     assert {p["error_class"] for p in all_points} == {"budget_exhausted"}
+    assert payload["status"] == "skipped"
+    assert payload["was_skipped"] is True
+    assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
 

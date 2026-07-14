@@ -298,6 +298,31 @@ def _build_comparison(
     return rows, summary
 
 
+def _budget_limited_without_valid_pair(
+    *,
+    budget_exhausted: bool,
+    summary: dict[str, Any],
+    baseline_points: list[dict[str, Any]],
+    optimized_points: list[dict[str, Any]],
+) -> bool:
+    """Return true when budget gating, not benchmark failure, prevented all pairs."""
+    if not budget_exhausted or int(summary.get("successful_pairs") or 0) > 0:
+        return False
+    points = baseline_points + optimized_points
+    if not points:
+        return False
+    saw_budget_skip = False
+    for point in points:
+        status = str(point.get("status") or "").lower()
+        error_class = str(point.get("error_class") or "")
+        if error_class == "budget_exhausted":
+            saw_budget_skip = True
+            continue
+        if status not in ("succeeded", "skipped"):
+            return False
+    return saw_budget_skip
+
+
 def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
     """One row per (arm, conc) — flat columns for spreadsheet pivots.
 
@@ -627,6 +652,13 @@ async def run_conc_sweep(
     optimized_points.sort(key=lambda p: p["conc"])
 
     comparison, summary = _build_comparison(baseline_points, optimized_points)
+    budget_limited_no_pair = _budget_limited_without_valid_pair(
+        budget_exhausted=budget_exhausted,
+        summary=summary,
+        baseline_points=baseline_points,
+        optimized_points=optimized_points,
+    )
+    status = "succeeded" if summary["successful_pairs"] else ("skipped" if budget_limited_no_pair else "failed")
 
     ceiling = _build_roofline_ceiling(
         state,
@@ -639,7 +671,7 @@ async def run_conc_sweep(
 
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "status": "succeeded" if summary["successful_pairs"] else "failed",
+        "status": status,
         "session_id": str(getattr(state, "session_id", "") or session_dir.name),
         "isl": isl,
         "osl": osl,
@@ -662,6 +694,9 @@ async def run_conc_sweep(
         "total_budget_sec": total_budget_sec if has_budget else None,
         "budget_exhausted": budget_exhausted,
     }
+    if budget_limited_no_pair:
+        payload["was_skipped"] = True
+        payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
     if budget_exhausted:
         payload["budget_skip_reason"] = budget_skip_reason
         payload["budget_remaining_sec"] = round(float(budget_remaining_sec or 0.0), 2)

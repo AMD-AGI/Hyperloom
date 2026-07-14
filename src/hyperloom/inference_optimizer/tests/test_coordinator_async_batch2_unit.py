@@ -1299,19 +1299,46 @@ async def test_unpromotable_conc_sweep_records_failed_terminal_state(coord: Coor
         task,
         {
             "status": "failed",
-            "budget_exhausted": True,
+            "budget_exhausted": False,
             "summary": {"successful_pairs": 0},
             "report_json_path": "/tmp/cs-failed.json",
         },
     )
 
     assert coord.shared_state.last_conc_sweep["status"] == "failed"
-    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is True
+    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is False
     result = exit_normal_sweep(coord.shared_state)
     assert result is not None
     reason, evidence = result
     assert reason == "conc_sweep_failed"
     assert evidence["conc_sweep_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_budget_limited_conc_sweep_skip_records_done(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    task = _ptask("cs-budget-skip", "conc_sweep")
+    await coord._promote_to_shared_state(
+        "conc_sweep",
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "skip_reason": "budget_exhausted_no_successful_pairs",
+            "budget_exhausted": True,
+            "summary": {"successful_pairs": 0},
+            "report_json_path": "/tmp/cs-budget-skip.json",
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is True
+    result = exit_normal_sweep(coord.shared_state)
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_done"
+    assert evidence["conc_sweep_status"] == "skipped"
 
 
 # -- _scan_stale_specialists (running rows) ---------------------------------

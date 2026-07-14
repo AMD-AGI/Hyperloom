@@ -228,8 +228,9 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    # First attempt eval=true (failed), fallback retried eval=false (succeeded).
-    assert [c["run_eval"] for c in calls] == ["true", "false"]
+    # Warmup first tries eval=true, falls back to eval=false, then the hot
+    # measured baseline reuses the eval-disabled materialized config.
+    assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
     assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])
