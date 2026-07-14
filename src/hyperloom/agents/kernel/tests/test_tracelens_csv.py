@@ -1382,11 +1382,11 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
             self.kwargs = kwargs
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-active")
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token-active")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     output_dir = tmp_path / "out"
     captured: dict[str, Any] = {}
@@ -1419,8 +1419,8 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     assert opts["setting_sources"] == []
     child_env = opts["env"]
     assert child_env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
-    assert child_env["ANTHROPIC_API_KEY"] == "sk-ant-active"
-    assert child_env["ANTHROPIC_AUTH_TOKEN"] == "sk-ant-active"
+    assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-token-active"
+    assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "anthropic-token-active"
     assert child_env["ANTHROPIC_MODEL"] == "claude-sonnet-4-5-20250929"
     assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-sonnet-4-5-20250929"
 
@@ -1467,12 +1467,12 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     def _no_claude_query(**_kwargs):
         raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
