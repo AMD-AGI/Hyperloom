@@ -24,8 +24,6 @@ Sites intentionally NOT delegated here (kept local by design):
   module-global ``os``/``tempfile`` being monkeypatched by its tests.
 * ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
   ``shutil.copystat`` preserves the target's mode.
-* ``recipe_kb/local_store._atomic_write_json`` — best-effort ``fsync`` + DEBUG
-  logging for durability on journaling mounts.
 * ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run
   standalone, so they must not gain a ``hyperloom`` import dependency.
 """

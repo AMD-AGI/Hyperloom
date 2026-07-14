@@ -263,7 +263,14 @@ def test_list_jsonl_skips_bad(tmp_path):
 def test_atomic_write_json_cleanup_on_error(tmp_path):
     # Non-serialisable payload makes json.dump raise -> tmp cleanup branch.
     with pytest.raises(TypeError):
-        ls._atomic_write_json(tmp_path / "x.json", {"bad": object()})
+        ls.atomic_write_json(
+            tmp_path / "x.json",
+            {"bad": object()},
+            indent=2,
+            sort_keys=True,
+            make_parents=True,
+            fsync=True,
+        )
     # tmp file should have been cleaned up
     assert list(tmp_path.glob("*.tmp")) == []
 

@@ -59,7 +59,6 @@ import json
 import logging
 import os
 import shutil
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,37 +120,6 @@ class LocalRecipeStoreError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Atomically write ``payload`` as JSON via a tmp-file + rename.
-
-    The tmp file lives in the same directory as ``path`` so the
-    rename is atomic on the same filesystem (POSIX guarantee). Any
-    other layout would risk a cross-device EXDEV.
-
-    fsync is best-effort: tmpfs and certain wekafs mounts reject the
-    syscall, but the rename is already durable on those systems via
-    a different path (e.g. journaling). Logging at DEBUG so operators
-    aren't spammed by the expected miss on tmpfs CI runners.
-
-    Args:
-        path (Path): Destination file path. Parent directories are
-            created if missing.
-        payload (dict[str, Any]): JSON-serialisable mapping to write.
-
-    Raises:
-        Exception: Any error raised while writing or renaming is
-            re-raised after a best-effort cleanup of the tmp file.
-    """
-    atomic_write_json(
-        path,
-        payload,
-        indent=2,
-        sort_keys=True,
-        make_parents=True,
-        fsync=True,
-    )
-
-
 def _read_json(path: Path) -> dict[str, Any] | None:
     """Read a JSON file or return ``None`` if it doesn't exist.
 
@@ -585,7 +553,14 @@ class LocalRecipeStore:
                     "replaced_by": dict(provenance or {}),
                     "snapshot": dict(live) if isinstance(live, dict) else {},
                 }
-                _atomic_write_json(archive_path, archive_payload)
+                atomic_write_json(
+                    archive_path,
+                    archive_payload,
+                    indent=2,
+                    sort_keys=True,
+                    make_parents=True,
+                    fsync=True,
+                )
 
             # Build payload via ``Recipe.from_dict`` so dataclass
             # instances and dicts both round-trip cleanly (typed
@@ -626,9 +601,13 @@ class LocalRecipeStore:
                     payload_dict.setdefault(key, val)
 
             recipe = Recipe.from_dict(payload_dict)
-            _atomic_write_json(
+            atomic_write_json(
                 self._live_path(canonical_id),
                 recipe.to_dict(),
+                indent=2,
+                sort_keys=True,
+                make_parents=True,
+                fsync=True,
             )
 
         return {

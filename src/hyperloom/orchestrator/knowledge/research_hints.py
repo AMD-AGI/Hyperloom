@@ -122,18 +122,6 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    """Write text to a file atomically via a temp file and rename.
-
-    Delegates to :func:`hyperloom.common.io.atomic_write_text`.
-
-    Args:
-        path: Destination file path.
-        text: Text content to write.
-    """
-    _common_io.atomic_write_text(path, text)
-
-
 def write_hints_skeleton(session_dir: Path) -> None:
     """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints).
 
@@ -157,11 +145,11 @@ def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
     sd = Path(session_dir)
     sd.mkdir(parents=True, exist_ok=True)
     try:
-        _atomic_write(
+        _common_io.atomic_write_text(
             session_paths.research_hints_json(sd),
             json.dumps({"hints": hints}, indent=2) + "\n",
         )
-        _atomic_write(session_paths.research_hints_md(sd), _render_md(hints))
+        _common_io.atomic_write_text(session_paths.research_hints_md(sd), _render_md(hints))
     except OSError as exc:
         log.warning("research_hints: persist failed (%s): %s", sd, exc)
 
@@ -248,7 +236,7 @@ def write_competitor_target(
         "notes": str(target.get("notes") or "").strip(),
     }
     try:
-        _atomic_write(
+        _common_io.atomic_write_text(
             session_paths.competitor_target_json(session_dir),
             json.dumps(out, indent=2) + "\n",
         )

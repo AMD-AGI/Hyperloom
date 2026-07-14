@@ -154,7 +154,7 @@ def test_delete_recipe_never_touches_remote(local_store: LocalRecipeStore) -> No
     kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
     cid = _cid()
     local_store.put_recipe(canonical_id=cid)
-    assert kb.delete_recipe(canonical_id=cid) is True
+    assert kb.local.delete_recipe(canonical_id=cid) is True
 
 
 # Reads — remote-first, local fallback (fake remote)
@@ -390,7 +390,7 @@ def test_list_recent_is_local_only(local_store: LocalRecipeStore) -> None:
     cid_local = _cid(model="local-only")
     local_store.put_recipe(canonical_id=cid_local)
     kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.list_recent()
+    rows = kb.local.list_recent()
     assert [r["canonical_id"] for r in rows] == [cid_local]
 
 

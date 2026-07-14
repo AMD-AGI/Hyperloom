@@ -7,9 +7,9 @@ according to the design fixed in 2026-05-28:
 
 Writes — local-only::
 
-    :meth:`put_recipe`, :meth:`append_attempt`,
-    :meth:`delete_recipe` are forwarded verbatim to
-    :class:`LocalRecipeStore`. The remote client never sees a
+    :meth:`put_recipe` and :meth:`append_attempt` are forwarded
+    verbatim to :class:`LocalRecipeStore` (deletes go straight to
+    ``local.delete_recipe``). The remote client never sees a
     write request, by construction (it doesn't expose write
     methods at all). The local store is the authoritative place
     new rows land.
@@ -21,7 +21,7 @@ through to local on absence / failure::
     ``get_recipe`` decodes the 5-tuple from the canonical_id into
     ``label_match`` and issues ONE search — the server decides
     exact-vs-relative fallback + ranking, the client takes the top
-    row. ``get_history`` / ``list_recent`` / ``list_attempts`` /
+    row. ``get_history`` / ``list_attempts`` /
     ``list_session_attempts`` are LOCAL-only (those routes are not
     used). For the search-backed read:
     1. If ``remote`` is configured AND enabled → call the central
@@ -367,25 +367,6 @@ class RecipeKB:
     audit_hook: Any = None
 
     # ------------------------------------------------------------------
-    # Capability flags
-    # ------------------------------------------------------------------
-    @property
-    def enabled(self) -> bool:
-        """Always ``True`` — the dispatcher is usable whenever it
-        exists, because the local store is always present (writes land
-        locally; reads fall back to local). Remote reachability is a
-        separate concern handled by :meth:`_remote_active`. Exposed so
-        call sites that historically probed ``client.enabled`` on the
-        v1 ``CortexKBClient`` keep working against the v2 dispatcher
-        (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
-        attribute there would silently skip the SDK-fallback T0 anchor.
-
-        Returns:
-            bool: Always ``True``.
-        """
-        return True
-
-    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _remote_active(self) -> bool:
@@ -671,18 +652,6 @@ class RecipeKB:
             attempt_at=attempt_at,
         )
 
-    def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live recipe row LOCALLY ONLY (history preserved).
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-
-        Returns:
-            bool: ``True`` iff a live row was removed.
-        """
-        return self.local.delete_recipe(canonical_id=canonical_id)
-
     # ==================================================================
     # Reads — remote-first, local fallback
     # ==================================================================
@@ -849,19 +818,6 @@ class RecipeKB:
             canonical_id=canonical_id,
             limit=limit,
         )
-
-    def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Recent recipes — LOCAL only (remote = ``/recipes/search``
-        route only; bare ``GET /recipes`` is not used).
-
-        Args:
-            limit (int): Maximum number of recipes to return.
-
-        Returns:
-            list[dict[str, Any]]: Recent live recipes, ordered
-                ``updated_at DESC``.
-        """
-        return self.local.list_recent(limit=limit)
 
     def search(
         self,
