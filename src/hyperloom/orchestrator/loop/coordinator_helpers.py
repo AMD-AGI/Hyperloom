@@ -340,7 +340,7 @@ def _resolve_roofline_watermark_ratio() -> float:
     return val
 
 
-def _merge_cumulative_extra_sglang_args(
+def _merge_cumulative_extra_server_args(
     base_args: str,
     candidate_args: str,
     full_args: str,

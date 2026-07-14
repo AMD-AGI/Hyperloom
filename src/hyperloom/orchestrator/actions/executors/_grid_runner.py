@@ -1715,44 +1715,6 @@ SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
 
 
-def pick_winners(
-    results: list[VariantResult],
-    baseline_tput: float,
-    *,
-    keep_threshold_pct: float | None = None,
-) -> list[VariantResult]:
-    """Filter variants whose throughput beats ``baseline_tput`` by more than
-    the resolved ``keep_threshold_pct`` percent.
-
-    Resolution of ``keep_threshold_pct``: an explicit caller value wins; ``None``
-    falls back to ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%, the empirical
-    cross-node noise floor) in multi-node mode, else
-    ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (1.0%).
-
-    Args:
-        results (list[VariantResult]): All variant results to filter.
-        baseline_tput (float): Baseline throughput the winners must beat.
-        keep_threshold_pct (float | None): Required percent improvement over
-            baseline; ``None`` resolves to the multi/single-node default.
-
-    Returns:
-        list[VariantResult]: Succeeded variants whose output throughput exceeds
-        the baseline-plus-threshold cutoff.
-    """
-    if keep_threshold_pct is None:
-        from ._multi_node_env import is_multi_node
-
-        keep_threshold_pct = (
-            MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT if is_multi_node() else SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT
-        )
-    cutoff = baseline_tput * (1.0 + keep_threshold_pct / 100.0)
-    return [
-        r
-        for r in results
-        if r.status == "succeeded" and isinstance(r.output_throughput, (int, float)) and r.output_throughput > cutoff
-    ]
-
-
 def _safe(name: str) -> str:
     """Filesystem-safe slug for variant directory names.
 
@@ -1827,7 +1789,6 @@ __all__ = [
     "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",
     "merge_server_args",
-    "pick_winners",
     "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",

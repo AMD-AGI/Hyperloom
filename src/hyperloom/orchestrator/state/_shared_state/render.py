@@ -58,8 +58,8 @@ class _RenderMixin:
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
     def _format_last_kernel_opt(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ...kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ...kernel import _kernel_decisions as _m
         return _m._format_last_kernel_opt(self)
 
     def to_intervention_mix_summary(self) -> str:
