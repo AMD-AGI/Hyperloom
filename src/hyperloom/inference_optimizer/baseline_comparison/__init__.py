@@ -31,8 +31,7 @@ from .inferencex_client import (
     InferenceXFetchError,
     fetch_rows,
 )
-from .name_mapping import KNOWN_INFERENCEX_MODELS, to_inferencex_name
-from .target_analyzer import analyze
+from .target_analyzer import KNOWN_INFERENCEX_MODELS, analyze, to_inferencex_name
 from .types import BaselinePoint, BaselineQuery, BaselineSummary
 
 
