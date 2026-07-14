@@ -169,12 +169,16 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
         rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
 
         if rc == 0 and _run_eval_enabled(bench_envs):
+            # Task/limit come from env (same names as Magpie's remote-compat
+            # shim) so smoke runs can cap samples without a config change.
             eval_cmd = bypass_engine.build_eval_command(
                 python_exe=sys.executable,
                 model=model,
                 base_url=base_url,
                 conc=conc,
                 out_dir=str(workspace / "lm_eval"),
+                tasks=os.environ.get("MAGPIE_EVAL_TASKS", "gsm8k").strip() or "gsm8k",
+                limit=(os.environ.get("MAGPIE_EVAL_LIMIT", "").strip() or None),
             )
             # Eval failure must not sink a healthy throughput measurement; the
             # accuracy gate degrades to "no result" when results*.json is absent.
