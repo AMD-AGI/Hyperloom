@@ -8,7 +8,7 @@ hangs / 401 storms:
 * **J1 ``gateway_auth_outage``** — gateway ``/models`` returns 401/403
   (key lost/revoked); every claude/codex CLI will fail at the gateway.
 * **J2 ``wekafs_degraded``** — ``stat`` on a source mount errored or
-  exceeded the latency budget; ``trace_analyze`` / OOB CLI hang silently.
+  exceeded the latency budget; ``trace_analyze`` / external CLI hang silently.
 * **J3 ``tracelens_cli_missing``** — neither TraceLens perf-report CLI
   is on ``PATH``. Boot-time-only, so the detector latches after first fire.
 
@@ -217,7 +217,7 @@ def _mount_symptoms(
                     source="local",
                     suggestion=(
                         "WekaFS mount may have dropped; trace_analyze / "
-                        "OOB CLI / benchmark scripts will hang. Check "
+                        "external CLI / benchmark scripts will hang. Check "
                         "the read-only mount; consider re-mounting"
                     ),
                 )
@@ -251,7 +251,7 @@ def _mount_symptoms(
                 subject={"path": path},
                 source="local",
                 suggestion=(
-                    "WekaFS read latency degrading; if it persists, trace_analyze / OOB CLI requests will time out"
+                    "WekaFS read latency degrading; if it persists, trace_analyze / external CLI requests will time out"
                 ),
             )
         )
