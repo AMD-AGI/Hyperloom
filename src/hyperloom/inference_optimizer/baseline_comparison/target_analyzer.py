@@ -192,19 +192,7 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
         A ``BaselinePoint`` built from the row, or ``None`` when the row has
         no usable positive ``tput_per_gpu``.
     """
-
-    def _fnum(key: str) -> float:
-        """Read a float field from the enclosing ``row``.
-
-        Args:
-            key: Field name to look up.
-
-        Returns:
-            The value as a float, or ``0.0`` if missing or unparseable.
-        """
-        return to_float(row.get(key), default=0.0)
-
-    tput = _fnum("tput_per_gpu")
+    tput = to_float(row.get("tput_per_gpu"), default=0.0)
     if tput <= 0:
         return None
     return BaselinePoint(
@@ -213,7 +201,7 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
         conc=int(row.get("conc") or 0),
         decode_tp=0,
         mean_ttft_ms=0.0,
-        mean_tpot_ms=_fnum("tpot_ms"),
+        mean_tpot_ms=to_float(row.get("tpot_ms"), default=0.0),
         mean_e2el_ms=0.0,
         date="",
     )

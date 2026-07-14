@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Workload sweep that relaunches the GEAK-optimized server.
 
 When the KERNEL_AGENT phase is delegated to GEAK
@@ -17,17 +19,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json
+
 log = logging.getLogger(__name__)
-
-
-def _read_json(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        # ValueError covers json.JSONDecodeError; an absent vs malformed file
-        # both degrade to {} but are now distinguishable in debug logs.
-        log.debug("_read_json: could not read %s: %s", path, exc)
-        return {}
 
 
 def _write_benchmark_report(
@@ -236,7 +230,7 @@ async def sweep_via_geak(
             err: str | None = None
             try:
                 proc = await asyncio.to_thread(_run)
-                summ = _read_json(out_dir / "bench_summary.json")
+                summ = read_json(out_dir / "bench_summary.json", default={})
                 tput = summ.get("output_throughput_tok_s_median")
                 ttft = summ.get("ttft_ms_median")
                 tpot = summ.get("tpot_ms_median")

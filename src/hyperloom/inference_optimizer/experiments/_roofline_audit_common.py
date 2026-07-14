@@ -11,10 +11,11 @@ lockstep. Read-only, pure stdlib.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any, Protocol
+
+from hyperloom.common.jsonio import read_json
 
 
 # Keywords the LLM is likely to quote from analysis.md when grounding a
@@ -56,13 +57,7 @@ def safe_load_state(session_dir: Path) -> dict[str, Any] | None:
         dict[str, Any] | None: Parsed state mapping, or ``None`` when missing
         or unreadable.
     """
-    p = session_dir / "state.json"
-    if not p.is_file():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    return read_json(session_dir / "state.json", default=None)
 
 
 def flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:

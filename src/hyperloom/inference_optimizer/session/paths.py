@@ -14,11 +14,12 @@ Two path concepts:
 
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import re
 from pathlib import Path
+
+from hyperloom.common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
     if _layout_mode() == "per_model_ts" and model_name:
         basename = _sanitize_model_basename(model_name)
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ts = utc_now_compact()
         sd = ws / basename / ts
     else:
         sd = ws
