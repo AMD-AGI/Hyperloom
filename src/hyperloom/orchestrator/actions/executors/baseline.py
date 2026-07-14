@@ -817,7 +817,11 @@ class BaselineExecutor:
         """
         from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
 
-        self.magpie_python = magpie_python or _resolve_magpie_python()
+        # Backend-aware interpreter: bypass uses a plain python3, magpie
+        # uses the Magpie-importable venv.
+        from .benchmark_backend import resolve_benchmark_interpreter
+
+        self.magpie_python = magpie_python or resolve_benchmark_interpreter()
         # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()

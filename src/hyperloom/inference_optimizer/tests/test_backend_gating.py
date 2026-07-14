@@ -78,8 +78,9 @@ def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     info = sl.resolve_lifecycle_params(cfg_path)
-    assert info["eligible"] is False
-    assert "bypass" in info["reason"]
+    # bypass now honors the YAML lifecycle block, so a serving framework
+    # with profiling off is eligible.
+    assert info["eligible"] is True
     assert info["framework"] == "vllm"
     assert info["port"] == 8888
 
@@ -121,5 +122,38 @@ def test_lifecycle_magpie_non_builtin_ineligible(tmp_path, monkeypatch):
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is False
+
+
+def test_bypass_lifecycle_ineligible_when_profiling(tmp_path, monkeypatch):
+    """bypass lifecycle is ineligible when torch_profiler is enabled."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "envs": {"PORT": 8888},
+            "profiler": {"torch_profiler": {"enabled": True}},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is False
+    assert "profiler" in info["reason"]
+
+
+def test_bypass_lifecycle_ineligible_for_non_serving(tmp_path, monkeypatch):
+    """bypass lifecycle is ineligible for a non-serving framework."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
+    cfg = {"benchmark": {"framework": "xdit", "envs": {"PORT": 8888}}}
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     info = sl.resolve_lifecycle_params(cfg_path)
     assert info["eligible"] is False

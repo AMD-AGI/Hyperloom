@@ -60,6 +60,12 @@ class MagpieBackend:
 
     name = "magpie"
 
+    def resolve_interpreter(self) -> str:
+        """Return the Magpie-importable interpreter for the Magpie backend."""
+        from ._grid_runner import _resolve_magpie_python
+
+        return _resolve_magpie_python()
+
     def lifecycle_eligibility(self, bench: dict) -> dict | None:
         """Return None to use the default (Magpie script-based) eligibility.
 
@@ -102,11 +108,29 @@ class BypassBackend:
 
     name = "bypass"
 
-    def lifecycle_eligibility(self, bench: dict) -> dict | None:
-        """bypass does not yet support server_lifecycle reuse (Stage 4c-2).
+    def resolve_interpreter(self) -> str:
+        """Return a plain python3 for bypass (no Magpie import needed).
 
-        Returns an explicit ineligible verdict so the caller runs a single
-        measured round instead of assuming Magpie's script-based reuse.
+        Prefers the current interpreter, then a PATH ``python3``. bypass
+        drives InferenceX directly, so it must NOT fall back to Magpie's
+        ``/opt/venv/bin/python`` canonical path.
+        """
+        import shutil
+        import sys
+
+        return sys.executable or shutil.which("python3") or "python3"
+
+    # Serving frameworks whose OpenAI server bypass can persist for reuse.
+    _LIFECYCLE_FRAMEWORKS = frozenset({"vllm", "atom", "sglang"})
+
+    def lifecycle_eligibility(self, bench: dict) -> dict | None:
+        """Decide bypass server_lifecycle eligibility.
+
+        Eligible for a single-node serving framework with profiling off:
+        bypass honors the YAML ``server_lifecycle`` block (persist server on
+        the first round, reuse on the next, teardown on cleanup), so
+        run_grid's warmup+measure reuse works. Scriptable/diffusion and
+        torch_profiler runs stay ineligible (no persistent server to reuse).
         """
         framework = str(bench.get("framework") or "").lower()
         envs = bench.get("envs") or {}
@@ -114,12 +138,16 @@ class BypassBackend:
             port = int(envs.get("PORT", 8888))
         except (TypeError, ValueError):
             port = 8888
-        return {
-            "eligible": False,
-            "framework": framework,
-            "port": port,
-            "reason": "bypass backend: server_lifecycle not yet implemented",
-        }
+        verdict = {"eligible": False, "framework": framework, "port": port, "reason": ""}
+        if framework not in self._LIFECYCLE_FRAMEWORKS:
+            verdict["reason"] = f"framework {framework!r} is not a serving framework"
+            return verdict
+        profiler_on = bool((bench.get("profiler") or {}).get("torch_profiler", {}).get("enabled"))
+        if profiler_on:
+            verdict["reason"] = "torch_profiler enabled (incompatible with reuse)"
+            return verdict
+        verdict["eligible"] = True
+        return verdict
 
     def build_command(
         self,
@@ -170,6 +198,11 @@ def resolve_backend() -> BenchmarkBackend:
     # Unknown backend: fall back to Magpie (defensive) so a typo cannot
     # silently disable benchmarking.
     return MagpieBackend()
+
+
+def resolve_benchmark_interpreter() -> str:
+    """Resolve the interpreter for the active benchmark backend."""
+    return resolve_backend().resolve_interpreter()
 
 
 def build_benchmark_command(

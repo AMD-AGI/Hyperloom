@@ -163,6 +163,32 @@ def run_benchmark(
             workspace=workspace, pid_dir=pid_dir, cleanup=cleanup, start=time.time(),
         )
 
+    # YAML-driven lifecycle: run_grid injects benchmark.server_lifecycle
+    # (cleanup/pid_dir/port) and drives warmup(cleanup=false)+measure(cleanup=
+    # true) as two identical calls, delegating phase choice to us. Honor it so
+    # bypass reuse works through run_grid with no scheduler changes.
+    sl = bench.get("server_lifecycle") or {}
+    if phase == "all" and bool(sl.get("enabled")):
+        sl_cleanup = bool(sl.get("cleanup", True))
+        sl_pid_dir = str(sl.get("pid_dir") or workspace)
+        if bypass_engine.server_health_ok(base_url):
+            # A persistent server from a prior round is up: reuse it.
+            return _run_client_phase(
+                framework=framework, model=model, port=port, conc=conc, isl=isl, osl=osl,
+                rrr=rrr, profile=profile, bench_envs=bench_envs, inferencex_root=inferencex_root,
+                base_url=base_url, server_log=server_log, timeout_s=timeout_s,
+                workspace=workspace, pid_dir=sl_pid_dir, cleanup=sl_cleanup, start=time.time(),
+            )
+        # No server yet: start + persist, run this round's client, then honor cleanup.
+        return _run_lifecycle_all(
+            framework=framework, model=model, tp=tp, port=port,
+            max_model_len=max_model_len_i, profile=profile, profile_dir=profile_dir,
+            bench_envs=bench_envs, server_log=server_log, base_url=base_url,
+            timeout_s=timeout_s, pid_dir=sl_pid_dir, cleanup=sl_cleanup,
+            inferencex_root=inferencex_root, conc=conc, isl=isl, osl=osl, rrr=rrr,
+            workspace=workspace, output_dir=output_dir,
+        )
+
     # phase == "all": start server, run client, always teardown.
     server_env = _server_env(profile, profile_dir)
     extra_args = _tokenize_extra_args(bench_envs, framework)
@@ -245,6 +271,56 @@ def _run_client_phase(
             from ._server_lifecycle import teardown_lifecycle_server
 
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
+    return _finalize_report(
+        workspace=workspace, framework=framework, model=model, server_log=server_log,
+        bench_envs=bench_envs, start=start, rc=rc,
+    )
+
+
+def _run_lifecycle_all(
+    *, framework, model, tp, port, max_model_len, profile, profile_dir,
+    bench_envs, server_log, base_url, timeout_s, pid_dir, cleanup,
+    inferencex_root, conc, isl, osl, rrr, workspace, output_dir,
+) -> int:
+    """Start + persist a server, run this round's client, teardown iff cleanup.
+
+    Used for the first round of a YAML-driven lifecycle sequence: the server is
+    left running (pid/meta written) so a later reuse round can attach; the
+    server is only torn down when this round requests cleanup.
+    """
+    server_env = _server_env(profile, profile_dir)
+    extra_args = _tokenize_extra_args(bench_envs, framework)
+    try:
+        server_cmd = bypass_engine.build_server_command(
+            framework=framework, model=model, tp=tp, port=port,
+            max_model_len=max_model_len, extra_args=extra_args, profile_dir=profile_dir,
+        )
+    except ValueError as exc:
+        _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
+        return 2
+    start = time.time()
+    proc = _launch_server(server_cmd, server_env, server_log)
+    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=timeout_s):
+        _terminate_server(proc)
+        _write_report(workspace, framework, model, False, start, ["server did not become ready"])
+        return 1
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = proc.pid
+    bypass_engine.write_lifecycle_files(
+        pid_dir=pid_dir, framework=framework, port=port, pid=proc.pid, pgid=pgid, model=model,
+    )
+    rc = _run_client_and_eval(
+        inferencex_root=inferencex_root, model=model, base_url=base_url,
+        isl=isl, osl=osl, conc=conc, rrr=rrr, profile=profile,
+        bench_envs=bench_envs, workspace=workspace, timeout_s=timeout_s,
+    )
+    if cleanup:
+        _terminate_server(proc)
+        from ._server_lifecycle import teardown_lifecycle_server
+
+        teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
     return _finalize_report(
         workspace=workspace, framework=framework, model=model, server_log=server_log,
         bench_envs=bench_envs, start=start, rc=rc,

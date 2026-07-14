@@ -927,7 +927,10 @@ async def run_grid(
         list[VariantResult]: Per-variant results for every attempt, in order.
     """
     if not magpie_python:
-        magpie_python = _resolve_magpie_python()
+        # Backend-aware: bypass uses a plain python3, not Magpie's venv.
+        from .benchmark_backend import resolve_benchmark_interpreter
+
+        magpie_python = resolve_benchmark_interpreter()
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)

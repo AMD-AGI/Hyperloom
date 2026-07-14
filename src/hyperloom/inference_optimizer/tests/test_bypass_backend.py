@@ -524,3 +524,95 @@ def test_client_phase_no_server_fails(tmp_path, monkeypatch):
         cfg_path, tmp_path / "out", phase="client", pid_dir=str(tmp_path), cleanup=True,
     )
     assert rc == 1
+
+
+def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir):
+    import yaml
+    cfg = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/models/x",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "envs": {"TP": 1, "CONC": 4, "ISL": 128, "OSL": 64, "RUN_EVAL": "false", "PORT": 8888},
+            "server_lifecycle": {"enabled": True, "cleanup": cleanup, "pid_dir": str(pid_dir)},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return cfg_path
+
+
+def _fake_client_run(monkeypatch, tput=700.0):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        if "--result-dir" in cmd:
+            rd = Path(cmd[cmd.index("--result-dir") + 1])
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "inferencex_result.json").write_text(
+                json.dumps({"output_throughput": tput, "completed": 40, "duration": 30.0}),
+                encoding="utf-8",
+            )
+
+        class _P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch):
+    """server_lifecycle warmup round (cleanup=false, no server yet): start + persist, no teardown."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir)
+
+    class _FakeServer:
+        pid = 5555
+
+        def wait(self, timeout=None):
+            return 0
+
+    terminated = {"n": 0}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: terminated.__setitem__("n", terminated["n"] + 1))
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # no server yet
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")  # phase defaults to all
+    assert rc == 0
+    assert terminated["n"] == 0  # cleanup=false -> persist
+    assert bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
+
+
+def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
+    """server_lifecycle measure round (cleanup=true, healthy server present): reuse + teardown."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
+
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)  # server already up
+    launched = {"n": 0}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: launched.__setitem__("n", launched["n"] + 1))
+    teardown = {"called": False}
+    import hyperloom.orchestrator.actions.executors._server_lifecycle as sl
+    monkeypatch.setattr(sl, "teardown_lifecycle_server", lambda **k: teardown.__setitem__("called", True))
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert launched["n"] == 0  # reused existing server, did not launch a new one
+    assert teardown["called"] is True  # cleanup=true -> torn down
