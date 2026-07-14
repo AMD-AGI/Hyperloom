@@ -74,7 +74,7 @@ Current Hyperloom treats `--max-hours 24` as a long-horizon run. Long-horizon cy
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
-If `MODEL_PATH` is unset, do not assume the Hugging Face CLI exists. Download the model with Python:
+If `MODEL_PATH` is unset, ask the user whether they want to provide an existing local model path. If they provide one, set `MODEL_PATH` to that path and verify it contains `config.json`. If they do not provide a path, download `Qwen/Qwen3-8B` automatically. Do not assume the Hugging Face CLI exists; download the model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
