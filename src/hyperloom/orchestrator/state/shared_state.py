@@ -451,8 +451,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     target_summary: str = ""
     baseline_tput: float = 0.0
     # Internal-only baseline cold+hot double-run switch. Public CLI/env controls
-    # are intentionally unsupported so normal runs stay single-round.
-    baseline_double_run: bool = False
+    # are intentionally unsupported; default-on keeps EXPLORE warm-decision
+    # apples-to-apples with the baseline measurement basis.
+    baseline_double_run: bool = True
     # Discarded first-round tput from the baseline cold-start double-run.
     # Kept only for audit/debugging; conclusion fields and gain math use the
     # hot measure-round value in ``baseline_tput``.

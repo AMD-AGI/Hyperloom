@@ -732,13 +732,13 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_warm_decision_runs_three_rounds_on_keep(
+async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
 ):
-    """Q4-a: warm-decision KEEP path runs warmup + decision + stack_rebench (3 Magpie runs)."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
+    """Default EXPLORE measures hot decisions, matching default hot baseline."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

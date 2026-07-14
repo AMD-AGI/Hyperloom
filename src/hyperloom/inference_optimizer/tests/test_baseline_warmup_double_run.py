@@ -118,7 +118,7 @@ def _executor(
     base: Path,
     tmp_path: Path,
     *,
-    baseline_double_run: bool = False,
+    baseline_double_run: bool = True,
 ) -> BaselineExecutor:
     return BaselineExecutor(
         magpie_python="/opt/venv/bin/python",
@@ -168,8 +168,8 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
-def test_baseline_single_round_by_default(tmp_path, monkeypatch):
-    """Baseline defaults to one cold-start round unless double-run is requested."""
+def test_baseline_double_run_by_default(tmp_path, monkeypatch):
+    """Baseline defaults to cold+hot rounds to match EXPLORE warm-decision."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -193,15 +193,16 @@ def test_baseline_single_round_by_default(tmp_path, monkeypatch):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert state["calls"] == 1
-    assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
-    assert "warmup_round_tput" not in result
-    assert "server_lifecycle" not in captured[0]["benchmark"]
+    assert state["calls"] == 2
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert result.get("warmup_round_tput") == pytest.approx(_COLD_TPUT)
+    assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
+    assert captured[0]["benchmark"]["server_lifecycle"]["cleanup"] is False
+    assert captured[1]["benchmark"]["server_lifecycle"]["cleanup"] is True
 
 
-def test_baseline_env_var_no_longer_enables_double_run(tmp_path, monkeypatch):
-    """The expensive double-run is internal state/task-param controlled, not env controlled."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
+def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch):
+    """Focused callers may explicitly opt out of the default cold+hot baseline."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -214,6 +215,7 @@ def test_baseline_env_var_no_longer_enables_double_run(tmp_path, monkeypatch):
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
+            "baseline_double_run": False,
         }
     )
 
@@ -225,15 +227,16 @@ def test_baseline_env_var_no_longer_enables_double_run(tmp_path, monkeypatch):
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 1
+    assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
-def test_baseline_double_run_loads_persisted_session_state(tmp_path):
-    """A fresh executor process can recover the launch flag from SharedState."""
+def test_baseline_double_run_loads_persisted_session_opt_out(tmp_path):
+    """A fresh executor process can recover a session-level opt-out from SharedState."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = SharedState.load_or_init(session_dir)
-    state.baseline_double_run = True
+    state.baseline_double_run = False
     state.save(session_dir)
 
     executor = BaselineExecutor(
@@ -242,7 +245,7 @@ def test_baseline_double_run_loads_persisted_session_state(tmp_path):
         shared_state=None,
     )
 
-    assert executor._double_run_enabled() is True
+    assert executor._double_run_enabled() is False
 
 
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
@@ -429,7 +432,6 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     benchmark_* workspace and is classified ``server_init_dead`` with the
     server.log root cause surfaced in ``error`` (not a generic
     ``subprocess_nonzero`` from Magpie's wrapper noise)."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -448,7 +450,7 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
         # Magpie exits nonzero, no benchmark_* workspace produced.
         return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -479,7 +481,6 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
         SERVER_DEAD_RETURNCODE,
     )
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="sglang")
     output_dir = tmp_path / "ws"
@@ -487,7 +488,7 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, SERVER_DEAD_RETURNCODE, "", "")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -515,7 +516,6 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     failure is classified ``server_init_dead`` (not the generic ``no_report`` /
     ``invalid_measurement``) and the real engine fault is surfaced in
     ``error``."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -535,7 +535,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
         # server.log marker, not the wrapper returncode.
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -561,7 +561,6 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     clears the prior log before launching, so an attempt that boots fine but
     yields no report is classified by its own outcome (``no_report``) — never
     the previous attempt's ``server_init_dead``."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -580,7 +579,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
         (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -747,7 +746,6 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     """
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="sglang")
     output_dir = tmp_path / "ws"
@@ -774,7 +772,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
         _fake_workspace(slot, tput=_HOT_TPUT)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -809,7 +807,6 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     cuda-graph fix is the local-InferenceX mirror — see
     ``test_baseline_points_magpie_at_local_inferencex`` — because Magpie
     re-roots the server via ``cd <inferencex>``.)"""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -822,7 +819,7 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
         _fake_workspace(slot, tput=_HOT_TPUT)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
@@ -1160,7 +1157,6 @@ def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypat
 def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
     """Single-round (double-run disabled) keeps legacy behaviour: the
     pre-start deep clean is a double-run-only concern and must not fire."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1178,6 +1174,7 @@ def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
+            "baseline_double_run": False,
         }
     )
 

@@ -286,9 +286,6 @@ def _classify_subprocess_error(
     return "subprocess_nonzero"
 
 
-BASELINE_DEFAULT_TIMEOUT_SEC = (
-    7800  # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
-)
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
 BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
 # COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS now live in
@@ -1324,8 +1321,9 @@ class BaselineExecutor:
         # Fix: run TWICE against the SAME persistent server via Magpie's
         # ``server_lifecycle`` reuse — round 1 boots + pays cold costs,
         # round 2 re-attaches to the hot server and is the clean baseline.
-        # Eligibility (else single round): double-run explicitly requested,
-        # single-node, benchmark script is a Magpie built-in, profiler off.
+        # Eligibility (else single round): double-run requested by the session
+        # default/task params, single-node, benchmark script is a Magpie
+        # built-in, profiler off.
         lifecycle = self._resolve_lifecycle_params(materialized_config_path)
         double_run_requested = self._double_run_enabled(
             params=params,
@@ -1479,12 +1477,14 @@ class BaselineExecutor:
     ) -> bool:
         """Whether baseline double-run is enabled.
 
-        Public CLI/env controls are intentionally unsupported. Internal callers
-        may pass ``task.params["baseline_double_run"]`` for focused tests or
-        debug runs, or set the session state directly.
+        Public CLI/env controls are intentionally unsupported. The session
+        default is on so EXPLORE warm-decision compares hot candidates against a
+        hot baseline. Internal callers may pass
+        ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
+        set the session state directly.
 
         Returns:
-            ``True`` only when the task params or session state opt in.
+            ``True`` unless task params or session state explicitly opt out.
         """
         params = params or {}
         if "baseline_double_run" in params:
@@ -1501,12 +1501,12 @@ class BaselineExecutor:
             session_dir = Path(str(extra.get("session_dir") or self.session_dir))
             state = SharedState.load_or_init(session_dir)
             return bool(getattr(state, "baseline_double_run", False))
-        except Exception:  # noqa: BLE001 - keep baseline fallback single-round.
+        except Exception:  # noqa: BLE001 - keep baseline fallback double-run.
             log.debug(
                 "baseline_executor: could not resolve baseline_double_run from session state",
                 exc_info=True,
             )
-            return False
+            return True
 
     def _resolve_lifecycle_params(
         self,

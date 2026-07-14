@@ -120,7 +120,7 @@
     ],
     "baseline_cold_tput": 0.0,
     "baseline_config_path": "<volatile>",
-    "baseline_double_run": false,
+    "baseline_double_run": true,
     "baseline_eager_fallback": false,
     "baseline_failure_streak": 2,
     "baseline_hot_tput": 0.0,
