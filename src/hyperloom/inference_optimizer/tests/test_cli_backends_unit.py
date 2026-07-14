@@ -135,6 +135,33 @@ def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkey
     assert callable(b["critic"][1]["codex_client_factory"])
 
 
+def test_deepseek_factory_default_base_url_carries_v1(monkeypatch) -> None:
+    """The OpenAI SDK appends the route verbatim (no /v1 auto-insertion), so the
+    DeepSeek default base URL must carry the conventional /v1 suffix."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    clib._deepseek_openai_client_factory()()
+    assert captured["base_url"] == "https://api.deepseek.com/v1"
+    assert captured["api_key"] == "test-deepseek-key"
+
+
+def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
+    """An explicit DEEPSEEK_BASE_URL is used as-is (custom gateways may not use /v1)."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.example/openai/v2/")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    clib._deepseek_openai_client_factory()()
+    assert captured["base_url"] == "https://gw.example/openai/v2"
+
+
 def test_build_backends_openai_only_uses_codex_for_orchestration_and_kernel(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
