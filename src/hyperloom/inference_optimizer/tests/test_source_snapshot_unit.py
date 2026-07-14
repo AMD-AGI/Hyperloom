@@ -92,7 +92,6 @@ def test_snapshot_source_layer_skips_unsafe_paths(tmp_path: Path) -> None:
     assert manifest is None
     assert not dest.exists()
 
-
 def test_snapshot_source_layer_returns_none_when_nothing_capturable(
     tmp_path: Path,
 ) -> None:
