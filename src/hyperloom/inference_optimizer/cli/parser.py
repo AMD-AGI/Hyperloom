@@ -889,8 +889,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Cortex KB base URL for this run, used only by the Critic "
-        "agent's per-proposal assess enrichment (/v2/reasoning/assess); "
-        "also settable via $CORTEX_KB_URL. This is NOT the recipe KB — "
+        "agent's per-proposal assess enrichment (/v2/reasoning/assess). "
+        "This flag is the single source of truth: the CLI no longer reads a "
+        "$CORTEX_KB_URL env fallback (the flag value is forwarded to the "
+        "critic subprocess as CORTEX_KB_URL). This is NOT the recipe KB — "
         "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
         "go to --local-kb-root. Leave it UNSET to skip Critic assess "
         "enrichment entirely.",
@@ -990,20 +992,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pr-monitor-url",
         dest="pr_monitor_url",
         type=str,
-        default=None,
-        help="Override PR Monitor REST URL for this run. Default: "
-        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local"
-        "/v1 (env: PR_MONITOR_URL). Pair with --pr-monitor-mcp-url "
-        "when port-forwarding for local debug.",
+        default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
+        help="PR Monitor REST URL for this run (flag wins). Default: "
+        "$PRIMUS_CORTEX_PR_API (the canonical internal PR API env), else "
+        "the in-cluster "
+        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local. "
+        "Set this flag / $PRIMUS_CORTEX_PR_API to a reachable HTTPS "
+        "endpoint when running outside the primus-cortex namespace. Pair "
+        "with --pr-monitor-mcp-url when port-forwarding for local debug.",
     )
     opt.add_argument(
         "--pr-monitor-mcp-url",
         dest="pr_monitor_mcp_url",
         type=str,
         default=None,
-        help="Override PR Monitor MCP URL handed to specialist LLM "
-        "backends. Default mirrors --pr-monitor-url with /mcp/ "
-        "suffix; the trailing slash is mandatory.",
+        help="PR Monitor MCP URL handed to specialist LLM backends (flag "
+        "wins). Default: the in-cluster MCP endpoint. The trailing slash "
+        "is mandatory.",
     )
     opt.add_argument(
         "--degraded-pr",
