@@ -120,6 +120,7 @@
     ],
     "baseline_cold_tput": 0.0,
     "baseline_config_path": "<volatile>",
+    "baseline_double_run": true,
     "baseline_eager_fallback": false,
     "baseline_failure_streak": 2,
     "baseline_hot_tput": 0.0,
@@ -271,6 +272,7 @@
       "workspace": null
     },
     "last_conc_sweep": {},
+    "last_conc_sweep_watermark": {},
     "last_consumed_escalate_hint": "",
     "last_consumed_escalate_hint_ts": "<volatile>",
     "last_cycle_bottleneck": "",
