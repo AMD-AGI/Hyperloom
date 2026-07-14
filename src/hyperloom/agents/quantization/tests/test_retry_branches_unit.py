@@ -84,4 +84,3 @@ def test_decide_next_step_checkpoint_aborted(tmp_path) -> None:
     )
     assert decision.retry is False
     assert "checkpoint_aborted" in decision.note
-
