@@ -20,6 +20,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json
+
 from .decision import candidate_score, prior_score, winner_decision
 from .isolation import (
     WorkspacePaths,
@@ -417,25 +419,6 @@ def _apply_prior_scores(req: ExploreRequest, candidates: list[Candidate]) -> lis
     return [replace(c, prior_rank=i) for i, (_, c) in enumerate(scored, start=1)]
 
 
-def _load_json(path: Path) -> dict[str, Any]:
-    """Best-effort JSON loader; returns {} when missing or invalid.
-
-    Args:
-        path (Path): The JSON file to load.
-
-    Returns:
-        dict[str, Any]: The parsed object, or ``{}`` when the file is missing,
-            unreadable, malformed, or not a JSON object.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - missing/bad metric files don't kill the run
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _resolve_output_path(template: str, variables: dict[str, str]) -> Path:
     """Render a path template using the candidate's variable bag.
 
@@ -589,8 +572,8 @@ def _evaluate_candidate(req: ExploreRequest, variables: dict[str, str]) -> tuple
     """
     benchmark_template = req.outputs.get("benchmark_json", "{candidate_dir}/benchmark.json")
     accuracy_template = req.outputs.get("accuracy_json", "{candidate_dir}/accuracy.json")
-    benchmark = _load_json(_resolve_output_path(benchmark_template, variables))
-    accuracy = _load_json(_resolve_output_path(accuracy_template, variables))
+    benchmark = read_json(_resolve_output_path(benchmark_template, variables), default={}, require_dict=True)
+    accuracy = read_json(_resolve_output_path(accuracy_template, variables), default={}, require_dict=True)
     throughput = _metric_float(benchmark, ("throughput", "output_throughput", "tput"))
     acc = _metric_float(accuracy, ("accuracy", "gsm8k", "exact_match", "score"))
     completed = str(benchmark.get("completed") or benchmark.get("Completed") or "")

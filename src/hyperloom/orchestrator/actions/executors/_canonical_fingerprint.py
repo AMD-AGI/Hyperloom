@@ -32,8 +32,7 @@ def canonical_fingerprint(
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant.
 
-    Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
-    delegates here. Normalization: args ``shlex.split``
+    Single source of truth for the content hash. Normalization: args ``shlex.split``
     → sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
 
     Args:

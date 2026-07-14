@@ -583,14 +583,14 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "geak_v3-123.jsonl"
+    shard = sd / "reports" / "trace" / "ext" / "forge-123.jsonl"
     shard.write_text(
-        json.dumps(_llm_row(component="geak_v3", role=None, input_tokens=500, output_tokens=60)) + "\n",
+        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
-    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "geak_v3"]
+    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "forge"]
     assert len(geak_gens) == 1
     assert geak_gens[0].kwargs["usage_details"]["input"] == 500
     assert geak_gens[0].kwargs["metadata"]["has_text"] is False
@@ -603,8 +603,8 @@ def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    (sd / "reports" / "trace" / "ext" / "geak_v3-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak_v3", role=None, input_tokens=500, output_tokens=60)) + "\n",
+    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
+        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
@@ -1038,8 +1038,8 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     sd = _seed_trace_dir(tmp_path)
     # one ext shard (out-of-process) + one unpaired token half + one decision
     # so flush counts move.
-    (sd / "reports" / "trace" / "ext" / "geak_v3-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak_v3", role=None)) + "\n",
+    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
+        json.dumps(_llm_row(component="forge", role=None)) + "\n",
         encoding="utf-8",
     )
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(

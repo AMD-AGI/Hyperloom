@@ -452,7 +452,7 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     assert cid.startswith("inference:")
     assert "mi300x" in cid
     # anchor delegates to the same derivation
-    assert coord._gap_anchor_canonical_id() == cid
+    assert coord._workload_canonical_id() == cid
 
 
 def test_resolve_issue_canonical_priority(coord: Coordinator) -> None:
