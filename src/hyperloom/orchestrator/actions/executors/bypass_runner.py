@@ -34,6 +34,7 @@ import yaml
 from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
+from . import bypass_scriptable
 
 _FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
@@ -110,6 +111,17 @@ def run_benchmark(
     model = str(bench.get("model") or os.environ.get("MODEL", ""))
     bench_envs = dict(bench.get("envs") or {})
     timeout_s = _as_float(bench.get("timeout_seconds"), 3600.0)
+
+    # Scriptable (server-less) frameworks (e.g. xDiT diffusion): no server,
+    # no HTTP client. Run the self-contained scriptable benchmark script,
+    # which writes inferencex_result.json with a quality_gate.
+    from hyperloom.inference_optimizer import framework_registry
+
+    if framework_registry.is_scriptable(framework):
+        return _run_scriptable_benchmark(
+            framework=framework, model=model, bench=bench, bench_envs=bench_envs,
+            timeout_s=timeout_s, output_dir=output_dir,
+        )
 
     if framework not in bypass_engine.SERVER_FRAMEWORKS:
         _emit_failure(output_dir, framework, model, f"unsupported framework: {framework!r}")
@@ -343,6 +355,38 @@ def _run_lifecycle_all(
         workspace=workspace, framework=framework, model=model, server_log=server_log,
         bench_envs=bench_envs, start=start, rc=rc,
     )
+
+
+def _run_scriptable_benchmark(
+    *, framework, model, bench, bench_envs, timeout_s, output_dir,
+) -> int:
+    """Run a server-less scriptable benchmark (e.g. xDiT) and write the report."""
+    inferencex_root = bypass_engine.resolve_inferencex_root(bench)
+    workspace = bypass_report.create_workspace(output_dir, framework)
+    _snapshot_config(workspace, {"benchmark": bench})
+    runner_type = str(
+        bench.get("runner_type") or os.environ.get("RUNNER_TYPE") or "mi300x"
+    ).lower()
+    start = time.time()
+    rc, error = bypass_scriptable.run_scriptable(
+        framework=framework, runner_type=runner_type,
+        inferencex_root=str(inferencex_root or ""), bench=bench,
+        workspace=workspace, timeout_s=timeout_s,
+    )
+    if error is not None:
+        _write_report(workspace, framework, model, False, start, [error])
+        return 2
+    raw = _load_raw_result(workspace)
+    success = rc == 0 and raw is not None
+    errors: list[str] = []
+    if rc != 0:
+        errors.append(f"scriptable benchmark exited {rc}")
+    if raw is None:
+        errors.append("inferencex_result.json not produced")
+    _write_report(
+        workspace, framework, model, success, start, errors, raw=raw,
+    )
+    return 0 if success else (rc or 1)
 
 
 def _run_client_and_eval(

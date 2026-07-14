@@ -657,3 +657,85 @@ def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
     ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
     rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
     assert rep["success"] is True
+
+
+def test_scriptable_script_resolution(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "benchmarks").mkdir(parents=True)
+    ix_script = inferencex / "benchmarks" / "xdit_mi300x.sh"
+    ix_script.write_text("#!/bin/bash\n", encoding="utf-8")
+
+    monkeypatch.delenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    got = bs.resolve_scriptable_script("xdit", "mi300x", str(inferencex))
+    assert got == ix_script
+
+    override = tmp_path / "scripts"
+    override.mkdir()
+    ov_script = override / "xdit_mi300x.sh"
+    ov_script.write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(override))
+    got = bs.resolve_scriptable_script("xdit", "mi300x", str(inferencex))
+    assert got == ov_script  # override wins
+
+
+def test_scriptable_script_missing_returns_none(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    monkeypatch.delenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    assert bs.resolve_scriptable_script("xdit", "mi300x", str(tmp_path)) is None
+
+
+def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
+    """xdit scriptable run produces a report carrying quality_gate; eval maps it."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
+
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "benchmarks").mkdir(parents=True)
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    # Fake xdit script: write an InferenceX-shaped result with a passing gate.
+    (scripts_dir / "xdit_mi300x.sh").write_text(
+        "#!/bin/bash\n"
+        "cat > \"$RESULT_DIR/$RESULT_FILENAME.json\" <<JSON\n"
+        "{\"framework\": \"xdit\", \"workload_kind\": \"scriptable\", "
+        "\"throughput_unit\": \"img/s\", \"output_throughput\": 1.5, "
+        "\"latency_s\": 0.66, "
+        "\"quality_gate\": {\"passed\": true, \"lpips\": 0.01, \"ssim\": 0.99}}\n"
+        "JSON\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts_dir))
+
+    cfg = {
+        "benchmark": {
+            "framework": "xdit",
+            "model": "/primus/models/FLUX",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "workload_kind": "scriptable",
+            "envs": {"TP": 1},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    ws = sorted((tmp_path / "out").glob("benchmark_xdit_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is True
+    assert rep["framework"] == "xdit"
+    assert rep["throughput_unit"] == "img/s"
+    assert rep["quality_gate"]["passed"] is True
+
+    # parse_eval_results maps a passing quality_gate onto accuracy=1.0 for xdit.
+    out = parse_eval_results(ws, framework="xdit")
+    assert out["accuracy"] == 1.0
