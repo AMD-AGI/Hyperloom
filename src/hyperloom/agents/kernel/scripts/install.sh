@@ -579,10 +579,14 @@ ensure_fd_limit_for_ray() {
   case "$hard" in
     unlimited|''|*[!0-9]*) : ;;
     *)
-      [ "$hard" -lt "$RAY_MIN_NOFILE" ] && \
+      if [ "$hard" -lt "$RAY_MIN_NOFILE" ]; then
         warn "fd-limit: hard nofile cap=$hard < $RAY_MIN_NOFILE; only 'docker run --ulimit nofile=1048576' lifts the hard cap (issue #433)."
+      fi
       ;;
   esac
+  # Never leak a non-zero status to the caller: under `set -e` the healthy path
+  # (hard cap >= target) left the trailing test as the function's exit status,
+  # which aborted the whole installer (issue #433).
   return 0
 }
 
