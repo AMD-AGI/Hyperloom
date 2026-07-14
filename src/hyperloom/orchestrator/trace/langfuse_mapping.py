@@ -122,18 +122,6 @@ def phase_of(row: dict[str, Any]) -> str:
     return str(row.get("phase") or UNPHASED)
 
 
-def span_key(row: dict[str, Any]) -> tuple[str, str]:
-    """(phase, agent) key identifying which agent-span a Generation nests in.
-
-    Args:
-        row: A trace row dict.
-
-    Returns:
-        A ``(phase, agent)`` tuple.
-    """
-    return (phase_of(row), agent_of(row))
-
-
 def derive_trace_id(seed: str) -> str:
     """Map a session id (or any seed) to a stable 32-char lowercase hex id.
 
@@ -520,7 +508,6 @@ __all__ = [
     "phase_of",
     "redact_env",
     "session_start_payload",
-    "span_key",
     "trace_metadata",
     "usage_details",
     "utc_second_key",

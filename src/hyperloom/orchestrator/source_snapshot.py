@@ -10,9 +10,7 @@ to the stock installed framework).
 
 The fix is to stop treating the mutable live tree as the source of truth: every
 KEEP snapshots its *realized* file contents into a session-scoped, self-contained
-directory that no later git hygiene can touch. Both the orchestrator (resume /
-relaunch) and GEAK (baseline ref) rebuild an identical tree from the
-snapshot via :func:`materialize_source_layer`.
+directory that no later git hygiene can touch.
 
 The on-disk format is the cross-tool contract (Hyperloom writes it; the GEAK/
 GEAK side re-implements the same trivial reader), so neither side needs to
@@ -30,7 +28,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Iterable
 
 MANIFEST_NAME = "manifest.json"
@@ -114,110 +112,3 @@ def snapshot_source_layer(
     return {"snapshot_dir": str(dest_dir), **manifest}
 
 
-def _symlink_mirror(mirror_root: Path, changed_rels: set[str], tree: Path) -> None:
-    """Build ``tree`` as a symlink mirror of ``mirror_root``, keeping real dirs
-    only along the paths to ``changed_rels``.
-
-    We mirror the *installed* framework so its prebuilt JIT ``.so`` / compiled
-    artifacts survive (via symlinks) while only the changed files become real
-    copies. A from-scratch ``git worktree`` checkout would be source-only and
-    force the engine to JIT-rebuild every kernel at request time, which can fail
-    and crash the server.
-    """
-    changed = {str(PurePosixPath(r)) for r in changed_rels}
-    ancestors: set[str] = {"."}
-    for r in changed:
-        parts = PurePosixPath(r).parts
-        for i in range(1, len(parts)):
-            ancestors.add(str(PurePosixPath(*parts[:i])))
-
-    def rec(src: Path, dst: Path, rel: str) -> None:
-        dst.mkdir(parents=True, exist_ok=True)
-        for child in src.iterdir():
-            crel = child.name if rel == "." else f"{rel}/{child.name}"
-            if crel in changed:
-                continue
-            link = dst / child.name
-            if child.is_dir() and crel in ancestors:
-                rec(child, link, crel)
-            else:
-                try:
-                    link.symlink_to(child)
-                except FileExistsError:
-                    pass
-
-    if tree.exists():
-        shutil.rmtree(tree, ignore_errors=True)
-    if mirror_root.is_dir():
-        rec(mirror_root, tree, ".")
-    else:
-        tree.mkdir(parents=True, exist_ok=True)
-
-
-def materialize_source_layer(
-    snapshot_dir: str | Path,
-    work_root: str | Path,
-    mirror_root: str | Path | None = None,
-) -> str | None:
-    """Rebuild the patched source tree from a snapshot; return its import root.
-
-    Mirrors the installed framework (``mirror_root``, default the snapshot's
-    ``framework_root``) via symlinks — preserving prebuilt JIT / compiled
-    artifacts — and overlays ONLY the snapshot's changed files as real copies.
-    This is robust to the shared live tree having been reset in the meantime:
-    the overlay authoritatively pins exactly the files the KEEP changed.
-
-    Args:
-        snapshot_dir: A directory produced by :func:`snapshot_source_layer`.
-        work_root: Scratch directory the reconstructed tree is built under.
-        mirror_root: Installed framework to mirror (defaults to the snapshot's
-            ``framework_root``); override when the captured tree differs from the
-            runtime install location.
-
-    Returns:
-        Absolute path to the reconstructed framework root (prepend to
-        ``PYTHONPATH`` so its packages shadow the installed ones), or ``None``
-        if the snapshot is unreadable.
-    """
-    snapshot_dir = Path(snapshot_dir)
-    work_root = Path(work_root)
-    manifest_path = snapshot_dir / MANIFEST_NAME
-    if not manifest_path.is_file():
-        return None
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    mirror = Path(str(mirror_root) if mirror_root else str(manifest.get("framework_root") or ""))
-    work_root.mkdir(parents=True, exist_ok=True)
-    tree = work_root / "tree"
-
-    files_root = snapshot_dir / "files"
-    records = manifest.get("files", [])
-    changed_rels = {r for r in (_safe_rel(str(x.get("rel") or "")) for x in records) if r}
-    _symlink_mirror(mirror, changed_rels, tree)
-
-    for rec in records:
-        rel = _safe_rel(str(rec.get("rel") or ""))
-        if rel is None:
-            continue
-        dst = tree / rel
-        if str(rec.get("op")) == "delete":
-            try:
-                if dst.is_symlink() or dst.exists():
-                    dst.unlink()
-            except OSError:
-                pass
-            continue
-        src = files_root / rel
-        if src.is_file():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.is_symlink() or dst.exists():
-                try:
-                    dst.unlink()
-                except OSError:
-                    pass
-            shutil.copy2(src, dst)
-
-    return str(tree)

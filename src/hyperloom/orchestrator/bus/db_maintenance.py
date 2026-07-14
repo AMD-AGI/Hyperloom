@@ -96,22 +96,6 @@ _PENDING_PROPOSAL_SEQS_SQL = """
 """
 
 
-async def pending_proposal_seqs(db: SqliteConnection) -> set[int]:
-    """Return seqs of ``proposal`` events with no matching ``review_verdict``.
-
-    These rows are protected from pruning (see :data:`_PENDING_PROPOSAL_SEQS_SQL`
-    and ``Coordinator.replay_for_resume``).
-    """
-    rows = await db.fetchall(_PENDING_PROPOSAL_SEQS_SQL)
-    out: set[int] = set()
-    for r in rows or []:
-        try:
-            out.add(int(r["seq"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
-
-
 async def prune_events(
     db: SqliteConnection,
     cursors: CursorStore,

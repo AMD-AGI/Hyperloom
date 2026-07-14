@@ -23,7 +23,7 @@ _MAGPIE_CWD_DEFAULT = "/tmp"
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
 
-@dataclass(init=False)
+@dataclass
 class GridVariant:
     """One row of the grid we're going to test.
 
@@ -44,44 +44,6 @@ class GridVariant:
     extra_server_args: str = ""  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
     extra_envs: dict[str, str] = field(default_factory=dict)
     note: str = ""  # optional reason / category
-
-    def __init__(
-        self,
-        name: str,
-        extra_server_args: str = "",
-        extra_envs: dict[str, str] | None = None,
-        note: str = "",
-        *,
-        extra_sglang_args: str | None = None,
-    ) -> None:
-        """Initialize a grid variant descriptor.
-
-        Args:
-            name: Variant name.
-            extra_server_args: Extra server CLI args for this variant.
-            extra_envs: Extra environment variables for this variant.
-            note: Optional reason/category note.
-            extra_sglang_args: Deprecated alias for ``extra_server_args``;
-                routed into the canonical attribute with a warning.
-        """
-        # Back-compat alias for the historical ``extra_sglang_args`` kwarg;
-        # routed into the canonical attribute with a DeprecationWarning.
-        if extra_sglang_args is not None:
-            import warnings as _warnings
-
-            _warnings.warn(
-                "GridVariant(extra_sglang_args=...) is a deprecation "
-                "alias for GridVariant(extra_server_args=...) and will "
-                "be removed in the next Hyperloom release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if not extra_server_args:
-                extra_server_args = extra_sglang_args
-        self.name = name
-        self.extra_server_args = extra_server_args
-        self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
-        self.note = note
 
     @property
     def fingerprint(self) -> str:
