@@ -278,7 +278,6 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     # TTL — neither max_turns nor per_turn drives the lease any more.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "10")
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=1,
