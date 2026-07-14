@@ -1355,7 +1355,8 @@ def _submit_and_collect_pod_json(
 
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
 # Cohesive rayjob/dynamo clusters live in commands/{rayjob,dynamo}.py. Bind
-# only the command hooks used below.
+# only the command hooks used below; legacy helper access is handled lazily by
+# ``__getattr__`` to avoid import cycles.
 from .commands.rayjob import cmd_create_rayjob as cmd_create_rayjob
 from .commands.dynamo import (
     cmd_create_dynamo as cmd_create_dynamo,
@@ -1367,6 +1368,45 @@ from .commands.dynamo import (
     _dynamo_kernel_bench as _dynamo_kernel_bench,
     cmd_install_geak as cmd_install_geak,
 )
+
+_RAYJOB_COMPAT_EXPORTS = frozenset(
+    {
+        "_SAFE_GET_WORKLOAD_404_GRACE_S",
+        "_TERMINAL_FAIL_PHASES",
+        "_TERMINAL_OK_PHASES",
+        "_checkpoint_create_rayjob_state",
+        "_write_rayjob_meta",
+        "ray_gcs_address",
+        "_is_safe_get_workload_404",
+        "_summarize_workload_failure",
+        "_find_head_pod_ip",
+    }
+)
+_DYNAMO_COMPAT_EXPORTS = frozenset(
+    {
+        "_DYNAMO_SSH_DIR",
+        "_dynamo_require_state",
+        "_FORWARD_ENV_PREFIXES",
+        "_collect_forward_env",
+        "_dynamo_fanout_launch",
+        "_dynamo_all_gpu_ips",
+        "_dynamo_ssh_node_op",
+        "_resolve_geak_src",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy compatibility exports for helpers moved to command modules."""
+    if name in _RAYJOB_COMPAT_EXPORTS:
+        from .commands import rayjob
+
+        return getattr(rayjob, name)
+    if name in _DYNAMO_COMPAT_EXPORTS:
+        from .commands import dynamo
+
+        return getattr(dynamo, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:
