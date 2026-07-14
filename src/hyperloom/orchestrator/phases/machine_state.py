@@ -322,6 +322,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
         "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
+        "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
@@ -388,6 +389,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "no_kernel_skipped",
         "sweep_done",
         "conc_sweep_done",
+        "conc_sweep_failed",
         "explore_force_exit_low_budget",
         "framework_agent_phase_done",
         "framework_agent_plateau",
@@ -1737,7 +1739,7 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit: sweep_done OR conc_sweep_done OR budget exhausted.
+    """SWEEP normal exit: sweep_done, conc_sweep terminal, or budget exhausted.
 
     Emits an exit on concurrency-sweep completion so a singleton-blocked sweep does not idle.
 
@@ -1760,6 +1762,8 @@ def exit_normal_sweep(
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
         cs_status = str(last_conc.get("status") or "").lower()
+        if cs_status == "failed":
+            return "conc_sweep_failed", {"conc_sweep_status": cs_status}
         if cs_status in ("succeeded", "partial", "completed", "skipped"):
             return "conc_sweep_done", {"conc_sweep_status": cs_status}
     remaining = phase_budget_remaining_seconds(
@@ -2216,6 +2220,11 @@ def compute_next_phase(
     if current == PHASE_SWEEP:
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
+            exit_reason, exit_evidence = norm
+            # Failed conc_sweep closeout is terminal: preserve the honest
+            # stop_reason instead of opening another macro-cycle.
+            if exit_reason == "conc_sweep_failed":
+                return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: in cyclic mode, loop back to EXPLORE (a new macro-cycle)
             # while budget remains and the run hasn't globally converged (R7);
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
@@ -2230,7 +2239,7 @@ def compute_next_phase(
                     reloop_target,
                     "cycle_reloop",
                     {
-                        **norm[1],
+                        **exit_evidence,
                         **reloop_ev,
                         "loopback": True,
                     },
@@ -2246,12 +2255,12 @@ def compute_next_phase(
                     PHASE_CLOSE,
                     "global_converged",
                     {
-                        **norm[1],
+                        **exit_evidence,
                         **reloop_ev,
                         "terminal": True,
                     },
                 )
-            return PHASE_CLOSE, norm[0], {**norm[1], **reloop_ev}
+            return PHASE_CLOSE, exit_reason, {**exit_evidence, **reloop_ev}
         return None
 
     # PHASE_CLOSE — terminal, no further transitions.
