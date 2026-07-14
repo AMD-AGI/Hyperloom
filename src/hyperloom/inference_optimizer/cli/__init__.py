@@ -30,109 +30,42 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import parse_custom_headers
-from .executors import (  # noqa: F401 - re-exported for callers/tests
-    _NOOP_KINDS_KERNEL_ONLY,
-    _REAL_EXECUTORS_FULL,
+from .executors import (
     _build_specialist_executor,
-    _noop_prep,
     _register_executors,
 )
-from .kb import (  # noqa: F401 - re-exported for callers/tests
+from .kb import (
     _bootstrap_cortex_kb,
     _bootstrap_knowledge_plane,
-    _build_recipe_kb_dispatcher,
-    _resolve_local_kb_root,
 )
-from .backends import (  # noqa: F401 - re-exported for callers/tests
-    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
+from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .model_gate import (  # noqa: F401 - re-exported for callers/tests
-    _AMD_GPU_TYPES,
-    _AMD_UNSUPPORTED_ARCHITECTURES,
-    _AMD_UNSUPPORTED_MODEL_TYPES,
-    _AMD_UNSUPPORTED_QUANT_ALGOS,
-    _AMD_UNSUPPORTED_QUANT_METHODS,
-    _CONTEXT_HEADROOM_DEFAULT,
-    _CONTEXT_HEADROOM_ENV,
-    _GEMMA2_ARCHITECTURES,
-    _GFX_TO_RUNNER,
-    _MAX_MODEL_LEN_HEADROOM,
-    _MAXPOS_CONFIG_KEYS,
-    _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES,
-    _PHI3_ROPE_TYPES,
-    _ROPE_CONFIG_KEYS,
-    _SAFETENSORS_HEADER_LIMIT,
-    _SUPPORTED_ARCH_MARKERS,
-    _SUPPORTED_MODEL_TYPES,
-    _TEXT_COERCIBLE_MODEL_TYPES,
-    _TEXT_DECODER_CONFIG_KEYS,
-    _TOKENIZER_ARTIFACT_FILES,
-    _UNRECOGNIZED_ARCHITECTURES,
-    _UNRECOGNIZED_MODEL_TYPES,
-    _UNREGISTERED_CUSTOM_CONFIG_TYPES,
-    _UNSUPPORTED_ARCHITECTURES,
-    _UNSUPPORTED_CONFIG_KEYS,
-    _UNSUPPORTED_MODEL_TYPES,
-    _VERDICT_TEXT_COERCIBLE,
-    _VERDICT_VISION_ONLY,
-    _VOCAB_WEIGHT_NAMES,
-    _arch_is_supported_text_generation,
+from .model_gate import (
     _autodetect_gpu_type,
-    _config_architectures,
-    _config_declares_text_decoder,
-    _context_headroom_tokens,
-    _detect_amd_unsupported_quant,
-    _detect_gemma2_missing_hidden_act,
-    _detect_incompatible_model_config,
-    _detect_missing_tokenizer_files,
-    _detect_phi3_rope_scaling_incompatible,
-    _detect_unrecognized_architecture,
-    _detect_unsupported_model,
-    _detect_vocab_weight_shape_mismatch,
     _gpu_runner_type,
-    _load_model_arch,
-    _load_model_config_dict,
-    _load_model_config_tags,
-    _load_model_max_position_embeddings,
-    _model_has_dual_chunk_attention,
-    _model_is_moe,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
-    _read_safetensors_header,
-    _resolve_amd_gpu_type,
     _resolve_gpu_type,
     _resolve_max_model_len,
 )
-from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
-    _model_is_gemma2,
+from ..model_config_utils import (
     summarize_model_config,
 )
-from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
-    _default_target_summary,
-    _parse_conc_sweep_concs,
+from .bootstrap import (
     _print_final_summary,
-    _print_kernel_opt_summary_line,
     _print_session_skeleton,
-    _read_failure_summary,
     _reconcile_crash_count,
-    _resolve_reference_recipe,
-    _resolve_session_dir_for_summary,
     _seed_shared_state,
     _snapshot_system_prompts,
     resolve_model_display_name,
 )
-from hyperloom.orchestrator.actions.executors._aiter_jit import (
-    AITER_LOCK_STALE_MINUTES,
-    clean_stale_aiter_locks,
-)
+from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
 from .credentials import (
     _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
     _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
@@ -144,78 +77,19 @@ from .credentials import (
     _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
     _resolve_robustness_agent_root as _resolve_robustness_agent_root,
     _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
-    _GEAK_BASE_URL_RE as _GEAK_BASE_URL_RE,
-    _is_stale_proxy_url as _is_stale_proxy_url,
-    _sync_geak_config_base_url as _sync_geak_config_base_url,
-    _derive_anthropic_base_url as _derive_anthropic_base_url,
-    _resolve_llm_endpoints as _resolve_llm_endpoints,
-    _reset_claude_config_to_upstream as _reset_claude_config_to_upstream,
-    _validate_credentials as _validate_credentials,
 )
 from .multi_node import (
-    _gc_old_profile_traces as _gc_old_profile_traces,
-    _resolve_mn_backend as _resolve_mn_backend,
-    _provision_multi_node_dynamo_stack as _provision_multi_node_dynamo_stack,
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
-    _replay_kernel_patches_for_multi_node as _replay_kernel_patches_for_multi_node,
 )
 from .quantization import (
-    _quantization_enabled_via_env as _quantization_enabled_via_env,
     _run_quantization_prelude as _run_quantization_prelude,
 )
 from .recover import (
-    _session_recovery_status as _session_recovery_status,
     _run_recover_session as _run_recover_session,
 )
 
 
-# Backward-compat re-exports: these helpers were extracted into cli_executors /
-# cli_kb / cli_backends / cli_model_gate / model_config_utils / cli_bootstrap
-# during the CLI decomposition, but callers and tests still import them from
-# ``hyperloom.inference_optimizer.cli`` (e.g. _grid_runner, test_reference_script). Listing
-# them in ``__all__`` keeps the re-export intentional (and silences the unused-
-# import lint for a re-export-only binding).
-__all__ = [
-    # from .cli_executors
-    "_NOOP_KINDS_KERNEL_ONLY", "_REAL_EXECUTORS_FULL", "_build_specialist_executor",
-    "_noop_prep", "_register_executors",
-    # from .cli_kb
-    "_bootstrap_cortex_kb", "_bootstrap_knowledge_plane", "_build_recipe_kb_dispatcher",
-    "_resolve_local_kb_root",
-    # from .cli_backends
-    "_MULTI_NODE_WORKLOAD_UID_ENV_KEYS", "_build_backends", "_build_proposal_scorer",
-    "_build_robustness_options", "_robustness_server_configured",
-    # from .cli_model_gate
-    "_AMD_GPU_TYPES", "_AMD_UNSUPPORTED_ARCHITECTURES", "_AMD_UNSUPPORTED_MODEL_TYPES",
-    "_AMD_UNSUPPORTED_QUANT_ALGOS", "_AMD_UNSUPPORTED_QUANT_METHODS",
-    "_CONTEXT_HEADROOM_DEFAULT", "_CONTEXT_HEADROOM_ENV", "_GEMMA2_ARCHITECTURES",
-    "_GFX_TO_RUNNER", "_MAX_MODEL_LEN_HEADROOM", "_MAXPOS_CONFIG_KEYS",
-    "_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES", "_PHI3_ROPE_TYPES", "_ROPE_CONFIG_KEYS",
-    "_SAFETENSORS_HEADER_LIMIT", "_SUPPORTED_ARCH_MARKERS", "_SUPPORTED_MODEL_TYPES",
-    "_TEXT_COERCIBLE_MODEL_TYPES", "_TEXT_DECODER_CONFIG_KEYS", "_TOKENIZER_ARTIFACT_FILES",
-    "_UNRECOGNIZED_ARCHITECTURES", "_UNRECOGNIZED_MODEL_TYPES",
-    "_UNREGISTERED_CUSTOM_CONFIG_TYPES", "_UNSUPPORTED_ARCHITECTURES",
-    "_UNSUPPORTED_CONFIG_KEYS", "_UNSUPPORTED_MODEL_TYPES", "_VERDICT_TEXT_COERCIBLE",
-    "_VERDICT_VISION_ONLY", "_VOCAB_WEIGHT_NAMES", "_arch_is_supported_text_generation",
-    "_autodetect_gpu_type", "_config_architectures", "_config_declares_text_decoder",
-    "_context_headroom_tokens", "_detect_amd_unsupported_quant",
-    "_detect_gemma2_missing_hidden_act", "_detect_incompatible_model_config",
-    "_detect_missing_tokenizer_files", "_detect_phi3_rope_scaling_incompatible",
-    "_detect_unrecognized_architecture", "_detect_unsupported_model",
-    "_detect_vocab_weight_shape_mismatch", "_gpu_runner_type", "_load_model_arch",
-    "_load_model_config_dict", "_load_model_config_tags",
-    "_load_model_max_position_embeddings", "_model_has_dual_chunk_attention",
-    "_model_is_moe", "_preflight_context_window", "_preflight_model_config_compat",
-    "_preflight_unsupported_model_arch", "_read_safetensors_header",
-    "_resolve_amd_gpu_type", "_resolve_gpu_type", "_resolve_max_model_len",
-    # from .model_config_utils
-    "_model_is_gemma2",
-    # from .cli_bootstrap
-    "_default_target_summary", "_parse_conc_sweep_concs", "_print_final_summary",
-    "_print_kernel_opt_summary_line", "_print_session_skeleton", "_read_failure_summary",
-    "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
-    "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
-]
+__all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from hyperloom.orchestrator.actions.registry import ActionRegistry
@@ -236,44 +110,12 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-# _RetiredFlag / _build_parser (+ its purely computational helpers) live in
-# .parser; re-exported here so the module namespace is unchanged for
-# callers/tests.
-from .parser import (  # noqa: F401 - re-exported for callers/tests
-    _RetiredFlag as _RetiredFlag,
+from .parser import (
     _build_parser as _build_parser,
-    _default_gpu_specialist_capacity as _default_gpu_specialist_capacity,
-    _default_research_lane_capacity as _default_research_lane_capacity,
-    _parse_conc_env_default as _parse_conc_env_default,
-    _parse_conc_sweep_default as _parse_conc_sweep_default,
-    _parse_conc_values as _parse_conc_values,
     _positive_int_arg as _positive_int_arg,
 )
-# The _preflight cluster (env-hygiene / SDK install / TraceLens-CLI gate /
-# diagnostics) lives in .preflight; re-exported here so the module namespace +
-# monkeypatch surface is intact. See
-# preflight.py's module docstring for why _load_dotenv_fallback /
-# _load_kernel_agent_env_fallback / _clone_inferencex use lazy
-# package-qualified lookups internally instead of bare-name calls.
-from .preflight import (  # noqa: F401 - re-exported for callers/tests
-    _check_gpu_visibility as _check_gpu_visibility,
-    _check_node_claude_cli as _check_node_claude_cli,
-    _check_shm_disk as _check_shm_disk,
-    _check_tracelens_cli as _check_tracelens_cli,
-    _check_tracelens_root_exists as _check_tracelens_root_exists,
-    _clone_inferencex as _clone_inferencex,
-    _emit_preflight_diagnostics as _emit_preflight_diagnostics,
-    _ensure_python_sdks as _ensure_python_sdks,
-    _inferencex_checkout_ok as _inferencex_checkout_ok,
-    _is_placeholder_tracelens_path as _is_placeholder_tracelens_path,
-    _load_dotenv_fallback as _load_dotenv_fallback,
-    _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback,
+from .preflight import (
     _preflight as _preflight,
-    _print_cortex_kb_queue_status as _print_cortex_kb_queue_status,
-    _run_ir3_preflight as _run_ir3_preflight,
-    _tracelens_required_at_preflight as _tracelens_required_at_preflight,
-    _unset_hip_visible_devices as _unset_hip_visible_devices,
-    _TRACELENS_REQUIRED_CLIS as _TRACELENS_REQUIRED_CLIS,
 )
 
 

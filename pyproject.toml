@@ -136,8 +136,6 @@ hyperloom = [
     "assets/slurm/*.template",
     "references/*.md",
     "tools/*.sh.example",
-    "data/framework/*.md",
-    "data/recipes/*.json",
 ]
 # tree-reform.MD P2.5: critic-agent's LLM skill assets (mounted by the A2A /
 # Codex chat server host, not imported as Python) promoted alongside its
@@ -239,16 +237,6 @@ pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
-    "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
-]
-filterwarnings = [
-    # The DeprecationWarning for the extra_sglang_args -> extra_server_args
-    # rename is raised from this canonical module (tree-reform.MD P2.4
-    # flattened compat/payload_aliases.py into compat.py, which re-exported
-    # -- not re-wrapped -- hyperloom.common.payload_aliases; P2.7 then
-    # removed that transition shim entirely once every call site was updated
-    # to import hyperloom.common.payload_aliases directly).
-    "ignore::DeprecationWarning:hyperloom.common.payload_aliases",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
@@ -317,7 +305,6 @@ omit = [
     # apply_kernel_patch / parallel_e2e_runner tools above. Their pure helpers
     # (e.g. _diff_unsupported_ops, _spread) ARE covered by test_apply_and_bench.py.
     "src/hyperloom/agents/kernel/tools/apply_and_bench.py",
-    "src/hyperloom/agents/kernel/tools/geak_vs_forge_driver.py",
     # Backends within kernel-agent tools (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
     "src/hyperloom/agents/kernel/tools/_collective_names.py",

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import io as _common_io
+from hyperloom.common.io import atomic_write_text
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -29,21 +29,6 @@ from hyperloom.inference_optimizer.session.paths import db_path_for
 
 
 log = logging.getLogger(__name__)
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically (tempfile in the same dir + os.replace).
-
-    Guarantees a reader never observes a half-written file: either the old
-    contents or the complete new contents, never a truncated/partial one.
-
-    Delegates to :func:`hyperloom.common.io.atomic_write_text`.
-
-    Args:
-        path: Destination file path.
-        text: Full file contents to write.
-    """
-    _common_io.atomic_write_text(path, text)
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
@@ -1228,7 +1213,7 @@ class ReportExecutor:
         # Atomic write: a kill mid-flush must never leave a non-empty but
         # invalid final.json on disk (issue #464 — downstream keys off it, and
         # the crash-safe fallback would otherwise see garbled JSON).
-        _atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
+        atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(

@@ -325,7 +325,7 @@ def test_breaker_threshold_higher_than_one(tmp_path, monkeypatch):
 
 def test_write_verdict_disabled_when_breaker_open(breaker_writer):
     w, _, _, _ = breaker_writer
-    w.force_kb_unreachable()
+    w._unreachable_until = w._time_fn() + w._breaker_cooldown
     res = w.write_verdict(
         verdict={
             "verdict": "reject",
@@ -348,7 +348,7 @@ def test_write_verdict_disabled_when_breaker_open(breaker_writer):
 
 def test_write_kb_drafts_disabled_when_breaker_open(breaker_writer):
     w, _, _, _ = breaker_writer
-    w.force_kb_unreachable()
+    w._unreachable_until = w._time_fn() + w._breaker_cooldown
     res = w.write_kb_drafts(
         kb_drafts=[
             {
@@ -400,7 +400,7 @@ def test_decision_reviewer_marks_bundle_when_breaker_open(tmp_path):
     kb = _FlakyKBClient()
     writer = KBWriter(kb, session_memory=sm)
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
-    writer.force_kb_unreachable()
+    writer._unreachable_until = writer._time_fn() + writer._breaker_cooldown
 
     bundle = rev.prepare_review(
         {
@@ -504,7 +504,7 @@ def test_add_contradiction_skipped_on_missing_ids(writer):
 
 def test_add_contradiction_disabled_when_breaker_open(breaker_writer):
     w, _, _, _ = breaker_writer
-    w.force_kb_unreachable()
+    w._unreachable_until = w._time_fn() + w._breaker_cooldown
     res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
     assert res.status == "disabled"
     assert res.detail["reason"] == "kb_unreachable"

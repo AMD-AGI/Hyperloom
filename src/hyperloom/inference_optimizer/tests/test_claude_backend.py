@@ -212,7 +212,6 @@ def test_claude_backend_with_seams_constructs(monkeypatch):
         sdk_options_cls=FakeOptions,
         enable_mcp_emit_intent=False,
     )
-    assert backend.has_emit_intent_tool is False
     assert backend.sdk_query_factory is not None
 
 
@@ -545,7 +544,8 @@ def test_raw_completion_disables_emit_intent_mcp():
         sdk_options_cls=FakeOptions,
         raw_completion=True,
     )
-    assert backend.has_emit_intent_tool is False
+    assert backend.mcp_server_config is None
+    assert backend.mcp_tool_name is None
 
 
 # Options propagation
@@ -599,7 +599,8 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
         mcp_server_factory=fake_server,
         enable_mcp_emit_intent=True,
     )
-    assert backend.has_emit_intent_tool
+    assert backend.mcp_server_config is not None
+    assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
     with pytest.raises(NoIntentEmitted):
         await backend.run("p", tools=["Read"])
     kw = captured["options_kwargs"]

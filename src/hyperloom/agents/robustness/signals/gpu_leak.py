@@ -269,27 +269,7 @@ class GpuLeakDetector:
             ),
         )
 
-
-def evaluate_gpu_leak_signals(
-    detector: GpuLeakDetector,
-    ctx: ReactorContext,
-    data: SourceData,
-) -> list[Symptom]:
-    """Adapt the stateful detector to the ``(ctx, data)`` entry point.
-
-    Args:
-        detector: The stateful GPU-leak detector instance.
-        ctx: Reactor context for the current tick.
-        data: Collected source data.
-
-    Returns:
-        The symptoms produced by the detector.
-    """
-    return detector.evaluate(ctx, data)
-
-
 __all__ = [
     "GpuLeakConfig",
     "GpuLeakDetector",
-    "evaluate_gpu_leak_signals",
 ]

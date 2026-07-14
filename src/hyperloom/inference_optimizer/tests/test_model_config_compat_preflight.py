@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import model_gate as cli
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 
 
