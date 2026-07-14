@@ -361,42 +361,6 @@ class _ExploreStateMixin:
         gap["last_updated_ts"] = ss._now_iso()
         return gap
 
-    def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
-        """Bulk-replace ``gaps`` with a fresh dedup'd list (discards stale rows wholesale); idempotent.
-
-        Args:
-            entries (list[dict[str, Any]]): The replacement gap rows; deduped
-                by ``canonical_id``, per-gap attempts and the list are capped.
-                A non-list value is a no-op.
-        """
-        if not isinstance(entries, list):
-            return
-        dedup: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            cid = str(entry.get("canonical_id") or "").strip()
-            if not cid:
-                continue
-            if cid not in dedup:
-                order.append(cid)
-            dedup[cid] = dict(entry)
-        # Apply the per-entry cap on attempts.
-        new_list: list[dict[str, Any]] = []
-        for cid in order:
-            row = dedup[cid]
-            attempts = list(row.get("attempts") or [])
-            ss = _shared_state_module()
-            if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
-            row["attempts"] = attempts
-            new_list.append(row)
-        ss = _shared_state_module()
-        if len(new_list) > ss._GAPS_MAX_ENTRIES:
-            new_list = new_list[-ss._GAPS_MAX_ENTRIES:]
-        self.gaps = new_list
-
     def record_intervention(
         self,
         *,
@@ -431,58 +395,6 @@ class _ExploreStateMixin:
             self.consecutive_config_only_rounds = int(self.consecutive_config_only_rounds or 0) + 1
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
-
-    def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
-        """Summarise the intervention-mix ledger as derived counts (config vs code_patch totals, recent window, consecutive_config_only, config_heavy). Read-only; unknown change_types ignored in tallies but break the trailing config-only run.
-
-        Args:
-            recent_window (int): Size of the trailing window for the
-                ``recent_*`` tallies; non-positive uses the full ledger.
-
-        Returns:
-            dict[str, Any]: Derived totals (total/recent config and
-                code_patch counts, ``consecutive_config_only``,
-                ``config_heavy``).
-        """
-        ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
-
-        def _ct(entry: dict[str, Any]) -> str:
-            """Return an entry's normalized ``change_type`` string.
-
-            Args:
-                entry: A single intervention-mix ledger entry.
-
-            Returns:
-                The lowercased, stripped change type (empty if absent).
-            """
-            return str(entry.get("change_type") or "").strip().lower()
-
-        total_config = sum(1 for e in ledger if _ct(e) == "config")
-        total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
-        total_code_patch_attempt = sum(1 for e in ledger if _ct(e) in ("code_patch", "code_patch_attempt"))
-        window = ledger[-recent_window:] if recent_window > 0 else ledger
-        recent_config = sum(1 for e in window if _ct(e) == "config")
-        recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
-        recent_code_patch_attempt = sum(1 for e in window if _ct(e) in ("code_patch", "code_patch_attempt"))
-
-        consecutive_config_only = 0
-        for e in reversed(ledger):
-            ct = _ct(e)
-            if ct == "config":
-                consecutive_config_only += 1
-            else:
-                break
-
-        return {
-            "total_config": total_config,
-            "total_code_patch": total_code_patch,
-            "total_code_patch_attempt": total_code_patch_attempt,
-            "recent_config": recent_config,
-            "recent_code_patch": recent_code_patch,
-            "recent_code_patch_attempt": recent_code_patch_attempt,
-            "consecutive_config_only": consecutive_config_only,
-            "config_heavy": total_config >= recent_window and total_code_patch == 0,
-        }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value.
@@ -536,18 +448,6 @@ class _ExploreStateMixin:
             # FIFO eviction of oldest-seen ids; re-surfacing a very old PR is low-harm.
             self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
         return added
-
-    def has_seen_pr_id(self, pr_id: Any) -> bool:
-        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK.
-
-        Args:
-            pr_id (Any): The PR id to check.
-
-        Returns:
-            bool: ``True`` when the id is non-blank and already seen.
-        """
-        pid = str(pr_id or "").strip()
-        return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
 
     # Explore plateau proxy
     def reset_explore_plateau_proxy(self) -> None:

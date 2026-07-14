@@ -11,7 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import model_gate as cli
 
 
 def _write_config(model_dir: Path, payload) -> None:

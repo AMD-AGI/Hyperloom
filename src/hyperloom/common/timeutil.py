@@ -62,27 +62,4 @@ def iso_z(ts: Any) -> str:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def parse_iso_unix(ts: Any, default: float | None = None) -> float | None:
-    """Parse an ISO-8601 timestamp to unix seconds.
-
-    Accepts a ``Z`` suffix (treated as UTC). Naive timestamps are interpreted
-    with the local :meth:`datetime.timestamp` convention (matching the legacy
-    ``datetime.fromisoformat(...).timestamp()`` call sites).
-
-    Args:
-        ts: An ISO-8601 timestamp string.
-        default: Returned when *ts* is not a parseable ISO-8601 string
-            (default ``None``).
-
-    Returns:
-        Unix seconds as ``float``, or *default*.
-    """
-    if not isinstance(ts, str):
-        return default
-    try:
-        return datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return default
-
-
-__all__ = ["now_iso", "utc_now_compact", "iso_z", "parse_iso_unix"]
+__all__ = ["now_iso", "utc_now_compact", "iso_z"]

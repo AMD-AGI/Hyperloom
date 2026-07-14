@@ -19,9 +19,8 @@ Adds two local-store-specific helpers:
   ``Path(*components)`` must be lossless.
 * :func:`canonical_id_for_path` — given a path under the store root,
   derive the canonical id of the recipe that lives there. Used by
-  :meth:`LocalRecipeStore.list_recent` / ``search`` so a tree-walk
-  result can produce the same cid string the caller would have built
-  from a 7-tuple.
+  ``search`` so a tree-walk result can produce the same cid string the
+  caller would have built from a 7-tuple.
 """
 
 from __future__ import annotations

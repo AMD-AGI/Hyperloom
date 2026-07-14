@@ -9,10 +9,7 @@ import json
 import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-from hyperloom.orchestrator.knowledge.pr_monitor import (
-    DEFAULT_PR_MONITOR_URL,
-    PRMonitorClient,
-)
+from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 from hyperloom.orchestrator.specialists.runner import (
     CORTEX_KB_READONLY_MCP_TOOLS,
     DEFAULT_SPECIALIST_TOOLS,
@@ -22,9 +19,8 @@ from hyperloom.orchestrator.specialists.runner import (
 
 
 # 1. PRMonitorClient stub
-def test_pr_monitor_client_from_args_default_url():
+def test_pr_monitor_client_from_args_default_enabled():
     c = PRMonitorClient.from_args()
-    assert c.base_url == DEFAULT_PR_MONITOR_URL.rstrip("/")
     assert c.enabled is True
 
 
@@ -33,17 +29,10 @@ def test_pr_monitor_client_from_args_disabled():
     assert c.enabled is False
 
 
-def test_pr_monitor_client_from_args_env(monkeypatch):
-    monkeypatch.delenv("PR_MONITOR_URL", raising=False)
-    monkeypatch.setenv("PRIMUS_CORTEX_PR_URL", "http://env-host/v1/")
-    c = PRMonitorClient.from_args()
-    assert c.base_url == "http://env-host/v1"
-
-
 def test_pr_monitor_client_timeout_sec_ignored():
     # timeout_sec is accepted for call-site compat but silently ignored
     c = PRMonitorClient.from_args(url="http://x/v1", timeout_sec=2.5)
-    assert c.base_url == "http://x/v1"
+    assert c.enabled is True
 
 
 # 2. KnowledgePlane facade

@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Structured-intent transport schema (protocol layer).
+"""Structured-intent transport validation (protocol layer).
 
 Claude (``emit_intent`` MCP tool_call) and Codex (``validated_json_output``)
-transports share one envelope schema, validated via :func:`validate_envelope`.
+transports share one envelope shape, validated via :func:`validate_envelope`.
 Bottom-layer definition: must never import ``orchestrator`` / ``shared_state``
 (import cycle).
 """
@@ -41,44 +41,12 @@ class IntentType(str, Enum):
     # specialist exit: one per task.
     SPECIALIST_DONE = "specialist_done"
 
-
-_ALL_INTENT_VALUES: tuple[str, ...] = tuple(t.value for t in IntentType)
-
-
 @dataclass
 class Intent:
     """One validated intent from any transport."""
 
     type: IntentType
     payload: dict[str, Any] = field(default_factory=dict)
-
-
-# Envelope schema — inlined to avoid a jsonschema dependency.
-INTENT_ENVELOPE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "intents": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "intent_type": {
-                        "type": "string",
-                        "enum": list(_ALL_INTENT_VALUES),
-                    },
-                    "payload": {
-                        "type": "object",
-                        "description": "Schema depends on intent_type.",
-                    },
-                },
-                "required": ["intent_type", "payload"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["intents"],
-    "additionalProperties": False,
-}
 
 
 # Per-intent payload required-field map
@@ -100,53 +68,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     # (policy._validate_specialist_done).
     IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
 }
-
-
-# Tool schema for the Claude SDK.
-EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
-    "name": "emit_intent",
-    "description": (
-        "The ONLY way to communicate decisions, messages, or actions to "
-        "the system. Free-text responses are ignored. Call this tool one "
-        "or more times per turn; each call carries exactly one intent."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "intent_type": {
-                "type": "string",
-                "enum": list(_ALL_INTENT_VALUES),
-            },
-            "payload": {
-                "type": "object",
-                "description": (
-                    "Per-intent payload. send_message: {topic, body_md, to?}; "
-                    "propose_action: {action_name, predicted_gain_pct, "
-                    "reason?}; delegate: {action_name, params?, "
-                    "idempotency_key?}; alert: {severity, summary, detail?}; "
-                    "update_state: {changes}; "
-                    "request: {target_agent, kind, params?, "
-                    "reason?}; response: {in_reply_to, kind, status?, "
-                    "result?}; review_verdict: {target_proposal_msg_id, "
-                    "verdict ∈ approve/reject/redirect/advise/needs_review, "
-                    "reasoning, kb_evidence?} for single-proposal review, "
-                    "OR {target_proposal_msg_id, verdict_map: "
-                    "{variant_name: {verdict, rationale?}}} for batch "
-                    "explore review (v0.8 KB_gaps/Gap-11); the two "
-                    "shapes are mutually exclusive — Critic-only; "
-                    "kill_task / prune_branch / "
-                    "escalate_strategy_change — Robustness-only (PolicyGate); "
-                    "specialist_done: {gap_canonical_id, domain, "
-                    "proposal_set: [variant...], empty, summary, "
-                    "confidence?, new_findings?, residual_questions?} — "
-                    "specialist-only, exactly one per task."
-                ),
-            },
-        },
-        "required": ["intent_type", "payload"],
-    },
-}
-
 
 class NoIntentEmitted(RuntimeError):
     """Backend produced no parseable envelope and no tool_use blocks."""
@@ -268,8 +189,6 @@ def _validate_review_verdict_payload(
 
 
 __all__ = [
-    "EMIT_INTENT_TOOL_SCHEMA",
-    "INTENT_ENVELOPE_SCHEMA",
     "Intent",
     "IntentType",
     "IntentValidationError",

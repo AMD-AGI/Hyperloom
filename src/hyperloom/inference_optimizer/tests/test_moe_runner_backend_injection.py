@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
@@ -102,7 +101,7 @@ def dense_model(tmp_path) -> str:
 )
 def test_model_is_moe_true(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli._model_is_moe(path) is True
+    assert cli_model_gate._model_is_moe(path) is True
 
 
 @pytest.mark.parametrize(
@@ -116,11 +115,11 @@ def test_model_is_moe_true(tmp_path, config):
 )
 def test_model_is_moe_false(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli._model_is_moe(path) is False
+    assert cli_model_gate._model_is_moe(path) is False
 
 
 def test_model_is_moe_missing_config_is_false(tmp_path):
-    assert cli._model_is_moe(str(tmp_path / "does-not-exist")) is False
+    assert cli_model_gate._model_is_moe(str(tmp_path / "does-not-exist")) is False
 
 
 # inject_sglang_moe_runner_backend (pure helper)

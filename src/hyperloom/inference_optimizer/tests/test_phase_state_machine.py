@@ -171,33 +171,13 @@ def test_phase_interleave_on_widens_explore_and_kernel():
         )
 
 
-def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
-    """The helpers honour the env flag; interleave is OFF by default, only an explicit on value enables it."""
-    # Unset / empty => OFF by default.
-    monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
+def test_phase_interleave_policy_is_disabled():
+    """The default helper keeps interleave off."""
     assert phase_state.is_phase_interleave_enabled() is False
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt",
         "EXPLORE",
     )
-    # Explicit on values enable interleave (opt-in).
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
-    assert phase_state.is_phase_interleave_enabled() is True
-    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt",
-        "EXPLORE",
-    )
-    # Explicit off values keep interleave off.
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
-    assert phase_state.is_phase_interleave_enabled() is False
-    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt",
-        "EXPLORE",
-    )
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "false")
-    assert phase_state.is_phase_interleave_enabled() is False
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "off")
-    assert phase_state.is_phase_interleave_enabled() is False
 
 
 def test_phase_exit_reasons_includes_required_vocab():
@@ -531,11 +511,8 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
     assert excinfo.value.rule == "phase_incompatible"
 
 
-def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
-    monkeypatch,
-):
-    """With interleave off, a kernel_agent-owned REQUEST in EXPLORE is denied by R1."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "0")
+def test_policy_gate_denies_kernel_request_in_explore():
+    """A kernel_agent-owned REQUEST in EXPLORE is denied by R1."""
     state = SharedState()
     state.record_phase_transition(
         to_phase="EXPLORE",
@@ -562,11 +539,8 @@ def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
     assert excinfo.value.rule == "phase_incompatible"
 
 
-def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
-    monkeypatch,
-):
-    """With interleave on, EXPLORE widens to kernel_agent-owned kinds, so R1 lets the REQUEST through."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+def test_policy_gate_does_not_widen_explore_for_kernel_request():
+    """EXPLORE no longer widens to kernel_agent-owned kinds."""
     state = SharedState()
     state.record_phase_transition(
         to_phase="EXPLORE",
@@ -588,14 +562,13 @@ def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
             "params": {},
         },
     )
-    gate.validate_intent("orchestration", intent)  # no exception
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
 
 
-def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
-    monkeypatch,
-):
-    """With interleave on, KERNEL also accepts explore/specialist/integrate_patch proposals."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+def test_policy_gate_does_not_widen_kernel_for_explore_propose():
+    """KERNEL no longer accepts explore proposals via interleave."""
     state = SharedState()
     state.record_phase_transition(
         to_phase="KERNEL_AGENT",
@@ -613,12 +586,13 @@ def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "explore", "predicted_gain_pct": 1.0},
     )
-    gate.validate_intent("orchestration", intent)  # no exception
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
 
 
-def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
-    """Interleave widening is scoped to EXPLORE/KERNEL; SWEEP still rejects the explore lever under R1."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+def test_policy_gate_sweep_rejects_explore_lever():
+    """SWEEP rejects the explore lever under R1."""
     state = SharedState()
     state.record_phase_transition(
         to_phase="SWEEP",
@@ -650,7 +624,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
@@ -665,7 +638,7 @@ def coordinator_with_mocks(session_dir):
     )
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
