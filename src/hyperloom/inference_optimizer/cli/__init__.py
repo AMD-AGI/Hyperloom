@@ -27,7 +27,6 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import parse_custom_headers
 from .executors import (
@@ -656,22 +655,22 @@ def _probe_llm_catalog(
 
 
 def _catalog_probe_headers(*, base_url: str, api_key: str) -> dict[str, str]:
-    """Build headers for direct ``/models`` probes.
+    """Build headers for a direct ``<base_url>/models`` probe.
 
-    The Anthropic SDK supports ``ANTHROPIC_CUSTOM_HEADERS`` for gateways that
-    require subscription headers; the preflight catalog probe is a direct httpx
-    request, so it must apply the same env-specified headers itself.
+    Applies the operator's custom headers for the side being probed: the OpenAI
+    base uses ``OPENAI_CUSTOM_HEADERS``; the Anthropic base and any manual probe
+    override use ``ANTHROPIC_CUSTOM_HEADERS`` (Anthropic is the primary catalog
+    target, so it is the default). Gateway-specific headers (e.g. an AMD
+    ``Ocp-Apim-Subscription-Key``) must be supplied via those env vars — no
+    host-specific auto-injection.
     """
-    headers = parse_custom_headers(os.environ.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
-        os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
-    )
-    lower_names = {name.lower() for name in headers}
-    if api_key and "authorization" not in lower_names:
+    openai_base = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/")
+    probe = (base_url or "").strip().rstrip("/")
+    probing_openai = bool(openai_base) and (probe == openai_base or probe.startswith(openai_base + "/"))
+    env_name = "OPENAI_CUSTOM_HEADERS" if probing_openai else "ANTHROPIC_CUSTOM_HEADERS"
+    headers = parse_custom_headers(os.environ.get(env_name))
+    if api_key and not any(name.lower() == "authorization" for name in headers):
         headers["Authorization"] = f"Bearer {api_key}"
-    if api_key and "ocp-apim-subscription-key" not in lower_names:
-        parts = urlsplit(base_url)
-        if parts.hostname == "llm-api.amd.com":
-            headers["Ocp-Apim-Subscription-Key"] = api_key
     return headers
 
 
