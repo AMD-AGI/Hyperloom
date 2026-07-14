@@ -12,9 +12,11 @@ import yaml
 
 from hyperloom.inference_optimizer.cli import (
     _export_workload_envs_for_optimize,
+    _resolve_run_max_model_len,
+)
+from hyperloom.inference_optimizer.cli.parser import (
     _parse_conc_env_default,
     _parse_conc_sweep_default,
-    _resolve_run_max_model_len,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,

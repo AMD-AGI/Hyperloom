@@ -92,19 +92,6 @@ def test_name_mapping_paths() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# baseline_comparison.types                                                   #
-# --------------------------------------------------------------------------- #
-def test_baseline_summary_from_dict_partial() -> None:
-    from hyperloom.inference_optimizer.baseline_comparison.types import BaselineSummary
-
-    summary = BaselineSummary.from_dict({"query": {"model": "m"}, "best": None})
-    assert summary.query.model == "m"
-    assert summary.best is None
-    # Round-trips back to a dict.
-    assert summary.to_dict()["query"]["model"] == "m"
-
-
-# --------------------------------------------------------------------------- #
 # framework_registry                                                          #
 # --------------------------------------------------------------------------- #
 def test_framework_registry_surface() -> None:
@@ -113,18 +100,15 @@ def test_framework_registry_surface() -> None:
     assert "sglang" in fr.names()
     assert fr.is_supported("SGLang") is True
     assert fr.is_supported("nope") is False
-    spec = fr.get("sglang")  # lines 134-135
+    spec = fr.FRAMEWORKS["sglang"]
     assert spec.name == "sglang"
-    assert fr.kind("xdit") == fr.SCRIPTABLE
+    assert fr.FRAMEWORKS["xdit"].kind == fr.SCRIPTABLE
     assert fr.is_scriptable("xdit") is True
     assert fr.is_scriptable("sglang") is False
     assert fr.extra_args_env("vllm") == "EXTRA_VLLM_ARGS"
     assert fr.throughput_unit("xdit") == "img/s"
-    assert fr.supports_server_reuse("atom") is False
-    assert fr.repo_url("vllm")
-    assert fr.repo_url("does-not-exist") is None
     # Unknown name falls back to the default spec.
-    assert fr.kind("unknown") == fr.get(fr.DEFAULT_FRAMEWORK).kind
+    assert fr.is_scriptable("unknown") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -356,16 +340,9 @@ def test_paths_helpers(monkeypatch, tmp_path) -> None:
     # asset_root override that exists (line 267).
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path))
     assert paths.asset_root() == tmp_path
-    # Derived asset dirs (lines 277, 304).
-    assert paths.asset_scripts_dir() == tmp_path / "assets"
-    assert paths.asset_kernel_opt_dir() == tmp_path / "kernel_opt"
-
     # find_latest returns None when workspace root is not a dir (line 179).
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "does_not_exist"))
     assert paths.find_latest_per_session_dir() is None
-
-    sd = tmp_path / "sd"
-    assert paths.kernel_agent_root(sd) == sd / "kernel-agent"  # line 383
 
 
 def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:

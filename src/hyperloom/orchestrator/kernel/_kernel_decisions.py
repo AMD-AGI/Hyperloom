@@ -2,9 +2,8 @@
 
 """Kernel-decision write-owner functions.
 
-Extracted from :mod:`.kernel_request_handlers` (which re-exports every name
-here so its module namespace / monkeypatch surface is unchanged). SharedState
-is a passive persisted record; the functions that *own kernel decisions*
+Extracted from :mod:`.request_handlers`. SharedState is a passive persisted
+record; the functions that *own kernel decisions*
 (recording kernel-opt / integrate / gemm-tuning outcomes, kernel-patch
 identity, pending-keep bookkeeping, hot-kernel reuse) live here. They take
 ``state`` as their first argument and read/mutate it; SharedState keeps thin
@@ -13,7 +12,7 @@ keep working.
 
 Also carries the "honest E2E" hardening-flag helper (``_honest_flag`` + its
 constants), shared by both this cluster and the request handlers that stayed
-in the origin module (which re-exports it back for its own call sites).
+in the origin module.
 
 Dependencies on ``shared_state`` constants are imported lazily inside the
 functions that need them (cycle-free, one-way dependency), matching the
@@ -117,8 +116,8 @@ def _resolve_kernel_patch_identity(
     Pulls ``kernel_id`` / patch path / target file / extra server args
     from the envelope, back-filling the patch path from
     :attr:`last_kernel_opt` when the payload omits it but names a
-    matching kernel. The legacy ``extra_sglang_args`` alias is resolved
-    through the compat helper.
+    matching kernel. Extra launch args are read from the canonical
+    ``extra_server_args`` field.
 
     Args:
         payload (dict[str, Any] | None): The kernel_opt result or LLM
@@ -151,9 +150,7 @@ def _resolve_kernel_patch_identity(
         or payload.get("source_file")
         or ""
     )
-    # External envelope; route through compat helper so legacy ``extra_sglang_args`` still resolves.
-    from hyperloom.common.payload_aliases import read_extra_server_args
-    extra_args = read_extra_server_args(payload).strip()
+    extra_args = str(payload.get("extra_server_args") or "").strip()
     return kernel_id, patch_path, target_file, extra_args
 
 def kernel_patch_key(state, payload: dict[str, Any] | None) -> str:

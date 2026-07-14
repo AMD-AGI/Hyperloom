@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hyperloom.common.llm_config import derive_openai_base_url
+
 log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -336,8 +338,12 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
         and not _is_official_anthropic_url(anthropic_url)
         and not _is_deepseek_anthropic_url(anthropic_url)
     ):
-        # Anthropic-compatible gateway: let the OpenAI/Codex side reuse the same URL.
-        return anthropic_url, anthropic_url
+        # Anthropic-compatible gateway: the OpenAI/Codex side reuses the same
+        # gateway, but its chat-completions path differs (AMD convention:
+        # ``/anthropic`` -> ``/Unified/v1``, ``/Unified`` -> ``/Unified/v1``).
+        # Derive it so OPENAI_BASE_URL isn't left without ``/v1`` (which 404s on
+        # ``/chat/completions``); mirrors the OpenAI->Anthropic derivation above.
+        return anthropic_url, derive_openai_base_url(anthropic_url) or anthropic_url
     if anthropic_url or openai_url:
         return anthropic_url, openai_url
     return "", ""

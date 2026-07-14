@@ -5,7 +5,7 @@ Three groups, all offline (no Quark / Claude SDK / GPU):
 * Parser     — ``--quantize`` flag parses (default None / value when passed).
 * Adapter    — ``run_quantization_prelude_async`` maps quantization_agent's
                QuantSkillRunResult status -> decision (return dir vs SystemExit(3)).
-* CLI hook   — ``cli._run_quantization_prelude`` is a no-op without the flag,
+* CLI hook   — ``cli_quantization._run_quantization_prelude`` is a no-op without the flag,
                skipped on --resume, gated on $HYPERLOOM_QUANTIZE_ENABLED, and
                rewrites args.model otherwise.
 
@@ -21,7 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import parser as cli_parser
+from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
+from hyperloom.inference_optimizer.cli import quantization as cli_quantization
 from hyperloom.orchestrator.phases import quantization_request_handlers as qrh
 from hyperloom.orchestrator.phases import quantization_schemes as qs
 
@@ -74,7 +76,7 @@ def _patch_quantize(monkeypatch: pytest.MonkeyPatch, result):
 
 
 def _parse(argv: list[str]):
-    return cli._build_parser().parse_args(["optimize", "--model", "/tmp/m", *argv])
+    return cli_parser._build_parser().parse_args(["optimize", "--model", "/tmp/m", *argv])
 
 
 def test_quantize_flag_defaults_none():
@@ -301,7 +303,7 @@ def test_prelude_noop_without_flag(monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     args = _Args(model="/models/src", quantize=None)
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged
 
@@ -315,7 +317,7 @@ def test_prelude_skipped_on_resume(monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     args = _Args(model="/models/src", quantize="fp8", resume=True)
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged
 
@@ -332,7 +334,7 @@ def test_prelude_rewrites_model_on_success(tmp_path, monkeypatch):
     monkeypatch.delenv("MODEL_PATH", raising=False)
 
     args = _Args(model="/models/src", quantize="fp8")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
 
     assert str(args.model) == str(tmp_path / "out" / "quantized")
     assert os.environ["MODEL_PATH"] == str(tmp_path / "out" / "quantized")
@@ -347,7 +349,7 @@ def test_prelude_noop_when_scheme_none(monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     args = _Args(model="/models/src", quantize=None, quantize_scheme="none")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"
 
@@ -364,7 +366,7 @@ def test_prelude_uses_scheme_enum_when_no_freetext(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
     args = _Args(model="/models/src", quantize=None, quantize_scheme="fp8")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     # the fp8 enum resolved to its curated prompt
     assert "fp8" in seen["prompt"]
     assert str(args.model) == str(tmp_path / "q")
@@ -385,7 +387,7 @@ def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
     # prelude writes does not leak into other tests.
     monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
     args = _Args(model="/models/src", quantize_scheme="mxfp4", gpu_type="mi300x")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged -> downstream un-quantized
     captured = capsys.readouterr()
@@ -408,7 +410,7 @@ def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
     args = _Args(model="/models/src", quantize_scheme="mxfp4", gpu_type="mi355x")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert "mxfp4" in seen["prompt"]
     assert str(args.model) == str(tmp_path / "q")
 
@@ -425,7 +427,7 @@ def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
     args = _Args(model="/models/src", quantize="custom mxfp4 prompt", quantize_scheme="fp8")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert seen["prompt"] == "custom mxfp4 prompt"  # free text wins
 
 
@@ -449,12 +451,12 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
     monkeypatch.delenv("MODEL_PATH", raising=False)
 
     args = _Args(model="/wekafs/models/google-gemma-4-26B-A4B-it", quantize="fp8")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
 
     # The model path is rewritten to the generic quantized export dir ...
     assert str(args.model).endswith("/quantized")
     # ... but the identity used for session_dir / state / manifest is preserved.
-    name = cli.resolve_model_display_name(args)
+    name = cli_bootstrap.resolve_model_display_name(args)
     assert name != "quantized"
     assert name == "google-gemma-4-26B-A4B-it-quantized"
 
@@ -464,9 +466,9 @@ def test_prelude_no_display_name_without_quantization(monkeypatch):
     resolver falls back to the plain model-path basename (no collapse, no
     spurious suffix)."""
     args = _Args(model="/models/Qwen3-32B", quantize=None)
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert getattr(args, "model_display_name", None) in (None, "")
-    assert cli.resolve_model_display_name(args) == "Qwen3-32B"
+    assert cli_bootstrap.resolve_model_display_name(args) == "Qwen3-32B"
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +489,7 @@ def test_prelude_env_gate_skips_when_disabled(monkeypatch, capsys):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     args = _Args(model="/models/src", quantize="fp8")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
 
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged -> downstream un-quantized
@@ -507,7 +509,7 @@ def test_prelude_env_gate_skips_when_unset(monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     args = _Args(model="/models/src", quantize="fp8")
-    asyncio.run(cli._run_quantization_prelude(args))
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"
 
@@ -515,9 +517,9 @@ def test_prelude_env_gate_skips_when_unset(monkeypatch):
 def test_quantization_enabled_via_env_helper(monkeypatch):
     for v in ("1", "true", "TRUE", "yes", "on", "On", " 1 "):
         monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert cli._quantization_enabled_via_env() is True
+        assert cli_quantization._quantization_enabled_via_env() is True
     for v in ("0", "false", "no", "off", "", "bogus"):
         monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert cli._quantization_enabled_via_env() is False
+        assert cli_quantization._quantization_enabled_via_env() is False
     monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
-    assert cli._quantization_enabled_via_env() is False
+    assert cli_quantization._quantization_enabled_via_env() is False

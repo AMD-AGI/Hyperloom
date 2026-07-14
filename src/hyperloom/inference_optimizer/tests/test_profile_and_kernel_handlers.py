@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.inference_optimizer import cli as optimizer_cli
+from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -84,10 +86,10 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         target_tput=None,
     )
 
-    assert optimizer_cli._gpu_runner_type("mi325x") == "mi300x"
-    assert optimizer_cli._GFX_TO_RUNNER.get("gfx1100") is None
+    assert cli_model_gate._gpu_runner_type("mi325x") == "mi300x"
+    assert cli_model_gate._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
-    state = optimizer_cli._seed_shared_state(
+    state = cli_bootstrap._seed_shared_state(
         tmp_path,
         args,
         session_id="mi325x-session",
@@ -114,9 +116,9 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         target_tput=None,
     )
 
-    assert optimizer_cli._gpu_runner_type("mi308x") == "mi300x"
+    assert cli_model_gate._gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
-    state = optimizer_cli._seed_shared_state(
+    state = cli_bootstrap._seed_shared_state(
         tmp_path,
         args,
         session_id="mi308x-session",
@@ -129,7 +131,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
 
 
 def test_cli_parser_accepts_mi308x():
-    parser = optimizer_cli._build_parser()
+    parser = cli_parser._build_parser()
     args = parser.parse_args(
         [
             "optimize",
@@ -1178,7 +1180,6 @@ def test_profile_executor_sanitizes_current_best_args(monkeypatch, tmp_path):
 
     assert result["status"] == "succeeded"
     merged = captured["extra_server_args"]
-    assert "extra_sglang_args" not in captured
     assert "--enable-torch-compile" not in merged
     assert "--torch-compile-max-bs" not in merged
     assert "--quantization fp8" in merged
@@ -1199,7 +1200,6 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
         params={
             "base_extra_args": "--attention-backend AITER",
             "extra_server_args": ("--enable-torch-compile --torch-compile-max-bs 32 --quantization fp8"),
-            "extra_sglang_args": "--enable-torch-compile",
         },
         task_id="t-profile-canonical-sanitize",
     )
@@ -1209,7 +1209,6 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
 
     assert result["status"] == "succeeded"
     merged = captured["extra_server_args"]
-    assert "extra_sglang_args" not in captured
     assert "--enable-torch-compile" not in merged
     assert "--torch-compile-max-bs" not in merged
     assert "--attention-backend AITER" in merged
@@ -2866,7 +2865,7 @@ async def test_run_optimization_handler_dry_run(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
+async def test_run_optimization_handler_forwards_extra_server_args(session_dir):
     captured: dict[str, object] = {}
 
     async def fake_run(cmd, *, timeout_sec):
@@ -2878,7 +2877,7 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
         "kernel_id": "fake_kernel_1",
         "session_id": session_dir.name,
         "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
-        "extra_sglang_args": "--kv-cache-dtype fp8 --page-size 16",
+        "extra_server_args": "--kv-cache-dtype fp8 --page-size 16",
         "dry_run": True,
         "_single_kernel": True,
     }

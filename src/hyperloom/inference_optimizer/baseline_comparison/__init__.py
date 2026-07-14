@@ -33,13 +33,9 @@ from .inferencex_client import (
 )
 from .name_mapping import KNOWN_INFERENCEX_MODELS, to_inferencex_name
 from .target_analyzer import analyze
-from .types import BaselinePoint, BaselineQuery, BaselineSummary
 
 
 __all__ = [
-    "BaselinePoint",
-    "BaselineQuery",
-    "BaselineSummary",
     "DEFAULT_BASE_URL",
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_TIMEOUT_SEC",

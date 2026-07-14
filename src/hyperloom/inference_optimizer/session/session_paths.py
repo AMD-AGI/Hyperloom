@@ -172,36 +172,13 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     return runs_root(session_dir) / a / tid
 
 
-# Kernel-agent long-lived workspaces (cross-task, keyed by kernel_id)
-def kernel_workspace(session_dir: Path, kernel_id: str) -> Path:
-    """``<sd>/kernel-agent-workspace/<kernel_id>/`` — extracted source,
-    GEAK/Forge candidates, and the chosen patch for one kernel. Keyed by
-    ``kernel_id`` and survives across tasks (vs the per-invocation
-    :func:`kernel_agent_runs_dir`).
-
-    Args:
-        session_dir: The session root directory.
-        kernel_id: Kernel id keying the workspace; blank falls back to
-            ``"unknown"``.
-
-    Returns:
-        ``<session_dir>/kernel-agent-workspace/<kernel_id>``.
-    """
-    kid = str(kernel_id or "").strip() or "unknown"
-    return Path(session_dir) / "kernel-agent-workspace" / kid
-
-
 def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation
     kernel-agent run dirs (keyed by tool-invocation session id beneath it).
 
-    Note: distinct from ``paths.kernel_agent_root`` which returns the
-    kernel-agent *root* (one level above ``runs/``). tree-reform.MD
-    §2.4/P2.4: ``paths.py`` used to also define a ``kernel_agent_runs_root``
-    that returned that different (root, not runs/) path; it was renamed to
-    ``kernel_agent_root`` to remove the same-name-different-meaning
-    ambiguity. This function's name is unchanged — it already describes the
-    ``runs/`` directory it returns.
+    tree-reform.MD §2.4/P2.4: the similarly named ``paths.py`` helper that
+    returned the kernel-agent root was removed; this function is unchanged
+    because it already describes the ``runs/`` directory it returns.
 
     Args:
         session_dir: The session root directory.
@@ -215,8 +192,7 @@ def kernel_agent_runs_root(session_dir: Path) -> Path:
 def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
     """``<sd>/kernel-agent/runs/<session_id>/`` — per-tool-invocation
     kernel-agent output (logs, status JSON, optimization_attempts.jsonl,
-    TraceLens analysis). Keyed by tool-invocation session id (vs the
-    kernel_id-keyed :func:`kernel_workspace`).
+    TraceLens analysis). Keyed by tool-invocation session id.
 
     Args:
         session_dir: The session root directory.
@@ -275,21 +251,6 @@ def reports_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "reports"
 
 
-def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
-    """Compute the path to a final report file ``<sd>/reports/<ts>_final.<suffix>``.
-
-    Args:
-        session_dir (Path): The session root directory.
-        ts (str): The timestamp tag used as the filename prefix.
-        suffix (str): The file extension without the dot (e.g. ``"md"`` or
-            ``"json"``). Defaults to ``"md"``.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/reports/<ts>_final.<suffix>``.
-    """
-    return reports_dir(session_dir) / f"{ts}_final.{suffix}"
-
-
 # ---------------------------------------------------------------------------
 # Full-trace artefacts (token + decision timeline) under reports/trace/
 # ---------------------------------------------------------------------------
@@ -305,7 +266,7 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
 # is the sole writer of llm_calls.jsonl, so there is no concurrent-writer
 # fan-in to coordinate on that file. Out-of-process children (specialist /
 # geak / forge / robustness / critic-agent CLI) do NOT append to it; they write
-# their own ext/*.jsonl shard (see ``ext_trace_path``) which the collector
+# their own ext/*.jsonl shard under ``trace_ext_dir`` which the collector
 # (``_load_llm_calls``) and the Langfuse emitter (``_flush_ext_shards``)
 # backfill at read time. The ext shards are a legacy/child-compatibility path:
 # new producers should run in-process and parent-append into llm_calls.jsonl.
@@ -326,8 +287,8 @@ def llm_calls_path(session_dir: Path) -> Path:
     in-process LLM call (orchestration / kernel / specialist
     in-process fallback / codex / critic / proposal_scorer).
 
-    Out-of-process children write to :func:`ext_trace_path` instead; the
-    collector merges both streams.
+    Out-of-process child shards live under :func:`trace_ext_dir`; the collector
+    merges both streams.
 
     Args:
         session_dir: The session root directory.
@@ -349,26 +310,6 @@ def trace_ext_dir(session_dir: Path) -> Path:
         ``<session_dir>/reports/trace/ext``.
     """
     return trace_dir(session_dir) / "ext"
-
-
-def ext_trace_path(session_dir: Path, component: str, pid: int) -> Path:
-    """``<sd>/reports/trace/ext/<component>-<pid>.jsonl``.
-
-    Each independent agent process (geak / forge / robustness / critic-agent
-    CLI / tracelens) writes its own shard so concurrent children never
-    contend on a shared file; the collector globs ``ext/*.jsonl`` and merges.
-    The ``pid`` keeps shards disjoint across re-spawns of the same component.
-
-    Args:
-        session_dir: The session root directory.
-        component: Producer component name; blank falls back to ``"unknown"``.
-        pid: Process id of the producing child.
-
-    Returns:
-        ``<session_dir>/reports/trace/ext/<component>-<pid>.jsonl``.
-    """
-    comp = str(component or "").strip() or "unknown"
-    return trace_ext_dir(session_dir) / f"{comp}-{int(pid)}.jsonl"
 
 
 def decision_trace_path(session_dir: Path) -> Path:
@@ -481,79 +422,7 @@ def competitor_target_json(session_dir: Path) -> Path:
     return Path(session_dir) / "competitor_target.json"
 
 
-def logs_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/logs/``, the host dir for per-agent log files.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/logs``.
-    """
-    return Path(session_dir) / "logs"
-
-
-def agent_log(session_dir: Path, role: str) -> Path:
-    """Compute ``<sd>/logs/<role>.log``, one append-only log per persistent agent.
-
-    Args:
-        session_dir (Path): The session root directory.
-        role (str): The persistent agent role name.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/logs/<role>.log``.
-    """
-    return logs_dir(session_dir) / f"{role}.log"
-
-
-# Launcher-side artefacts (stdout, PID file, robustness monitor logs)
-def optimizer_runs_dir(session_dir: Path) -> Path:
-    """``<sd>/optimizer_runs/`` — launcher artefacts (run_<tag>.log / .pid /
-    robustness_monitor_*.log). Under $USER_DATA_PATH so one override moves
-    the whole run tail.
-
-    Args:
-        session_dir: The session root directory.
-
-    Returns:
-        ``<session_dir>/optimizer_runs``.
-    """
-    return Path(session_dir) / "optimizer_runs"
-
-
-def optimizer_run_log(session_dir: Path, run_tag: str) -> Path:
-    """Compute the launcher stdout log path ``<sd>/optimizer_runs/run_<tag>.log``.
-
-    Args:
-        session_dir (Path): The session root directory.
-        run_tag (str): The launcher run tag; blank/empty falls back to
-            ``"unknown"``.
-
-    Returns:
-        Path: The absolute path to
-            ``<session_dir>/optimizer_runs/run_<tag>.log``.
-    """
-    tag = str(run_tag or "").strip() or "unknown"
-    return optimizer_runs_dir(session_dir) / f"run_{tag}.log"
-
-
-def optimizer_run_pidfile(session_dir: Path, run_tag: str) -> Path:
-    """Compute the launcher pid-file path ``<sd>/optimizer_runs/run_<tag>.pid``.
-
-    Args:
-        session_dir (Path): The session root directory.
-        run_tag (str): The launcher run tag; blank/empty falls back to
-            ``"unknown"``.
-
-    Returns:
-        Path: The absolute path to
-            ``<session_dir>/optimizer_runs/run_<tag>.pid``.
-    """
-    tag = str(run_tag or "").strip() or "unknown"
-    return optimizer_runs_dir(session_dir) / f"run_{tag}.pid"
-
-
-# Per-agent inbox/outbox + system prompt snapshot
+# Per-agent artefacts
 def agent_dir(session_dir: Path, role: str) -> Path:
     """Compute ``<sd>/agents/<role>/``, the per-agent artefact root.
 
@@ -565,45 +434,6 @@ def agent_dir(session_dir: Path, role: str) -> Path:
         Path: The absolute path to ``<session_dir>/agents/<role>``.
     """
     return Path(session_dir) / "agents" / role
-
-
-def agent_inbox(session_dir: Path, role: str) -> Path:
-    """Compute ``<sd>/agents/<role>/inbox.jsonl``, the agent's inbound message log.
-
-    Args:
-        session_dir (Path): The session root directory.
-        role (str): The agent role name.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/agents/<role>/inbox.jsonl``.
-    """
-    return agent_dir(session_dir, role) / "inbox.jsonl"
-
-
-def agent_outbox(session_dir: Path, role: str) -> Path:
-    """Compute ``<sd>/agents/<role>/outbox.jsonl``, the agent's outbound message log.
-
-    Args:
-        session_dir (Path): The session root directory.
-        role (str): The agent role name.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/agents/<role>/outbox.jsonl``.
-    """
-    return agent_dir(session_dir, role) / "outbox.jsonl"
-
-
-def agent_persona(session_dir: Path, role: str) -> Path:
-    """Compute ``<sd>/agents/<role>/persona.md``, the agent's persona document.
-
-    Args:
-        session_dir (Path): The session root directory.
-        role (str): The agent role name.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/agents/<role>/persona.md``.
-    """
-    return agent_dir(session_dir, role) / "persona.md"
 
 
 def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
@@ -683,19 +513,6 @@ def cortex_dir(session_dir: Path) -> Path:
         Path: The absolute path to ``<session_dir>/runtime/cortex``.
     """
     return Path(session_dir) / "runtime" / "cortex"
-
-
-def cortex_sid_file(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_sid`` — Cortex session id from T0 ``session
-    begin`` (resume reuses it). Absent => --degraded-kb or T0 not yet run.
-
-    Args:
-        session_dir: The session root directory.
-
-    Returns:
-        ``<session_dir>/runtime/cortex/.kb_sid``.
-    """
-    return cortex_dir(session_dir) / ".kb_sid"
 
 
 def cortex_warm_json(session_dir: Path) -> Path:
@@ -933,10 +750,6 @@ def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep
 __all__ = [
     "allocate_turn_workdir",
     "agent_dir",
-    "agent_inbox",
-    "agent_log",
-    "agent_outbox",
-    "agent_persona",
     "agent_prompt_snapshot",
     "breakdown_parts_dir",
     "competitor_target_json",
@@ -950,7 +763,6 @@ __all__ = [
     "cortex_lessons_json",
     "cortex_pending_ndjson",
     "cortex_pitfalls_json",
-    "cortex_sid_file",
     "cortex_warm_json",
     "decision_trace_path",
     "proposal_task_map_path",
@@ -958,15 +770,9 @@ __all__ = [
     "gemm_tuning_steps_path",
     "kernel_agent_runs_dir",
     "kernel_agent_runs_root",
-    "kernel_workspace",
     "llm_calls_path",
-    "logs_dir",
     "manifest_path",
-    "optimizer_run_log",
-    "optimizer_run_pidfile",
-    "optimizer_runs_dir",
     "patches_dir",
-    "report_file",
     "reports_dir",
     "research_hints_json",
     "research_hints_md",

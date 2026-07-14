@@ -322,11 +322,11 @@ def test_full_enabled_actions_still_contains_explore():
 
 def test_cli_real_executors_still_contains_explore_and_sweep():
     """Sanity: the canonical EXPLORE-phase executors stay registered."""
-    from hyperloom.inference_optimizer import cli as cli_mod
+    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
 
-    assert "explore" in cli_mod._REAL_EXECUTORS_FULL
-    assert "sweep" in cli_mod._REAL_EXECUTORS_FULL
-    assert "baseline" in cli_mod._REAL_EXECUTORS_FULL
+    assert "explore" in _REAL_EXECUTORS_FULL
+    assert "sweep" in _REAL_EXECUTORS_FULL
+    assert "baseline" in _REAL_EXECUTORS_FULL
 
 
 # Mission-summary + robustness prompt point at explore, not retired names

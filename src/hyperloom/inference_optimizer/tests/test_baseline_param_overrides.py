@@ -176,7 +176,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli": _CLI_STUB}):
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
         materialized = materialize_config_with_envs(
             base,
             out,
@@ -208,7 +208,7 @@ def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli": _CLI_STUB}):
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
         materialized = materialize_config_with_envs(
             base,
             out,
@@ -233,7 +233,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli": _CLI_STUB}):
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
         materialized = materialize_config_with_envs(
             base,
             out,

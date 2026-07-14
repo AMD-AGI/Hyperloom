@@ -203,27 +203,7 @@ class AiterJitDetector:
             suggestion=("observe; if it persists, suggest cleaning <jit_dir>/build/ manually between runs"),
         )
 
-
-def evaluate_aiter_jit_signals(
-    detector: AiterJitDetector,
-    ctx: ReactorContext,
-    data: SourceData,
-) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points.
-
-    Args:
-        detector (AiterJitDetector): The stateful detector owned by the caller.
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected source data.
-
-    Returns:
-        list[Symptom]: The detector's symptoms for this tick, possibly empty.
-    """
-    return detector.evaluate(ctx, data)
-
-
 __all__ = [
     "AiterJitConfig",
     "AiterJitDetector",
-    "evaluate_aiter_jit_signals",
 ]
