@@ -242,29 +242,6 @@ def test_parse_claude_response_no_text(tmp_path):
     assert pu.parse_claude_stream_json_response(log) is None
 
 
-# ---- parse_oob_json_usage ----
-
-
-def test_parse_oob_empty():
-    assert pu.parse_oob_json_usage("") is None
-    assert pu.parse_oob_json_usage("   ") is None
-
-
-def test_parse_oob_whole_doc():
-    out = pu.parse_oob_json_usage(json.dumps({"usage": {"input_tokens": 3}}))
-    assert out["input_tokens"] == 3
-
-
-def test_parse_oob_jsonl_fallback():
-    stdout = "log noise\n" + json.dumps({"result": {"usage": {"output_tokens": 8}}})
-    out = pu.parse_oob_json_usage(stdout)
-    assert out["output_tokens"] == 8
-
-
-def test_parse_oob_nothing():
-    assert pu.parse_oob_json_usage("no json here") is None
-
-
 # ---- parse_geak_usage ----
 
 

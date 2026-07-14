@@ -103,7 +103,7 @@ def test_load_backend_ladder(tmp_path: Path):
         "attempts": [
             "not-a-dict",
             {
-                "backend": "geak_v3",
+                "backend": "forge",
                 "status": "failed",
                 "attempt_id": "a1",
                 "optimized_path": "runs/k/out_stdout.log",
@@ -117,7 +117,7 @@ def test_load_backend_ladder(tmp_path: Path):
     ladder, reason = kas._load_backend_ladder(tmp_path, "k")
     assert reason == "" and len(ladder) == 1
     row = ladder[0]
-    assert row["backend"] == "geak_v3"
+    assert row["backend"] == "forge"
     assert row["produced_artifact"] is False
     assert row["elapsed_sec"] == 1.5
     assert row["error_class"] == kas.ERROR_CLASS_TIMEOUT
@@ -189,7 +189,7 @@ def test_unattempted_reason_order():
             {
                 "source_file": "f.py",
                 "reusable_native_kernel": True,
-                "recommended_backends": ["geak_v3"],
+                "recommended_backends": ["forge"],
             },
         )[0]
         == kas.UNATTEMPTED_BELOW_CUTOFF
@@ -207,7 +207,7 @@ def test_load_backend_ladder_skipped_flag(tmp_path: Path):
                 "returncode": 2,
                 "skipped": True,
             },
-            {"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1"},
+            {"backend": "forge", "status": "failed", "attempt_id": "forge-1"},
         ],
     }
     f = tmp_path / "k.json"

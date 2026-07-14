@@ -35,8 +35,6 @@ from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.parse_usage import (
     parse_forge_steps,
     parse_forge_usage,
-    parse_geak_usage,
-    parse_oob_json_usage,
 )
 
 # Cohesive clusters live in sibling modules; re-exported here so the module
@@ -66,7 +64,6 @@ from ._kernel_decisions import (
 
 
 log = logging.getLogger(__name__)
-_BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
 
 # Recognized trace-analysis routes: the TraceLens ``agent`` (default) / ``deterministic``
 # routes and the independent, TraceLens-free ``bypass`` backend (explicit). An unknown
@@ -167,12 +164,9 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
 
 
 # kernel_optimization attempt backends whose stdout log we mine for token
-# usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
-# --json`` whose envelope may carry a ``usage`` block; ``forge`` (Kernel-Forge
-# autonomous loop) prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
-# its claude-agent-sdk ResultMessages. The other backends (claude/codex/cursor)
-# already account their spend via their own paths.
-_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak_v3", "oob", "forge"})
+# usage. ``forge`` prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
+# its claude-agent-sdk ResultMessages.
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -249,10 +243,12 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Default ladder: forge first, then the per-kernel GEAK backend (geak_v3). An
-# explicit KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload
-# backend_order) still overrides this default as-is.
-_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak_v3")
+# Explicit per-kernel fallback ladder used only for the legacy native path;
+# forge is the only per-kernel backend. The default phase-level backend is the
+# whole-pipeline GEAK delegate (``geak``), so this ladder is not used unless
+# selected explicitly.
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge",)
+_DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
@@ -262,23 +258,6 @@ _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # finish. Mirrors the +180s wrapper grace.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
-
-
-@functools.lru_cache(maxsize=1)
-def _default_geak_budget_minutes() -> float:
-    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→180); mirrors kernel-agent tool defaults.
-
-    Full mode gets 180 min (3 h) so preprocess (CK/.cu harness build) + the
-    optimization round + the post-round FULL_BENCHMARK verification all fit;
-    at 130 min the verification step was being starved and every attempt
-    finalized as an unverified NEEDS_REVIEW. Matches the kernel-agent tool
-    default (kernel_optimization.py).
-
-    Returns:
-        The default per-attempt GEAK budget in minutes.
-    """
-    raw = (os.environ.get("GEAK_RUN_MODE") or "").strip().lower()
-    return 70.0 if raw == "quick" else 180.0
 
 
 def _visible_gpu_count() -> int | None:
@@ -352,7 +331,7 @@ def _default_kernel_batch_parallel() -> int:
 def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
     """Decide whether to run backend ladders in parallel per kernel.
 
-    With the ladder converged to forge + geak_v3 there is no second (OOB)
+    With the ladder converged to a single forge backend there is no second
     ladder to race, so the auto-derived default is always sequential. Operators
     / tests can still force the flag via payload ``parallel_backends`` or env
     ``KERNEL_OPT_PARALLEL_BACKENDS`` (truthy ``1/true/yes/on`` enables).
@@ -1339,7 +1318,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         before invoking the command with output capture and the timeout.
 
         Launches the child in its own POSIX session and, on timeout, reaps the
-        WHOLE process group so a hung grandchild (the claude CLI / oob / curl
+        WHOLE process group so a hung grandchild (the claude CLI / curl
         holding a stalled LLM streaming socket) dies with the wrapper instead of
         being orphaned — the Sandbox-hang RCA left such grandchildren running,
         keeping the pod alive and the GPU idle. Mirrors ``subprocess.run``'s
@@ -3102,43 +3081,16 @@ async def run_optimization_handler(
     )
 
 
-def _geak_budget_minutes(payload: dict) -> float:
-    """Resolve the per-GEAK-attempt budget in minutes.
-
-    Priority: ``payload['geak_budget_min']`` > ``HYPERLOOM_GEAK_BUDGET_MIN``
-    env > the mode-derived default from :func:`_default_geak_budget_minutes`.
-
-    Args:
-        payload (dict): Request payload that may carry ``geak_budget_min``.
-
-    Returns:
-        float: The GEAK budget in minutes.
-    """
-    return float(
-        payload.get("geak_budget_min") or os.environ.get("HYPERLOOM_GEAK_BUDGET_MIN") or _default_geak_budget_minutes()
-    )
-
-
 def _optimization_budget_minutes(payload: dict) -> float:
     """Wall-clock budget mirrored by the kernel_optimization.py wrapper.
 
-    Picks the GEAK budget for GEAK, and the max of the generic and GEAK budgets
-    for empty/multi-backend payloads (which may still run GEAK in the ladder).
-
     Args:
-        payload (dict): Request payload carrying ``backends`` and optional
-            ``budget_minutes`` / GEAK budget hints.
+        payload (dict): Request payload carrying an optional ``budget_minutes``.
 
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
-    generic_budget = float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
-    geak_budget = _geak_budget_minutes(payload)
-    backend = str(payload.get("backends") or "").strip().lower()
-    if backend == "geak_v3":
-        return geak_budget
-    # Empty / multi-backend payloads may still run GEAK in the ladder.
-    return max(generic_budget, geak_budget)
+    return float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
 
 
 def _optimization_wrapper_timeout_sec(payload: dict) -> int:
@@ -3167,7 +3119,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
 
     Precedence (highest to lowest): ``payload['backend_order']`` ->
     ``KERNEL_OPT_BACKEND_ORDER`` env -> ``KERNEL_OPT_BACKENDS`` env.  When none
-    is set an empty list is returned so callers can apply their own default.
+    is set, the phase-level GEAK delegate is the default.
 
     Args:
         payload: Optional request payload that may carry ``backend_order``.
@@ -3181,7 +3133,7 @@ def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
         or os.environ.get("KERNEL_OPT_BACKENDS")
     )
     if not raw:
-        return []
+        return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
     return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
 
 
@@ -3192,8 +3144,7 @@ def geak_selected(payload: dict | None = None) -> bool:
     means "delegate the whole KERNEL_AGENT phase to the GEAK e2e optimizer".
     It therefore *owns* the phase whenever present (any other backends in the
     order are ignored for the kernel phase), so an order of just ``geak``
-    runs only the GEAK e2e optimizer. The legacy per-kernel backend is the
-    distinct ``geak_v3`` token.
+    runs only the GEAK e2e optimizer. ``forge`` is the per-kernel backend.
 
     Args:
         payload: Optional request payload that may carry ``backend_order``.
@@ -3207,8 +3158,8 @@ def geak_selected(payload: dict | None = None) -> bool:
 def _kernel_ladder_budget_sec(payload: dict) -> int:
     """Total wall-clock budget for one kernel's whole backend ladder.
 
-    The ladder runs its backends sequentially (forge -> geak_v3 fallback),
-    each as a subprocess with its own timeout. Without a shared ceiling a
+    The ladder runs the forge backend as a subprocess with its own timeout.
+    Without a shared ceiling a
     backend that hangs to its hard timeout followed by a fallback running its
     full budget could roughly double a kernel's wall clock and overshoot the
     KERNEL-phase budget cap (which is only re-checked between orchestration
@@ -3245,7 +3196,7 @@ def _backend_order(payload: dict) -> list[str]:
     2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
     3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
        ``KERNEL_OPT_BACKEND_ORDER``.
-    4. The built-in forge-first default ladder.
+    4. Empty, because the no-env default is the phase-level ``geak`` delegate.
 
     All backend names are normalized to lowercase before filtering, so
     values like ``"GEAK"`` or ``"Forge"`` are treated the same as their
@@ -3256,17 +3207,14 @@ def _backend_order(payload: dict) -> list[str]:
 
     Returns:
         list[str]: The filtered, ordered backend names (subset of
-            ``{"geak_v3", "forge"}``).
+            ``{"forge"}``).
     """
     order = _raw_kernel_backend_order(payload)
-    if not order:
-        # Ignore legacy payload["backends"]; the default ladder (forge first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
-        order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
-    # `forge` (Kernel-Forge autonomous-loop backend) and the per-kernel GEAK
-    # backend ``geak_v3`` are the only per-kernel backends. Bare ``geak`` (the
-    # whole-pipeline e2e delegate) is intentionally absent: it is a phase-level
-    # delegate (see ``geak_selected``), not a per-kernel backend.
-    allowed = {"geak_v3", "forge"}
+    # `forge` (Kernel-Forge autonomous-loop backend) is the only per-kernel
+    # backend. Bare ``geak`` (the whole-pipeline e2e delegate) is intentionally
+    # absent: it is a phase-level delegate (see ``geak_selected``), not a
+    # per-kernel backend.
+    allowed = {"forge"}
     filtered = [backend for backend in order if backend in allowed]
     if filtered:
         return filtered
@@ -3752,10 +3700,10 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
 
     A KEEP verdict always beats a non-KEEP regardless of micro_speedup
     (GEAK frequently reports a higher micro on a NEEDS_REVIEW that has no
-    correctness gate, while a Claude/Codex KEEP at a lower micro is a real
+    correctness gate, while a KEEP at a lower micro is a real
     integrate-ready patch); among equals, higher ``micro_speedup`` wins.
     Mirrors the max-key in :func:`_run_optimization_batch` so the ladder,
-    the GEAK-vs-OOB race, and the batch all agree on "best".
+    the backend ladder and batch mode agree on "best".
 
     Args:
         result: A kernel-opt attempt result, or ``None``.
@@ -3765,34 +3713,12 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
         non-KEEP, and higher ``micro_speedup`` breaks ties.
     """
     if not isinstance(result, dict):
-        return (0, 0, 0.0)
+        return (0, 0.0)
     proposal = result.get("proposal") or {}
     verification = result.get("verification") or {}
     keep = 1 if (result.get("status") == "ok" and proposal.get("decision") == "KEEP") else 0
     micro = float(verification.get("micro_speedup") or 0.0)
-    # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
-    # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
-    # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
-    # forge KEEP. Scoped to backend=="geak_v3" so forge ranking stays byte-identical;
-    # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
-    _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
-    try:
-        _thr = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
-    except ValueError:
-        _thr = 1.10
-    _backend = str(verification.get("best_backend") or result.get("backend") or "").lower()
-    verified_nr = (
-        1
-        if (
-            _promote
-            and keep == 0
-            and _backend == "geak_v3"
-            and verification.get("correctness_passed") is True
-            and micro >= _thr
-        )
-        else 0
-    )
-    return (keep, verified_nr, micro)
+    return (keep, micro)
 
 
 async def _run_backend_ladder(
@@ -3886,66 +3812,32 @@ async def _run_kernel_backend_sequence(
     session_dir: Path,
     parallel_backends: bool = False,
 ) -> HandlerResult:
-    """Optimize one kernel across the backend ladder (forge, then geak_v3).
-
-    forge runs first and in-place; if it KEEPs we short-circuit. Otherwise the
-    remaining ladder (geak_v3) runs, stopping at the first KEEP.
+    """Optimize one kernel with the forge backend.
 
     Args:
         base_payload: The base request payload shared by every backend.
         candidate: The kernel candidate to optimize.
         session_dir: Session directory for workspace and state.
-        parallel_backends: Retained for signature compatibility; unused now
-            that the ladder is a single forge/geak_v3 sequence.
+        parallel_backends: Retained for signature compatibility; unused.
 
     Returns:
-        The strongest ``HandlerResult`` across the backends tried.
+        The strongest ``HandlerResult`` produced.
     """
     kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
     order = _backend_order(base_payload)
 
-    # Bound the whole ladder (all backends for this kernel) to one wall-clock
-    # budget so a backend that hangs to its hard timeout cannot let the
-    # fallback double the kernel's wall clock and overshoot the KERNEL-phase
-    # cap. Each ladder call caps its backends to the time left.
+    # Bound the backend to one wall-clock budget so a hang cannot overshoot the
+    # KERNEL-phase cap (which is only re-checked between orchestration turns).
     ladder_deadline = time.monotonic() + _kernel_ladder_budget_sec(base_payload)
 
-    # Forge edits the live repo in-place (temp branch + per-file restore) and
-    # must NOT race with other backends that read/write the same repo. Run it
-    # sequentially first; if it KEEPs, short-circuit. Otherwise continue with
-    # the remaining backend ladder.
-    forge_group = [b for b in order if b == "forge"]
-    remaining = [b for b in order if b != "forge"]
-    forge_best: dict | None = None
-    forge_attempts: list = []
-    best: dict | None = None
-    attempts: list = []
-    if forge_group:
-        forge_best, forge_attempts = await _run_backend_ladder(
-            base_payload,
-            candidate,
-            kernel_id,
-            forge_group,
-            session_dir=session_dir,
-            deadline=ladder_deadline,
-        )
-        if forge_best and _kernel_result_rank(forge_best)[0] > 0:
-            best = forge_best
-            attempts = forge_attempts
-
-    # forge KEEP short-circuits; otherwise run the remaining ladder (geak_v3).
-    if best is None:
-        best, attempts = await _run_backend_ladder(
-            base_payload,
-            candidate,
-            kernel_id,
-            remaining,
-            session_dir=session_dir,
-            deadline=ladder_deadline,
-        )
-        attempts = forge_attempts + attempts
-        if best is None and forge_best is not None:
-            best = forge_best
+    best, attempts = await _run_backend_ladder(
+        base_payload,
+        candidate,
+        kernel_id,
+        order,
+        session_dir=session_dir,
+        deadline=ladder_deadline,
+    )
 
     if best is None:
         best = {
@@ -3962,218 +3854,6 @@ async def _run_kernel_backend_sequence(
         if cand_src:
             best["source_file"] = str(cand_src)
     return best
-
-
-def _resolve_local_model_path(model: str) -> str:
-    """Map a model name/path to a local weights directory the server can load.
-
-    A bare HF id like ``meta-llama-Llama-3.1-8B-Instruct`` passed straight to
-    sglang/vllm triggers a HuggingFace fetch (401 for gated repos), so resolve it
-    to a local directory first. Reuses the existing kernel-agent resolver
-    (``tracelens_analysis._candidate_model_config_paths``, honouring
-    ``$HYPERLOOM_MODELS_ROOT``, default ``/wekafs/models``): the directory holding
-    the first existing ``config.json`` wins. Returns the input unchanged when it
-    is already a directory or nothing resolves (caller/serve layer decides).
-
-    Args:
-        model: A model name or filesystem path.
-
-    Returns:
-        str: A local weights directory if one resolves, else ``model`` unchanged.
-    """
-    if not model:
-        return model
-    if Path(model).is_dir():
-        return model
-    try:
-        tool = _kernel_agent_tool_path("tracelens_analysis.py")
-        tools_dir = str(tool.parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)  # tracelens_analysis imports sibling tools-dir modules
-        import tracelens_analysis as _tla  # type: ignore[import-not-found]
-        for cfg in _tla._candidate_model_config_paths(model):
-            if Path(cfg).is_file():
-                return str(Path(cfg).parent)
-    except Exception as exc:  # noqa: BLE001  # resolution is best-effort; fall back to the raw value
-        log.info("combined_e2e: model-path resolve failed (%s); using raw '%s'", exc, model)
-    return model
-
-
-def _collect_combined_e2e_pairs(results: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Collect (best_patch, target_source) pairs from a batch's per-kernel results.
-
-    Uses each kernel's BEST microbench patch (``geak_per_task_best_patch``)
-    regardless of the per-kernel KEEP/REVERT verdict -- the combined E2E applies
-    ALL optimized patches together and lets the end-to-end A/B be the arbiter.
-    Kernels with no usable patch (e.g. a kernel that produced none) are skipped.
-
-    Args:
-        results: The batch's per-kernel result dicts (``out["batch_results"]``).
-
-    Returns:
-        list[tuple[str, str]]: ``(patch_path, target_source_file)`` pairs, one
-            per kernel that produced a best patch.
-    """
-    pairs: list[tuple[str, str]] = []
-    for r in results or []:
-        if not isinstance(r, dict):
-            continue
-        kid = str(r.get("kernel_id") or "?")
-        target = str(r.get("source_file") or "")
-        best_patch = ""
-        for att in r.get("attempts") or []:
-            bp = att.get("backend_paths") if isinstance(att, dict) else None
-            if isinstance(bp, dict) and bp.get("geak_per_task_best_patch"):
-                best_patch = str(bp["geak_per_task_best_patch"])
-                break
-        if best_patch and target:
-            pairs.append((best_patch, target))
-            log.info("combined_e2e: kernel %s -> patch %s on %s", kid, best_patch, target)
-        else:
-            log.info("combined_e2e: kernel %s skipped (no best patch / target)", kid)
-    return pairs
-
-
-def _combined_e2e_serving_config(payload: dict) -> dict[str, Any]:
-    """Resolve serving knobs (tp/isl/osl/conc/num_prompts/framework) for combined E2E.
-
-    Precedence: explicit ``payload['serving_config']`` dict (what the driver
-    passes, parsed from its --serving-config) -> the materialized workload
-    metadata resolver -> apply_and_bench's own defaults (left unset here).
-    Never hardcodes workload-specific values.
-
-    Args:
-        payload: The run_optimization request payload.
-
-    Returns:
-        dict[str, Any]: Keys among {tp, isl, osl, conc, num_prompts, framework}
-            that were resolved; missing keys fall back to apply_and_bench defaults.
-    """
-    cfg: dict[str, Any] = {}
-    explicit = payload.get("serving_config")
-    if isinstance(explicit, dict):
-        for k in ("tp", "isl", "osl", "conc", "num_prompts", "framework"):
-            if explicit.get(k) is not None:
-                cfg[k] = explicit[k]
-    if "framework" not in cfg and payload.get("framework"):
-        cfg["framework"] = str(payload["framework"]).strip().lower()
-    # Fall back to materialized workload metadata for any unset numeric knob.
-    config_path = str(payload.get("config_path") or "")
-    if config_path:
-        meta = _load_materialized_workload_metadata(config_path)
-        wl = (meta.get("runtime_args") or {}).get("workload") if isinstance(meta, dict) else None
-        if isinstance(wl, dict):
-            for k in ("tp", "isl", "osl", "conc", "num_prompts"):
-                if k not in cfg and wl.get(k) is not None:
-                    cfg[k] = wl[k]
-    return cfg
-
-
-def _run_combined_e2e_sync(
-    results: list[dict[str, Any]], payload: dict, session_dir: Path
-) -> dict[str, Any] | None:
-    """Apply ALL of a GEAK batch's best patches together and measure E2E (blocking).
-
-    GEAK-only, opt-in. Returns None (skip, no-op) unless: ``payload['combined_e2e']``
-    is truthy, the effective backend is geak, a servable ``model_path`` is present,
-    and >=1 GPU is visible. Reuses the gate-less ``apply_and_bench`` primitive (the
-    single shared apply->rebuild->serve->A/B->revert mechanism). Never raises.
-
-    Args:
-        results: The batch's per-kernel result dicts.
-        payload: The run_optimization request payload.
-        session_dir: Session directory (E2E artifacts written under it).
-
-    Returns:
-        dict | None: The apply_and_bench result dict, an ``{status:error}`` dict,
-            or ``None`` when the step is skipped.
-    """
-    if not payload.get("combined_e2e"):
-        return None
-    order = _backend_order(payload)
-    if "geak_v3" not in [b.lower() for b in (order or [])]:
-        log.info("combined_e2e: skipped (backend is not geak_v3: %s)", order)
-        return None
-    model = _resolve_local_model_path(str(payload.get("model_path") or "").strip())
-    if not model:
-        log.info("combined_e2e: skipped (no model_path to serve)")
-        return None
-    n_gpus = _visible_gpu_count()
-    if not n_gpus or n_gpus < 1:
-        log.info("combined_e2e: skipped (no visible GPU)")
-        return None
-    pairs = _collect_combined_e2e_pairs(results)
-    if not pairs:
-        log.info("combined_e2e: skipped (no kernel produced a patch)")
-        return None
-
-    try:
-        tool = _kernel_agent_tool_path("apply_and_bench.py")
-    except RuntimeError as exc:
-        return {"status": "error", "error": f"apply_and_bench tool not found: {exc}"}
-    spec = importlib.util.spec_from_file_location("apply_and_bench", str(tool))
-    if spec is None or spec.loader is None:
-        return {"status": "error", "error": "could not load apply_and_bench module"}
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception as exc:  # noqa: BLE001  # module import failure is non-fatal to the batch
-        return {"status": "error", "error": f"apply_and_bench import failed: {exc}"}
-
-    cfg = _combined_e2e_serving_config(payload)
-    # Expose exactly the GPUs the serving TP needs. apply_and_bench sets
-    # HIP/ROCR_VISIBLE_DEVICES=gpu, so a hardcoded "0" with tp>1 makes the server
-    # request device ordinals that aren't visible -> "HIP error: invalid device
-    # ordinal" and a baseline_failed A/B. Map the first `tp` visible GPUs (clamped
-    # to n_gpus) so tp=8 serving gets "0,1,...,7".
-    _tp = int(cfg.get("tp") or 1)
-    _tp = max(1, min(_tp, int(n_gpus)))
-    _gpu_ids = ",".join(str(i) for i in range(_tp))
-    kwargs: dict[str, Any] = dict(
-        pairs=pairs,
-        backup_root=str(session_dir / "e2e_backups"),
-        model=model,
-        out_dir=str(session_dir / "combined_e2e"),
-        reps=int(payload.get("e2e_reps", 5)),
-        gpu=_gpu_ids,
-        aiter_rebuild=True,
-    )
-    # Only forward knobs we actually resolved; apply_and_bench has its own defaults.
-    if cfg.get("framework"):
-        kwargs["backend"] = cfg["framework"]
-    for k in ("tp", "isl", "osl", "conc", "num_prompts"):
-        if cfg.get(k) is not None:
-            kwargs[k] = int(cfg[k])
-    kwargs["tp"] = _tp  # keep --tp consistent with the exposed GPU set
-    log.info("combined_e2e: applying %d patch(es) -> E2E A/B (model=%s, cfg=%s)",
-             len(pairs), model, cfg)
-    try:
-        return mod.apply_and_bench(**kwargs)
-    except Exception as exc:  # noqa: BLE001  # serving/bench failure must not fail the opt result
-        return {"status": "error", "error": f"apply_and_bench raised: {exc}"}
-
-
-async def _maybe_run_combined_e2e(
-    results: list[dict[str, Any]], payload: dict, session_dir: Path
-) -> dict[str, Any] | None:
-    """Async wrapper: run the blocking combined-E2E in an executor (off the loop).
-
-    Args:
-        results: The batch's per-kernel result dicts.
-        payload: The run_optimization request payload.
-        session_dir: Session directory for E2E artifacts.
-
-    Returns:
-        dict | None: As :func:`_run_combined_e2e_sync`; never raises.
-    """
-    try:
-        # get_running_loop() is the correct call inside an async def (the deprecated
-        # get_event_loop() raises "no current event loop" under Python 3.11 when no
-        # loop is set on the thread). We are always inside the orchestrator's loop here.
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _run_combined_e2e_sync, results, payload, session_dir)
-    except Exception as exc:  # noqa: BLE001  # belt-and-suspenders: never fail the batch
-        return {"status": "error", "error": f"combined_e2e wrapper failed: {exc}"}
 
 
 async def _run_optimization_batch(
@@ -4207,12 +3887,11 @@ async def _run_optimization_batch(
     if "forge" in _backend_order(payload):
         max_parallel = 1
     # parallel_backends is off by default now that the ladder is a single
-    # forge/geak_v3 sequence; only an explicit override enables it (see
+    # forge backend; only an explicit override enables it (see
     # :func:`_should_parallelize_backends`).
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
-    # When forced on, keep the legacy GPU-budget halving so a kernel that
-    # launches two before_kernel_opt rocprof subprocesses *before* entering Ray
-    # (NOT bound by the Ray GPU lease) stays within the real GPU budget.
+    # When forced on, keep the legacy GPU-budget halving so pre-Ray backend
+    # setup stays within the real GPU budget.
     if parallel_backends:
         n_gpus = _visible_gpu_count()
         per_task = _per_task_gpus()
@@ -4288,12 +3967,6 @@ async def _run_optimization_batch(
     out["max_parallel"] = max_parallel
     out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
-    # Autonomous combined E2E (GEAK-only, opt-in): once all kernels are optimized,
-    # apply ALL their best patches together and remeasure end-to-end throughput, with
-    # no manual step. Skipped (returns None) unless explicitly requested + servable.
-    combined = await _maybe_run_combined_e2e(results, payload, session_dir)
-    if combined is not None:
-        out["combined_e2e"] = combined
     return out
 
 
@@ -4301,12 +3974,12 @@ def _backends_cli_arg(value: Any) -> str:
     """Normalize a payload ``backends`` field into a bare ``--backends`` value.
 
     The orchestration payload may carry ``backends`` as a bare string
-    (``"geak_v3"``), a comma-joined string (``"geak_v3,claude"``), or a JSON list
-    (``["geak_v3"]``) when an upstream request serializes it as an array. A list
-    MUST be comma-joined into bare names, never ``str()``-ed into the repr of a
-    list (``"['geak_v3']"``) — the kernel-agent's ``parse_backends`` validator
-    correctly rejects that opaque token and the dispatch fails with the
-    self-contradictory "unsupported backend(s): ['geak_v3']".
+    (``"forge"``) or a JSON list (``["forge"]``) when an upstream request
+    serializes it as an array. A list MUST be comma-joined into bare names,
+    never ``str()``-ed into the repr of a list (``"['forge']"``) — the
+    kernel-agent's ``parse_backends`` validator correctly rejects that opaque
+    token and the dispatch fails with the self-contradictory
+    "unsupported backend(s): ['forge']".
 
     Args:
         value: The raw ``payload["backends"]`` value (str / list / tuple / None).
@@ -4405,18 +4078,10 @@ async def _run_optimization_single(
             "--accuracy-passed",
             "true" if bool(payload["accuracy_passed"]) else "false",
         ]
-    if payload.get("enable_rag") is False:
-        cmd += ["--disable-rag"]
-    if payload.get("enable_xs_memory") is False:
-        cmd += ["--disable-xs-memory"]
     if payload.get("test_command"):
         cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
-    geak_budget_min = _geak_budget_minutes(payload)
-    backend = backends_arg.lower()
-    if backend == "geak_v3" or not backend:
-        cmd += ["--geak-budget-min", str(geak_budget_min)]
     if payload.get("budget_minutes") is not None:
         cmd += ["--budget-minutes", str(payload["budget_minutes"])]
     # Allow the tool to handle its own backend timeout and salvage partial artifacts.
@@ -4443,7 +4108,7 @@ async def _run_optimization_single(
         # failed result here instead of letting TimeoutExpired propagate to the
         # batch wrapper — that wrapper produces a backend-less result, so the
         # failure was silently bucketed as a GEAK invocation even when a
-        # different optimizer (e.g. claude) actually ran.
+        # different optimizer (e.g. forge) actually ran.
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
@@ -4460,16 +4125,17 @@ async def _run_optimization_single(
         # (pre-dispatch / infra / timeout) to the backend that actually ran, so
         # downstream recorders never fall back to a silent GEAK default. Only
         # when this run dispatched a single, unambiguous backend.
+        dispatched_backend = backends_arg.lower()
         if (
-            backend
-            and "," not in backend
+            dispatched_backend
+            and "," not in dispatched_backend
             and not result.get("backend")
             and not result.get("attempts")
         ):
-            result["backend"] = backend
-    # Full-trace: mine each geak/oob/forge attempt's stdout log for token usage
+            result["backend"] = dispatched_backend
+    # Full-trace: mine each forge attempt's stdout log for token usage
     # and append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the
-    # backend emits no usage block (claude/codex/cursor account spend elsewhere).
+    # backend emits no usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
     # Full-trace: record each forge attempt's key-step timeline (rationale /
     # validation / keep-revert + summary) as a forge_steps audit, backfilled
@@ -4483,13 +4149,12 @@ def _trace_kernel_attempt_usage(
     *,
     session_dir: Path,
 ) -> None:
-    """Append ``llm_calls.jsonl`` rows for geak/oob attempts in ``result``.
+    """Append ``llm_calls.jsonl`` rows for out-of-process attempts in ``result``.
 
     Each ``kernel_optimization`` attempt record carries ``backend`` plus
     ``optimized_path`` (the backend's full ``*_stdout.log``). For the
     token-traced backends (:data:`_TOKEN_TRACED_KERNEL_BACKENDS`) we read that
-    log and run the matching usage parser (``geak`` → :func:`parse_geak_usage`,
-    ``oob`` → :func:`parse_oob_json_usage`, ``forge`` →
+    log and run the matching usage parser (``forge`` →
     :func:`parse_forge_usage`). A row is appended only when a
     usage block is actually recovered — backends that don't emit usage stay a
     silent no-op rather than logging fabricated zeros.
@@ -4521,12 +4186,7 @@ def _trace_kernel_attempt_usage(
         except (OSError, ValueError):
             continue
         try:
-            if backend == "geak_v3":
-                usage = parse_geak_usage(stdout_text)
-            elif backend == "forge":
-                usage = parse_forge_usage(stdout_text)
-            else:
-                usage = parse_oob_json_usage(stdout_text)
+            usage = parse_forge_usage(stdout_text)
             if not usage:
                 continue
             record = LLMCallRecord(
@@ -4724,317 +4384,6 @@ def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
         if isinstance(row, dict) and str(row.get("kernel_id") or "") == str(kernel_id):
             return str(row.get("name") or row.get("matched_kernel_name") or "").strip()
     return ""
-
-
-def _record_after_kernel_opt_rocprof_status(
-    *,
-    session_dir: Path,
-    kernel_id: str,
-    status: str,
-    reason: str = "",
-    json_path: str = "",
-    txt_path: str = "",
-    log: Any = None,
-) -> None:
-    """Best-effort sidecar status update for skipped/failed after-opt rocprof.
-
-    Args:
-        session_dir: Session directory holding the roofline sidecar.
-        kernel_id: The kernel id whose sidecar row is updated.
-        status: The rocprof status to record.
-        reason: Optional human-readable reason for the status.
-        json_path: Optional path to the rocprof JSON artifact.
-        txt_path: Optional path to the rocprof text artifact.
-        log: Optional logger for warnings on failure.
-    """
-    try:
-        ko_tool = _kernel_agent_tool_path("kernel_optimization.py")
-        ko_dir = ko_tool.parent
-        import sys as _sys
-
-        if str(ko_dir) not in _sys.path:
-            _sys.path.insert(0, str(ko_dir))
-        from kernel_optimization import _update_kernel_roofline_sidecar  # type: ignore[import-not-found]  # noqa: PLC0415
-
-        _update_kernel_roofline_sidecar(
-            workspace_path=str(session_dir),
-            kernel_id=kernel_id,
-            rocprof_json_path=json_path,
-            rocprof_txt_path=txt_path,
-            log_path=None,
-            rocprof_status=status,
-            rocprof_reason=reason,
-            phase="after_kernel_opt",
-        )
-    except Exception as exc:
-        if log is not None:
-            log.warning("integrate: after_kernel_opt sidecar status update failed: %s", exc)
-
-
-def _rocprof_timeout_sec() -> int:
-    """Resolve the rocprof roofline subprocess timeout in seconds.
-
-    Reads ``HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC`` and clamps it to a
-    minimum of 60 seconds.
-
-    Returns:
-        The timeout in seconds (defaults to 1800).
-    """
-    try:
-        return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
-    except (TypeError, ValueError):
-        return 1800
-
-
-def _rocprof_profile_command(test_command: str) -> str:
-    """Rewrite a test command to run in rocprof profiling mode.
-
-    Swaps a ``--correctness`` flag for ``--profile`` only when the command
-    targets a recognized unittest harness; otherwise returns it unchanged.
-
-    Args:
-        test_command: The original kernel test command.
-
-    Returns:
-        The (possibly rewritten) command string.
-    """
-    if "--correctness" not in test_command:
-        return test_command
-    if "/unittest/harness_" not in test_command and " harness_" not in test_command:
-        return test_command
-    return test_command.replace("--correctness", "--profile", 1)
-
-
-async def _run_after_kernel_opt_rocprof(
-    *,
-    kernel_id: str,
-    session_dir: Path,
-    log: Any,
-) -> dict[str, Any]:
-    """Best-effort: after an integrate KEEP, run rocprof on the now-patched kernel.
-
-    Resolves ``test_command`` from ``SharedState.kernel_opt_attempts`` or
-    ``last_kernel_opt``, launches ``rocprof_roofline.py`` as a subprocess, and
-    calls ``_update_kernel_roofline_sidecar`` with ``phase='after_kernel_opt'``.
-
-    Always returns a small status dict; never raises.
-
-    Args:
-        kernel_id: The kernel id that was just integrated.
-        session_dir: Session directory for state and artifacts.
-        log: Logger for status/warning messages.
-
-    Returns:
-        A small status dict describing the rocprof outcome.
-    """
-    rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
-    if rocprof_env in {"0", "false", "no", "off"}:
-        _record_after_kernel_opt_rocprof_status(
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-            status="skipped",
-            reason="disabled_by_env",
-            log=log,
-        )
-        return {"status": "skipped", "reason": "disabled_by_env"}
-
-    try:
-        from ..state.shared_state import SharedState
-
-        state = SharedState.load_or_init(session_dir)
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
-        test_command = str(attempt.get("test_command") or "").strip()
-        if not test_command:
-            lko = state.last_kernel_opt or {}
-            if str(lko.get("kernel_id") or "") == kernel_id:
-                bp = lko.get("backend_paths") or {}
-                test_command = str(bp.get("test_command") or "").strip()
-        # Derive workdir from last_source_file (mirrors before-opt logic); fall back to session_dir.
-        run_workdir: Path = session_dir
-        source_file = str(attempt.get("last_source_file") or "").strip()
-        if source_file:
-            sf = Path(source_file)
-            if sf.is_file():
-                run_workdir = sf.parent
-            elif sf.is_dir():
-                run_workdir = sf
-    except Exception as exc:
-        reason = f"state_load_error: {type(exc).__name__}"
-        _record_after_kernel_opt_rocprof_status(
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-            status="skipped",
-            reason=reason,
-            log=log,
-        )
-        return {"status": "skipped", "reason": reason}
-
-    if not test_command:
-        _record_after_kernel_opt_rocprof_status(
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-            status="skipped",
-            reason="no_test_command_in_state",
-            log=log,
-        )
-        return {"status": "skipped", "reason": "no_test_command_in_state"}
-
-    try:
-        tool = _kernel_agent_tool_path("rocprof_roofline.py")
-    except Exception:
-        _record_after_kernel_opt_rocprof_status(
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-            status="skipped",
-            reason="rocprof_roofline_tool_unavailable",
-            log=log,
-        )
-        return {"status": "skipped", "reason": "rocprof_roofline_tool_unavailable"}
-
-    out_dir = session_dir / "kernel-agent" / "rocprof_after_kernel_opt" / kernel_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_json = out_dir / "after.json"
-    out_txt = out_dir / "after.txt"
-    timeout_sec = _rocprof_timeout_sec()
-    profiling_command = _rocprof_profile_command(test_command)
-
-    cmd = [
-        "python3",
-        str(tool),
-        "--workdir",
-        str(run_workdir),
-        "--cmd",
-        profiling_command,
-        "--out-json",
-        str(out_json),
-        "--out-txt",
-        str(out_txt),
-        "--timeout-sec",
-        str(timeout_sec),
-    ]
-    target_kernel = _lookup_kernel_roofline_name(session_dir, kernel_id)
-    if target_kernel:
-        cmd.extend(["--target-kernel", target_kernel])
-    log.info("integrate: running after_kernel_opt rocprof for %s", kernel_id)
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec + 30)
-    except Exception as exc:
-        log.warning("integrate: after_kernel_opt rocprof subprocess error: %s", exc)
-        from ..loop.coordinator_helpers import format_exc_brief
-
-        reason = format_exc_brief(exc)
-        _record_after_kernel_opt_rocprof_status(
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-            status="failed",
-            reason=reason,
-            json_path=str(out_json),
-            txt_path=str(out_txt),
-            log=log,
-        )
-        return {"status": "failed", "reason": reason}
-
-    try:
-        payload = json.loads(out_json.read_text(encoding="utf-8"))
-    except Exception:
-        payload = {}
-
-    status = "ok" if rc == 0 and payload.get("status") == "ok" else payload.get("status", "failed")
-    log.info("integrate: after_kernel_opt rocprof status=%s for %s", status, kernel_id)
-
-    # Mirror into reports/kernel_roofline.json
-    try:
-        ko_tool = _kernel_agent_tool_path("kernel_optimization.py")
-        ko_dir = ko_tool.parent
-        import sys as _sys
-
-        if str(ko_dir) not in _sys.path:
-            _sys.path.insert(0, str(ko_dir))
-        from kernel_optimization import _update_kernel_roofline_sidecar  # type: ignore[import-not-found] # noqa: PLC0415
-
-        _update_kernel_roofline_sidecar(
-            workspace_path=str(session_dir),
-            kernel_id=kernel_id,
-            rocprof_json_path=str(out_json),
-            rocprof_txt_path=str(out_txt),
-            log_path=None,
-            rocprof_status=status,
-            phase="after_kernel_opt",
-        )
-        # Author-time breakdown capture: transcribe the external tool's sidecar
-        # (reports/kernel_roofline.json) into the recorder right after it lands.
-        _record_kernel_roofline_sidecar(session_dir)
-    except Exception as exc:
-        log.warning("integrate: after_kernel_opt sidecar update failed: %s", exc)
-
-    return {
-        "status": status,
-        "json_path": str(out_json),
-        "txt_path": str(out_txt),
-    }
-
-
-def _schedule_after_kernel_opt_rocprof(
-    *,
-    kernel_id: str,
-    session_dir: Path,
-    log: logging.Logger,
-) -> dict[str, Any]:
-    """Schedule a background rocprof roofline run after a kernel integrate.
-
-    Honors ``HYPERLOOM_ROCPROF_ROOFLINE`` to disable profiling; otherwise
-    records a ``scheduled`` status and launches the run as a tracked
-    background task.
-
-    Args:
-        kernel_id: Identifier of the integrated kernel.
-        session_dir: Session directory for status sidecars.
-        log: Logger for status and error reporting.
-
-    Returns:
-        A status dict indicating whether the run was scheduled or skipped.
-    """
-    rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
-    if rocprof_env in {"0", "false", "no", "off"}:
-        _record_after_kernel_opt_rocprof_status(
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-            status="skipped",
-            reason="disabled_by_env",
-            log=log,
-        )
-        return {"status": "skipped", "reason": "disabled_by_env"}
-
-    _record_after_kernel_opt_rocprof_status(
-        session_dir=session_dir,
-        kernel_id=kernel_id,
-        status="scheduled",
-        reason="background_task",
-        log=log,
-    )
-    task = asyncio.create_task(
-        _run_after_kernel_opt_rocprof(
-            kernel_id=kernel_id,
-            session_dir=session_dir,
-            log=log,
-        )
-    )
-    _BACKGROUND_ROCPROF_TASKS.add(task)
-
-    def _done(done_task: asyncio.Task[Any]) -> None:
-        """Completion callback that drops the task and logs failures.
-
-        Args:
-            done_task: The finished background rocprof task.
-        """
-        _BACKGROUND_ROCPROF_TASKS.discard(done_task)
-        try:
-            done_task.result()
-        except Exception as exc:  # noqa: BLE001 — best-effort background task
-            log.warning("integrate: after_kernel_opt rocprof background failed: %s", exc)
-
-    task.add_done_callback(_done)
-    return {"status": "scheduled", "reason": "background_task"}
 
 
 async def integrate_handler(
@@ -5429,16 +4778,6 @@ async def integrate_handler(
         )
     )
 
-    # After KEEP, schedule rocprof so integrate returns without waiting
-    # up to the profiling timeout.
-    rocprof_after_info: dict[str, Any] = {}
-    if decision == "KEEP" and kernel_id:
-        rocprof_after_info = _schedule_after_kernel_opt_rocprof(
-            kernel_id=kernel_id,
-            session_dir=session_dir,
-            log=log,
-        )
-
     result: dict[str, Any] = {
         "status": "ok",
         "decision": decision,
@@ -5468,8 +4807,6 @@ async def integrate_handler(
         result["paired_ab"] = paired_ab
         if paired_ab.get("confirmed") is False:
             result["decision_reason"] = "paired_ab_disconfirmed"
-    if rocprof_after_info:
-        result["rocprof_after_kernel_opt"] = rocprof_after_info
     return result
 
 

@@ -7,9 +7,8 @@
 """Independent benchmark/test-file discovery for the bypass analysis backend.
 
 Populates ``benchmark_files`` on routable hot-kernel candidates so the shared
-GEAK harness generator (``harness_generator.maybe_generate_harness``) and the
-opt-in rocprof-compute roofline enrichment can build a runnable per-kernel
-benchmark (which is what rocprof profiles to fill real bound/AI/efficiency).
+GEAK harness generator (``harness_generator.maybe_generate_harness``) can build
+a runnable per-kernel benchmark when downstream tools need one.
 
 Compact, independent reimplementation of the discovery *logic* used by
 ``tracelens_analysis.find_benchmark_files`` (content-grep over the kernel repo's

@@ -14,8 +14,7 @@ name resolved via Kineto correlation (may be empty under cudagraph replay).
 Schema mirrors the fields the Coordinator / kernel-agent consume in the
 TraceLens ``kernel_candidates.json`` / ``summary.json`` / ``kernel_roofline.json``
 contract. Roofline hardware fields (bound_type / efficiency / arithmetic
-intensity) are left null here and filled by the rocprof-compute enrichment
-stage (M6).
+intensity) are estimated from the analytical model.
 """
 
 from __future__ import annotations
@@ -321,10 +320,8 @@ def build_candidates(
         op_dtypes = k.get("op_dtypes") or []
         shape_entries = _trace_shape_entries(op_shapes, op_dtypes, k.get("count") or 0)
 
-        # Benchmark discovery (opt-in; gated by the caller because only the
-        # rocprof-compute roofline enrichment consumes it). A routable kernel's
-        # on-disk test/benchmark seeds the shared GEAK harness that rocprof
-        # profiles for real bound/AI — without it the enrichment skips the row.
+        # Benchmark discovery is opt-in. A routable kernel's on-disk
+        # test/benchmark can seed downstream harness generation.
         bench_files: list[str] = []
         kernel_repo = ""
         if discover_benchmarks and kc.reusable and source_file:
@@ -819,8 +816,7 @@ def render_analysis_md(
         f"framework={framework or 'unknown'}, platform={target_platform or 'unknown'}, "
         f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
         f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
-        f"operand shapes + measured kernel time (roofline_source=analytical), with optional "
-        f"rocprof-compute refinement."
+        f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
 
     extra = _render_bypass_extra_sections(
@@ -1140,8 +1136,7 @@ def build_kernel_roofline(
 ) -> dict[str, Any]:
     """Build the per-kernel roofline sidecar payload.
 
-    Hardware roofline fields are null here (populated by the rocprof-compute
-    enrichment stage).
+    Hardware roofline fields are estimated from the analytical model.
 
     Args:
         candidates: Output of :func:`build_candidates`.

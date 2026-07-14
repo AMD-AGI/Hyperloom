@@ -18,7 +18,7 @@ Coverage in this module (state-owned sections; single owner = Coordinator):
   (idempotent: re-recording overwrites rather than duplicates).
 * ``phase_timeline`` -- one event per recorded action attempt.
 
-File-born sections (geak/oob invocations, kernel/conc-sweep report summaries,
+File-born sections (kernel backend invocations, kernel/conc-sweep report summaries,
 critic_robustness, specialist_runs, telemetry, kb_provenance) are produced by
 other processes/executors and are instrumented at those sites separately.
 """
@@ -38,13 +38,8 @@ log = logging.getLogger(__name__)
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-# kernel-agent backend -> invocation section. Three independent lanes: geak,
-# the out-of-band LLM backends (claude/codex) on the oob lane, and forge
-# (Kernel-Forge autonomous loop) on its own lane. forge is NOT folded into oob
-# — it is a distinct backend, so it gets a distinct ``forge_invocations``
-# section (and a distinct capability/attribution row downstream).
+# kernel-agent backend -> invocation section.
 _GEAK_BACKENDS = frozenset({"geak"})
-_OOB_BACKENDS = frozenset({"claude", "codex"})
 _FORGE_BACKENDS = frozenset({"forge"})
 
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
@@ -410,20 +405,17 @@ def _invocation_section(backend: str) -> str | None:
     """Map a kernel-agent backend to its invocation section name.
 
     Args:
-        backend (str): the backend name (geak / forge / claude / codex / ...).
+        backend (str): the backend name (geak / forge / ...).
 
     Returns:
-        str | None: the matching invocation section (``geak_invocations`` /
-            ``forge_invocations`` / ``oob_invocations``), or ``None`` when the
-            backend has no invocation lane.
+        str | None: the matching invocation section, or ``None`` when the backend
+            has no invocation lane.
     """
     b = str(backend or "").lower()
     if b in _GEAK_BACKENDS:
         return "geak_invocations"
     if b in _FORGE_BACKENDS:
         return "forge_invocations"
-    if b in _OOB_BACKENDS:
-        return "oob_invocations"
     return None
 
 
@@ -433,7 +425,7 @@ def record_kernel_invocations(
     *,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record geak/oob invocations from an in-process kernel-agent result.
+    """Record kernel backend invocations from an in-process kernel-agent result.
 
     Reads ``result['attempts']`` (per-backend ladder) so backend-level
     failures are captured even when the kernel-agent crashed before persisting
@@ -441,7 +433,7 @@ def record_kernel_invocations(
     When the whole invocation failed before any backend ran (pre-dispatch
     gating: non_reusable_kernel / missing_source / kernel_agent_root_missing /
     ...), a single ``FAILED`` marker is recorded so the failure is never
-    invisible in the geak/oob view.
+    invisible in the invocation view.
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
@@ -502,7 +494,7 @@ def record_kernel_invocations(
             return
 
         # No per-backend attempts: capture a pre-dispatch / infra failure so
-        # the geak/oob view still shows it (root cause of invisible failures).
+        # the invocation view still shows it (root cause of invisible failures).
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         decision = str((result.get("proposal") or {}).get("decision") or "").upper()
@@ -574,27 +566,19 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
 # Notes (verified on-cluster): GEAK's version is its git SHA, NOT the pip
 # ``mini-swe-agent`` (that's the upstream core); InferenceX is git-only (no pip
-# package); TraceLens reads best as ``git describe``; OOB sub-agents report via
-# their npm CLIs (codex/claude), and the OOB harness itself via ``oob-mcp-server``.
+# package); TraceLens reads best as ``git describe``.
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
     # The whole-pipeline GEAK e2e optimizer — the CANONICAL ``geak`` (formerly
     # ``geak_v4`` / perfskills). Its checkout lives under $GEAK_ROOT (the GEAK
     # e2e clone) and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # The legacy per-kernel single-kernel GEAK backend (v3.2.x). Its checkout
-    # lives under $GEAK_V3_ROOT, kept distinct from the e2e ``geak`` above so
-    # versions["geak_v3"] records the v3 clone's SHA, not the e2e clone's.
-    "geak_v3": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    "mini": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    "geak-gaagent": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
+        # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
     # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
     # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).
     "forge": {"root_env": "FORGE_PATH", "version": "git_short"},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
     "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
-    "oob": {"root_env": "", "version": ("dist", ("oob-mcp-server",))},
     "inferencex": {"root_env": "INFERENCEX_PATH", "version": "git_short"},
     "kernel_agent": {"root_env": "HYPERLOOM_KERNEL_AGENT_ROOT", "version": "git_short"},
 }

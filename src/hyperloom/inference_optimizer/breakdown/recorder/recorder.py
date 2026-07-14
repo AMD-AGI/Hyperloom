@@ -54,7 +54,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "final": "singleton",
     "phase_timeline": "item",
     "geak_invocations": "item",
-    "oob_invocations": "item",
     "forge_invocations": "item",
     "kernel_lifecycle": "singleton",
     "explore_search": "singleton",
@@ -80,7 +79,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # the breakdown envelope on their own.
     "kernel_discovery": "item",  # one per hot-kernel discovery run (tracelens/roofline)
     "kernel_dispatch": "item",  # one per kernel: dispatched? which backends?
-    "kernel_backend_result": "item",  # one per backend attempt (geak/oob)
+    "kernel_backend_result": "item",  # one per backend attempt
     "kernel_e2e": "item",  # one per kernel: e2e integrate gain
     # Authoritative external-tool versions (geak/tracelens/claude/codex/...),
     # one item per tool (idempotent by tool name); folded into the top-level

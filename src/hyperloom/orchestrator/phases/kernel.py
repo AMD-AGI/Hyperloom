@@ -1139,7 +1139,7 @@ class KernelPhase(PhaseHandler):
             # denominator (cross-harness), so it is PROVISIONAL only. Do NOT stamp
             # cumulative_gain_validated here - validated may only be produced by a
             # same-harness full-stack rebench, consumed in _promote_to_shared_state.
-            # Native/codex lanes are unaffected (they never call this method; their
+            # Other lanes are unaffected (they never call this method; their
             # validated gain is already same-harness).
             self.shared_state.cumulative_gain = gain
             self.shared_state.cumulative_gain_provenance = (
@@ -1220,8 +1220,7 @@ class KernelPhase(PhaseHandler):
         # assembler backfills each kernel's discovery-sourced fields
         # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
         # not tracelens, so the route is ``bypass``; ``tool="geak"`` keeps the
-        # version provenance under the canonical GEAK e2e optimizer (the legacy
-        # per-kernel backend is the distinct ``geak_v3`` token).
+        # version provenance under the canonical GEAK e2e optimizer.
         for run in (journey.get("discovery_runs") or []):
             if not isinstance(run, dict):
                 continue

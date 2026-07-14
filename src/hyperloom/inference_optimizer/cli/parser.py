@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from .. import framework_registry
+from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_MODEL
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -92,6 +93,8 @@ def _default_claude_model_env() -> str:
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
+    if (os.environ.get("DEEPSEEK_API_KEY") or "").strip() or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip():
+        return (os.environ.get("DEEPSEEK_MODEL") or "").strip() or DEFAULT_DEEPSEEK_MODEL
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
@@ -112,6 +115,12 @@ def _default_codex_model_env() -> str:
     """
     anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
     openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    if (
+        (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or anthropic_url == "https://api.deepseek.com/anthropic"
+    ) and not openai_url:
+        return (os.environ.get("CLAUDE_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "").strip() or DEFAULT_DEEPSEEK_MODEL
     if anthropic_url and not openai_url:
         return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
@@ -259,6 +268,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--gpu-type",
+        type=str.lower,
         choices=["mi300x", "mi308x", "mi325x", "mi355x"],
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
@@ -721,7 +731,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help=(
             "Use Codex for the Kernel-agent conversation backend (default — "
-            "faster). This does not select the forge/geak_v3 kernel rewrite "
+            "faster). This does not select the forge kernel rewrite "
             "ladder; use KERNEL_OPT_BACKEND_ORDER for that. Pass --kernel-claude "
             "to switch the conversation backend."
         ),
@@ -732,7 +742,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="kernel_codex",
         help=(
             "Use Claude for the Kernel-agent conversation backend. This does not "
-            "select the forge/geak_v3 kernel rewrite ladder."
+            "select the forge kernel rewrite ladder."
         ),
     )
     # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.

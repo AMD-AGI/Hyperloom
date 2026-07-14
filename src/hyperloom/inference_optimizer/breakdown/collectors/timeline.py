@@ -287,7 +287,6 @@ def _capability_for_action(
 def collect_capability_summary(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
-    oob_invocations: list[dict[str, Any]],
     warnings: list[str],
     forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -296,7 +295,6 @@ def collect_capability_summary(
     Args:
         state: Session state mapping.
         geak_invocations: GEAK backend invocation records.
-        oob_invocations: Out-of-box backend invocation records.
         warnings: Mutable list that collected warnings are appended to.
         forge_invocations: Forge backend invocation records (own lane).
 
@@ -305,7 +303,7 @@ def collect_capability_summary(
     """
     forge_invocations = forge_invocations or []
     # Integrate (e2e) outcome per kernel: a kernel-opt KEEP REVERTED at
-    # integrate is not a real adoption, so don't inflate the geak/oob tally.
+    # integrate is not a real adoption, so don't inflate the backend tally.
     integ = state.get("kernel_integrate_attempts") or {}
     integ_by_kid: dict[str, dict[str, Any]] = {}
     if isinstance(integ, dict):
@@ -320,7 +318,7 @@ def collect_capability_summary(
                 "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
             }
 
-    # GEAK / OOB from on-disk invocations, reconciled against the integrate verdict.
+    # Kernel backends from on-disk invocations, reconciled against the integrate verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
         """Reduce one lane's invocations to a capability row.
 
@@ -365,7 +363,6 @@ def collect_capability_summary(
         return row
 
     geak_cap = _from_invocations(geak_invocations)
-    oob_cap = _from_invocations(oob_invocations)
     forge_cap = _from_invocations(forge_invocations)
 
     # Legacy capability rows for archived (pre-merge) sessions; current
@@ -428,7 +425,6 @@ def collect_capability_summary(
     specialist_row = _specialist_capability_row(state)
     return {
         "geak": geak_cap,
-        "oob": oob_cap,
         "forge": forge_cap,
         # primary post-merge row; backends/params/validate_stack are compat rows.
         "explore": explore,

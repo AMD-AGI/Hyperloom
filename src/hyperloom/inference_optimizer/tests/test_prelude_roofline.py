@@ -25,6 +25,8 @@ class _BareState:
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    kernel_optimizer: str = "native"
+    phase_history: list[dict[str, Any]] = field(default_factory=list)
 
     def save(self, _session_dir: Path | None) -> None:
         pass
@@ -62,12 +64,15 @@ class _StubTaskRegistry:
 
 
 @pytest.fixture
-def coord(tmp_path: Path) -> Coordinator:
+def coord(tmp_path: Path, monkeypatch) -> Coordinator:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
+    c._run_deadline = None
+    c._run_started_monotonic = None
     return c
 
 

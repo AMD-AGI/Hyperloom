@@ -23,6 +23,7 @@ from .config import Config
 from .decision.action_ladder import ActionLadder, ActionLadderConfig
 from .decision.policy_aware import PolicyAware
 from .decision.rca_engine import (
+    AnthropicRcaEngine,
     LlmRcaEngine,
     NoopRcaEngine,
     RcaEngine,
@@ -392,7 +393,8 @@ def _build_rca_engine(
         config.llm_rca_cooldown_s,
         config.llm_rca_max_calls_per_tick,
     )
-    return LlmRcaEngine(
+    engine_cls = AnthropicRcaEngine if config.llm_provider == "anthropic" else LlmRcaEngine
+    return engine_cls(
         base_url=config.llm_base_url,
         api_key=config.llm_api_key,
         model=config.llm_model,

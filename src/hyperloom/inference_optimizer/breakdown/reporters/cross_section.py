@@ -90,7 +90,6 @@ def _gain_attribution_lines(
         "explore": to_float(sb.get("explore_pct_of_total")),
         "replay_warm_recipe": to_float(sb.get("replay_warm_recipe_pct_of_total")),
         "geak": to_float(sb.get("geak_pct_of_total")),
-        "oob": to_float(sb.get("oob_pct_of_total")),
         "sweep": to_float(sb.get("sweep_pct_of_total")),
     }
     nonzero = {k: v for k, v in sources.items() if v and v != 0}
