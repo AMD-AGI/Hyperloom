@@ -296,8 +296,8 @@ def _patch_dynamo_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[di
     import hyperloom.inference_optimizer.multi_node.commands.dynamo as dyn
 
     saved: list[dict] = []
-    monkeypatch.setattr(dyn, "_load_state", lambda: dict(state))
-    monkeypatch.setattr(dyn, "_save_state", lambda payload: saved.append(dict(payload)))
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: dict(state))
+    monkeypatch.setattr(dyn._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
     return saved
 
 
@@ -307,9 +307,9 @@ def test_dynamo_create_and_state_requirements(tmp_path: Path, monkeypatch: pytes
     saved: list[dict] = []
     monkeypatch.setenv("SAFE_WORKSPACE", "ws")
     monkeypatch.setenv("CLAW_SESSION_ID", "sess-1")
-    monkeypatch.setattr(dyn, "_load_state", lambda: saved[-1] if saved else {})
-    monkeypatch.setattr(dyn, "_save_state", lambda payload: saved.append(dict(payload)))
-    monkeypatch.setattr(dyn, "_dynamo_ssh_dir", lambda: tmp_path / "ssh")
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: saved[-1] if saved else {})
+    monkeypatch.setattr(dyn._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
+    monkeypatch.setattr(dyn._mn_cli, "_dynamo_ssh_dir", lambda: tmp_path / "ssh")
     monkeypatch.setattr(dyn.ssh_client, "generate_session_keypair", lambda _d: (tmp_path / "id_ed25519", "ssh-ed25519 pub"))
     monkeypatch.setattr(dyn.workload_spec, "build_dynamo_workload_body", lambda **kw: {"body": kw})
     workload = {
@@ -321,9 +321,9 @@ def test_dynamo_create_and_state_requirements(tmp_path: Path, monkeypatch: pytes
     }
     fake_safe = _FakeSafe(workload=workload)
     monkeypatch.setattr(dyn.safe_client, "from_env", lambda: fake_safe)
-    monkeypatch.setattr(dyn, "_short_poll", lambda **kw: workload)
-    monkeypatch.setattr(dyn, "_refresh_dynamo_known_hosts", lambda ips, port, state: tmp_path / "known_hosts")
-    monkeypatch.setattr(dyn, "_dynamo_known_hosts_path", lambda state: tmp_path / "known_hosts")
+    monkeypatch.setattr(dyn._mn_cli, "_short_poll", lambda **kw: workload)
+    monkeypatch.setattr(dyn._mn_cli, "_refresh_dynamo_known_hosts", lambda ips, port, state: tmp_path / "known_hosts")
+    monkeypatch.setattr(dyn._mn_cli, "_dynamo_known_hosts_path", lambda state: tmp_path / "known_hosts")
     monkeypatch.setattr(dyn.ssh_client, "probe_ssh", lambda *a, **kw: True)
 
     args = argparse.Namespace(
@@ -358,10 +358,10 @@ def test_dynamo_create_and_state_requirements(tmp_path: Path, monkeypatch: pytes
     assert saved[-1]["worker_pod_ips"] == ["10.0.1.0", "10.0.1.1"]
     assert saved[-1]["ssh_known_hosts"] == str(tmp_path / "known_hosts")
 
-    monkeypatch.setattr(dyn, "_load_state", lambda: {"backend": "rayjob"})
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: {"backend": "rayjob"})
     with pytest.raises(RuntimeError, match="state backend"):
         dyn._dynamo_require_state()
-    monkeypatch.setattr(dyn, "_load_state", lambda: {"backend": "dynamo", "worker_pod_ips": ["10.0.1.0"]})
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: {"backend": "dynamo", "worker_pod_ips": ["10.0.1.0"]})
     with pytest.raises(RuntimeError, match="ssh_key_path"):
         dyn._dynamo_require_state()
 
@@ -382,7 +382,7 @@ def test_dynamo_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dyn._collect_forward_env()["MORI_FOO"] == "1"
 
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(dyn, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(dyn._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
 
     def _run(state, ip, script, python, launch_args, **kw):
         calls.append((ip, launch_args))
@@ -390,7 +390,7 @@ def test_dynamo_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
             raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=kw["timeout"])
         return _Completed(returncode=1 if ip == "10.0.0.3" else 0, stdout='noise {"status":"ok"}\n', stderr="bad")
 
-    monkeypatch.setattr(dyn, "_dynamo_ssh_run_script", _run)
+    monkeypatch.setattr(dyn._mn_cli, "_dynamo_ssh_run_script", _run)
     rc, results = dyn._dynamo_fanout_launch(
         {"ssh_port": 2222},
         "--model /m",
@@ -442,7 +442,7 @@ def test_dynamo_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         "ssh_port": 2222,
     }
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: dict(state))
-    monkeypatch.setattr(dyn, "_save_state", lambda payload: saved.append(dict(payload)))
+    monkeypatch.setattr(dyn._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
     build_calls: list[dict] = []
     monkeypatch.setattr(
         dyn.dynamo_support,
@@ -501,9 +501,9 @@ def test_dynamo_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         "ssh_port": 2222,
     }
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: dict(state))
-    monkeypatch.setattr(dyn, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(dyn._mn_cli, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
     monkeypatch.setattr(
-        dyn,
+        dyn._mn_cli,
         "_dynamo_ssh_run_script",
         lambda *a, **kw: _Completed(returncode=0, stdout='logs {"status":"ok","backup_path":"/b"}', stderr=""),
     )
@@ -512,7 +512,7 @@ def test_dynamo_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
     assert tx["rc"] == 0
 
     monkeypatch.setattr(
-        dyn,
+        dyn._mn_cli,
         "_dynamo_ssh_run_script",
         lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["ssh"], timeout=5)),
     )
@@ -603,12 +603,12 @@ def test_dynamo_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     }
     saved = _patch_dynamo_state(monkeypatch, state)
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: dict(state))
-    monkeypatch.setattr(dyn, "_read_pod_script", lambda name: f"script:{name}")
-    monkeypatch.setattr(dyn, "_poll_timeout_from_args", lambda args: 5)
+    monkeypatch.setattr(dyn._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(dyn._mn_cli, "_poll_timeout_from_args", lambda args: 5)
 
     calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
-        dyn,
+        dyn._mn_cli,
         "_dynamo_ssh_run_script",
         lambda st, ip, script, python, op_args, **kw: calls.append((ip, python, op_args))
         or _Completed(returncode=0, stdout='{"status":"applied","per_pod":[{"status":"applied"}]}', stderr=""),
@@ -619,10 +619,13 @@ def test_dynamo_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     assert calls[0][1] == "/opt/venv/bin/python"
     assert "--sglang-version-pin v1" in calls[0][2]
 
+    monkeypatch.delenv("HYPERLOOM_GEAK_SRC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_ROOT", raising=False)
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
     assert dyn.cmd_install_geak(argparse.Namespace(geak_src="", poll_timeout=5, print_logs=False)) == dyn.EXIT_CONFIG_ERROR
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setattr(
-        dyn,
+        dyn._mn_cli,
         "_dynamo_ssh_run_script",
         lambda *a, **kw: _Completed(returncode=0, stdout='{"status":"installed"}', stderr=""),
     )
@@ -636,8 +639,8 @@ def test_rayjob_create_reuse_and_failure_helpers(monkeypatch: pytest.MonkeyPatch
     saved: list[dict] = []
     monkeypatch.setenv("SAFE_WORKSPACE", "ws")
     monkeypatch.setenv("CLAW_SESSION_ID", "sess-rj")
-    monkeypatch.setattr(rayjob, "_load_state", lambda: saved[-1] if saved else {})
-    monkeypatch.setattr(rayjob, "_save_state", lambda payload: saved.append(dict(payload)))
+    monkeypatch.setattr(rayjob._mn_cli(), "_load_state", lambda: saved[-1] if saved else {})
+    monkeypatch.setattr(rayjob._mn_cli(), "_save_state", lambda payload: saved.append(dict(payload)))
     monkeypatch.setattr(rayjob.workload_spec, "build_rayjob_workload_body", lambda **kw: {"body": kw})
     monkeypatch.setattr(rayjob, "_write_rayjob_meta", lambda **kw: None)
     workload = {
@@ -647,7 +650,7 @@ def test_rayjob_create_reuse_and_failure_helpers(monkeypatch: pytest.MonkeyPatch
             {"podId": "cluster-head-abc", "resourceId": 1, "podIP": "10.0.0.1"},
         ],
     }
-    monkeypatch.setattr(rayjob, "_short_poll", lambda **kw: workload)
+    monkeypatch.setattr(rayjob._mn_cli(), "_short_poll", lambda **kw: workload)
     monkeypatch.setattr(rayjob.safe_client, "from_env", lambda: _FakeSafe(workload=workload))
 
     args = argparse.Namespace(
@@ -714,10 +717,10 @@ def test_dynamo_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     ) == dyn.EXIT_CONFIG_ERROR
 
     monkeypatch.setattr(dyn, "_dynamo_all_gpu_ips", lambda st: ["10.0.1.0"])
-    monkeypatch.setattr(dyn, "_read_pod_script", lambda name: f"script:{name}")
-    monkeypatch.setattr(dyn, "_poll_timeout_from_args", lambda args: 1)
+    monkeypatch.setattr(dyn._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(dyn._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     monkeypatch.setattr(
-        dyn,
+        dyn._mn_cli,
         "_dynamo_ssh_run_script",
         lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["ssh"], timeout=1)),
     )
@@ -1167,10 +1170,10 @@ def test_dynamo_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
         "ssh_key_path": "/tmp/k",
         "ssh_port": 2222,
     }
-    monkeypatch.setattr(dyn, "_load_state", lambda: dict(state))
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: dict(state))
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: dict(state))
-    monkeypatch.setattr(dyn, "_read_pod_script", lambda name: f"script:{name}")
-    monkeypatch.setattr(dyn, "_poll_timeout_from_args", lambda args: 5)
+    monkeypatch.setattr(dyn._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(dyn._mn_cli, "_poll_timeout_from_args", lambda args: 5)
 
     geak_calls = {"n": 0}
 
@@ -1180,7 +1183,7 @@ def test_dynamo_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
             raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=5)
         return _Completed(returncode=0, stdout='{"status":"failed","reason":"pip"}', stderr="")
 
-    monkeypatch.setattr(dyn, "_dynamo_ssh_run_script", _geak_run)
+    monkeypatch.setattr(dyn._mn_cli, "_dynamo_ssh_run_script", _geak_run)
     assert dyn.cmd_install_geak(argparse.Namespace(geak_src="/geak", poll_timeout=5, print_logs=False)) == 1
 
 
@@ -1220,13 +1223,13 @@ def test_dynamo_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypa
 
     saved: list[dict] = []
     state = {"backend": "dynamo", "rayjob_id": "wid-old", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k"}
-    monkeypatch.setattr(dyn, "_load_state", lambda: saved[-1] if saved else dict(state))
-    monkeypatch.setattr(dyn, "_save_state", lambda payload: saved.append(dict(payload)))
-    monkeypatch.setattr(dyn, "_dynamo_ssh_dir", lambda: tmp_path / "ssh")
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: saved[-1] if saved else dict(state))
+    monkeypatch.setattr(dyn._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
+    monkeypatch.setattr(dyn._mn_cli, "_dynamo_ssh_dir", lambda: tmp_path / "ssh")
     monkeypatch.setattr(dyn.ssh_client, "generate_session_keypair", lambda _d: (tmp_path / "id_ed25519", "ssh-ed25519 pub"))
     monkeypatch.setattr(dyn.workload_spec, "build_dynamo_workload_body", lambda **kw: {"body": kw})
     monkeypatch.setattr(dyn.ssh_client, "probe_ssh", lambda *a, **kw: False)
-    monkeypatch.setattr(dyn, "_refresh_dynamo_known_hosts", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("keyscan")))
+    monkeypatch.setattr(dyn._mn_cli, "_refresh_dynamo_known_hosts", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("keyscan")))
 
     class _ReuseSafe(_FakeSafe):
         def get_workload(self, wid: str) -> dict:
@@ -1249,7 +1252,7 @@ def test_dynamo_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypa
     assert dyn.cmd_create_dynamo(_args()) == 0
     assert saved[-1]["rayjob_id"] == "wid-test"
 
-    monkeypatch.setattr(dyn, "_load_state", lambda: {"backend": "dynamo", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"})
+    monkeypatch.setattr(dyn._mn_cli, "_load_state", lambda: {"backend": "dynamo", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"})
     with pytest.raises(RuntimeError, match="no GPU pod IPs"):
         dyn._dynamo_require_state()
 

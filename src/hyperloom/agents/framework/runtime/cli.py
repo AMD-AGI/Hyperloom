@@ -33,33 +33,27 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
+from hyperloom.common.subprocess_bridge import emit_json as _common_emit_json
 
 if TYPE_CHECKING:
     from ..models import ExploreRequest
 
 
-# _emit_json intentionally does NOT delegate to
-# hyperloom.common.subprocess_bridge.emit_json: this copy additionally
-# creates --out's parent directory before writing, which the shared
-# implementation does not do; see subprocess_bridge.py's module docstring
-# for the divergence rationale.
+# Framework's emit uses ``make_parents=True`` because its CLI is invoked with
+# ``--out`` paths under a fresh work dir that may not exist yet (Critic /
+# Robustness never create the parent). This thin wrapper keeps all call sites
+# using the bare ``_emit_json(obj, out)`` signature.
 def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path.
+    """Serialize obj as JSON to stdout or a file path, creating parent dirs.
 
-    Always writes to stdout; additionally writes to ``out`` when it names a
-    real path (not ``None`` or ``"-"``).
+    Delegates to :func:`hyperloom.common.subprocess_bridge.emit_json` with
+    ``make_parents=True``.
 
     Args:
         obj (Any): JSON-serialisable object to emit.
         out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
     """
-    text = json.dumps(obj, ensure_ascii=False, indent=2)
-    if out and out != "-":
-        path = Path(out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-    sys.stdout.write(text + "\n")
-    sys.stdout.flush()
+    _common_emit_json(obj, out, make_parents=True)
 
 
 def _load_request(path: str) -> "ExploreRequest":
@@ -330,6 +324,54 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not isinstance(gaps, list) or not gaps:
         gaps = [{"gap_canonical_id": "", "gap_description": ""}]
 
+    # #5-P2 forced cross-framework candidates. Operators (or the Coordinator)
+    # can pin exact upstream PRs so they surface as ``source='explicit'``
+    # candidates (always emitted first by ``enumerate_candidates``) instead of
+    # relying on keyword search ranking. Refs are scoped to the repo whose slug
+    # matches ``repo_scope`` (default: apply to any repo). This keeps the forced
+    # refs attributed to their OWN repo so the Coordinator's cross-discover tag
+    # (FRAMEWORK_AGENT_CROSS_DISCOVER_TAG) can stamp them src->dst correctly.
+    #   request field:  "forced_candidate_refs": ["PR:27364", ...]
+    #                   "forced_candidate_repo_scope": "sgl-project/sglang"
+    #   env fallback:   FRAMEWORK_AGENT_FORCE_PR_REFS="PR:27364,PR:27965,PR:25098"
+    #                   FRAMEWORK_AGENT_FORCE_PR_REPO="sgl-project/sglang"
+    forced_refs_raw = request.get("forced_candidate_refs")
+    if not forced_refs_raw:
+        env_refs = (os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REFS") or "").strip()
+        forced_refs_raw = [r for r in env_refs.replace(";", ",").split(",")] if env_refs else []
+    forced_repo_scope = str(
+        request.get("forced_candidate_repo_scope")
+        or os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REPO")
+        or ""
+    ).strip().lower()
+
+    def _norm_ref(r: str) -> str:
+        r = str(r or "").strip()
+        if not r:
+            return ""
+        if r.startswith("PR:"):
+            return r
+        # tolerate a full PR URL or bare number
+        if r.isdigit():
+            return f"PR:{r}"
+        if "/pull/" in r:
+            tail = r.rstrip("/").rsplit("/pull/", 1)[-1].split("/")[0]
+            if tail.isdigit():
+                return f"PR:{tail}"
+        return r
+
+    forced_refs: list[str] = []
+    if forced_repo_scope and forced_repo_scope not in repo_url.strip().lower():
+        # This queried repo is out of scope for the forced refs; skip.
+        forced_refs = []
+    else:
+        seen_fr: set[str] = set()
+        for raw in forced_refs_raw or []:
+            nr = _norm_ref(raw)
+            if nr and nr not in seen_fr:
+                seen_fr.add(nr)
+                forced_refs.append(nr)
+
     # Step B hard-dedup: candidates the caller (Hyperloom) has already
     # discovered or reached a terminal verdict on. Also collapse "same PR
     # number as a failed candidate" into a drop (deterministic de-prioritise).
@@ -404,6 +446,10 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
                 "keywords": gap_keywords,
+                # #5-P2: explicit forced refs are always emitted first by
+                # enumerate_candidates (source='explicit'); empty by default so
+                # same-framework / unforced discovery is byte-for-byte unchanged.
+                "candidate_refs": tuple(forced_refs),
                 **primus_block,
             }
         )
@@ -418,6 +464,25 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         for cand in cands:
             entry = _asdict(cand)
             repo = str(entry.get("repo") or "")
+            # #5-P2: explicit forced candidates carry repo=repo_url (the queried
+            # repo_url, typically a .git URL). Derive the owner/name slug for
+            # pr_url/diff_url building, but KEEP the ``repo`` field as the
+            # canonical .git URL so the Coordinator's cross-discover origin
+            # helper (exact-match against repo_map .git URLs) can re-tag the
+            # candidate's origin framework (sglang) and route it through the
+            # cross-framework PORT instead of a same-framework raw apply.
+            repo_slug = repo
+            if str(entry.get("source") or "") == "explicit" and (
+                repo.startswith("http") or repo.endswith(".git")
+            ):
+                try:
+                    from framework_agent.pr_kb_slug import normalise_repo as _norm_repo
+
+                    slug = _norm_repo(repo)
+                    if slug:
+                        repo_slug = slug  # used only for pr_url/diff_url below
+                except Exception:  # noqa: BLE001 — best-effort
+                    repo_slug = repo
             ref = str(entry.get("ref") or "")
             key = (repo, ref)
             if not ref or key in seen_refs:
@@ -433,9 +498,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             diff_url = (
                 f"{html_url}.diff"
                 if html_url and isinstance(pr_number, int)
-                else (f"https://github.com/{repo}/pull/{pr_number}.diff" if repo and isinstance(pr_number, int) else "")
+                else (f"https://github.com/{repo_slug}/pull/{pr_number}.diff" if repo_slug and isinstance(pr_number, int) else "")
             )
-            pr_url = html_url or _pr_url_for(repo, pr_number)
+            pr_url = html_url or _pr_url_for(repo_slug, pr_number)
             # Step B: drop candidates already seen / finalised / equivalent to a
             # failed PR this session, so discovery stops re-surfacing them.
             if _candidate_excluded_by_memory(

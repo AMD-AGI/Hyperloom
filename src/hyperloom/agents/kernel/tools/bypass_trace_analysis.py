@@ -48,15 +48,11 @@ from _idle_gate import (  # noqa: E402
     resolve_idle_pct_threshold,
 )
 from _denoise_steps import resolve_perstep_divisor  # noqa: E402
+from _io_utils import atomic_write_json, utc_now, write_text  # noqa: E402
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
 AGGREGATION_SCOPE_STEADY = "steady_state"
-
-
-def _utc_now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string."""
-    return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _run_stamp() -> str:
@@ -64,23 +60,61 @@ def _run_stamp() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    """Write ``payload`` as pretty JSON to ``path`` via a temp-file rename.
+def _maybe_enrich_rocprof(
+    kernel_roofline_path: Path,
+    candidates_path: Path,
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Optionally run rocprof-compute enrichment on the roofline sidecar.
+
+    Opt-in via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`` (off by default), mirroring
+    the TraceLens ``write_reports`` enrichment so the bypass sidecar carries the
+    same per-kernel ``rocprof_roofline`` audit fields. Reuses
+    ``rocprof_roofline.enrich_kernel_roofline_sidecar``, which degrades
+    gracefully (rocprof-compute missing / non-reusable kernel / no benchmark
+    files -> row skipped; per-kernel failure -> row failed) and never aborts.
+
+    The heavy per-kernel rocprof runs (before GEAK / after kernel-opt) happen
+    later in the route-agnostic kernel-opt phase; this stage is only the opt-in
+    batch pass.
 
     Args:
-        path: Destination file path (parent dirs are created).
-        payload: JSON-serializable object to write.
+        kernel_roofline_path: Path to the written ``kernel_roofline.json``.
+        candidates_path: Path to the written ``kernel_candidates.json``.
+        run_dir: Per-run output directory used as the profiling workdir.
+
+    Returns:
+        The enrich summary dict, ``{"status": "disabled"}`` when the env gate is
+        off, or ``{"status": "error: ..."}`` on unexpected failure. Progress is
+        logged to stderr so stdout stays a single result-JSON line.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
+    if enrich_value not in {"1", "true", "yes", "on"}:
+        return {"status": "disabled"}
+    try:
+        from rocprof_roofline import enrich_kernel_roofline_sidecar
 
-
-def _write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path``, creating parent directories."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+        timeout_sec = int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800)
+        enrich_summary = enrich_kernel_roofline_sidecar(
+            sidecar_path=str(kernel_roofline_path),
+            candidates_path=str(candidates_path),
+            workdir=str(run_dir),
+            timeout_sec_per_kernel=timeout_sec,
+            log_fn=None,
+        )
+        print(
+            "[rocprof_enrich] "
+            f"matched={enrich_summary.get('matched', 0)} "
+            f"skipped={enrich_summary.get('skipped', 0)} "
+            f"failed={enrich_summary.get('failed', 0)} "
+            f"rows={enrich_summary.get('rows', 0)}",
+            file=sys.stderr,
+        )
+        return enrich_summary
+    except Exception as exc:  # noqa: BLE001 — enrichment must never break bypass
+        msg = f"error: {type(exc).__name__}: {exc}"
+        print(f"[rocprof_enrich] skipped: {msg}", file=sys.stderr)
+        return {"status": msg}
 
 
 def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
@@ -427,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         cand["trace_report_path"] = str(analysis_md_path)
 
     throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
-    _write_text(
+    write_text(
         analysis_md_path,
         _report.render_analysis_md(
             candidates,
@@ -440,17 +474,17 @@ def main(argv: list[str] | None = None) -> int:
             summary_csv_path=str(kernel_summary_csv_path),
         ),
     )
-    _atomic_write_json(candidates_path, candidates)
+    atomic_write_json(candidates_path, candidates, ensure_ascii=False, sort_keys=False, trailing_newline=False)
     # Structured, code-generated CSV exports (full per-kernel metrics + category
     # summary); machine-readable ground truth that downstream code can load by path.
-    _write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
-    _write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
+    write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
+    write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
 
     summary = _report.build_summary(
         candidates,
         framework=args.framework,
         target_platform=args.target_platform,
-        generated_at=_utc_now_iso(),
+        generated_at=utc_now(timespec="seconds"),
         trace_health_warnings=trace_health_warnings,
     )
     summary["estimated"] = estimated
@@ -458,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     # Always present (may be null) so the summary/manifest/result schemas match.
     summary["steady_window"] = steady_window
 
-    _atomic_write_json(
+    atomic_write_json(
         manifest_path,
         {
             "source": "bypass",
@@ -472,8 +506,11 @@ def main(argv: list[str] | None = None) -> int:
             "analyzed_rank": analyzed_rank,
             "rank_count": rank_count,
             "event_total": analyze.get("event_total", 0),
-            "created_at": _utc_now_iso(),
+            "created_at": utc_now(timespec="seconds"),
         },
+        ensure_ascii=False,
+        sort_keys=False,
+        trailing_newline=False,
     )
 
     kernel_roofline = _report.build_kernel_roofline(
@@ -481,15 +518,23 @@ def main(argv: list[str] | None = None) -> int:
         analysis_md_path=str(analysis_md_path),
         kernel_candidates_path=str(candidates_path),
     )
-    _atomic_write_json(kernel_roofline_path, kernel_roofline)
+    atomic_write_json(kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
-    _atomic_write_json(summary_path, summary)
+    # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in
+    # place). Skipped in --dry-run; env-gated + graceful degradation otherwise.
+    rocprof_enrich: dict[str, Any] = (
+        {"status": "disabled"}
+        if args.dry_run
+        else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
+    )
+    summary["rocprof_enrich"] = rocprof_enrich
+    atomic_write_json(summary_path, summary, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Kernel-fusion opportunities: time-ordered launch adjacency -> fusable
     # clusters (Elementwise/Norm/Quant chains). A separate artifact carrying the
     # kernel-relationship data the name-aggregated candidates cannot express.
     fusion = _report.build_fusion(analyze)
-    _atomic_write_json(kernel_sequence_path, fusion)
+    atomic_write_json(kernel_sequence_path, fusion, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Diffusion / scriptable workload-level roofline (parity with the TraceLens
     # route's diffusion_roofline.json): aggregate the per-kernel analytical
@@ -527,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
                 kernels_aggregated=len(_all_kernels),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
-            _atomic_write_json(_diff_path, _diff_report)
+            atomic_write_json(_diff_path, _diff_report, ensure_ascii=False, sort_keys=False, trailing_newline=False)
             diffusion_roofline_path = str(_diff_path)
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None

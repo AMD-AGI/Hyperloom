@@ -22,6 +22,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
 from _io_utils import (  # noqa: E402
+    append_jsonl,
     append_log,
     atomic_write_json,
     kernel_row_matches,
@@ -33,18 +34,6 @@ from _io_utils import (  # noqa: E402
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
-
-
-def append_jsonl(path: Path, data: dict[str, Any]) -> None:
-    """Append one JSON object as a line to the given JSONL file.
-
-    Args:
-        path (Path): Destination JSONL file; parent dirs are created.
-        data (dict[str, Any]): JSON-serializable object to append.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def update_status(
@@ -1725,7 +1714,7 @@ def build_prompt(
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
         "GOAL & TIME BUDGET:\n"
-        # GEAK v3.2.1 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # GEAK LLM-parses prompt for `--mode full` / `mode=quick` etc.
         # (prompts.py:73-76 trigger list). Emit the explicit token so the
         # parser locks in the right preset (yaml run.budgets.<mode>) instead
         # of leaking off other prompt phrases like "quick micro-benchmark".

@@ -72,6 +72,24 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
 
 
 @pytest.mark.asyncio
+async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Coordinator) -> None:
+    coord.shared_state.auto_roofline_pending_task_id = "pending-x"
+    coord.shared_state.baseline_warm_runtime_sec = 7.5
+
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 120.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+
+    assert coord.shared_state.baseline_runtime_sec == 120.0
+    assert coord.shared_state.baseline_warm_runtime_sec == 0.0
+
+
+@pytest.mark.asyncio
 async def test_promote_baseline_non_dict_is_noop(coord: Coordinator) -> None:
     await coord._promote_to_shared_state("baseline", "not-a-dict")  # type: ignore[arg-type]
 

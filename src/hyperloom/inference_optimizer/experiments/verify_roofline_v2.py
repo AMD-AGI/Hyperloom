@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.experiments._roofline_audit_common import (
+    aggregate_cache_tokens,
     cache_hit_rate,
     count_analysis_md_references,
     extract_proposed_flags,
@@ -228,16 +229,10 @@ def extract(session_dir: Path) -> SessionMetrics:
         m.hallucinated_flag_count = sum(1 for f in proposed if f not in m.discovered_flag_names)
     m.analysis_md_referenced_count = count_analysis_md_references(state)
 
-    # Cache metrics — the backend surfaces these to backend.calls
-    # per-call. Coordinator does not aggregate to SharedState. For now
-    # read pre-aggregated values if a future hook writes them; otherwise
-    # leave at 0.
-    cache_metrics = state.get("tick_cache_metrics") or {}
-    if isinstance(cache_metrics, dict):
-        m.cache_creation_input_tokens = int(cache_metrics.get("cache_creation_input_tokens") or 0)
-        m.cache_read_input_tokens = int(cache_metrics.get("cache_read_input_tokens") or 0)
-        m.input_tokens = int(cache_metrics.get("input_tokens") or 0)
-        m.output_tokens = int(cache_metrics.get("output_tokens") or 0)
+    # Cache metrics — aggregated from the real per-call ledger
+    # (reports/trace/llm_calls.jsonl) rather than the never-written
+    # state["tick_cache_metrics"], so the hit rate reflects actual caching.
+    m.cache_creation_input_tokens, m.cache_read_input_tokens = aggregate_cache_tokens(session_dir)
     return m
 
 
