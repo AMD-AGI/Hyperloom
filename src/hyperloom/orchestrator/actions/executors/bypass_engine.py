@@ -280,3 +280,65 @@ def wait_for_server_ready(
             pass
         sleep(poll_s)
     return False
+
+
+# --- server_lifecycle pid/meta helpers -------------------------------------
+# Filenames match Hyperloom's teardown_lifecycle_server convention so a
+# persistent bypass server can be reused across processes and torn down by
+# either side: <pid_dir>/<framework>_<port>.pid ("<pid> <pgid>") + .json meta.
+
+
+def lifecycle_pid_file(pid_dir: str, framework: str, port: int) -> Path:
+    """Return the pid file path for a persistent server."""
+    return Path(pid_dir) / f"{framework}_{port}.pid"
+
+
+def lifecycle_meta_file(pid_dir: str, framework: str, port: int) -> Path:
+    """Return the meta file path for a persistent server."""
+    return Path(pid_dir) / f"{framework}_{port}.json"
+
+
+def write_lifecycle_files(
+    *,
+    pid_dir: str,
+    framework: str,
+    port: int,
+    pid: int,
+    pgid: int,
+    model: str,
+) -> None:
+    """Persist pid + meta for a lifecycle server (Hyperloom-compatible)."""
+    import json as _json
+
+    Path(pid_dir).mkdir(parents=True, exist_ok=True)
+    lifecycle_pid_file(pid_dir, framework, port).write_text(
+        f"{pid} {pgid}\n", encoding="utf-8"
+    )
+    lifecycle_meta_file(pid_dir, framework, port).write_text(
+        _json.dumps(
+            {
+                "pid": pid,
+                "pgid": pgid,
+                "framework": framework,
+                "port": port,
+                "model": model,
+                "base_url": f"http://127.0.0.1:{port}",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None) -> bool:
+    """One-shot health probe (no polling); True iff /health returns 200."""
+    health_url = f"{base_url.rstrip('/')}/health"
+
+    def _default_probe(url: str) -> int:
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - localhost health probe
+            return int(getattr(resp, "status", 0) or resp.getcode())
+
+    do_probe = probe or _default_probe
+    try:
+        return do_probe(health_url) == 200
+    except Exception:  # noqa: BLE001
+        return False

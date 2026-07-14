@@ -399,3 +399,128 @@ def test_vllm_server_command_no_profiler_when_dir_none():
         max_model_len=2048, extra_args=[], profile_dir=None,
     )
     assert not any("profiler-config" in c for c in cmd)
+
+
+def test_bypass_pid_meta_helpers(tmp_path):
+    pid_dir = str(tmp_path)
+    bypass_engine.write_lifecycle_files(
+        pid_dir=pid_dir, framework="vllm", port=8888, pid=123, pgid=123, model="/m",
+    )
+    pidf = bypass_engine.lifecycle_pid_file(pid_dir, "vllm", 8888)
+    metaf = bypass_engine.lifecycle_meta_file(pid_dir, "vllm", 8888)
+    assert pidf.read_text(encoding="utf-8").split() == ["123", "123"]
+    meta = json.loads(metaf.read_text(encoding="utf-8"))
+    assert meta["pid"] == 123 and meta["port"] == 8888
+    assert meta["base_url"] == "http://127.0.0.1:8888"
+
+
+def test_server_health_ok_probe():
+    assert bypass_engine.server_health_ok("http://127.0.0.1:8888", probe=lambda u: 200) is True
+    assert bypass_engine.server_health_ok("http://127.0.0.1:8888", probe=lambda u: 503) is False
+
+    def boom(u):
+        raise OSError("refused")
+
+    assert bypass_engine.server_health_ok("http://127.0.0.1:8888", probe=boom) is False
+
+
+def test_server_phase_writes_pid_meta_and_persists(tmp_path, monkeypatch):
+    """phase=server starts a server, writes pid/meta, and does NOT terminate it."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+
+    class _FakeServer:
+        pid = 4321
+
+        def wait(self, timeout=None):
+            return 0
+
+    terminated = {"called": False}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: terminated.__setitem__("called", True))
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+
+    rc = bypass_runner.run_benchmark(
+        cfg_path, tmp_path / "out", phase="server", pid_dir=str(pid_dir),
+    )
+    assert rc == 0
+    assert terminated["called"] is False  # server must persist
+    pidf = bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888)
+    assert pidf.exists()
+    assert pidf.read_text(encoding="utf-8").split()[0] == "4321"
+
+
+def test_server_phase_requires_pid_dir(tmp_path, monkeypatch):
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server", pid_dir=None)
+    assert rc == 2
+
+
+def test_client_phase_reuses_healthy_server(tmp_path, monkeypatch):
+    """phase=client reuses a running server, runs client, writes report."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: True)
+    teardown = {"called": False}
+    import hyperloom.orchestrator.actions.executors._server_lifecycle as sl
+    monkeypatch.setattr(sl, "teardown_lifecycle_server", lambda **k: teardown.__setitem__("called", True))
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        if "--result-dir" in cmd:
+            rd = Path(cmd[cmd.index("--result-dir") + 1])
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "inferencex_result.json").write_text(
+                json.dumps({"output_throughput": 500.0, "completed": 40, "duration": 30.0}),
+                encoding="utf-8",
+            )
+
+        class _P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # cleanup=False -> server must NOT be torn down.
+    rc = bypass_runner.run_benchmark(
+        cfg_path, tmp_path / "out", phase="client", pid_dir=str(pid_dir), cleanup=False,
+    )
+    assert rc == 0
+    assert teardown["called"] is False
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is True
+
+    # cleanup=True -> server torn down.
+    rc = bypass_runner.run_benchmark(
+        cfg_path, tmp_path / "out2", phase="client", pid_dir=str(pid_dir), cleanup=True,
+    )
+    assert rc == 0
+    assert teardown["called"] is True
+
+
+def test_client_phase_no_server_fails(tmp_path, monkeypatch):
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)
+    rc = bypass_runner.run_benchmark(
+        cfg_path, tmp_path / "out", phase="client", pid_dir=str(tmp_path), cleanup=True,
+    )
+    assert rc == 1
