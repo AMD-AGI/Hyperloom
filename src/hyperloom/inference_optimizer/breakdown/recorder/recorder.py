@@ -22,12 +22,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 import threading
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.io import atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
 from .sections import SECTION_SHAPES
@@ -185,7 +184,6 @@ class Recorder:
             Exception: re-raised if writing or replacing the file fails (the
                 temp file is removed first).
         """
-        self._dir.mkdir(parents=True, exist_ok=True)
         record = {
             "section": section,
             "kind": kind,
@@ -196,19 +194,7 @@ class Recorder:
         }
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         target = self._dir / filename
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{filename}.",
-            suffix=".tmp",
-            dir=str(self._dir),
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-            os.replace(tmp, target)
-        except Exception:
-            with suppress(OSError):
-                os.unlink(tmp)
-            raise
+        atomic_write_text(target, data, make_parents=True)
         return target
 
 

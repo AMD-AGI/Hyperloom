@@ -17,6 +17,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json
+from hyperloom.common.timeutil import iso_z
+
 from . import collectors
 from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
 
@@ -41,7 +44,7 @@ def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     """
     return (
         str(ev.get("action") or ""),
-        collectors._iso_z(ev.get("ts"))[:19],
+        iso_z(ev.get("ts"))[:19],
         str(ev.get("change") or ev.get("task_id") or ""),
     )
 
@@ -105,11 +108,11 @@ def _load_json(session_dir: Path, filename: str, warnings: list[str]) -> dict[st
     if not path.exists():
         warnings.append(f"{filename} missing at {path}")
         return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"failed to parse {filename}: {exc!r}")
-        return {}
+    return read_json(
+        path,
+        default={},
+        on_error=lambda exc: warnings.append(f"failed to parse {filename}: {exc!r}"),
+    )
 
 
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
