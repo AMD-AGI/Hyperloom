@@ -41,13 +41,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
@@ -1224,19 +1224,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # and the recipe KB all carry the primary latency metric. Best-effort.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, indent=2, sort_keys=True)
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                # Temp file already gone; re-raise the original error below.
-                pass
-            raise
+        atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
         # Author-time breakdown capture: snapshot state-owned sections into the
         # recorder spool right after persisting. Best-effort; never blocks save.
         self._session_dir = Path(session_dir)

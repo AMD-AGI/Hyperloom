@@ -57,11 +57,6 @@ class _RenderMixin:
         from ...policy import gate as _m
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
-    def _format_last_kernel_opt(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ...kernel import request_handlers as _m
-        return _m._format_last_kernel_opt(self)
-
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as neutral telemetry (one-line counts summary; ``""`` when empty). No directive emitted — config-vs-patch is the LLM's choice.
 
@@ -504,6 +499,8 @@ class _RenderMixin:
                 audit fields (baseline / current best / gains / kernel-opt
                 queue / attempts history / failures / phase status).
         """
+        from ...kernel import request_handlers as _kernel_request_handlers
+
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
@@ -531,17 +528,17 @@ class _RenderMixin:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_trace_analyze={self._format_last_trace_analyze()}",
+            f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md so the LLM grounds propose_action in the actual report.
             f"analysis_md={self._format_analysis_md_full()}",
             # Streak counter is a readable fact (KEEP/REVERT counts allowed); plateau judges also consume it on legacy resume.
             f"params_no_promote_streak={self.params_no_promote_streak}",
-            f"explore_search={self._format_explore_search()}",
+            f"explore_search={self._format_search_state(self.explore_search)}",
             f"discovered_flags={self._format_discovered_flags()}",
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
-            f"last_kernel_opt={self._format_last_kernel_opt()}",
+            f"last_kernel_opt={_kernel_request_handlers._format_last_kernel_opt(self)}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
             (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
@@ -751,15 +748,6 @@ class _RenderMixin:
             out.append(f"    [+{len(self.backend_winners_history) - 5} earlier rounds elided]")
         return "\n".join(out)
 
-    def _format_explore_search(self) -> str:
-        """Render the unified ``explore_search`` ledger for the prompt.
-
-        Returns:
-            str: The :meth:`_format_search_state` render of
-                :attr:`explore_search`.
-        """
-        return self._format_search_state(self.explore_search)
-
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
         """Multi-line render of a ``*_search`` dedup ledger; each entry surfaces real ``gain_pct``. Counts on the head line; bodies show last 5 per bucket (only the prompt body is truncated).
@@ -893,14 +881,6 @@ class _RenderMixin:
         if not digest:
             return "(none)"
         return f"\n{digest}\n"
-
-    def _format_last_trace_analyze(self) -> str:
-        """Render the most recent trace-analyze blob for the prompt.
-
-        Returns:
-            A formatted summary of ``last_trace_analyze``.
-        """
-        return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
         """Render a trace-analyze cache blob as a compact prompt line.
