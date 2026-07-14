@@ -180,10 +180,36 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-main}"
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-# Run mode for the e2e optimizer budget. ``full`` (default) selects the 3 h
-# preset; ``quick`` selects the 70 min smoke preset. The inference_optimizer
-# kernel request handler reads $GEAK_RUN_MODE to pick the backend budget
-# default, so it is forwarded through the Ray env allowlist.
+GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
+if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
+  GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-chat}"
+fi
+# GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
+# endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
+# model names so LiteLLM uses the OpenAI-compatible transformer instead of the
+# Anthropic /v1/messages transformer.  Without this, GEAK gets
+# Primus.00009 / NotFound on the same key+URL that works through
+# /chat/completions.
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-8}"
+case "${GEAK_MODEL_NAME_RAW}" in
+  openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+  claude-*)
+    GEAK_MODEL_NAME_VAL="openai/${GEAK_MODEL_NAME_RAW}"
+    ;;
+  *)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+esac
+# Run mode for the GEAK CLI. Drives ``run.mode`` in the generated
+# ``$GEAK_CONFIG`` yaml: ``full`` (default) selects the 2 h / 5-round preset
+# at ``run.budgets.full`` and ``run.presets.full``; ``quick`` selects the
+# 1 h / 2-round preset for smoke tests. GEAK's ``mini.py:435`` mode
+# precedence still honours later overrides (CLI ``--mode`` or
+# LLM-parsed task hints), but this is the yaml-default operators can set
+# at install time without hand-editing $GEAK_CONFIG.
 GEAK_RUN_MODE_VAL="${GEAK_RUN_MODE:-full}"
 # Validate inline (the ``die`` helper is defined further down; calling it
 # from this top-level scope would error with "die: command not found").
@@ -892,6 +918,7 @@ write_env_file() {
     # consumed by src/hyperloom/agents/kernel/tools/backends/geak_runner.py.
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
+    [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && echo "export GEAK_CLAUDE_MODEL='${GEAK_CLAUDE_MODEL_VAL}'"
     # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin=""
