@@ -259,7 +259,7 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
 
 
 def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
-    # forge is its own backend (NOT folded into oob): a forge attempt keeps
+    # forge is its own backend: a forge attempt keeps
     # backend="forge" in the journey and mints a distinct versions["forge"]
     # provenance entry (via _TOOL_PROVENANCE), so A8b can group by forge version.
     sha = _init_git_repo(tmp_path)
@@ -289,22 +289,10 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     # The attempt keeps its own backend label in the journey.
     atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert atts[0]["backend"] == "forge"
-    # Distinct provenance entry, NOT merged into oob.
+    # Distinct provenance entry.
     versions = out["versions"]
     assert versions["forge"]["tool"] == "forge"
     assert versions["forge"]["version"] == sha
-    assert "oob" not in versions
-
-
-def test_geak_v3_provenance_resolves_git_sha(tmp_path: Path) -> None:
-    # geak_v3 (the per-kernel backend) is registered with the same git-SHA
-    # provenance as geak (the e2e optimizer) but rooted at $GEAK_V3_ROOT, so a
-    # real session mints a populated versions["geak_v3"] entry distinct from geak.
-    sha = _init_git_repo(tmp_path)
-    meta = instrument._tool_metadata("geak_v3", root=str(tmp_path))
-    assert meta["tool"] == "geak_v3"
-    assert meta["commit"] == sha
-    assert meta["version"] == sha
 
 
 def test_geak_provenance_resolves_geak_root_env_without_explicit_root(
@@ -312,16 +300,11 @@ def test_geak_provenance_resolves_geak_root_env_without_explicit_root(
 ) -> None:
     # No producer-supplied root: the e2e optimizer component ``geak`` must fall
     # back to $GEAK_ROOT (the GEAK e2e checkout), so versions["geak"] records
-    # that repo's SHA. The distinct per-kernel backend ``geak_v3`` resolves the
-    # separate $GEAK_V3_ROOT clone instead.
+    # that repo's SHA.
     geak_root = tmp_path / "GEAK"
-    geak_v3_root = tmp_path / "GEAK-v3"
     geak_root.mkdir()
-    geak_v3_root.mkdir()
     geak_sha = _init_git_repo(geak_root)
-    _init_git_repo(geak_v3_root)
     monkeypatch.setenv("GEAK_ROOT", str(geak_root))
-    monkeypatch.setenv("GEAK_V3_ROOT", str(geak_v3_root))
 
     meta = instrument._tool_metadata("geak")
 

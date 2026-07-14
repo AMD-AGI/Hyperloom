@@ -403,15 +403,15 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         }
     elif str(result.get("kernel_id") or ""):
         state.last_kernel_opt_dispatch_skip = {}
-    # Author-time breakdown capture: record geak/oob invocations (incl.
+    # Author-time breakdown capture: record geak/forge invocations (incl.
     # backend + pre-dispatch failures) before the metadata-less early
-    # return so no failed attempt becomes invisible in the geak/oob view.
+    # return so no failed attempt becomes invisible in the geak/forge view.
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
         instrument.record_kernel_invocations(sdir, result)
         # Record dispatch and per-backend attempts. Distinct from the
-        # geak/oob view above and never overlaps it.
+        # geak/forge view above and never overlaps it.
         _kid = str(result.get("kernel_id") or "")
         if sdir and _kid:
             _attempts = result.get("attempts")

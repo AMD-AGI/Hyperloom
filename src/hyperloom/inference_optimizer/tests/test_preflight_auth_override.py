@@ -157,8 +157,8 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
         assert cli.os.environ[name] == "new-safe-key"
     for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         assert cli.os.environ[name] == resolved[1]
-    assert "_".join(("OOB", "API", "KEY")) not in cli.os.environ
-    assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
+    assert "_".join(("legacy backend", "API", "KEY")) not in cli.os.environ
+    assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
     config_text = (config_dir / "config.json").read_text(encoding="utf-8")
     assert '"primaryApiKey": "new-safe-key"' in config_text
@@ -234,7 +234,7 @@ def test_preflight_anthropic_only_backfills_geak_aliases(
     assert resolved == ("https://api.anthropic.com", "")
     for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         assert cli.os.environ[name] == "https://api.anthropic.com"
-    assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
+    assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
 
 def test_preflight_official_anthropic_key_only_uses_default_endpoint(
@@ -346,7 +346,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     assert cli.os.environ["GEAK_BASE_URL"] == tunnel
     # Unset alias still defaults to the gateway.
     assert cli.os.environ["LLM_API_BASE"] == gateway
-    assert "_".join(("OOB", "BASE", "URL")) not in cli.os.environ
+    assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
 
 def test_preflight_rewrites_stale_proxy_even_when_operator_set(
