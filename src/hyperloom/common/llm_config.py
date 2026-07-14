@@ -193,6 +193,23 @@ def claude_sdk_env_options(
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
     if "ANTHROPIC_CUSTOM_HEADERS" not in source and source.get("OPENAI_CUSTOM_HEADERS"):
         source["ANTHROPIC_CUSTOM_HEADERS"] = source["OPENAI_CUSTOM_HEADERS"]
+    # Inject the AMD gateway subscription header on the Claude CLI subprocess
+    # path too. The OpenAI client (resolve_openai_client_config) and the
+    # preflight catalog probe both auto-add ``Ocp-Apim-Subscription-Key`` by
+    # host, but the Claude subprocess previously only forwarded
+    # ANTHROPIC_CUSTOM_HEADERS verbatim — so a bare gateway config (no explicit
+    # header) 401'd for orchestration / GEAK. Reuse the shared host rule and add
+    # it only when absent (an operator-supplied header always wins).
+    anthropic_base_url = source.get("ANTHROPIC_BASE_URL", "")
+    custom_headers = parse_custom_headers(source.get("ANTHROPIC_CUSTOM_HEADERS"))
+    if anthropic_base_url and fallback_key and _should_add_amd_subscription_header(anthropic_base_url, custom_headers):
+        custom_headers["Ocp-Apim-Subscription-Key"] = fallback_key
+        source["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{name}: {value}" for name, value in custom_headers.items())
+    # Claude Code >= 2.1.x injects ``anthropic-beta: advisor-tool-*``, which
+    # strict gateways reject with HTTP 400 — stalling orchestration (is_error
+    # every tick, 0 intents). Disable it by default; an operator can re-enable
+    # by presetting CLAUDE_CODE_DISABLE_ADVISOR_TOOL in the environment.
+    source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:
         source.setdefault("ANTHROPIC_MODEL", model)
         source.setdefault("ANTHROPIC_SMALL_FAST_MODEL", model)

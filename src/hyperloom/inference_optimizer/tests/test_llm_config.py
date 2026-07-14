@@ -114,3 +114,59 @@ def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
     )
     child_env = opts["env"]
     assert child_env["ANTHROPIC_BASE_URL"] == "https://deepseek.example/anthropic"
+
+
+def test_claude_sdk_env_options_injects_amd_subscription_header_when_missing():
+    """Claude CLI subprocess path auto-adds the AMD gateway subscription header
+    (parity with the OpenAI client / catalog probe), so a bare gateway config
+    does not 401 for orchestration / GEAK."""
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
+        }
+    )
+    headers = parse_custom_headers(opts["env"]["ANTHROPIC_CUSTOM_HEADERS"])
+    assert headers.get("Ocp-Apim-Subscription-Key") == "ak-anthropic"
+
+
+def test_claude_sdk_env_options_preserves_operator_subscription_header():
+    """An operator-supplied subscription header is never overwritten."""
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: operator-key",
+        }
+    )
+    headers = parse_custom_headers(opts["env"]["ANTHROPIC_CUSTOM_HEADERS"])
+    assert headers["Ocp-Apim-Subscription-Key"] == "operator-key"
+
+
+def test_claude_sdk_env_options_no_subscription_header_for_non_amd():
+    """Non-AMD Anthropic endpoints (e.g. official api.anthropic.com) get no header."""
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        }
+    )
+    headers = parse_custom_headers(opts["env"].get("ANTHROPIC_CUSTOM_HEADERS"))
+    assert "Ocp-Apim-Subscription-Key" not in headers
+
+
+def test_claude_sdk_env_options_disables_advisor_tool_by_default():
+    """Claude Code's advisor-tool beta header (rejected by strict gateways) is
+    disabled by default; an operator preset is preserved."""
+    opts = claude_sdk_env_options(
+        env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"}
+    )
+    assert opts["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
+
+    preset = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "0",
+        }
+    )
+    assert preset["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "0"

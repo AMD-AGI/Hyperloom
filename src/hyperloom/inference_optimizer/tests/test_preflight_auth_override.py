@@ -1241,7 +1241,9 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch
     if codex_follows_before:
         args.codex_model = args.claude_model
 
-    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/anthropic")
+    # The OpenAI/Codex side derives the /Unified/v1 chat-completions base from
+    # the single Anthropic-compatible gateway (was previously the raw /anthropic).
+    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/Unified/v1")
     assert cli._codex_model_should_follow_claude() is False
     assert args.codex_model == "claude-sonnet-5"
 
