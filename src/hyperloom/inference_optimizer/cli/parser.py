@@ -1081,6 +1081,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
+    # Retired: the earlier --enable-proposal-scoring spelling was folded into
+    # the --proposal-scoring / --no-proposal-scoring BooleanOptionalAction pair;
+    # hard-fail with a migration hint instead of an opaque unrecognized-arg error.
+    opt.add_argument(
+        "--enable-proposal-scoring",
+        action=_RetiredFlag,
+        hint="Use ``--proposal-scoring`` (default off) / ``--no-proposal-scoring`` instead.",
+    )
     # specialist sub-agent backend selection: Claude (default), inherits orchestration model; per-task caps bound LLM use.
     opt.add_argument(
         "--specialist-model",
