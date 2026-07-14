@@ -125,7 +125,8 @@ def test_format_trace_analyze_skipped_kernels():
     assert "skipped_kernels_top" in out
 
 
-def test_format_analysis_md_full():
+def test_format_analysis_md_full(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
     st = SharedState()
     assert "no TraceLens snapshot" in st._format_analysis_md_full()
     st.last_trace_analyze = {

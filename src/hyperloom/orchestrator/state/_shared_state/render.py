@@ -857,13 +857,14 @@ class _RenderMixin:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
-        # When inline injection is disabled, surface the structured digest above
-        # (profiler_digest=) and point at the show_analysis_md tool for the full
-        # report — saves context on long runs. Default keeps the verbatim md.
+        # Default surfaces the structured digest above (profiler_digest=) and
+        # points at the show_analysis_md tool for the full report — saves context
+        # on long runs. Set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to
+        # opt back into the verbatim md inline.
         if os.getenv(
             "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "1",
-        ).strip().lower() in ("0", "false", "off", "no"):
+            "0",
+        ).strip().lower() not in ("1", "true", "on", "yes"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "

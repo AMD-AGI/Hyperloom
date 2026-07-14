@@ -32,8 +32,6 @@ from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.parse_usage import (
     parse_forge_steps,
     parse_forge_usage,
-    parse_geak_usage,
-    parse_oob_json_usage,
 )
 
 # Cohesive clusters live in sibling modules; re-exported here so the module
@@ -165,11 +163,9 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
 
 
 # kernel_optimization attempt backends whose stdout log we mine for token
-# usage. ``geak_v3`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
-# --json`` whose envelope may carry a ``usage`` block; ``forge`` (Kernel-Forge
-# autonomous loop) prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
+# usage. ``forge`` prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
 # its claude-agent-sdk ResultMessages.
-_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak_v3", "oob", "forge"})
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -1319,7 +1315,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         before invoking the command with output capture and the timeout.
 
         Launches the child in its own POSIX session and, on timeout, reaps the
-        WHOLE process group so a hung grandchild (the claude CLI / oob / curl
+        WHOLE process group so a hung grandchild (the claude CLI / curl
         holding a stalled LLM streaming socket) dies with the wrapper instead of
         being orphaned — the Sandbox-hang RCA left such grandchildren running,
         keeping the pod alive and the GPU idle. Mirrors ``subprocess.run``'s
@@ -3712,7 +3708,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     correctness gate, while a KEEP at a lower micro is a real
     integrate-ready patch); among equals, higher ``micro_speedup`` wins.
     Mirrors the max-key in :func:`_run_optimization_batch` so the ladder,
-    the GEAK-vs-OOB race, and the batch all agree on "best".
+    the backend ladder and batch mode agree on "best".
 
     Args:
         result: A kernel-opt attempt result, or ``None``.
@@ -4142,7 +4138,7 @@ async def _run_optimization_single(
             and not result.get("attempts")
         ):
             result["backend"] = dispatched_backend
-    # Full-trace: mine each geak/oob/forge attempt's stdout log for token usage
+    # Full-trace: mine each forge attempt's stdout log for token usage
     # and append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the
     # backend emits no usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
@@ -4163,8 +4159,7 @@ def _trace_kernel_attempt_usage(
     Each ``kernel_optimization`` attempt record carries ``backend`` plus
     ``optimized_path`` (the backend's full ``*_stdout.log``). For the
     token-traced backends (:data:`_TOKEN_TRACED_KERNEL_BACKENDS`) we read that
-    log and run the matching usage parser (``geak_v3`` →
-    :func:`parse_geak_usage`, ``oob`` → :func:`parse_oob_json_usage`, ``forge`` →
+    log and run the matching usage parser (``forge`` →
     :func:`parse_forge_usage`). A row is appended only when a
     usage block is actually recovered — backends that don't emit usage stay a
     silent no-op rather than logging fabricated zeros.
@@ -4196,12 +4191,7 @@ def _trace_kernel_attempt_usage(
         except (OSError, ValueError):
             continue
         try:
-            if backend == "geak_v3":
-                usage = parse_geak_usage(stdout_text)
-            elif backend == "forge":
-                usage = parse_forge_usage(stdout_text)
-            else:
-                usage = parse_oob_json_usage(stdout_text)
+            usage = parse_forge_usage(stdout_text)
             if not usage:
                 continue
             record = LLMCallRecord(

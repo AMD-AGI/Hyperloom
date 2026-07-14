@@ -38,6 +38,7 @@ from typing import Any
 
 from hyperloom.inference_optimizer.experiments._roofline_audit_common import (
     ANALYSIS_MD_KEYWORDS,
+    aggregate_cache_tokens,
     cache_hit_rate,
     count_analysis_md_references,
     extract_proposed_flags,
@@ -143,10 +144,9 @@ def extract(session_dir: Path) -> AuditReport:
         r.untested_flag_names = r.discovered_flag_names - proposed_set
     r.analysis_md_referenced_count = count_analysis_md_references(state)
 
-    cache_metrics = state.get("tick_cache_metrics") or {}
-    if isinstance(cache_metrics, dict):
-        r.cache_creation_input_tokens = int(cache_metrics.get("cache_creation_input_tokens") or 0)
-        r.cache_read_input_tokens = int(cache_metrics.get("cache_read_input_tokens") or 0)
+    # Aggregated from the real per-call ledger (reports/trace/llm_calls.jsonl)
+    # rather than the never-written state["tick_cache_metrics"].
+    r.cache_creation_input_tokens, r.cache_read_input_tokens = aggregate_cache_tokens(session_dir)
     return r
 
 

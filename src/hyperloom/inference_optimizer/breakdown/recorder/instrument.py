@@ -29,6 +29,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float as _to_float
+from hyperloom.common.timeutil import now_iso
+
 log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
@@ -53,30 +56,10 @@ def _now_iso_safe() -> str:
         The current UTC time as a microsecond-precision ISO-8601 string, or
         ``""`` if the clock read fails.
     """
-    from datetime import datetime, timezone
-
     try:
-        return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        return now_iso(timespec="microseconds")
     except Exception:  # noqa: BLE001
         return ""
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a value to ``float``, rejecting bools and unparseable inputs.
-
-    Args:
-        value (Any): the value to coerce.
-
-    Returns:
-        float | None: the float value, or ``None`` when ``value`` is None, a
-            bool, or not parseable as a float.
-    """
-    try:
-        if value is None or isinstance(value, bool):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _recorder(session_dir: Path | str, producer: str):
@@ -617,13 +600,7 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     # ``geak_v4`` / perfskills). Its checkout lives under $GEAK_ROOT (the GEAK
     # e2e clone) and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # The legacy per-kernel single-kernel GEAK backend (v3.2.x). Its checkout
-    # lives under $GEAK_V3_ROOT, kept distinct from the e2e ``geak`` above so
-    # versions["geak_v3"] records the v3 clone's SHA, not the e2e clone's.
-    "geak_v3": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    "mini": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    "geak-gaagent": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
+        # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
     # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
     # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).
     "forge": {"root_env": "FORGE_PATH", "version": "git_short"},

@@ -1804,7 +1804,7 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
                 "verification": {"compile_passed": False, "correctness_passed": None, "micro_speedup": 1.0},
                 "backend_ladder": [
                     {
-                        "backend": "geak_v3",
+                        "backend": "forge",
                         "status": "failed",
                         "produced_artifact": False,
                         "elapsed_sec": 213.5,

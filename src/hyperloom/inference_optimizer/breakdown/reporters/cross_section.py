@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_float as _to_float
+
 from .base import RenderedSection
 
 __all__ = ["GlobalFacts", "build_global_facts"]
@@ -60,22 +62,6 @@ def _safe_pct(num: Any, denom: Any) -> float | None:
     if d == 0:
         return None
     return (n - d) / d * 100.0
-
-
-def _to_float(v: Any) -> float | None:
-    """Coerce a value to float, returning ``None`` instead of raising.
-
-    Args:
-        v (Any): The value to coerce.
-
-    Returns:
-        float | None: The float value, or ``None`` if ``v`` is ``None`` or
-            cannot be converted.
-    """
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _workload_summary(workload: dict[str, Any]) -> str:
