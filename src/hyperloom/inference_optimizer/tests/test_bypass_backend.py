@@ -1245,3 +1245,102 @@ def test_write_report_emits_magpie_compat_artifacts(tmp_path):
     assert "profiling_enabled: True" in summary
     assert (workspace / "benchmark_stdout.log").read_text(encoding="utf-8") == "client-out\n"
     assert (workspace / "benchmark_stderr.log").read_text(encoding="utf-8") == "client-err\n"
+
+
+def test_run_subprocess_timeout_writes_log(tmp_path, monkeypatch):
+    """Timeouts return 124 and leave a phase stderr log for debugging."""
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    rc = bypass_runner._run_subprocess(["client"], 0.01, tmp_path, "client")
+    assert rc == 124
+    assert "client timed out" in (tmp_path / "client_stderr.log").read_text(encoding="utf-8")
+
+
+def test_load_raw_result_missing_invalid_and_non_dict(tmp_path):
+    assert bypass_runner._load_raw_result(tmp_path) is None
+
+    raw = tmp_path / "inferencex_result.json"
+    raw.write_text("{bad json", encoding="utf-8")
+    assert bypass_runner._load_raw_result(tmp_path) is None
+
+    raw.write_text("[1, 2, 3]", encoding="utf-8")
+    assert bypass_runner._load_raw_result(tmp_path) is None
+
+    raw.write_text(json.dumps({"output_throughput": 1.0}), encoding="utf-8")
+    assert bypass_runner._load_raw_result(tmp_path) == {"output_throughput": 1.0}
+
+
+def test_eval_returncode_sentinel_roundtrip_and_invalid(tmp_path):
+    assert bypass_runner._read_eval_returncode(tmp_path) == 0
+    bypass_runner._write_eval_returncode(tmp_path, 7)
+    assert bypass_runner._read_eval_returncode(tmp_path) == 7
+
+    (tmp_path / "eval_returncode").write_text("not-an-int", encoding="utf-8")
+    assert bypass_runner._read_eval_returncode(tmp_path) == 0
+
+
+def test_finalize_report_client_failure_without_raw(tmp_path):
+    rc = bypass_runner._finalize_report(
+        workspace=tmp_path,
+        framework="sglang",
+        model="/models/x",
+        server_log=tmp_path / "server.log",
+        bench_envs={"RUN_EVAL": "false"},
+        start=0.0,
+        rc=9,
+        profile=True,
+    )
+    assert rc == 9
+    rep = json.loads((tmp_path / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+    assert rep["profiling_enabled"] is True
+    assert "benchmark client exited 9" in rep["errors"]
+    assert "inferencex_result.json not produced" in rep["errors"]
+
+
+def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
+    """SIGTERM failure falls back to terminate; wait failure escalates to SIGKILL."""
+    class _Log:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Proc:
+        pid = 123
+
+        def __init__(self):
+            self.terminated = False
+            self._bypass_log_fh = _Log()
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            raise TimeoutError("still running")
+
+    proc = _Proc()
+    signals = []
+
+    def fake_killpg(pgid, sig):
+        signals.append(sig)
+        if sig == bypass_runner.signal.SIGTERM:
+            raise OSError("missing process group")
+
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: 456)
+    monkeypatch.setattr(bypass_runner.os, "killpg", fake_killpg)
+
+    bypass_runner._terminate_server(proc)
+    assert proc.terminated is True
+    assert signals == [bypass_runner.signal.SIGTERM, bypass_runner.signal.SIGKILL]
+    assert proc._bypass_log_fh.closed is True
+
+
+def test_tokenize_extra_args_falls_back_on_bad_quoting():
+    args = bypass_runner._tokenize_extra_args(
+        {"EXTRA_VLLM_ARGS": '--flag "unterminated'}, "vllm",
+    )
+    assert args == ["--flag", '"unterminated']
