@@ -120,42 +120,95 @@ def test_build_backends_robustness_agent_with_root() -> None:
 
 
 # -- _build_proposal_scorer ------------------------------------------------
-def test_proposal_scorer_disabled() -> None:
-    args = argparse.Namespace(no_proposal_scoring=True)
+def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
+    # Default is OFF: without --proposal-scoring the scorer is not built.
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    args = argparse.Namespace(proposal_scoring=False, proposal_scorer_models=None)
     assert clib._build_proposal_scorer(args) is None
 
 
 def test_proposal_scorer_disabled_for_anthropic_only(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    args = argparse.Namespace(no_proposal_scoring=False, proposal_scorer_models=None)
+    args = argparse.Namespace(
+        proposal_scoring=True,
+        proposal_scorer_models=None,
+    )
     assert clib._build_proposal_scorer(args) is None
 
 
-def test_proposal_scorer_empty_models_returns_none() -> None:
+def test_proposal_scorer_empty_models_returns_none(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     args = argparse.Namespace(
-        no_proposal_scoring=False,
+        proposal_scoring=True,
         proposal_scorer_models="  ,  ",
     )
     assert clib._build_proposal_scorer(args) is None
 
 
 def test_proposal_scorer_default_models(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
-    args = argparse.Namespace(no_proposal_scoring=False)
+    args = argparse.Namespace(proposal_scoring=True)
     out = clib._build_proposal_scorer(args)
     assert out[0] == "scorer"
     assert len(out[1]["models"]) >= 1
 
 
 def test_proposal_scorer_explicit_models(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
     args = argparse.Namespace(
-        no_proposal_scoring=False,
+        proposal_scoring=True,
         proposal_scorer_models="m1, m2",
     )
     out = clib._build_proposal_scorer(args)
     assert out[1]["models"] == ("m1", "m2")
+
+
+def test_proposal_scoring_flag_parsing() -> None:
+    # Parser-level contract: default OFF, --proposal-scoring on, --no- off.
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    default = parser.parse_args(["optimize", "--model", "x"])
+    assert default.proposal_scoring is False
+    enabled = parser.parse_args(["optimize", "--model", "x", "--proposal-scoring"])
+    assert enabled.proposal_scoring is True
+    disabled = parser.parse_args(["optimize", "--model", "x", "--no-proposal-scoring"])
+    assert disabled.proposal_scoring is False
+
+
+def test_retired_enable_proposal_scoring_flag_rejected() -> None:
+    # The old --enable-proposal-scoring spelling is retired: it must hard-fail
+    # (exit 2) with a migration hint, not be silently accepted.
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["optimize", "--model", "x", "--enable-proposal-scoring"])
+
+
+def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
+    # Passing only --proposal-scorer-models (a non-empty list, which is also
+    # the parser default) must NOT turn scoring on: default OFF requires an
+    # explicit --proposal-scoring. Guards the silent-off regression.
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    parser = _build_parser()
+    args = parser.parse_args(
+        ["optimize", "--model", "x", "--proposal-scorer-models", "m1,m2"]
+    )
+    # Sanity: models parsed, but scoring stayed off.
+    assert args.proposal_scorer_models == "m1,m2"
+    assert args.proposal_scoring is False
+    assert clib._build_proposal_scorer(args) is None
 
 
 # -- _robustness_server_configured -----------------------------------------
