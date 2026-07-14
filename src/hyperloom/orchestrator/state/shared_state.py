@@ -427,10 +427,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "native" (geak_v3 per-kernel loop, default) or
-    # "geak" (one-shot whole-pipeline e2e optimizer cloned from upstream;
-    # see src/hyperloom/agents/kernel/tools/backends/geak_runner.py).
-    kernel_optimizer: str = "native"
+    # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e
+    # optimizer cloned from upstream; see
+    # src/hyperloom/agents/kernel/tools/backends/geak_runner.py) or "native"
+    # (legacy per-kernel loop when explicitly requested).
+    kernel_optimizer: str = "geak"
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
