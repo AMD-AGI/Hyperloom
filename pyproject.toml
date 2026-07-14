@@ -118,7 +118,15 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 where = ["src"]
 
 [tool.setuptools.data-files]
+# Install the setup skill under every agent's discovery dir so /hyperloom-setup
+# is visible in Claude Code (.claude), Cursor (.cursor/.agents) and Codex.
 ".agents/skills/hyperloom-setup" = [
+    "src/hyperloom/skills/hyperloom-setup/SKILL.md",
+]
+".claude/skills/hyperloom-setup" = [
+    "src/hyperloom/skills/hyperloom-setup/SKILL.md",
+]
+".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
 

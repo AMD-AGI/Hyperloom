@@ -141,9 +141,10 @@ The setup skill passes options to the packaged backend. Useful options include:
 
 - If the target directory contains many package folders after `pip install
   --target`, that is expected.
-- If `/hyperloom-setup` is not visible, confirm
-  `.agents/skills/hyperloom-setup/SKILL.md` exists under the target directory
-  and restart the agent if needed.
+- If `/hyperloom-setup` is not visible, confirm the setup skill exists under
+  the target directory. It is installed to `.claude/skills/hyperloom-setup/`
+  (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
+  `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
   framework torch wheel expects different ROCm user-space libraries; align
   `ROCM_PATH` and `LD_LIBRARY_PATH`.
