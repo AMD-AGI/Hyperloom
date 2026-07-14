@@ -6,6 +6,10 @@ Writes one :class:`Finding` per line to
 ``{session_dir}/agents/robustness/findings/{session_id}.jsonl`` via
 :func:`asyncio.to_thread` (keeps the tick off the disk I/O path).
 Best-effort: write failures log one WARN per error class, never raise.
+
+The on-disk subdir is exported as :data:`FINDINGS_SUBDIR` so cross-package
+readers (e.g. the Critic's ``decision_reviewer``) import the one string
+instead of re-hardcoding it.
 """
 
 from __future__ import annotations
@@ -25,13 +29,19 @@ from ..decision.action_ladder import Finding
 log = logging.getLogger(__name__)
 
 
+# On-disk JSONL subdir under the session dir. The single source of truth for
+# this path; ``PostmortemFinalizer`` reads the same subtree and the Critic's
+# ``decision_reviewer`` imports this constant to discover the findings file.
+FINDINGS_SUBDIR: str = "agents/robustness/findings"
+
+
 @dataclass
 class FindingSinkConfig:
     """Where the sink writes."""
 
     session_dir: Path
     session_id: str = "default"
-    subdir: str = "agents/robustness/findings"
+    subdir: str = FINDINGS_SUBDIR
 
     @property
     def file_path(self) -> Path:
@@ -126,4 +136,4 @@ def finding_to_row(finding: Finding) -> dict[str, Any]:
     return row
 
 
-__all__ = ["FindingSink", "FindingSinkConfig", "finding_to_row"]
+__all__ = ["FINDINGS_SUBDIR", "FindingSink", "FindingSinkConfig", "finding_to_row"]

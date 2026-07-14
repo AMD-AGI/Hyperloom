@@ -61,7 +61,8 @@ class PostmortemFinalizerConfig:
     """
 
     reports_subdir: str = "reports"
-    # Where FindingSink writes; the finalizer only reads here.
+    # Where FindingSink writes; the finalizer only reads here. Kept in sync
+    # with ``role.findings.FINDINGS_SUBDIR`` (the on-disk source of truth).
     findings_subdir: str = "agents/robustness/findings"
     runs_subdir: str = "runs"
     # HIGH-severity findings rendered in the body (cap keeps markdown readable).

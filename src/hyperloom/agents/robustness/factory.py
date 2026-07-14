@@ -29,11 +29,11 @@ from .decision.rca_engine import (
     RcaThrottle,
     RcaThrottleConfig,
 )
-from .finalize.postmortem import (
+from .role.findings import FindingSink, FindingSinkConfig
+from .role.postmortem import (
     PostmortemFinalizer,
     PostmortemFinalizerConfig,
 )
-from .findings.sink import FindingSink, FindingSinkConfig
 from .role.reactor import Reactor, ReactorComponents
 from .state_store import DetectorStateStore
 from .signals import Classifier, SymptomSeverity
@@ -207,17 +207,19 @@ def build_reactor_components(
         DetectorStateStore(session_dir=config.session_dir) if config.state_store_enabled else None
     )
 
-    classifier = Classifier(
-        state_store=state_store,
-        stall_config=StallConfig(
+    # Config->SignalConfig map keyed by ``SignalSpec.config_attr``; slots the
+    # registry defaults (e.g. ``cluster_fault``) are omitted here and filled by
+    # the classifier from the registry ``config_factory``.
+    signal_configs: dict[str, Any] = {
+        "stall": StallConfig(
             stall_timeout_s=config.agent_stall_timeout_s,
         ),
-        crash_config=CrashConfig(),
-        event_config=EventConfig(
+        "crash": CrashConfig(),
+        "event": EventConfig(
             idempotency_replay_threshold=config.idempotency_replay_threshold,
         ),
-        health_config=HealthConfig(),
-        local_health_config=LocalHealthConfig(
+        "health": HealthConfig(),
+        "local_health": LocalHealthConfig(
             gpu_temp_warn_c=config.gpu_temp_warn_c,
             disk_used_warn_pct=config.disk_used_warn_pct,
             disk_used_crit_pct=config.disk_used_crit_pct,
@@ -226,12 +228,12 @@ def build_reactor_components(
             fd_warn_used_pct=config.fd_warn_used_pct,
             fd_crit_used_pct=config.fd_crit_used_pct,
         ),
-        gpu_leak_config=GpuLeakConfig(
+        "gpu_leak": GpuLeakConfig(
             util_mem_pct_threshold=config.gpu_leak_util_mem_pct_threshold,
             free_mb_threshold=config.gpu_leak_free_mb_threshold,
             min_consecutive_ticks=config.gpu_leak_min_consecutive_ticks,
         ),
-        budget_config=BudgetConfig(
+        "budget": BudgetConfig(
             warn_pct=config.budget_warn_pct,
             imminent_pct=config.budget_imminent_pct,
             min_budget_minutes=config.budget_min_minutes,
@@ -240,62 +242,63 @@ def build_reactor_components(
             deadline_warning_minutes=config.budget_deadline_warning_minutes,
             deadline_hard_cutoff_minutes=(config.budget_deadline_hard_cutoff_minutes),
         ),
-        aiter_jit_config=AiterJitConfig(
+        "aiter_jit": AiterJitConfig(
             cold_so_count=config.aiter_jit_cold_so_count,
             regression_ratio=config.aiter_jit_regression_ratio,
             stale_build_threshold=config.aiter_jit_stale_build_threshold,
             stale_build_persist_ticks=config.aiter_jit_stale_build_persist_ticks,
         ),
-        progress_config=ProgressConfig(
+        "progress": ProgressConfig(
             gain_window_ticks=config.progress_gain_window_ticks,
             gain_epsilon_pct=config.progress_gain_epsilon_pct,
             no_levers_min_minutes=config.progress_no_levers_min_minutes,
             no_levers_min_ticks=config.progress_no_levers_min_ticks,
             productive_gain_pct=config.budget_productive_gain_pct,
         ),
-        repeated_payload_config=RepeatedPayloadConfig(
+        "repeated_payload": RepeatedPayloadConfig(
             streak_threshold=config.repeated_payload_streak_threshold,
             lookback_events=config.repeated_payload_lookback_events,
         ),
-        decision_audit_config=DecisionAuditConfig(
+        "decision_audit": DecisionAuditConfig(
             min_keep_gain_pct=config.decision_audit_min_keep_gain_pct,
             dispatch_bypass_pre_post_epsilon_pct=(config.decision_audit_dispatch_bypass_epsilon_pct),
         ),
-        model_gpu_fit_config=ModelGpuFitConfig(
+        "model_gpu_fit": ModelGpuFitConfig(
             min_headroom_pct=config.preflight_min_headroom_pct,
             activation_buf_gib=config.preflight_activation_buf_gib,
         ),
-        amdahl_ceiling_config=AmdahlCeilingConfig(
+        "amdahl_ceiling": AmdahlCeilingConfig(
             single_kernel_speedup=(config.preflight_amdahl_single_kernel_speedup),
             min_e2e_ceiling_pct=config.preflight_amdahl_min_e2e_ceiling_pct,
         ),
-        cold_start_config=ColdStartConfig(
+        "cold_start": ColdStartConfig(
             cold_so_count=config.preflight_cold_start_so_count,
             cold_start_minutes=config.preflight_cold_start_minutes,
         ),
-        critic_health_config=CriticHealthConfig(
+        "critic_health": CriticHealthConfig(
             min_outage_judges=config.critic_health_min_outage_judges,
             min_unavailable_verdicts=(config.critic_health_min_unavailable_verdicts),
             max_workdir_count=config.critic_health_max_workdir_count,
         ),
-        kernel_pipeline_config=KernelPipelineConfig(
+        "kernel_pipeline": KernelPipelineConfig(
             pending_count_threshold=(config.kernel_pipeline_pending_count_threshold),
             min_pending_ticks=config.kernel_pipeline_min_pending_ticks,
             min_geak_sigterm_attempts=(config.kernel_pipeline_min_geak_sigterm_attempts),
             min_kernels_with_no_progress=(config.kernel_pipeline_min_kernels_with_no_progress),
         ),
-        state_integrity_config=StateIntegrityConfig(
+        "state_integrity": StateIntegrityConfig(
             wal_bytes_warn_threshold=config.state_wal_bytes_warn_threshold,
             wal_bytes_critical_threshold=(config.state_wal_bytes_critical_threshold),
             stale_lease_min_age_s=config.state_stale_lease_min_age_s,
             inbox_bloat_warn_bytes=config.state_inbox_bloat_warn_bytes,
             inbox_bloat_critical_bytes=(config.state_inbox_bloat_critical_bytes),
         ),
-        external_deps_config=ExternalDepsConfig(
+        "external_deps": ExternalDepsConfig(
             mount_latency_warn_ms=config.external_mount_latency_warn_ms,
             mount_latency_critical_ms=(config.external_mount_latency_critical_ms),
         ),
-    )
+    }
+    classifier = Classifier(configs=signal_configs, state_store=state_store)
 
     ladder = ActionLadder(
         config=ActionLadderConfig(cooldown_ticks=config.cooldown_ticks),

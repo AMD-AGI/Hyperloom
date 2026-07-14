@@ -59,8 +59,8 @@ from hyperloom.common.subprocess_bridge import RuntimeAdapterError, emit_json, r
 
 from ..config import Config
 from ..factory import build_reactor_components
-from ..finalize.postmortem import finalize_session
 from ..role.envelope import build_envelope_dict
+from ..role.postmortem import finalize_session
 from ..role.prompt_inputs import (
     ReactorContext,
     SharedStateSnapshot,
