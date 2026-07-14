@@ -67,6 +67,18 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage(monkeypatch):
     assert evidence["next_cycle"] == 1
 
 
+def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available(monkeypatch):
+    monkeypatch.setenv(CYCLIC_ENV, "1")
+    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {"status": "failed"}
+    target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_failed"
+    assert evidence.get("conc_sweep_status") == "failed"
+    assert "loopback" not in evidence
+
+
 def test_sweep_closes_when_globally_converged(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
     # No gain this cycle + streak already at 2 → effective 3 ≥ threshold.

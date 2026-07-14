@@ -1279,13 +1279,15 @@ def run_t0_anchor(
             ),
             encoding="utf-8",
         )
+        # ``raw`` is intentionally omitted here: it duplicates ``recipe`` and is
+        # injected into specialist prompts. The disk snapshot above keeps it for
+        # envelope-shape compatibility.
         shared_state.warm_start_recipe = {
             "workload": workload,
             "hw": hw,
             "tier": warm_tier,
             "confidence": warm_conf,
             "recipe": warm_point,
-            "raw": warm_text,
         }
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)

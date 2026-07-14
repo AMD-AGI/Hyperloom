@@ -17,13 +17,12 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import source_text_looks_complete  # noqa: E402
+from _io_utils import source_text_looks_complete, utc_now  # noqa: E402
 
 sys.path.pop(0)
 
@@ -241,15 +240,6 @@ def _dispatch_multinode_revert(
         "stdout_tail": out[-2000:],
         "stderr_tail": (proc.stderr or "")[-2000:],
     }
-
-
-def _now() -> str:
-    """Return the current UTC timestamp as an ISO8601 string.
-
-    Returns:
-        str: The current UTC time formatted as an ISO8601 string.
-    """
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_name(value: str) -> str:
@@ -831,7 +821,7 @@ def _invalidate_aiter_jit_build(
         "status": "ok",
         "src": str(jit_build),
         "backup_path": str(backup_path),
-        "moved_at": _now(),
+        "moved_at": utc_now(),
     }
 
 
@@ -1016,7 +1006,7 @@ def _invalidate_aiter_cpp_itfs_cache(
         "build_dir": str(build_dir),
         "module_names": module_names,
         "scope": scope,
-        "invalidated_at": _now(),
+        "invalidated_at": utc_now(),
         "invalidated_unix": time.time(),
     }
     if not build_dir.exists():
@@ -1420,7 +1410,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001
                 mn_revert = {"status": "failed", "error": str(exc)}
 
-    reverted_at = _now()
+    reverted_at = utc_now()
     manifest["status"] = "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
@@ -1578,7 +1568,7 @@ def apply_kernel_patch(
             "compiled": strategy["compiled"],
             "root": strategy["root"],
         },
-        "created_at": _now(),
+        "created_at": utc_now(),
     }
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1732,7 +1722,7 @@ def apply_kernel_patch(
             }
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = _now()
+    manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:
@@ -1857,7 +1847,7 @@ def _apply_kernel_patch_snapshot(
         "descriptors": descriptors,
         "artifacts": artifacts,
         "strategy": {"compiled": compiled, "root": str(repo_root)},
-        "created_at": _now(),
+        "created_at": utc_now(),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
@@ -1982,7 +1972,7 @@ def _apply_kernel_patch_snapshot(
         rebuild = rebuild_records[-1] if rebuild_records else rebuild
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = _now()
+    manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:

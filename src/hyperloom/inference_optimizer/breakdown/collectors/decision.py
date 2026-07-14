@@ -140,6 +140,22 @@ def _load_llm_calls(
     return [r for r in rows if isinstance(r, dict)]
 
 
+def aggregate_session_cache_tokens(
+    session_dir: Path,
+    warnings: list[str] | None = None,
+) -> tuple[int, int]:
+    """Sum (cache_creation, cache_read) over ``reports/trace/llm_calls.jsonl``.
+
+    Reuses the same ledger read + fold as the token rollup, so the figures match
+    ``session_breakdown.json``. Best-effort: missing trace files yield ``(0, 0)``.
+    """
+    warns = warnings if warnings is not None else []
+    bucket = _empty_token_bucket()
+    for call in _load_llm_calls(session_dir, warns):
+        _fold_call_into_bucket(bucket, call)
+    return bucket["total_cache_creation"], bucket["total_cache_read"]
+
+
 def _load_proposal_task_map(
     session_dir: Path, warnings: list[str],
 ) -> dict[str, str]:
@@ -334,7 +350,7 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     return None
 
 
-def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
     """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
 
     Handles both bucket shapes: the rollup view (split
@@ -360,6 +376,9 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
     )
     b["total_in_out"] = ti + to
     b["grand_total"] = ti + to + cache
+    cc = int(b.get("total_cache_creation", 0) or 0)
+    cr = int(b.get("total_cache_read", 0) or 0)
+    b["cache_hit_rate"] = round(cr / (cc + cr), 4) if (cc + cr) else 0.0
     return b
 
 

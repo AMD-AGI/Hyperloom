@@ -136,7 +136,6 @@ The setup skill passes options to the packaged backend. Useful options include:
 | `LD_LIBRARY_PATH` | Make matching ROCm user-space libraries visible. |
 | `SGLANG_ROCM_EXTRA` | Select AMD SGLang ROCm extra, for example `rocm720`. |
 | `AITER_REF` | Override AITER source tag; otherwise setup auto-selects a compatible tag. |
-| `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` | Skip install-time GEAK RAG index build. |
 
 ## Troubleshooting
 
@@ -150,5 +149,3 @@ The setup skill passes options to the packaged backend. Useful options include:
   `ROCM_PATH` and `LD_LIBRARY_PATH`.
 - `hipDeviceAttributePciChipId` missing during AITER build means `hipcc` is
   using older ROCm headers; put the matching ROCm `bin` first on `PATH`.
-- GEAK RAG index build failures can be bypassed with
-  `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0`.

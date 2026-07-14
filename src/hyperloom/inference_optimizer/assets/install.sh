@@ -11,11 +11,10 @@
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) into the pod-local open-source repo tree,
-#      pinned to MAGPIE_REF
-#      (a commit SHA, mirrors the GEAK_REF pin in kernel-agent)
+#      pinned to MAGPIE_REF (a commit SHA or tag)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when MAGPIE_REF
-#       is pinned to an upstream-atomic commit)
+#       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when the
+#       MAGPIE_REF target already has upstream atomic copying)
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
@@ -131,25 +130,9 @@ FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/fram
 # package (still overridable) and the old chain_framework_agent() delegation
 # below is a no-op.
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie to a *commit SHA* (not a branch name) so a fresh install is
-# deterministic and an upstream force-push / rebase cannot silently change
-# what every fresh clone gets. This default-branch HEAD drift is the root
-# cause of bugs.md §C #1 version skew: Magpie merged the atomic-copy refactor
-# (`_copy_benchmark_script_atomic` in Magpie/modes/benchmark/benchmarker.py)
-# between 06-06 and 06-07. Pre-refactor clones still had the legacy
-# `shutil.copy2` + `chmod` block the in-place patcher targets; post-refactor
-# clones do not ("legacy block not found"). We deliberately pin to a
-# post-refactor SHA: the upstream code is already atomic, so the in-place
-# patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
-# fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
-# (mirrors GEAK_REF in src/hyperloom/agents/kernel/scripts/install.sh).
-# Pinned to AMD-AGI/Magpie main HEAD, which includes the xDiT scriptable
-# diffusion benchmark framework (#51); the previous pin
-# (b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7, #34 Atom) predates #51 and
-# rejects framework=xdit ("Unsupported framework: xdit"), breaking every
-# xDiT baseline. Still post the atomic-copy refactor, so the in-place patch
-# stays a no-op.
-MAGPIE_REF="${MAGPIE_REF:-e1be639428070e8d1e1ca21ca5414a84bc291d94}"
+# Pin Magpie to a release commit instead of the default branch. Operators can
+# re-pin with MAGPIE_REF=<tag|sha>.
+MAGPIE_REF="${MAGPIE_REF:-0171222c532db6fc5cb174667db66e34f1d9dd98}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at the same Magpie checkout. A single var keeps
 # the installer and runtime in lockstep; setting it never silently falls back to
