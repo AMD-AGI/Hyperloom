@@ -1226,7 +1226,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             )
         return rows
     rows.append("```json")
-    rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, indent=2))
+    rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, separators=(",", ":")))
     rows.append("```")
     return rows
 
@@ -1365,7 +1365,7 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
         return rows
     rows.append("**find-recipe result:**")
     rows.append("```json")
-    rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
+    rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, separators=(",", ":")))
     rows.append("```")
     return rows
 
