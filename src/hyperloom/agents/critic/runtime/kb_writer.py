@@ -170,17 +170,6 @@ class KBWriter:
             "cooldown_seconds": self._breaker_cooldown,
         }
 
-    def force_kb_unreachable(self, *, cooldown: float | None = None) -> None:
-        """Open the breaker manually (used by tests + admin tooling).
-
-        Args:
-            cooldown (float | None): Seconds to keep the breaker open; falls
-                back to the configured cooldown when ``None``.
-        """
-        self._consecutive_failures = self._breaker_threshold
-        self._unreachable_until = self._time_fn() + (cooldown if cooldown is not None else self._breaker_cooldown)
-        get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc({"reason": "manual"})
-
     def _record_kb_failure(self, endpoint: str, exc: Exception) -> None:
         """Account a transport error and possibly open the breaker.
 

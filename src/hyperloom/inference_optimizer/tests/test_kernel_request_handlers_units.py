@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -977,7 +978,7 @@ class TestLoadMaterializedWorkloadMetadata:
             f"framework={framework!r} expected server_args={expected_args!r}; got {runtime['server_args']!r}."
         )
 
-    def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
+    def test_atom_server_args_ignore_stray_sglang_env(self, tmp_path):
         """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
         cfg = tmp_path / "magpie_atom_mixed.yaml"
         cfg.write_text(
@@ -2022,7 +2023,7 @@ class TestKernelOptArtifactBundleRecording:
             "write_paths": ["aiter/ops/moe.py", "benchmarks/bench_moe.py"],
             "delete_paths": [],
         }
-        krh.record_kernel_opt(
+        kd.record_kernel_opt(
             state,
             {
                 "status": "completed",

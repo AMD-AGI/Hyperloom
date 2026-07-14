@@ -280,7 +280,7 @@ def test_persist_oserror_is_soft(tmp_path, monkeypatch, caplog):
     def _boom(_path, _text):
         raise OSError("disk full")
 
-    monkeypatch.setattr(rh, "_atomic_write", _boom)
+    monkeypatch.setattr(rh, "atomic_write_text", _boom)
     with caplog.at_level("WARNING"):
         # should not raise; failure is logged and swallowed
         rh._persist(tmp_path, [{"what": "x", "source": "s"}])
@@ -321,7 +321,7 @@ def test_write_competitor_target_oserror(tmp_path, monkeypatch, caplog):
     def _boom(_path, _text):
         raise OSError("nope")
 
-    monkeypatch.setattr(rh, "_atomic_write", _boom)
+    monkeypatch.setattr(rh, "atomic_write_text", _boom)
     with caplog.at_level("WARNING"):
         ok = rh.write_competitor_target(
             tmp_path,

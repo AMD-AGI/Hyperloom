@@ -64,11 +64,6 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_FLOAT", "")
     assert env.env_float("HL_FLOAT", default=1.25) == pytest.approx(1.25)
 
-    monkeypatch.delenv("HL_STR", raising=False)
-    assert env.env_str("HL_STR", default="fallback") == "fallback"
-    monkeypatch.setenv("HL_STR", " value ")
-    assert env.env_str("HL_STR") == "value"
-
 
 def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.common import io
@@ -76,10 +71,6 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
     text_path = tmp_path / "nested" / "value.txt"
     io.atomic_write_text(text_path, "hello", make_parents=True)
     assert text_path.read_text(encoding="utf-8") == "hello"
-
-    bytes_path = tmp_path / "payload.bin"
-    io.atomic_write_bytes(bytes_path, b"\x00\x01")
-    assert bytes_path.read_bytes() == b"\x00\x01"
 
     json_path = tmp_path / "data.json"
     io.atomic_write_json(json_path, {"b": 2, "a": 1}, indent=None, trailing_newline=True)
@@ -1261,7 +1252,7 @@ def test_dynamo_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypa
         dyn._dynamo_restart_server(_restart_args())
 
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: {"backend": "dynamo", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k", "framework": "sglang"})
-    monkeypatch.setattr(dyn, "_validate_extra_server_args", lambda *a, **kw: (_ for _ in ()).throw(dyn.ServerArgsRejected("denied")))
+    monkeypatch.setattr(dyn, "validate_server_args", lambda *a, **kw: (_ for _ in ()).throw(dyn.ServerArgsRejected("denied")))
     assert dyn._dynamo_restart_server(_restart_args(extra_args="--bad")) == dyn.EXIT_CONFIG_ERROR
 
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: {"backend": "dynamo", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"})

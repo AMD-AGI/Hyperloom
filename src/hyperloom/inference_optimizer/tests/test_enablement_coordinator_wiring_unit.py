@@ -705,7 +705,7 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
 
 def _make_coord_with_phase(session_dir) -> "Coordinator":
     """Build a minimal Coordinator for authored-lane tests."""
-    from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     plan = ScriptedPlan(
@@ -736,8 +736,6 @@ def test_rearm_authored_lane_delegates_enablement(session_dir):
 
 def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
     """apply_failed on perf_framework lane increments apply_fail_reauthor_attempts."""
-    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
-
     coord = _make_coord_with_phase(session_dir)
     cand_id = "https://github.com/example/repo/pull/99"
     res = {
