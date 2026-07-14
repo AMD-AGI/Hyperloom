@@ -97,7 +97,7 @@ def agent_of(row: dict[str, Any]) -> str:
     """The agent that produced a row: its ``component`` (role fallback).
 
     ``component`` is the closed producer vocabulary (orchestration / kernel /
-    specialist / critic / geak / oob / robustness / proposal_scorer /
+    specialist / critic / geak / forge / robustness / proposal_scorer /
     tracelens / breakdown); it is the "which agent did this" axis used for the
     per-agent span layer.
 

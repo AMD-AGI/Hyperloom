@@ -175,7 +175,7 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
 # Kernel-agent long-lived workspaces (cross-task, keyed by kernel_id)
 def kernel_workspace(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/kernel-agent-workspace/<kernel_id>/`` — extracted source,
-    GEAK/OOB candidates, and the chosen patch for one kernel. Keyed by
+    GEAK/Forge candidates, and the chosen patch for one kernel. Keyed by
     ``kernel_id`` and survives across tasks (vs the per-invocation
     :func:`kernel_agent_runs_dir`).
 
@@ -304,7 +304,7 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
 # compute paths (callers mkdir the parent before writing). The parent process
 # is the sole writer of llm_calls.jsonl, so there is no concurrent-writer
 # fan-in to coordinate on that file. Out-of-process children (specialist /
-# geak / oob / robustness / critic-agent CLI) do NOT append to it; they write
+# geak / forge / robustness / critic-agent CLI) do NOT append to it; they write
 # their own ext/*.jsonl shard (see ``ext_trace_path``) which the collector
 # (``_load_llm_calls``) and the Langfuse emitter (``_flush_ext_shards``)
 # backfill at read time. The ext shards are a legacy/child-compatibility path:
@@ -354,7 +354,7 @@ def trace_ext_dir(session_dir: Path) -> Path:
 def ext_trace_path(session_dir: Path, component: str, pid: int) -> Path:
     """``<sd>/reports/trace/ext/<component>-<pid>.jsonl``.
 
-    Each independent agent process (geak / oob / robustness / critic-agent
+    Each independent agent process (geak / forge / robustness / critic-agent
     CLI / tracelens) writes its own shard so concurrent children never
     contend on a shared file; the collector globs ``ext/*.jsonl`` and merges.
     The ``pid`` keeps shards disjoint across re-spawns of the same component.

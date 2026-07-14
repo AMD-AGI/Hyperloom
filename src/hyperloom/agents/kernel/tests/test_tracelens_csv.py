@@ -400,34 +400,34 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         is False
     )
     assert tla.is_reusable_native_kernel(candidate) is True
-    # Ladder converged to forge then GEAK; OOB backends (claude/codex/cursor) removed.
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    # Ladder converged to forge-only.
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_includes_geak_for_python_source():
-    """GEAK must be in the ladder for ``python`` source_type too (pre-fix it was dropped)."""
+def test_recommend_backends_for_python_source():
+    """forge must be recommended for ``python`` source_type too."""
     candidate = {
         "name": "some_python_dispatcher",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_includes_geak_for_unknown_source():
-    """Unknown source_type: GEAK must still be in the ladder (let GEAK decide, don't pre-filter by extension)."""
+def test_recommend_backends_for_unknown_source():
+    """Unknown source_type: forge is still recommended (don't pre-filter by extension)."""
     candidate = {
         "name": "some_unrecognised_kernel",
         "source_file": "/some/path/kernel.xyz",
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_geak_precedes_llm_backends():
-    """Invariant: forge leads, then the per-kernel GEAK backend."""
+def test_recommend_backends_is_forge_only():
+    """Invariant: forge is the sole per-kernel backend in the ladder."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -435,7 +435,7 @@ def test_recommend_backends_geak_precedes_llm_backends():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder[:2] == ["forge", "geak_v3"], f"forge then GEAK must lead the ladder, got {ladder}"
+    assert ladder == ["forge"], f"forge must be the sole per-kernel backend, got {ladder}"
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -808,56 +808,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["runtime_flags"]["target_platform"] == "MI300X"
     assert enriched["runtime_flags"]["is_multigpu"] is False
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
-
-
-def test_write_reports_does_not_run_rocprof_enrich_by_default(tmp_path, monkeypatch):
-    """Trace analysis must not synchronously profile every hot kernel by default."""
-    import json as _json
-    from argparse import Namespace
-    import rocprof_roofline as rr
-
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
-    analysis_md.parent.mkdir(parents=True, exist_ok=True)
-    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
-    candidate = {
-        "kernel_id": "k001",
-        "name": "paged_attention",
-        "duration_us": 100.0,
-        "call_count": 2,
-        "reusable_native_kernel": True,
-    }
-    args = Namespace(
-        trace_input=str(trace),
-        model_name="llama",
-        framework="sglang",
-        target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
-        dry_run=False,
-    )
-    called = {"value": False}
-
-    def _boom(*_args, **_kwargs):
-        called["value"] = True
-        raise AssertionError("batch enrich should be opt-in")
-
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
-    monkeypatch.setattr(rr, "enrich_kernel_roofline_sidecar", _boom)
-
-    artifacts = tla.write_reports(
-        tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
-        candidates=[candidate],
-        args=args,
-        existing_report_path=analysis_md,
-    )
-
-    assert called["value"] is False
-    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
-    assert payload["hot_kernels"][0]["kernel_id"] == "k001"
 
 
 def test_load_model_kernel_params_reads_head_dim(tmp_path):
@@ -2843,7 +2793,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
             "skip_reason": "",
             "gpu_pct": 12.5,
             "tracelens_pitem_rank": 1,
-            "recommended_backends": ["forge", "geak_v3"],
+            "recommended_backends": ["forge"],
         },
         {
             "kernel_id": "k002",
@@ -2886,7 +2836,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
     assert "source file" in aten_entry["skip_reason"]
     # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
-    assert summary["tasks"][0]["recommended_backends"] == ["forge", "geak_v3"]
+    assert summary["tasks"][0]["recommended_backends"] == ["forge"]
 
 
 def test_build_audit_summary_handles_empty_input():

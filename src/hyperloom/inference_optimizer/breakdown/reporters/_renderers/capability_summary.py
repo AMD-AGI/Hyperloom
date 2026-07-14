@@ -19,7 +19,6 @@ _CAPABILITY_ORDER = (
     "params",
     "sweep",
     "geak",
-    "oob",
     "validate_stack",
 )
 

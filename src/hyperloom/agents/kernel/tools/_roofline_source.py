@@ -10,8 +10,8 @@ Both routes emit values from this single vocabulary:
     - ``analytical``: bound derived from an analytical roofline model. On bypass
       this is captured shapes + measured kernel time vs the achievable ceiling;
       on TraceLens it is the per-op perf model vs the arch-benchmark ceiling.
-    - ``rocprof``: bound refined by a hardware measurement (rocprof-compute),
-      i.e. the strongest provenance. Reserved for the opt-in enrichment stage.
+    - ``rocprof``: bound refined by a hardware measurement, i.e. the strongest
+      provenance. Kept for historical roofline records.
 
 The ladder is ``placeholder`` -> ``analytical`` -> ``rocprof`` (weakest to
 strongest); a later stage only ever upgrades the source.
@@ -35,7 +35,7 @@ from __future__ import annotations
 PLACEHOLDER = "placeholder"
 #: Bound derived from an analytical roofline model (shapes/op-model + ceiling).
 ANALYTICAL = "analytical"
-#: Bound refined by a hardware measurement (rocprof-compute); strongest source.
+#: Bound refined by a hardware measurement; strongest source.
 ROCPROF = "rocprof"
 
 #: The full set of valid ``roofline_source`` values.

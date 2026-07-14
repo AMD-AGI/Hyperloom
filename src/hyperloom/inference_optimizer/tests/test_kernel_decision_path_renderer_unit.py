@@ -50,7 +50,7 @@ def test_render_with_entries():
                 "kernel_name": "attn",
                 "summary": {
                     "total_steps": 2,
-                    "backends_attempted": ["geak_v3"],
+                    "backends_attempted": ["forge"],
                     "final_outcome": "kept",
                     "total_duration_seconds": 90,
                 },
@@ -58,7 +58,7 @@ def test_render_with_entries():
                     {
                         "ts": "t0",
                         "step": "kernel_opt",
-                        "backend": "geak_v3",
+                        "backend": "forge",
                         "outcome": "ok",
                         "gain_pct": 5.0,
                         "duration_seconds": 10,
@@ -67,7 +67,7 @@ def test_render_with_entries():
                     {
                         "ts": "t1",
                         "step": "integrate",
-                        "backend": "geak_v3",
+                        "backend": "forge",
                         "outcome": "kept",
                         "gain_pct": 3.0,
                         "duration_seconds": 20,
