@@ -331,6 +331,19 @@ async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
 
 
 @pytest.mark.asyncio
+async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
+    """Failed conc_sweep closeout should stay distinguishable in final stop_reason."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "CLOSE", "reason": "conc_sweep_failed", "evidence": {"conc_sweep_status": "failed"}},
+    ]
+    assert coord.shared_state.stop_reason == ""
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "conc_sweep_failed"
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
     coord,
 ):

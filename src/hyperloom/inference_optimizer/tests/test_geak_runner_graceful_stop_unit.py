@@ -47,6 +47,18 @@ def _handoff() -> dict:
             "exp_root": "/tmp/x"}
 
 
+def test_resolve_runner_falls_back_to_open_source_root(tmp_path, monkeypatch):
+    geak_root = tmp_path / "open-source" / "GEAK"
+    runner = geak_root / "interface" / "run_e2e.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.delenv("GEAK_E2E_RUNNER", raising=False)
+    monkeypatch.delenv("GEAK_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "open-source"))
+
+    assert psr._resolve_runner() == str(runner)
+
+
 def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     """run_e2e must receive GEAK_E2E_TIMEOUT_S = timeout_s - flush_grace."""
     runner = _write_fake_runner(tmp_path, """

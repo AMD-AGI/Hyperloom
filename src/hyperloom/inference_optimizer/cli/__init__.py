@@ -686,20 +686,41 @@ def _catalog_compare_model_id(model_id: str) -> str:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    return bool(
+    has_anthropic = bool(
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        and not (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_anthropic and not has_openai
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    return bool(
+    has_openai = bool(
         (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        and not (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
+def _critic_agent_runtime_needed(critic_choice: str) -> bool:
+    """Whether the selected critic path will actually instantiate critic-agent."""
+    return critic_choice == "agent" and not _codex_model_should_follow_claude()
 
 
 def _validate_and_resolve_claude_model(
@@ -708,7 +729,7 @@ def _validate_and_resolve_claude_model(
 ) -> set[str] | None:
     """Hard-gate Claude model selection (must be in _CLAUDE_ALLOWED_MODELS); mutates ``args.claude_model``.
 
-    Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
+    Probes the gateway catalog (retries); falls back to a known-good model with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test).
 
     Args:
@@ -727,7 +748,7 @@ def _validate_and_resolve_claude_model(
     """
     chosen = (args.claude_model or "").strip()
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
-    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
+    # may not serve the AMD-blessed opus ids. The static allowlist is
     # an AMD-network safety default; an operator can opt out via
     # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
     # catalog probe below is the sole gate (a typo still fails because the id
@@ -768,6 +789,7 @@ def _validate_and_resolve_claude_model(
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
@@ -782,6 +804,7 @@ def _validate_and_resolve_claude_model(
         anthropic_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("SAFE_API_KEY", "")
         )
         openai_key = (
@@ -870,8 +893,8 @@ def _validate_and_resolve_claude_model(
         return catalog_ids
 
     print(
-        f"ERROR: neither {_CLAUDE_PREFERRED_MODEL!r} nor "
-        f"{_CLAUDE_FALLBACK_MODEL!r} present in gateway catalog "
+        f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "
+        f"present in gateway catalog "
         f"(catalog has {sorted(m for m in catalog_ids if m.startswith('claude-'))}). "
         f"Refusing to start.",
         file=sys.stderr,
@@ -897,6 +920,8 @@ def _smoke_test_codex_model(
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
     # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
+    if _codex_model_should_follow_claude():
+        return
     critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
     if not needs_codex:
@@ -1323,12 +1348,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
 
+    # Capture provider intent before _preflight() fills missing endpoints. A
+    # single Anthropic-compatible gateway may cause preflight to populate
+    # OPENAI_BASE_URL from ANTHROPIC_BASE_URL, but the user's original intent
+    # was still "Codex-style roles follow Claude".
+    codex_follows_claude = _codex_model_should_follow_claude()
     resolved_urls = _preflight(args)
 
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
     if claude_follows_codex:
         args.claude_model = args.codex_model
-    codex_follows_claude = _codex_model_should_follow_claude()
     _validate_and_resolve_claude_model(args, resolved_urls)
     if codex_follows_claude:
         args.codex_model = args.claude_model
@@ -1832,7 +1861,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if critic_choice == "agent":
+    if _critic_agent_runtime_needed(critic_choice):
         critic_agent_root = _resolve_critic_agent_root()
         if critic_agent_root is None:
             print(
@@ -2046,9 +2075,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
 
-    kernel_str = "DISABLED" if no_kernel else (f"{'Codex' if args.kernel_codex else 'Claude'}")
+    def _backend_kind(role: str) -> str:
+        backend = backends.get(role)
+        name = str(getattr(backend, "name", "") or "").strip().lower()
+        if name == "claude":
+            return "Claude"
+        if name == "codex":
+            return "Codex"
+        if backend is None:
+            return "DISABLED"
+        return backend.__class__.__name__
+
+    orchestration_str = (
+        f"Claude({args.claude_model})"
+        if _backend_kind("orchestration") == "Claude"
+        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    )
+    kernel_str = "DISABLED" if no_kernel else _backend_kind("kernel_agent")
     if critic_choice == "mock":
         critic_str = "mock"
+    elif _backend_kind("critic") == "Claude":
+        critic_str = f"Claude({args.claude_model})"
     else:  # "agent"
         critic_str = f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, root={critic_agent_root})"
     if robustness_choice == "mock":
@@ -2060,7 +2107,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             robustness_str += f"[{kvs}]"
     print(
         f"Backends        : "
-        f"orchestration=Claude({args.claude_model}), "
+        f"orchestration={orchestration_str}, "
         f"kernel={kernel_str}, "
         f"critic={critic_str}, "
         f"robustness={robustness_str}"
