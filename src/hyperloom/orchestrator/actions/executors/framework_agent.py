@@ -1,60 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FrameworkAgentExecutor — FRAMEWORK_AGENT phase per-candidate executor.
-
-Counterpart to :class:`IntegratePatchExecutor`. The Coordinator pump
-enumerates PR candidates via ``fa phase-discover``, gates each through
-the Critic, and dispatches this executor per approved candidate to::
-
-  1. Fetch the unified diff (explicit ``params.patches`` or
-     ``curl candidate.diff_url``; apply happens in the live source root).
-  2. Snapshot pre-apply HEAD SHA so REVERT can ``git reset --hard`` back
-     without disturbing prior KEEP commits.
-  3. Apply via ``git apply`` (single integration channel).
-  4. Bench the patched server (``run_grid([GridVariant])``, size=1).
-  5. KEEP commits to the live tree (next candidate stacks); REVERT runs
-     ``git reset --hard <pre_apply_sha>`` + ``git clean -fd``.
-
-Coordinator-internal: ``framework`` is absent from
-``PHASE_LLM_PROPOSABLE_ACTIONS`` so PolicyGate R1 denies LLM proposals.
-
-Inputs (``ctx.task.params``)::
-
-    candidate (dict, required) — PR metadata row:
-        ``{repo, pr_number, ref, title, diff_url, pr_url?, framework?}``
-    framework (str, optional) — ``"sglang"`` / ``"vllm"``. Falls back to
-        ``candidate["framework"]`` then ``$INFERENCE_OPTIMIZER_FRAMEWORK``.
-    batch_id (str, optional) — passed back in the result so the phase
-        loop can group ``framework_agent_phase_progress`` entries.
-    patches (list[str], optional) — explicit patch paths. When omitted,
-        the executor curls ``candidate.diff_url`` into the per-task
-        workspace and applies that.
-    keep_threshold_pct (float, optional) — default DEFAULT_KEEP_THRESHOLD_PCT
-        (1.0; imported from integrate_patch).
-    base_tput (float, optional) — baseline throughput; falls back to
-        ``SharedState.baseline_tput``.
-    accuracy_baseline (float, optional) — forwarded to the accuracy gate.
-    benchmark_script / result_dir / variant_timeout_sec / base_extra_args
-        — same semantics as ``integrate_patch``.
-    framework_source_root (str, optional) — explicit ``git apply`` target;
-        defaults to first existing entry of ``resolve_source_file_allowlist()``.
-    apply_only (bool, optional) — skip the bench step (test / smoke).
-
-Outputs (dict returned to the bus as ``delegated_result.result``)::
-
-    status: "kept" | "reverted" | "apply_failed" | "no_patch" |
-            "fetch_failed" | "applied_no_bench" | "failed"
-    output_throughput: float | None
-    delta_pct: float | None
-    accuracy_pass: bool | None
-    candidate: dict (echoes the input row)
-    batch_id: str
-    patches_applied: list[str]
-    patches_reverted: list[str]
-    reason: str
-    workspace: str
-    bench_result: dict | None
-"""
+"""Apply one discovered framework PR candidate and KEEP or REVERT by benchmark."""
 
 from __future__ import annotations
 

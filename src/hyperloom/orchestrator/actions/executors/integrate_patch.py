@@ -1,66 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""IntegratePatchExecutor.
-
-Serving-lane-locked patch integration: consumes a specialist's worktree
-patches, applies them to the live framework source roots, runs a
-throughput + optional accuracy gate, then KEEPs (advances the stack) or
-REVERTs (rolls back the tree).
-
-Deterministic Python executor (no LLM). This is the single
-allowed ``git apply`` channel against framework_source_roots (specialists
-author patches into their isolated worktree only).
-
-Inputs (``ctx.task.params``)::
-
-    specialist_task_id (str, required) — completed specialist task
-        whose worktree under ``runs/specialist/<task_id>/`` carries
-        the patches.
-    patches (list[str], optional) — explicit patch paths. Defaults to
-        ``specialist_done.patches_written``.
-    config_changes (dict[str, str], optional) — env vars layered on
-        the variant's launch env. Reverted with the patches on REVERT.
-    keep_threshold_pct (float, optional) — first-pass KEEP threshold;
-        defaults to DEFAULT_KEEP_THRESHOLD_PCT (1.0), the grid noise floor.
-        A KEEP is then re-confirmed by a full-stack rebench unless
-        ``enable_stack_rebench`` is False.
-    accuracy_baseline (float, optional) — baseline accuracy for the gate.
-        With a positive baseline the measured drop is enforced; without one,
-        the gate skips with a warning.
-    enable_stack_rebench (bool, optional) — when True (default) a KEEP
-        is confirmed by a second full-stack rebench (stability floor +
-        accuracy) before it is committed.
-    rebench_stable_threshold_pct (float, optional) — stability floor for
-        the confirmation rebench, as a percentage above ``base_tput``
-        (default 0.0).
-    base_tput (float, optional) — baseline throughput to compare
-        against. Falls back to ``SharedState.baseline_tput`` if zero.
-    benchmark_script / result_dir / variant_timeout_sec — same
-        semantics as the explore executor's params.
-    framework_source_root (str, optional) — explicit override for the
-        ``git apply`` target. Defaults to the first existing entry of
-        ``resolve_source_file_allowlist()``.
-    apply_only (bool, optional) — when True, skip the benchmark step
-        entirely (used by tests + a future smoke-only mode). The
-        executor still applies the patches but returns
-        ``status='applied_no_bench'`` so downstream bookkeeping can
-        differentiate from a genuine KEEP/REVERT.
-
-Outputs (dict, returned to the bus as ``delegated_result.result``)::
-
-    status: "kept" | "reverted" | "apply_failed" | "no_patches" |
-            "applied_no_bench" | "failed"
-    output_throughput: float | None
-    delta_pct: float | None
-    accuracy_pass: bool | None
-    patches_applied: list[str]
-    patches_reverted: list[str]
-    config_changes_applied: dict[str, str]
-    reason: str
-    specialist_task_id: str
-    workspace: str
-    bench_result: dict | None
-"""
+"""Apply specialist patches to live framework roots and KEEP or REVERT by benchmark."""
 
 from __future__ import annotations
 

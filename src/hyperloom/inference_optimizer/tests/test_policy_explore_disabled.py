@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""--no-explore fail-closed gate: when ``explore_enabled=False`` the phase
-interleave grey channel must not let KERNEL propose/delegate an ``explore``
-grid. The denial is independent of ``strict_phase`` (always fail-closed).
+"""--no-explore fail-closed gate: when ``explore_enabled=False`` KERNEL must
+not propose/delegate an ``explore`` grid. The denial is independent of
+``strict_phase`` (always fail-closed).
 ``specialist`` / ``integrate_patch`` stay allowed in KERNEL because they serve
 kernel work (specialist research + patch integration)."""
 
@@ -15,13 +15,6 @@ from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.phases.machine_state import PHASE_KERNEL_AGENT
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-
-@pytest.fixture(autouse=True)
-def _enable_interleave(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These tests exercise the EXPLORE↔KERNEL interleave grey channel, which is
-    OFF by default; enable it so KERNEL widens to explore/specialist/integrate_patch."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
 
 
 def _gate(state: SharedState, *, strict_phase: bool) -> PolicyGate:
@@ -55,7 +48,7 @@ def test_kernel_explore_denied_when_explore_disabled(strict_phase):
 def test_kernel_explore_allowed_when_explore_enabled():
     state = SharedState(phase=PHASE_KERNEL_AGENT, explore_enabled=True)
     gate = _gate(state, strict_phase=False)
-    # interleave enabled (fixture): explore is a valid KERNEL interleave action.
+    # strict_phase=False disables R1, so the dedicated explore_disabled guard is absent.
     gate.validate_intent("orchestration", _delegate_explore())
 
 
