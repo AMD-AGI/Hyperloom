@@ -216,8 +216,8 @@ _key_for_endpoint() {
   fi
   printf '%s' "${SAFE_API_KEY:-${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}}"
 }
-# GEAK uses the user's LiteLLM-compatible endpoint. The canonical env is
-# OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
+# Legacy GEAK_BASE_URL/GEAK_API_KEY aliases for endpoint routing (#521).
+# GEAKv4 kernel optimization uses GEAK_CLAUDE_MODEL + Claude Code auth instead.
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # Pair the GEAK key to its endpoint so a split deploy never sends the wrong
 # provider's key. Explicit GEAK_API_KEY still wins.

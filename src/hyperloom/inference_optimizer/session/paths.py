@@ -72,7 +72,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime",  # pod-local env files (kernel-agent.env.sh, etc.)
-    "runtime/geak-config",  # generated litellm config consumed by GEAK CLI
     # Cortex KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
     # created up-front so the KB client never mkdir's on the hot path.
     "runtime/cortex",
