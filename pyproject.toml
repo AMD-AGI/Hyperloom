@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
-    "claude-agent-sdk>=0.1.65",
+    "claude-agent-sdk>=0.2.110",
     "openai>=1.50",
     "httpx>=0.27",
     "PyYAML>=6.0",
@@ -70,7 +70,7 @@ ast = [
     "patch-ng>=1.18",
 ]
 claude = [
-    "claude_agent_sdk>=0.1",
+    "claude-agent-sdk>=0.2.110",
 ]
 
 [project.scripts]
@@ -128,6 +128,12 @@ hyperloom = [
     "assets/*.example",
     "assets/configs/*.yaml",
     "agent_skills/*/SKILL.md",
+    # Slurm submission bundle (batch-scheduler counterpart to the k8s layout;
+    # see docs/install/slurm.md). Shipped so wheel installs get the scripts.
+    "assets/slurm/*.sh",
+    "assets/slurm/*.sbatch",
+    "assets/slurm/*.tsv",
+    "assets/slurm/*.template",
     "references/*.md",
     "tools/*.sh.example",
     "data/framework/*.md",
@@ -204,10 +210,7 @@ asyncio_mode = "auto"
 # tools/ were explicitly listed, so 26 were "orphaned" and only ran when
 # pytest was pointed directly at them. ci/'s genuine unit tests
 # (test_submit_body.py + the test_ci_*.py suites) were never collected
-# before ci/ was added here; the two live smoke scripts (test_claw_flow.py /
-# test_tool4.py) define only a module-level main()/run_test() and no
-# ``test_`` functions, so pytest collects zero items from them and never
-# hits their network calls.
+# before ci/ was added here.
 testpaths = [
     "src/hyperloom/**/tests",
     "ci",
@@ -380,26 +383,26 @@ omit = [
     # omit entries were dropped in this same step rather than rewritten.
     # ── ci/ inference-optimization pipeline ──
     # The measured ci/ set is the library-shaped logic modules
-    # (generate_hf_matrix, generate_matrix, progress, build_rolling_pool,
+    # (generate_hf_matrix, generate_matrix,
     # inferenceX_parser, artifact_normalizer, transform_to_session_summary_v2,
     # build_summary, report_generator). Everything below is a SaFE/Claw/HF/
     # GitHub network client or a subprocess-driven CLI driver — the same
     # "subprocess plumbing dominated" reasoning that omits inference_optimizer
     # cli.py and the kernel-agent tool CLIs. Each is exercised end-to-end by
-    # the live optimize-submit / optimize-tiny workflows, not unit tests.
+    # the live optimize-submit workflow, not unit tests.
     "ci/optimize_submit.py",
-    "ci/tiny_submit.py",
+    "ci/optimize_submit_lib/*.py",
     "ci/orchestrator.py",
     "ci/import_session_breakdown.py",
     "ci/claw_client.py",
-    "ci/post_perf_runs.py",
     "ci/prewarm_models.py",
     "ci/send_webhook.py",
     "ci/publish_results.py",
     "ci/publish_artifacts.py",
     "ci/build_candidates.py",
     "ci/build_production_hf_pool.py",
-    # In-tree CLI test scripts / live smoke scripts (treated as test files).
+    # In-tree test support / CLI test scripts / live smoke scripts.
+    "ci/conftest.py",
     "ci/test_*.py",
 ]
 

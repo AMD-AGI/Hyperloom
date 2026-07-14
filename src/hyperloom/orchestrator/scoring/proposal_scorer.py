@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
+from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
@@ -294,11 +294,15 @@ class ProposalScorer:
             parts: list[str] = []
             usage_obj = None
             stream = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_completion_tokens=self.max_completion_tokens,
-                stream=True,
-                stream_options={"include_usage": True},
+                **apply_reasoning_effort(
+                    {
+                        "model": model,
+                        "messages": messages,
+                        "max_completion_tokens": self.max_completion_tokens,
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                )
             )
             async for chunk in stream:
                 if getattr(chunk, "usage", None) is not None:

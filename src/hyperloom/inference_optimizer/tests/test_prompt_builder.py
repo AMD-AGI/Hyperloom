@@ -336,8 +336,7 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
     assert "backends: 'claude'" not in example_block, (
         "orchestrator example must not pin backends='claude' — that's the #144 last comment Layer 2 regression"
     )
-    assert "backends: 'codex'" not in example_block
-    assert "backends: 'geak_v3'" not in example_block
+    assert "backends:" not in example_block
 
 
 def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path):

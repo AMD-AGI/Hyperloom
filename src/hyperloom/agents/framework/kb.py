@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.coerce import to_float
+
 from .models import Finding
 
 
@@ -551,14 +553,6 @@ def _normalise_keywords(keywords: Iterable[str] | None) -> set[str]:
     return {str(k).strip().lower() for k in (keywords or []) if str(k).strip()}
 
 
-def _safe_float(value: object, default: float = 0.0) -> float:
-    """Coerce a ledger numeric value while tolerating malformed rows."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
     """Read the framework PR outcome ledger from ``lessons.jsonl``.
 
@@ -713,15 +707,15 @@ def leaderboard_for_gap(
             row["reverted_count"] += 1
         elif outcome == "rejected_apply_fail":
             row["rejected_count"] += 1
-        assoc = _safe_float(rec.get("_association_score"))
-        gain = _safe_float(rec.get("tps_delta_pct"))
+        assoc = to_float(rec.get("_association_score"), default=0.0)
+        gain = to_float(rec.get("tps_delta_pct"), default=0.0)
         row["_assoc_sum"] += assoc
         row["_gain_sum"] += gain
-        row["best_tps_delta_pct"] = max(_safe_float(row["best_tps_delta_pct"]), gain)
+        row["best_tps_delta_pct"] = max(to_float(row["best_tps_delta_pct"], default=0.0), gain)
         row["gap_keywords"].update(_normalise_keywords(rec.get("gap_keywords") or []))
         row["changed_files"].update(str(f).strip() for f in (rec.get("changed_files") or []) if str(f).strip())
-        ts = _safe_float(rec.get("ts"))
-        if ts >= _safe_float(row["last_ts"]):
+        ts = to_float(rec.get("ts"), default=0.0)
+        if ts >= to_float(row["last_ts"], default=0.0):
             row["last_ts"] = ts
             row["last_outcome"] = outcome
         param_hits = 0
@@ -768,7 +762,7 @@ def leaderboard_for_gap(
                 "changed_files": sorted(row["changed_files"]),
             }
         )
-    out.sort(key=lambda r: (_safe_float(r.get("quality_score")), _safe_float(r.get("last_ts"))), reverse=True)
+    out.sort(key=lambda r: (to_float(r.get("quality_score"), default=0.0), to_float(r.get("last_ts"), default=0.0)), reverse=True)
     return out if limit <= 0 else out[:limit]
 
 
