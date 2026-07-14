@@ -813,20 +813,21 @@ def _probe_llm_catalog(
 
 
 def _catalog_probe_headers(*, base_url: str, api_key: str) -> dict[str, str]:
-    """Build headers for direct ``/models`` probes.
+    """Build headers for a direct ``<base_url>/models`` probe.
 
-    Applies the operator's gateway custom headers (``OPENAI_CUSTOM_HEADERS`` /
-    ``ANTHROPIC_CUSTOM_HEADERS``) plus a Bearer token. Gateway-specific headers
-    (e.g. an AMD ``Ocp-Apim-Subscription-Key``) must be supplied via those env
-    vars — the probe applies no host-specific auto-injection. ``base_url`` is
-    kept for signature stability with the caller.
+    Applies the operator's custom headers for the side being probed: the OpenAI
+    base uses ``OPENAI_CUSTOM_HEADERS``; the Anthropic base and any manual probe
+    override use ``ANTHROPIC_CUSTOM_HEADERS`` (Anthropic is the primary catalog
+    target, so it is the default). Gateway-specific headers (e.g. an AMD
+    ``Ocp-Apim-Subscription-Key``) must be supplied via those env vars — no
+    host-specific auto-injection.
     """
-    del base_url  # no longer used for header selection (env-driven only)
-    headers = parse_custom_headers(os.environ.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
-        os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
-    )
-    lower_names = {name.lower() for name in headers}
-    if api_key and "authorization" not in lower_names:
+    openai_base = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/")
+    probe = (base_url or "").strip().rstrip("/")
+    probing_openai = bool(openai_base) and (probe == openai_base or probe.startswith(openai_base + "/"))
+    env_name = "OPENAI_CUSTOM_HEADERS" if probing_openai else "ANTHROPIC_CUSTOM_HEADERS"
+    headers = parse_custom_headers(os.environ.get(env_name))
+    if api_key and not any(name.lower() == "authorization" for name in headers):
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
 
