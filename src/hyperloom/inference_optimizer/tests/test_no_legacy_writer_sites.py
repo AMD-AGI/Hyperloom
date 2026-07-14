@@ -73,18 +73,16 @@ ALLOWED_FILES: dict[str, str] = {
         "intent / sub-agent envelope read boundaries",
     # Coordinator method clusters live in collaborator objects; the
     # read_extra_server_args envelope-read comments /
-    # KB best_config arg handling moved with them.
-    "src/hyperloom/orchestrator/loop/resume.py": "resume/replay collaborator carries the coordinator envelope-read surface",
-    "src/hyperloom/orchestrator/loop/writeback.py": "writeback collaborator carries the KB best_config / recipe-attrs arg surface",
+    # KB best_config arg handling moved with them. The former resume + recorder
+    # collaborators were folded into writeback (lean-2), so that surface now
+    # lives here too.
+    "src/hyperloom/orchestrator/loop/writeback.py": "writeback collaborator carries the KB best_config / recipe-attrs / "
+    "resume-replay / result-recorder arg surface (resume.py + result_recorder.py folded in)",
     # tree-reform.MD P2.2 3b-2: Coordinator phase-handler clusters live in
     # collaborator objects; the read_extra_server_args envelope-read
     # comments / warm-recipe KB best_config arg handling moved with them.
     "src/hyperloom/orchestrator/phases/prelude.py": "prelude handler carries the warm-recipe KB best_config/extra_sglang_args read+merge surface",
     "src/hyperloom/orchestrator/phases/kernel.py": "kernel phase re-exports coordinator helper names for callers/tests",
-    "src/hyperloom/orchestrator/loop/result_recorder.py":
-        "result-recording / fact-synthesis methods extracted verbatim from "
-        "coordinator.py (phase 1B); same read_extra_server_args envelope-read "
-        "boundaries as the coordinator they came from",
     "src/hyperloom/orchestrator/loop/coordinator_helpers.py":
         "holds the extracted _merge_cumulative_extra_sglang_args helper "
         "that merges the legacy KB best_config arg stacks",

@@ -13,7 +13,7 @@ Why this exists
 ---------------
 The structural refactor (see the "break four God-objects" plan) extracts the
 Coordinator's ``_handle_*`` intent routing and ``record_*`` state mutations into
-collaborator objects (``IntentRouter``, ``ResultRecorder``) and moves behavior
+collaborator objects (``IntentRouter``, ``WritebackCollaborator``) and moves behavior
 off ``SharedState``. Those moves must be *behavior-preserving*. This test is the
 gate: if an extraction changes what the Coordinator does — different state,
 different bus decisions — the golden mismatch fails the build before the change

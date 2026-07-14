@@ -90,7 +90,6 @@ from ..bus.resource_lock import (
 )
 from ..state.shared_state import SharedState
 from .intent_router import IntentRouter
-from .result_recorder import ResultRecorder
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
@@ -558,15 +557,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "phase_explore": ("phases.explore", "ExplorePhase"),
         "phase_framework": ("phases.framework", "FrameworkPhase"),
         "router": ("loop.intent_router", "IntentRouter"),
-        "recorder": ("loop.result_recorder", "ResultRecorder"),
         "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
-        "resume_helper": ("loop.resume", "ResumeCollaborator"),
         "writeback": ("loop.writeback", "WritebackCollaborator"),
-        "gating": ("loop.gating", "GatingCollaborator"),
         "dispatcher": ("loop.dispatcher", "DispatcherCollaborator"),
         "proposals": ("loop.proposals", "ProposalsCollaborator"),
-        "advisory": ("loop.advisory", "AdvisoryCollaborator"),
-        "inline_actions": ("loop.inline_actions", "InlineActionsCollaborator"),
         "conversation": ("loop.conversation", "ConversationCollaborator"),
     }
 
@@ -989,22 +983,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.__dict__["_router"] = r
         return r
 
-    @property
-    def recorder(self) -> ResultRecorder:
-        """Result-recording / fact-synthesis collaborator (extracted from this class).
-
-        The ``_record_*`` / ``_build_*`` / ``cortex_finalize_recipe_and_journal``
-        / research-evidence methods were moved verbatim into
-        :class:`ResultRecorder`; the methods remaining here are thin forwarding
-        shims. Built lazily and cached, same as :attr:`router`, so test doubles
-        constructed via ``Coordinator.__new__`` resolve a recorder on first use.
-        """
-        r = self.__dict__.get("_recorder")
-        if r is None:
-            r = ResultRecorder(self)
-            self.__dict__["_recorder"] = r
-        return r
-
     # Methods extracted into collaborator objects are delegated back by name here
     # (symmetric to each collaborator's
     # ``__getattr__`` back to this coordinator). ``coord.foo`` / ``self.foo`` /
@@ -1020,9 +998,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_kill_task": "router", "_handle_prune_branch": "router",
         "_handle_escalate_strategy_change": "router", "_handle_send_message": "router",
         "_handle_alert": "router", "_handle_update_state": "router",
-        # recorder
-        "_aggregate_research_evidence": "recorder", "_harvest_research_scout": "recorder",
-        "_record_specialist_result": "recorder",
+        # recorder (folded into writeback)
+        "_aggregate_research_evidence": "writeback", "_harvest_research_scout": "writeback",
+        "_record_specialist_result": "writeback",
         # Phase handlers, grouped in the same call-chain order as
         # _COLLAB_MODULES/the @property block above:
         # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->
@@ -1210,17 +1188,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_reactor_conversation": "conversation",
         "_compose_prompt": "conversation",
         "_load_system_prompt": "conversation",
-        "_inline_action_whitelist": "inline_actions",
-        "_run_action_now_sync": "inline_actions",
-        "_run_action_now": "inline_actions",
-        "_plateau_advisory_block": "advisory",
-        "_dominant_roofline_direction": "advisory",
-        "_bottleneck_redirect_advisory_block": "advisory",
-        "_acceptance_threshold_advisory_block": "advisory",
-        "_target_gap_advisory_block": "advisory",
-        "_current_primary_gap": "advisory",
-        "_recent_proposed_variants": "advisory",
-        "_priors_match_advisory_block": "advisory",
+        "_inline_action_whitelist": "dispatcher",
+        "_run_action_now_sync": "dispatcher",
+        "_run_action_now": "dispatcher",
+        "_plateau_advisory_block": "conversation",
+        "_dominant_roofline_direction": "conversation",
+        "_bottleneck_redirect_advisory_block": "conversation",
+        "_acceptance_threshold_advisory_block": "conversation",
+        "_target_gap_advisory_block": "conversation",
+        "_current_primary_gap": "conversation",
+        "_recent_proposed_variants": "conversation",
+        "_priors_match_advisory_block": "conversation",
         "_resolve_issue_canonical": "proposals",
         "_workload_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
@@ -1244,12 +1222,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",
         "_lanes_fit": "dispatcher",
-        "_target_analysis_baseline_exists": "gating",
-        "_kernel_opt_keep_pending": "gating",
-        "_sequence_denial_for_action": "gating",
-        "_sequence_denial_for_request": "gating",
-        "_skip_gemm_tuning": "gating",
-        "_gemm_tuning_required_before_kernel_opt": "gating",
+        "_target_analysis_baseline_exists": "dispatcher",
+        "_kernel_opt_keep_pending": "dispatcher",
+        "_sequence_denial_for_action": "dispatcher",
+        "_sequence_denial_for_request": "dispatcher",
+        "_skip_gemm_tuning": "dispatcher",
+        "_gemm_tuning_required_before_kernel_opt": "dispatcher",
         "_emit_lifecycle": "writeback",
         "_record_policy_denied": "writeback",
         "_record_observation": "writeback",
@@ -1274,20 +1252,20 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "cortex_finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_promote_to_shared_state": "writeback",
-        "_detect_resume_state": "resume_helper",
-        "replay_for_resume": "resume_helper",
-        "_materialize_stack_config_for_resume": "resume_helper",
-        "build_env_spec": "resume_helper",
-        "_resume_consistency_pass": "resume_helper",
-        "_resume_reenter_kernel_if_needed": "resume_helper",
-        "_replay_keep_from_result": "resume_helper",
-        "_resume_rollback_pending_integrate": "resume_helper",
-        "_resume_recover_pending_integrate": "resume_helper",
-        "_resume_recover_orphaned_keeps": "resume_helper",
-        "_enqueue_internal_stack_rebench": "resume_helper",
-        "_validate_geak_via_geak_harness": "resume_helper",
-        "resumed_from": "resume_helper",
-        "_replay_resume_if_needed": "resume_helper",
+        "_detect_resume_state": "writeback",
+        "replay_for_resume": "writeback",
+        "_materialize_stack_config_for_resume": "writeback",
+        "build_env_spec": "writeback",
+        "_resume_consistency_pass": "writeback",
+        "_resume_reenter_kernel_if_needed": "writeback",
+        "_replay_keep_from_result": "writeback",
+        "_resume_rollback_pending_integrate": "writeback",
+        "_resume_recover_pending_integrate": "writeback",
+        "_resume_recover_orphaned_keeps": "writeback",
+        "_enqueue_internal_stack_rebench": "writeback",
+        "_validate_geak_via_geak_harness": "writeback",
+        "resumed_from": "writeback",
+        "_replay_resume_if_needed": "writeback",
         "_maybe_run_maintenance_tick": "maintenance",
         "_maybe_prune_runs_for_disk": "maintenance",
         "_maybe_checkpoint_orchestration": "maintenance",
@@ -1303,7 +1281,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _collaborator(self, attr: str, factory):
-        """Lazily build + cache a collaborator object (like ``router``/``recorder``);
+        """Lazily build + cache a collaborator object (like ``router``/``writeback``);
         works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""
         obj = self.__dict__.get(attr)
         if obj is None:
@@ -1365,16 +1343,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return self._collaborator("_conversation", ConversationCollaborator)
 
     @property
-    def inline_actions(self):
-        from .inline_actions import InlineActionsCollaborator
-        return self._collaborator("_inline_actions", InlineActionsCollaborator)
-
-    @property
-    def advisory(self):
-        from .advisory import AdvisoryCollaborator
-        return self._collaborator("_advisory", AdvisoryCollaborator)
-
-    @property
     def proposals(self):
         from .proposals import ProposalsCollaborator
         return self._collaborator("_proposals", ProposalsCollaborator)
@@ -1385,19 +1353,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return self._collaborator("_dispatcher", DispatcherCollaborator)
 
     @property
-    def gating(self):
-        from .gating import GatingCollaborator
-        return self._collaborator("_gating", GatingCollaborator)
-
-    @property
     def writeback(self):
         from .writeback import WritebackCollaborator
         return self._collaborator("_writeback", WritebackCollaborator)
-
-    @property
-    def resume_helper(self):
-        from .resume import ResumeCollaborator
-        return self._collaborator("_resume_helper", ResumeCollaborator)
 
     @property
     def maintenance(self):
