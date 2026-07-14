@@ -438,19 +438,6 @@ def test_label_search_filters_slugs_by_configured_prefix() -> None:
     assert c._mcp.calls[1][1]["slug"] == "hyperloom-recipe-kb/new"  # type: ignore[union-attr]
 
 
-def test_list_recent_returns_rows() -> None:
-    c = _client(
-        {
-            _slug("r1"): _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
-            _slug("r2"): _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
-        }
-    )
-    rows = c.list_recent(limit=10)
-    assert len(rows) == 2
-    # newest first
-    assert rows[0]["labels"]["hardware"] == "mi355x"
-
-
 def test_build_from_env_timeout(monkeypatch) -> None:
     monkeypatch.setenv("GBRAIN_BASE_URL", "http://gbrain.test")
     monkeypatch.setenv("GBRAIN_TOKEN", "tok")

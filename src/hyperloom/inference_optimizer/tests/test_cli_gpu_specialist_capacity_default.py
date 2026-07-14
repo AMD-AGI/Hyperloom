@@ -8,7 +8,7 @@ otherwise the default is the visible GPU count on the launch host.
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.cli import _default_gpu_specialist_capacity
+from hyperloom.inference_optimizer.cli.parser import _default_gpu_specialist_capacity
 
 
 def test_env_value_wins(monkeypatch):

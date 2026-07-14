@@ -11,6 +11,9 @@ import time
 import pytest
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import credentials as cli_credentials
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
 # _validate_credentials
@@ -32,28 +35,28 @@ def test_validate_credentials_passes_legacy_single_gateway(clean_creds_env):
     """Legacy AMD single-gateway pair (SAFE_API_KEY + OPENAI_BASE_URL) still passes."""
     clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    cli._validate_credentials()
+    cli_credentials._validate_credentials()
 
 
 def test_validate_credentials_passes_anthropic_only_entrypoint(clean_creds_env):
     """Split entrypoint: only the Anthropic side configured is enough."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
-    cli._validate_credentials()
+    cli_credentials._validate_credentials()
 
 
 def test_validate_credentials_passes_openai_key_with_anthropic_url(clean_creds_env):
     """A URL on one side + a key on the other still satisfies the check."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
-    cli._validate_credentials()
+    cli_credentials._validate_credentials()
 
 
 def test_validate_credentials_exits_2_when_no_base_url(clean_creds_env, capsys):
     """A key without any base URL is rejected."""
     clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_credentials()
+        cli_credentials._validate_credentials()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "base URL" in err
@@ -63,7 +66,7 @@ def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
     """A base URL without any key is rejected."""
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_credentials()
+        cli_credentials._validate_credentials()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "API key" in err
@@ -71,7 +74,7 @@ def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
 
 def test_validate_credentials_lists_both_missing(clean_creds_env, capsys):
     with pytest.raises(SystemExit):
-        cli._validate_credentials()
+        cli_credentials._validate_credentials()
     err = capsys.readouterr().err
     missing_line = err.split("Missing required credential(s):")[1].split("\n")[0]
     assert "base URL" in missing_line
@@ -82,7 +85,7 @@ def test_validate_credentials_no_bypass_paths(clean_creds_env):
     """HYPERLOOM_SKIP_CREDS_CHECK does NOT bypass — the bypass path was removed."""
     clean_creds_env.setenv("HYPERLOOM_SKIP_CREDS_CHECK", "1")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_credentials()
+        cli_credentials._validate_credentials()
     assert exc_info.value.code == 2
 
 
@@ -90,7 +93,7 @@ def test_validate_credentials_no_bypass_paths(clean_creds_env):
 def test_resolve_llm_endpoints_legacy_openai_only(clean_creds_env):
     """Only OPENAI_BASE_URL: Anthropic base is derived (trailing /v1 stripped)."""
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert openai_url == "https://gateway.example/v1"
     assert anthropic_url == "https://gateway.example"
 
@@ -98,7 +101,7 @@ def test_resolve_llm_endpoints_legacy_openai_only(clean_creds_env):
 def test_resolve_llm_endpoints_anthropic_only_reused_for_openai(clean_creds_env):
     """Only ANTHROPIC_BASE_URL: the OpenAI/Codex side reuses the same URL."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == "https://api.anthropic.com"
     assert openai_url == "https://api.anthropic.com"
 
@@ -107,13 +110,13 @@ def test_resolve_llm_endpoints_both_kept_distinct(clean_creds_env):
     """Both set: each side is respected as-is (true dual entrypoint)."""
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == "https://api.anthropic.com"
     assert openai_url == "https://api.openai.com/v1"
 
 
 def test_resolve_llm_endpoints_neither_set_returns_empty(clean_creds_env):
-    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
     assert anthropic_url == ""
     assert openai_url == ""
 
@@ -121,27 +124,27 @@ def test_resolve_llm_endpoints_neither_set_returns_empty(clean_creds_env):
 # _resolve_gpu_type
 def test_resolve_gpu_type_probe_only():
     """No --gpu-type passed; probe wins."""
-    gpu, warns = cli._resolve_gpu_type(user_specified="", probed="mi355x")
+    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="", probed="mi355x")
     assert gpu == "mi355x"
     assert warns == []
 
 
 def test_resolve_gpu_type_user_only():
     """Probe failed (CPU sandbox); user value is used as-is, no warn."""
-    gpu, warns = cli._resolve_gpu_type(user_specified="mi300x", probed="")
+    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="mi300x", probed="")
     assert gpu == "mi300x"
     assert warns == []
 
 
 def test_resolve_gpu_type_agreement_silent():
-    gpu, warns = cli._resolve_gpu_type(user_specified="mi355x", probed="mi355x")
+    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="mi355x", probed="mi355x")
     assert gpu == "mi355x"
     assert warns == []
 
 
 def test_resolve_gpu_type_disagreement_probe_always_wins():
     """On disagreement the probe wins unconditionally and warns loudly."""
-    gpu, warns = cli._resolve_gpu_type(
+    gpu, warns = cli_model_gate._resolve_gpu_type(
         user_specified="mi300x",
         probed="mi355x",
     )
@@ -153,7 +156,7 @@ def test_resolve_gpu_type_disagreement_probe_always_wins():
 
 def test_resolve_gpu_type_no_inputs_returns_empty():
     """No probe, no user value → empty gpu_type."""
-    gpu, warns = cli._resolve_gpu_type(user_specified="", probed="")
+    gpu, warns = cli_model_gate._resolve_gpu_type(user_specified="", probed="")
     assert gpu == ""
     assert warns == []
 
@@ -231,7 +234,7 @@ def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
 
 # CLI flag wiring (parser end-to-end)
 def test_parser_accepts_launch_info_file():
-    parser = cli._build_parser()
+    parser = _build_parser()
     ns = parser.parse_args(
         [
             "optimize",
@@ -245,14 +248,14 @@ def test_parser_accepts_launch_info_file():
 
 
 def test_parser_default_launch_info_file_is_none():
-    parser = cli._build_parser()
+    parser = _build_parser()
     ns = parser.parse_args(["optimize", "--model", "/models/test"])
     assert ns.launch_info_file is None
 
 
 def test_parser_does_not_expose_removed_bypass_flags():
     """Regression guard: --no-creds-check and --gpu-type-force must stay removed."""
-    parser = cli._build_parser()
+    parser = _build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(
             [

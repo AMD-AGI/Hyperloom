@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import (
+from hyperloom.inference_optimizer.cli.kb import (
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
@@ -469,10 +469,10 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         precision="p",
         best_throughput=2.0,
     )
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    assert history[0]["version"] == 1
-    assert history[0]["snapshot"]["best_throughput"] == 1.0
+    archived = store.get_recipe(canonical_id=cid, version=1)
+    assert archived is not None
+    assert archived["version"] == 1
+    assert archived["best_throughput"] == 1.0
 
 
 # Final local KB file data fields stay consistent with the Arbor recipe.

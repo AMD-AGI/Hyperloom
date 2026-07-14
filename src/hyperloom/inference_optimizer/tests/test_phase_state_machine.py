@@ -648,7 +648,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
@@ -663,7 +662,7 @@ def coordinator_with_mocks(session_dir):
     )
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

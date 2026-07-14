@@ -126,13 +126,6 @@ def test_forge_steps_marker_with_empty_blob_is_none():
     assert pu.parse_forge_steps("FORGE_STEPS") is None
 
 
-# ---- langfuse_mapping: pure helper edge paths ----
-
-
-def test_span_key():
-    assert lm.span_key({"phase": "EXPLORE", "component": "critic"}) == ("EXPLORE", "critic")
-
-
 def test_parse_ts_missing_and_unparseable():
     assert lm.parse_ts(None) is None
     assert lm.parse_ts("") is None

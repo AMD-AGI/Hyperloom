@@ -28,7 +28,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_prompt_snapshot,
-    kernel_workspace,
     manifest_path,
     patches_dir,
     runs_dir,
@@ -401,8 +400,7 @@ def test_runs_dir_rejects_unknown_action(tmp_path):
         runs_dir(tmp_path, "this_is_not_an_action", "x")
 
 
-def test_kernel_workspace_and_patches(tmp_path):
-    assert kernel_workspace(tmp_path, "k001") == tmp_path / "kernel-agent-workspace" / "k001"
+def test_patches_path(tmp_path):
     assert patches_dir(tmp_path, "k001") == tmp_path / "patches" / "k001"
 
 
