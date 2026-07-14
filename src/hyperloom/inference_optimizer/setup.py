@@ -6,6 +6,10 @@ The skill writes ``.env`` in the user's target directory, then invokes this
 module with ``PYTHONPATH=<target> python3 -m ...``. This backend locates the
 packaged installers and runs the bare-metal setup flow with the target
 directory as the runtime/config root.
+
+Kept directly under the lightweight ``hyperloom.inference_optimizer`` package
+(not under ``cli/``) so ``python -m hyperloom.inference_optimizer.setup`` starts
+with zero third-party imports; runtime deps are installed later by install.sh.
 """
 
 from __future__ import annotations
@@ -16,9 +20,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _INSTALL_BAREMETAL_SH = _ASSETS_DIR / "install_baremetal.sh"
-_PACKAGE_SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
+_PACKAGE_SKILL = Path(__file__).resolve().parent / "SKILL.md"
 
 
 def _build_parser() -> argparse.ArgumentParser:

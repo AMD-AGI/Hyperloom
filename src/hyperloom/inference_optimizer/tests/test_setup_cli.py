@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.inference_optimizer.cli import setup
+from hyperloom.inference_optimizer import setup
 
 
 class _Completed:

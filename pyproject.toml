@@ -9,20 +9,13 @@ description = "Inference Optimizer — single-mode 4-agent (Orchestration/Kernel
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = [
-    "claude-agent-sdk>=0.2.110",
-    "openai>=1.50",
-    "httpx>=0.27",
-    "PyYAML>=6.0",
-    # Optional critic-agent web tools (web_search / web_fetch). Kept in the
-    # base dependency set because the critic backend imports them at module
-    # load time even when CRITIC_WEB_TOOLS_ENABLED=false.
-    "markdownify>=0.11",
-    "cachetools>=5.3",
-    # tree-reform.MD P2.5: framework-agent's own base dependency, merged in
-    # verbatim after its promotion into hyperloom.agents.framework.
-    "jsonschema>=4.0",
-]
+# Intentionally empty: the bare wheel carries no third-party runtime deps so a
+# ``pip install --target`` workspace stays clean. Runtime deps are installed by
+# the packaged install.sh (see the ``runtime`` extra below and the packaged
+# branch of inference_optimizer/assets/install.sh); ``setup.py`` starts with
+# stdlib-only imports so ``python -m hyperloom.inference_optimizer.setup`` runs
+# before any dep is installed.
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/AMD-AGI/Hyperloom"
@@ -32,7 +25,31 @@ Changelog = "https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md"
 Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
 [project.optional-dependencies]
+# LLM backend SDKs — lazy-imported by the Claude/Codex/critic/scorer roles and
+# backfilled at runtime by preflight ``_ensure_python_sdks``. httpx also has a
+# few top-level imports in robustness/multi_node internals (not on the CLI
+# startup path).
+llm = [
+    "claude-agent-sdk>=0.2.110",
+    "openai>=1.50",
+    "httpx>=0.27",
+]
+# Critic-agent web tools (web_search / web_fetch). ``web_tools`` imports these
+# at module load time even when CRITIC_WEB_TOOLS_ENABLED=false, but that module
+# is only imported lazily by the critic backend, so they stay out of base.
+web = [
+    "markdownify>=0.11",
+    "cachetools>=5.3",
+]
+# Full runtime dependency set installed by the packaged install.sh. PyYAML is
+# a hard import-time dep of the CLI startup path (executors/baseline.py); the
+# rest come from the llm/web extras above.
+runtime = [
+    "PyYAML>=6.0",
+    "hyperloom-inference_optimizer[llm,web]",
+]
 test = [
+    "hyperloom-inference_optimizer[runtime]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "respx>=0.21",
@@ -75,7 +92,7 @@ claude = [
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
-hyperloom = "hyperloom.inference_optimizer.cli.setup:main"
+hyperloom = "hyperloom.inference_optimizer.setup:main"
 # tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
 # (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
 # keep resolving after promotion into the single ``hyperloom`` distribution.
@@ -102,7 +119,7 @@ where = ["src"]
 
 [tool.setuptools.data-files]
 ".agents/skills/hyperloom-setup" = [
-    "src/hyperloom/inference_optimizer/agent_skills/hyperloom-setup/SKILL.md",
+    "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
 
 [tool.setuptools.package-data]
@@ -127,7 +144,6 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
-    "agent_skills/*/SKILL.md",
     # Slurm submission bundle (batch-scheduler counterpart to the k8s layout;
     # see docs/install/slurm.md). Shipped so wheel installs get the scripts.
     "assets/slurm/*.sh",

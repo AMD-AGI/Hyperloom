@@ -104,7 +104,7 @@ If any required secret is missing or still a placeholder, stop and ask the user 
 Run setup from the same directory:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup
 ```
 
 Pass the selected framework after `--`.
@@ -112,19 +112,19 @@ Pass the selected framework after `--`.
 For `none`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup -- --install-framework none
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
 ```
 
 For `sglang`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup -- --install-framework sglang --yes
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
 For `vllm`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup -- --install-framework vllm --yes
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --yes
 ```
 
 ## Step 5: Report Result

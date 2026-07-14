@@ -65,7 +65,7 @@ The setup skill is interactive. It should:
 - ask the user to edit secrets directly in `.env` (do not paste API keys into chat);
 - ask whether to use the default `USER_DATA_PATH` or a custom path;
 - ask whether to install a serving framework: `none`, `sglang`, or `vllm`;
-- run the setup backend with `PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup`.
+- run the setup backend with `PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup`.
 
 LLM defaults:
 
@@ -112,7 +112,7 @@ CODEX_MODEL=gpt-4.1
 USER_DATA_PATH=/root/hyperloom
 EOF
 
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.cli.setup \
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup \
   --dry-run -- --skip-base-check --install-framework none
 ```
 
