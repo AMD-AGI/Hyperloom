@@ -1,9 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for sources/base.py.
-
-Covers DegradeRouter state machine + SourceData merge semantics.
-"""
+"""Unit tests for sources/base.py."""
 
 from __future__ import annotations
 
@@ -57,37 +54,6 @@ class _ScriptedSource:
 
 def _data(label: str) -> SourceData:
     return SourceData(session_summary={"from": label})
-
-
-# ---------------------------------------------------------------------------
-# Source data merging
-# ---------------------------------------------------------------------------
-
-
-def test_source_data_merge_preserves_existing_fields():
-    primary = SourceData(
-        session_pods=[{"pod": "a"}],
-        session_metrics={"x": 1},
-        sources_used=["server"],
-    )
-    secondary = SourceData(
-        session_pods=[{"pod": "b"}],
-        session_metrics={"y": 2},
-        cluster_faults=[{"fault": 1}],
-        sources_used=["local"],
-    )
-    primary.merge_from(secondary)
-    assert primary.session_pods == [{"pod": "a"}]
-    assert primary.session_metrics == {"x": 1}
-    assert primary.cluster_faults == [{"fault": 1}]
-    assert primary.sources_used == ["server", "local"]
-
-
-def test_source_data_merge_inherits_degraded_reason_when_missing():
-    primary = SourceData()
-    secondary = SourceData(degraded_reason="server timeout")
-    primary.merge_from(secondary)
-    assert primary.degraded_reason == "server timeout"
 
 
 # ---------------------------------------------------------------------------

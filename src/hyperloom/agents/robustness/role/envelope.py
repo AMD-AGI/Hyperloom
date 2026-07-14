@@ -257,19 +257,6 @@ class Intent:
         return {"intent_type": self.type.value, "payload": dict(self.payload)}
 
 
-@dataclass
-class BackendTurnResult:
-    """Mirror of upstream ``backends.base.BackendTurnResult``.
-
-    The Coordinator inspects ``intents`` and ignores the rest.
-    ``raw_text`` is recorded for debugging only.
-    """
-
-    intents: list[Intent] = field(default_factory=list)
-    raw_text: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
 # ---------------------------------------------------------------------------
 # Intent builders
 # ---------------------------------------------------------------------------
