@@ -202,7 +202,7 @@ hard-allowlisted:
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | `claude-opus-4-7` (preferred) or `claude-opus-4-6` | Enforced by the optimizer's model gate; other names are rejected. |
 | Kernel agent (GEAK) | `GEAK_MODEL_NAME` | for example `claude-opus-4-8` | Not subject to the orchestration gate. |
-| Codex / OOB | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
+| Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
 
 - Do **not** use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
   the gateway returns `Invalid model name` (which can surface misleadingly as

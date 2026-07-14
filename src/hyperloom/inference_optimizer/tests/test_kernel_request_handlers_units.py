@@ -784,16 +784,16 @@ class TestBackendOrder:
     def test_documented_kernel_opt_backends_env_is_honored(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak_v3")
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "forge")
 
-        assert krh._backend_order({}) == ["geak_v3"]
+        assert krh._backend_order({}) == ["forge"]
 
     def test_documented_kernel_opt_backends_env_is_case_normalized(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        # tokens are lowercased/trimmed; the removed OOB backend (codex) is filtered out
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK_V3 , CoDeX ")
+        # tokens are lowercased/trimmed; unknown backends are filtered out
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " FORGE , Foo ")
 
-        assert krh._backend_order({}) == ["geak_v3"]
+        assert krh._backend_order({}) == ["forge"]
 
 
 # _candidate_env_allowed
@@ -1397,65 +1397,6 @@ class TestRunGemmTuningHandler:
 
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
-# of the kernel-agent default; the legacy 90 forced quick-mode timing.
-class TestDefaultGeakBudgetMinutes:
-    @pytest.mark.parametrize(
-        "geak_run_mode, expected",
-        [
-            (None, 180.0),  # unset -> full default
-            ("", 180.0),  # empty -> full default
-            ("full", 180.0),
-            ("FULL", 180.0),  # case-insensitive
-            ("  full  ", 180.0),  # whitespace tolerated
-            ("garbage", 180.0),  # unknown values fall back to full
-            ("quick", 70.0),
-            ("QUICK", 70.0),
-            ("  quick  ", 70.0),
-        ],
-    )
-    def test_tracks_geak_run_mode(self, monkeypatch, geak_run_mode, expected):
-        if geak_run_mode is None:
-            monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
-        else:
-            monkeypatch.setenv("GEAK_RUN_MODE", geak_run_mode)
-        assert krh._default_geak_budget_minutes() == expected
-
-
-class TestGeakBudgetMinutes:
-    def test_payload_override_wins(self, monkeypatch):
-        monkeypatch.setenv("GEAK_RUN_MODE", "quick")
-        monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "500")
-        assert krh._geak_budget_minutes({"geak_budget_min": 100}) == 100.0
-
-    def test_env_override_beats_default(self, monkeypatch):
-        monkeypatch.setenv("GEAK_RUN_MODE", "quick")
-        monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "115")
-        assert krh._geak_budget_minutes({}) == 115.0
-
-    @pytest.mark.parametrize(
-        "geak_run_mode, expected",
-        [
-            ("full", 180.0),
-            ("quick", 70.0),
-        ],
-    )
-    def test_falls_through_to_helper_when_no_overrides(
-        self,
-        monkeypatch,
-        geak_run_mode,
-        expected,
-    ):
-        monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
-        monkeypatch.setenv("GEAK_RUN_MODE", geak_run_mode)
-        assert krh._geak_budget_minutes({}) == expected
-
-    def test_empty_env_value_falls_through_to_helper(self, monkeypatch):
-        # Pre-fix code would let "" propagate into ``float("")`` and raise.
-        monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "")
-        monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
-        assert krh._geak_budget_minutes({}) == 180.0
-
-
 # _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8
 # over-admitted on smaller pods (4-GPU labs, partial-node CI shards).
 class TestDefaultKernelBatchParallel:
@@ -1528,7 +1469,7 @@ class TestDefaultKernelBatchParallel:
 # ---------------------------------------------------------------------------
 # _should_parallelize_backends
 #
-# With the ladder converged to forge + geak_v3 there is no second (OOB) ladder
+# With the ladder converged to forge-only there is no second (legacy backend) ladder
 # to race, so backends never auto-parallelize regardless of GPU count. The flag
 # is False unless explicitly forced via payload ``parallel_backends`` or env
 # ``KERNEL_OPT_PARALLEL_BACKENDS``.
@@ -1555,7 +1496,7 @@ class TestShouldParallelizeBackends:
     @pytest.mark.parametrize(
         "n_gpus, per_task, num_candidates",
         [
-            # No auto-parallelize regardless of GPU count: the OOB ladder that
+            # No auto-parallelize regardless of GPU count: the removed backend ladder that
             # used to be raced against GEAK has been removed, so without an
             # explicit override the decision is always sequential (False).
             (8, 1, 3),
@@ -1634,103 +1575,6 @@ class TestShouldParallelizeBackends:
         assert krh._should_parallelize_backends({}, 5) is True
         monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "0")
         assert krh._should_parallelize_backends({}, 1) is False
-
-
-# ---------------------------------------------------------------------------
-# _run_optimization_batch concurrency cap (parallel-backends mode)
-#
-# Each parallel kernel launches TWO before_kernel_opt rocprof subprocesses
-# (GEAK + OOB) *before* entering Ray, bypassing the Ray GPU lease. The batch
-# caps concurrent kernels to ``visible_gpus // (2 * per_task)`` so those
-# pre-Ray profilers (and the Ray tasks that follow) stay within the real GPU
-# budget even when ``max_parallel`` is set higher.
-# ---------------------------------------------------------------------------
-
-
-class TestBatchParallelConcurrencyCap:
-    def test_caps_concurrency_to_gpu_budget(self, tmp_path, monkeypatch):
-        # 8 visible GPUs, 1 GPU/task -> safe concurrency = 8 // (2*1) = 4.
-        monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 8)
-        monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", "1")  # per_task = 1
-        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
-
-        state = {"in_flight": 0, "peak": 0}
-
-        async def fake_sequence(
-            base_payload,
-            candidate,
-            *,
-            session_dir,
-            parallel_backends=False,
-        ):
-            assert parallel_backends is True
-            state["in_flight"] += 1
-            state["peak"] = max(state["peak"], state["in_flight"])
-            try:
-                await asyncio.sleep(0.02)  # hold the slot so siblings overlap
-            finally:
-                state["in_flight"] -= 1
-            return {
-                "status": "ok",
-                "kernel_id": candidate["kernel_id"],
-                "source_file": candidate.get("source_file"),
-                "proposal": {"decision": "REVERT"},
-                "verification": {"micro_speedup": 1.0},
-            }
-
-        monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
-        candidates = [
-            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py", "reusable_native_kernel": True} for i in range(10)
-        ]
-        out = asyncio.run(
-            krh._run_optimization_batch(
-                payload={"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex", "max_parallel": 10},
-                candidates=candidates,
-                session_dir=tmp_path,
-            )
-        )
-
-        assert out["parallel_backends"] is True
-        # max_parallel echoes the capped value (10 -> 4).
-        assert out["max_parallel"] == 4
-        # Cap binds: 4 kernels * 2 ladders = 8 pre-Ray profilers == 8 GPUs.
-        assert state["peak"] == 4, state["peak"]
-
-    def test_no_cap_when_gpu_count_unknown(self, tmp_path, monkeypatch):
-        # torch can't report a count (None) -> cap math is skipped so the
-        # operator-supplied max_parallel is preserved (matches CI / mocks).
-        monkeypatch.setattr(krh, "_visible_gpu_count", lambda: None)
-        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
-
-        async def fake_sequence(
-            base_payload,
-            candidate,
-            *,
-            session_dir,
-            parallel_backends=False,
-        ):
-            return {
-                "status": "ok",
-                "kernel_id": candidate["kernel_id"],
-                "source_file": candidate.get("source_file"),
-                "proposal": {"decision": "REVERT"},
-                "verification": {"micro_speedup": 1.0},
-            }
-
-        monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
-        candidates = [
-            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py", "reusable_native_kernel": True} for i in range(3)
-        ]
-        out = asyncio.run(
-            krh._run_optimization_batch(
-                payload={"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex", "max_parallel": 7},
-                candidates=candidates,
-                session_dir=tmp_path,
-            )
-        )
-
-        assert out["parallel_backends"] is True
-        assert out["max_parallel"] == 7  # uncapped (visible GPU count unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -2188,7 +2032,7 @@ class TestKernelOptArtifactBundleRecording:
                     "micro_speedup": 1.25,
                     "compile_passed": True,
                     "correctness_passed": True,
-                    "best_backend": "geak_v3",
+                    "best_backend": "forge",
                     "best_artifact_path": "/repo/aiter/ops/moe.py",
                     "best_artifact_bundle": bundle,
                     "deploy_snapshot_dir": "/tmp/snap",
