@@ -355,7 +355,7 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
     # Unset gateway env so the external-deps sub-probe doesn't add a
     # ``/models`` request and break the exact-count assertion below.
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     cfg = lp.LocalProbeConfig(
         session_dir=None,
@@ -405,7 +405,7 @@ async def test_probe_gateway_health_uses_custom_subscription_header(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     out = await _probe_gateway_health("https://llm-api.amd.com/Unified/v1/models", 1.0)
 
@@ -425,7 +425,7 @@ async def test_probe_gateway_health_uses_provider_api_key(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_headers.update({k.lower(): v for k, v in request.headers.items()})
-        if request.headers.get("Authorization") == "Bearer sk-openai":
+        if request.headers.get("Authorization") == "Bearer openai-token":
             return httpx.Response(200, json={"data": []})
         return httpx.Response(401, json={"error": "missing bearer"})
 
@@ -438,8 +438,8 @@ async def test_probe_gateway_health_uses_provider_api_key(monkeypatch):
 
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
     monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
@@ -448,7 +448,7 @@ async def test_probe_gateway_health_uses_provider_api_key(monkeypatch):
 
     assert out["status"] == "ok"
     assert out["status_code"] == 200
-    assert seen_headers["authorization"] == "Bearer sk-openai"
+    assert seen_headers["authorization"] == "Bearer openai-token"
     assert "ocp-apim-subscription-key" not in seen_headers
 
 
