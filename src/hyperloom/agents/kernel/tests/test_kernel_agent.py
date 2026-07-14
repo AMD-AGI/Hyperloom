@@ -431,7 +431,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # Default ladder converged to forge-only; OOB/GEAK per-kernel backends removed.
+            # Default ladder converged to forge-only; legacy per-kernel backends removed.
             self.assertEqual(result["selected_backends"], ["forge"])
             # E2E evidence still missing, so still NEEDS_REVIEW.
             self.assertEqual(result["proposal"]["decision"], "NEEDS_REVIEW")
