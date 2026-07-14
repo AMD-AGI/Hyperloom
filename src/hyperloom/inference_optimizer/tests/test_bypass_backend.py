@@ -616,3 +616,44 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
     assert rc == 0
     assert launched["n"] == 0  # reused existing server, did not launch a new one
     assert teardown["called"] is True  # cleanup=true -> torn down
+
+
+def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
+    """BENCHMARK_BASE_URL set: bypass runs client against remote, no local server."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "http://head-pod:8888")
+    launched = {"n": 0}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: launched.__setitem__("n", launched["n"] + 1))
+
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        if "--result-dir" in cmd:
+            captured["base_url"] = cmd[cmd.index("--base-url") + 1] if "--base-url" in cmd else None
+            rd = Path(cmd[cmd.index("--result-dir") + 1])
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "inferencex_result.json").write_text(
+                json.dumps({"output_throughput": 600.0, "completed": 40, "duration": 30.0}),
+                encoding="utf-8",
+            )
+
+        class _P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert launched["n"] == 0  # no local server launched
+    assert captured.get("base_url") == "http://head-pod:8888"  # client hit remote
+    ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is True

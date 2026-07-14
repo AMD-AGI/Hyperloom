@@ -144,6 +144,24 @@ def run_benchmark(
     server_log = workspace / "server.log"
     base_url = f"http://127.0.0.1:{port}"
 
+    # Multi-node remote client: Hyperloom injects BENCHMARK_BASE_URL (+ 
+    # MAGPIE_RUN_PHASE=client) so the benchmark targets a head-pod server
+    # instead of launching one locally. bypass mirrors that: no local server,
+    # client (+eval) against the remote base_url, no teardown (remote server is
+    # not ours). See _multi_node_env.magpie_remote_env.
+    remote_base_url = os.environ.get("BENCHMARK_BASE_URL", "").strip()
+    if remote_base_url:
+        start = time.time()
+        rc = _run_client_and_eval(
+            inferencex_root=inferencex_root, model=model, base_url=remote_base_url,
+            isl=isl, osl=osl, conc=conc, rrr=rrr, profile=profile,
+            bench_envs=bench_envs, workspace=workspace, timeout_s=timeout_s,
+        )
+        return _finalize_report(
+            workspace=workspace, framework=framework, model=model, server_log=server_log,
+            bench_envs=bench_envs, start=start, rc=rc,
+        )
+
     if phase == "server":
         if not pid_dir:
             _emit_failure(output_dir, framework, model, "phase=server requires pid_dir", workspace=workspace)
