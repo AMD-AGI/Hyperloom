@@ -76,8 +76,14 @@ DERIVED_SECTIONS: frozenset[str] = frozenset(
 )
 
 
+def section_shape(section: str) -> SectionShape | None:
+    """Return the fragment shape declared for ``section``, if producer-written."""
+    return SECTION_SHAPES.get(section)
+
+
 __all__ = [
     "DERIVED_SECTIONS",
     "SECTION_SHAPES",
     "SectionShape",
+    "section_shape",
 ]

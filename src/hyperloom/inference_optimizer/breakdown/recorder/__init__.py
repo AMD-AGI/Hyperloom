@@ -44,6 +44,7 @@ from .sections import (
     DERIVED_SECTIONS,
     SECTION_SHAPES,
     SectionShape,
+    section_shape,
 )
 
 __all__ = [
@@ -68,4 +69,5 @@ __all__ = [
     "record_specialist_round",
     "record_tool_version",
     "snapshot_state_sections",
+    "section_shape",
 ]
