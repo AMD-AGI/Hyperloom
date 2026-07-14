@@ -358,4 +358,3 @@ class DegradeRouter:
             reason,
             state.fail_streak,
         )
-

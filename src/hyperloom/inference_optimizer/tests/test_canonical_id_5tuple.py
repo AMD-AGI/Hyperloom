@@ -319,4 +319,3 @@ def test_detect_framework_version_strips_dunder_version_whitespace(
     fake.__version__ = "  0.6.0\n"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm", fake)
     assert detect_framework_version("vllm") == "0.6.0"
-
