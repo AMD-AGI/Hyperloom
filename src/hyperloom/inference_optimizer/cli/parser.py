@@ -1063,27 +1063,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated gateway model slugs that independently "
         "score each specialist proposal_set (advisory only; never "
         "gates; rater identities are anonymized in the orchestration "
-        "prompt). Only takes effect when --enable-proposal-scoring is "
-        "also passed (scoring is OFF by default); this flag alone does "
-        "not enable scoring. Default 'claude-opus-4-8,gpt-5.5,"
+        "prompt). Only takes effect when --proposal-scoring is also "
+        "passed (scoring is OFF by default); this flag alone does not "
+        "enable scoring. Default 'claude-opus-4-8,gpt-5.5,"
         "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
         "Add a model by appending its slug. Empty list disables scoring "
         "even when enabled.",
     )
     opt.add_argument(
-        "--no-proposal-scoring",
-        dest="no_proposal_scoring",
-        action="store_true",
-        help="Disable the advisory specialist-proposal scorer entirely.",
-    )
-    opt.add_argument(
-        "--enable-proposal-scoring",
-        dest="enable_proposal_scoring",
-        action="store_true",
-        help="Enable the advisory specialist-proposal scorer. Disabled by "
-        "default; the scorer only runs when this flag is passed (and is "
-        "still skipped under --no-proposal-scoring, in Anthropic-only "
-        "deployments, or when the model list is empty).",
+        "--proposal-scoring",
+        dest="proposal_scoring",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the advisory specialist-proposal scorer (disabled by "
+        "default). Use --no-proposal-scoring to keep it off explicitly. "
+        "Even when enabled it is skipped in Anthropic-only deployments "
+        "(OpenAI-compatible only) or when the model list is empty. "
+        "Advisory only; never gates.",
     )
     # specialist sub-agent backend selection: Claude (default), inherits orchestration model; per-task caps bound LLM use.
     opt.add_argument(
