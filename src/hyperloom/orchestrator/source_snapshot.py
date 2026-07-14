@@ -111,4 +111,3 @@ def snapshot_source_layer(
     )
     return {"snapshot_dir": str(dest_dir), **manifest}
 
-
