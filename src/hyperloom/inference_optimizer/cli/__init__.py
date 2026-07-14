@@ -877,8 +877,16 @@ def _claude_model_should_follow_codex() -> bool:
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
-    """Whether the selected critic path will actually instantiate critic-agent."""
-    return critic_choice == "agent" and not _codex_model_should_follow_claude()
+    """Whether the selected critic path will instantiate the critic-agent runtime.
+
+    The critic-agent now runs in every provider mode: with an OpenAI-compatible
+    gateway it reasons over Codex; in provider-only (Anthropic / DeepSeek) mode
+    it reasons over the native provider endpoint (Anthropic ``/v1/messages`` or
+    the DeepSeek OpenAI-compatible API). The KB prepare/commit runtime is
+    therefore required whenever ``critic_choice == "agent"``, regardless of
+    which provider is configured.
+    """
+    return critic_choice == "agent"
 
 
 def _validate_and_resolve_claude_model(
@@ -2255,7 +2263,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     elif _backend_kind("critic") == "Claude":
         critic_str = f"Claude({args.claude_model})"
     else:  # "agent"
-        critic_str = f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, root={critic_agent_root})"
+        # Provider-only (Anthropic / DeepSeek) drives the review over the Claude
+        # model; an OpenAI-compatible gateway drives it over Codex.
+        _review_model = args.claude_model if _codex_model_should_follow_claude() else args.codex_model
+        critic_str = f"critic-agent(kb={critic_kb_mode}, model={_review_model}, root={critic_agent_root})"
     if robustness_choice == "mock":
         robustness_str = "mock"
     else:
