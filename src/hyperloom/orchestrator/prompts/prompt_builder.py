@@ -226,8 +226,7 @@ def _section_phase_semantics(
         lines.extend(
             [
                 "",
-                "**Phase interleave mode is ON** (off by default; enabled via "
-                + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1`):",
+                "**Phase interleave mode is ON**:",
                 "- EXPLORE may also REQUEST kernel_agent-owned kinds "
                 + "(kernel_opt / integrate / deep_kernel_analysis / "
                 + "operator_tuning / vendor_kernel_config / gemm_tuning) when "

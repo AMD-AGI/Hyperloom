@@ -19,9 +19,6 @@ from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
-
-
 # ==========================================================================
 # Decaying acceptance curve: threshold(N) = 0.1 + 0.9 / N (N = macro_cycle + 1)
 # ==========================================================================
@@ -66,8 +63,7 @@ def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
     return st
 
 
-def test_subthreshold_gain_does_not_reset_streak(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_subthreshold_gain_does_not_reset_streak():
     # cycle 3 bar = 0.40%; a 0.2% delta is below it → counts as no-gain.
     st = _sweep_state(macro_cycle=2, cycle_delta=0.2, no_gain_streak=1)
     reloop, ev = ps.should_reloop_to_explore(st)
@@ -77,16 +73,14 @@ def test_subthreshold_gain_does_not_reset_streak(monkeypatch):
     assert reloop is True  # streak 2 < 3, still loops
 
 
-def test_three_subthreshold_cycles_converge(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_three_subthreshold_cycles_converge():
     st = _sweep_state(macro_cycle=2, cycle_delta=0.1, no_gain_streak=2)
     reloop, ev = ps.should_reloop_to_explore(st)
     assert reloop is False
     assert ev["reloop_blocked"] == "global_converged"
 
 
-def test_suprathreshold_gain_resets_streak(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_suprathreshold_gain_resets_streak():
     # cycle 3 bar = 0.40%; a 0.5% delta clears it → streak resets to 0.
     st = _sweep_state(macro_cycle=2, cycle_delta=0.5, no_gain_streak=2)
     reloop, ev = ps.should_reloop_to_explore(st)
@@ -95,9 +89,7 @@ def test_suprathreshold_gain_resets_streak(monkeypatch):
     assert reloop is True
 
 
-def test_all_saturated_directions_stop_reloop(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE", raising=False)
+def test_all_saturated_directions_stop_reloop():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {
         "kernel_switch_specialist": {"saturated": True},
@@ -108,14 +100,12 @@ def test_all_saturated_directions_stop_reloop(monkeypatch):
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
 
-def test_saturation_convergence_env_can_disable(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE", "0")
+def test_saturation_convergence_is_always_enabled():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {"kernel_switch_specialist": {"saturated": True}}
     reloop, ev = ps.should_reloop_to_explore(st)
-    assert reloop is True
-    assert ev.get("reloop_blocked") != "all_directions_saturated"
+    assert reloop is False
+    assert ev["reloop_blocked"] == "all_directions_saturated"
 
 
 # ==========================================================================
@@ -145,8 +135,7 @@ def test_effective_max_minutes_unbounded_is_14_days():
     assert ps.DEFAULT_LONGRUN_MAX_MINUTES == 14 * 24 * 60
 
 
-def test_unbounded_explore_exits_when_cap_exceeded(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "0")
+def test_unbounded_explore_exits_when_cap_exceeded():
     now = 1_000_000.0
     # Started just over the 24h*0.45 cap ago, unbounded run.
     cap = ps.phase_cap_seconds(SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0))
@@ -161,8 +150,7 @@ def test_unbounded_explore_exits_when_cap_exceeded(monkeypatch):
     assert out[0] == "explore_budget_cap"
 
 
-def test_bounded_explore_does_not_hit_absolute_cap(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "0")
+def test_bounded_explore_does_not_hit_absolute_cap():
     now = 1_000_000.0
     # 10h bounded run, 1 min into EXPLORE → well under the phase budget and the
     # absolute cap, and above the 3.0h force-exit wall-clock buffer (the session

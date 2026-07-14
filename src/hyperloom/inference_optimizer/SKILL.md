@@ -262,7 +262,7 @@ Critic-gated, then `git apply`d against the live framework_source_roots
 and benchmarked; KEEP commits to the live tree (next candidate stacks on
 top), REVERT does `git reset --hard`. Exits on low budget
 (<0.6 × max_hours), **plateau (3 consecutive benchmarked candidate tests
-with no KEEP** — env `INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK`),
+with no KEEP**),
 or an empty discovery batch. Resume skips completed candidates by
 idempotency key. The launcher only chooses whether the phase runs
 (`--no-framework-agent`).

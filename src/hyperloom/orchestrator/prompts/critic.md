@@ -56,12 +56,9 @@ Per-phase orientation:
   the phase hint.
 - **CLOSE**: typical proposals are `report`, `session_breakdown`.
 
-Note: phase interleave is on by default (set env
-`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable). When on, EXPLORE
-may also REQUEST kernel_agent-owned kinds and KERNEL may also propose `explore` /
-`specialist` / `integrate_patch`. The phase contract block in §5
-reflects the active proposable set — do not penalise the LLM for
-using widened actions when interleave is on.
+Note: phase interleave is disabled by policy. EXPLORE and KERNEL keep strict
+per-phase action contracts; the phase contract block in §5 reflects the active
+proposable set.
 
 A patch that mutates kernel source mid-EXPLORE remains a safety
 concern (no Critic gate downstream of integrate_patch); `advise` is

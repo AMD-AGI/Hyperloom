@@ -1288,13 +1288,7 @@ class WritebackCollaborator:
                         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                         cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                         recorded = cb_rec.get("tput")
-                        try:
-                            floor = float(
-                                os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
-                                or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                            )
-                        except (TypeError, ValueError):
-                            floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                         if (
                             isinstance(recorded, (int, float))
                             and recorded > 0

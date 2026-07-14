@@ -26,7 +26,6 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
-CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
 SOFT_RESTART_DISABLE_ENV = "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART"
 
 
@@ -108,7 +107,6 @@ async def test_reclaim_respects_lease_window(conn):
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(CYCLIC_ENV, "1")
     monkeypatch.delenv(SOFT_RESTART_DISABLE_ENV, raising=False)
     # Don't let the soft restart's /proc server sweep run against the real host
     # during unit tests; the kill path is covered separately via monkeypatch.

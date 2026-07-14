@@ -4,7 +4,7 @@
 
 Covers:
 * cyclic EXPLORE plateau is *actionable* (winds the cycle down via
-  ``explore_no_more_leverage`` + ``switch_bottleneck``); advisory-only when cyclic off.
+  ``explore_no_more_leverage`` + ``switch_bottleneck``).
 * ``compute_next_phase`` routes a plateaued EXPLORE → KERNEL_AGENT (switch lever).
 * Coordinator stamps the bottleneck-switch handoff onto SharedState.
 * The redirect advisory renders in the next cycle's EXPLORE and names a
@@ -22,9 +22,6 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
-
-
-CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
 
 
 def _plateaued_explore_state(
@@ -57,8 +54,7 @@ def _plateaued_explore_state(
 # ==========================================================================
 # plateau → actionable
 # ==========================================================================
-def test_explore_plateau_is_actionable_in_cyclic(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_explore_plateau_is_actionable_in_cyclic():
     st = _plateaued_explore_state()
     out = ps.exit_normal_explore(st)
     assert out is not None
@@ -68,15 +64,7 @@ def test_explore_plateau_is_actionable_in_cyclic(monkeypatch):
     assert evidence.get("plateau") is True
 
 
-def test_explore_plateau_is_advisory_only_when_cyclic_off(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    st = _plateaued_explore_state()
-    # Budget remains + no escalate hint + cyclic off → plateau does NOT force exit.
-    assert ps.exit_normal_explore(st) is None
-
-
-def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_compute_next_phase_plateau_routes_explore_to_kernel():
     st = _plateaued_explore_state()
     target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
     # Exhausted explore leverage switches lever to KERNEL (non-terminal).
@@ -91,7 +79,6 @@ def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(CYCLIC_ENV, "1")
     from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
@@ -201,15 +188,6 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
     assert f"focus={row['focus']}" in block
 
 
-def test_redirect_advisory_empty_when_cyclic_off(cyclic_coordinator, monkeypatch):
-    c = cyclic_coordinator
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
-    st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
-    assert c._bottleneck_redirect_advisory_block() == ""
-
-
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
@@ -241,16 +219,6 @@ def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     st.macro_cycle = 0  # first cycle: bar == legacy default, nothing decayed
-    assert c._acceptance_threshold_advisory_block() == ""
-
-
-def test_acceptance_threshold_advisory_empty_when_cyclic_off(
-    cyclic_coordinator,
-    monkeypatch,
-):
-    c = cyclic_coordinator
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    c.shared_state.macro_cycle = 3
     assert c._acceptance_threshold_advisory_block() == ""
 
 
