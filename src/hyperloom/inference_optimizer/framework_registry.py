@@ -280,4 +280,3 @@ def format_primary_metric(
         return f"n/a {unit}"
     return f"{value:.{precision}f} {unit}"
 
-
