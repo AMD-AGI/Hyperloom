@@ -79,7 +79,7 @@ class _StubTaskRegistry:
         row = _StubTaskRow(
             task_id=tid,
             kind=kind,
-            state="succeeded",  # terminal so _wait_for_task_terminal returns immediately
+            state="succeeded",
             params=dict(params),
             idempotency_key=idempotency_key,
         )
@@ -217,46 +217,6 @@ async def test_record_close_step_replaces_non_list_close_steps(coord):
 async def test_record_close_step_no_op_when_history_empty(coord):
     coord.shared_state.phase_history = []
     await coord._record_close_step("report", status="done")
-
-
-# 2. _wait_for_task_terminal helper
-@pytest.mark.asyncio
-async def test_wait_for_task_terminal_returns_immediately_when_succeeded(
-    coord,
-):
-    await coord.tasks.create_or_return_existing(
-        kind="report",
-        params={},
-        idempotency_key="k1",
-        task_id="t-x",
-    )
-    state = await coord._wait_for_task_terminal("t-x", timeout_sec=1.0)
-    assert state == "succeeded"
-
-
-@pytest.mark.asyncio
-async def test_wait_for_task_terminal_returns_none_for_unknown(coord):
-    state = await coord._wait_for_task_terminal("missing", timeout_sec=1.0)
-    assert state is None
-
-
-@pytest.mark.asyncio
-async def test_wait_for_task_terminal_timeout(coord):
-    """Task never reaches terminal → returns None after timeout."""
-
-    class _StuckRegistry:
-        async def get(self, task_id):
-            return _StubTaskRow(
-                task_id=task_id,
-                kind="report",
-                state="running",
-                params={},
-                idempotency_key="",
-            )
-
-    coord.tasks = _StuckRegistry()
-    state = await coord._wait_for_task_terminal("t-stuck", timeout_sec=0.05)
-    assert state is None
 
 
 # Report task enqueue.

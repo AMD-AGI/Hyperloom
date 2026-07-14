@@ -34,7 +34,7 @@ You may NOT:
   numeric or named entity you write MUST appear verbatim in one of:
   ``global_facts``, ``key_facts``, or ``decisions``.
 - Describe a capability (for example ``explore`` / ``sweep`` /
-  ``specialist`` / ``geak`` / ``oob`` / ``kernel_opt``) as "ran" /
+  ``specialist`` / ``geak`` / ``forge`` / ``kernel_opt``) as "ran" /
   "contributed" / "applied" unless its decision is one of: ``kept`` /
   ``attempted`` / ``reverted`` / ``rejected`` / ``partial``. Legacy
   aliases such as ``backends`` / ``params`` / ``validate_stack`` must be

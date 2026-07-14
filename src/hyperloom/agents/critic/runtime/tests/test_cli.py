@@ -302,20 +302,6 @@ def test_commit_review_rejects_non_object_review(tmp_path):
     assert rc == 2
 
 
-def test_resolve_kb_client_cortex_requires_url(monkeypatch, tmp_path):
-    from hyperloom.agents.critic.runtime.cli import _resolve_kb_client
-    from hyperloom.agents.critic.runtime.errors import RuntimeAdapterError
-
-    monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "cortex")
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    with pytest.raises(RuntimeAdapterError, match="CORTEX_KB_URL"):
-        _resolve_kb_client()
-
-    monkeypatch.setenv("CORTEX_KB_URL", "http://cortex.invalid")
-    client = _resolve_kb_client()
-    assert client is not None
-
-
 def test_resolve_kb_client_live_requires_url(monkeypatch):
     from hyperloom.agents.critic.runtime.cli import _resolve_kb_client
     from hyperloom.agents.critic.runtime.errors import RuntimeAdapterError

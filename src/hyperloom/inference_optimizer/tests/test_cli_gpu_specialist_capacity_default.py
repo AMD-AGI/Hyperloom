@@ -8,7 +8,7 @@ or resize the pool with the explicit CLI flag.
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.cli import _default_gpu_specialist_capacity
+from hyperloom.inference_optimizer.cli.parser import _default_gpu_specialist_capacity
 
 
 def test_env_value_is_ignored(monkeypatch):

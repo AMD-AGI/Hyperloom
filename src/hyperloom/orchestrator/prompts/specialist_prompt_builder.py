@@ -19,7 +19,6 @@ from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
     domain_for_tag,
-    get_domain,
 )
 
 
@@ -1987,39 +1986,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     return _flatten(system_sections), _flatten(user_sections)
 
 
-def build_specialist_prompts_for_domain(
-    *,
-    task_id: str,
-    domain_key: str,
-    **kwargs: Any,
-) -> tuple[str, str]:
-    """Build specialist prompts by resolving a domain key to a domain.
-
-    Convenience wrapper that looks up ``domain_key`` via
-    :func:`get_domain`, constructs a :class:`SpecialistPromptInputs`, and
-    delegates to :func:`build_specialist_prompts`.
-
-    Args:
-        task_id (str): Identifier for the specialist task.
-        domain_key (str): Key naming the specialist domain to resolve.
-        **kwargs (Any): Additional fields forwarded to
-            :class:`SpecialistPromptInputs`.
-
-    Returns:
-        tuple[str, str]: The ``(system_prompt, user_prompt)`` pair.
-
-    Raises:
-        ValueError: If ``domain_key`` does not resolve to a known domain.
-    """
-    domain = get_domain(domain_key)
-    if domain is None:
-        raise ValueError(f"unknown specialist domain={domain_key!r}; see specialist_domains")
-    inp = SpecialistPromptInputs(task_id=task_id, domain=domain, **kwargs)
-    return build_specialist_prompts(inp)
-
-
 __all__ = [
     "SpecialistPromptInputs",
     "build_specialist_prompts",
-    "build_specialist_prompts_for_domain",
 ]

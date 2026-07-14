@@ -531,8 +531,7 @@ def inject_sglang_context_length(
         return args
     if _SGLANG_CONTEXT_LENGTH_RE.search(args):
         return args
-    # Lazy import to avoid a module-level cycle through the heavy cli.py.
-    from hyperloom.inference_optimizer.cli import _load_model_max_position_embeddings
+    from hyperloom.inference_optimizer.cli.model_gate import _load_model_max_position_embeddings
 
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
@@ -609,7 +608,7 @@ def inject_sglang_attention_backend(
         return args
     if _SGLANG_ATTN_BACKEND_RE.search(args):
         return args
-    from hyperloom.inference_optimizer.cli import _model_has_dual_chunk_attention
+    from hyperloom.inference_optimizer.cli.model_gate import _model_has_dual_chunk_attention
 
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
@@ -677,7 +676,7 @@ def inject_sglang_moe_runner_backend(
         return args
     if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
         return args
-    from hyperloom.inference_optimizer.cli import _model_is_moe, _resolve_amd_gpu_type
+    from hyperloom.inference_optimizer.cli.model_gate import _model_is_moe, _resolve_amd_gpu_type
 
     if not _resolve_amd_gpu_type(gpu_type):
         return args

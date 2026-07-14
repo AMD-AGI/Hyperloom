@@ -35,10 +35,10 @@ applicable_when:
 # these params directly from ``state.warm_start_recipe.recipe.attrs.best_config``;
 # operators don't get to set them via propose_action (PolicyGate denies).
 params_schema:
-  extra_sglang_args:
+  extra_server_args:
     type: string
     description: |
-      ``best_config.extra_sglang_args`` from the warm-start recipe. Applied
+      ``best_config.extra_server_args`` from the warm-start recipe. Applied
       verbatim by BaselineExecutor's materialize_config_with_envs path.
   extra_envs:
     type: object

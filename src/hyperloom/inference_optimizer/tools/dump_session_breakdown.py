@@ -136,7 +136,6 @@ def _summary_line(breakdown: dict) -> str:
     sess = breakdown.get("session") or {}
     final = breakdown.get("final") or {}
     geak_n = len(breakdown.get("geak_invocations") or [])
-    oob_n = len(breakdown.get("oob_invocations") or [])
     lifecycle = breakdown.get("kernel_lifecycle") or {}
     sweep = breakdown.get("sweep") or {}
     warnings = breakdown.get("warnings") or []
@@ -147,7 +146,7 @@ def _summary_line(breakdown: dict) -> str:
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "
         f"stop_reason={sess.get('stop_reason') or '?'}  "
         f"gain_validated={final.get('cumulative_gain_pct_validated', 0.0):.2f}%  "
-        f"geak={geak_n}  oob={oob_n}  "
+        f"geak={geak_n}  "
         f"detected={len(lifecycle.get('detected') or [])}  "
         f"adopted={len(lifecycle.get('adopted') or [])}  "
         f"sweep={len(sweep.get('all_variants') or [])}  "

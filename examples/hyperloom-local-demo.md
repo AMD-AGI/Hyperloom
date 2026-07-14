@@ -502,7 +502,7 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" hyperloom-local bash -lc 'cat "$
 | INFERENCEX_PATH | _fill in_ |
 | TRACELENS_ROOT | _fill in_ |
 | GEAK_ROOT | _fill in_ |
-| GEAK_CONFIG | _fill in_ |
+| GEAK_CLAUDE_MODEL | _fill in_ |
 
 3. **Save** the summary — the `.env` highlights **and** the `kernel-agent.env.sh`
    table above:

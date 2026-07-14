@@ -64,8 +64,6 @@ from _paths import workspace_root
 # TraceLens and bypass routes gate on identical semantics (kept as private
 # aliases to preserve existing references/tests in this module).
 from _idle_gate import (
-    HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
-    HIGH_IDLE_PCT_THRESHOLD_ENV,
     build_high_idle_warning as _build_high_idle_warning,
     resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
 )
@@ -2921,7 +2919,7 @@ def _expand_op_fanout(
 # moe_fused category metric (and the LLM-rendered analysis.md ``Args`` column)
 # emit the candidate with ``shapes: []``. Hyperloom's dispatch gate
 # (``_validate_kernel_shape_and_paths`` → ``empty_kernel_shape``) then rejects the
-# whole geak→claude→codex ladder before any harness is built.
+# whole backend ladder before any harness is built.
 #
 # TraceLens DOES still capture the operands for this kernel: the per-shape rows in
 # ``perf_report_csvs/ops_unique_args.csv`` carries trace-recorded ``Input Dims``
@@ -3729,7 +3727,7 @@ def _finalize_candidates(
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     """Recommend a backend ladder for a reusable native kernel.
 
-    Orders forge first, then the per-kernel GEAK backend (geak_v3).
+    Recommends the forge backend.
 
     Args:
         candidate: The hot-kernel candidate dict.
@@ -3747,10 +3745,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # forge then the per-kernel GEAK backend (geak_v3). Uses ``geak_v3`` (not
-    # ``geak``) because parse_backends/choose_backends reject bare ``geak`` on
-    # the per-kernel path.
-    return ["forge", "geak_v3"]
+    return ["forge"]
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
@@ -4653,9 +4648,8 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     double-check under the lock, then clone into a temp sibling and atomically
     rename into place so a partial clone is never observed.
 
-    Keep this temp-clone+pin+atomic-rename in lockstep with the twin
-    implementations: src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens) and
-    src/hyperloom/inference_optimizer/assets/local_setup.sh (clone_or_update "atomic").
+    Keep this temp-clone+pin+atomic-rename in lockstep with
+    src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens).
     """
     tl_root = Path(tl_root)
     if _tracelens_checkout_complete(tl_root):
@@ -5514,33 +5508,6 @@ def write_reports(
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
-
-    # Batch rocprof-compute enrichment is opt-in because it can profile many kernels.
-    # Kernel-opt still profiles the selected kernel on demand.
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
-    if enrich_value in {"1", "true", "yes", "on"}:
-        try:
-            tools_dir = str(Path(__file__).resolve().parent)
-            if tools_dir not in sys.path:
-                sys.path.insert(0, tools_dir)
-            from rocprof_roofline import enrich_kernel_roofline_sidecar  # noqa: WPS433
-
-            enrich_summary = enrich_kernel_roofline_sidecar(
-                sidecar_path=str(kernel_roofline_path),
-                candidates_path=str(kernel_candidates_path),
-                workdir=str(run_dir),
-                timeout_sec_per_kernel=int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800),
-                log_fn=None,
-            )
-            print(
-                "[rocprof_enrich] "
-                f"matched={enrich_summary.get('matched', 0)} "
-                f"skipped={enrich_summary.get('skipped', 0)} "
-                f"failed={enrich_summary.get('failed', 0)} "
-                f"rows={enrich_summary.get('rows', 0)}"
-            )
-        except Exception as exc:  # pragma: no cover - guard against import cycles
-            print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
 
     # Diffusion / scriptable workload-level roofline. TraceLens produces a
     # *per-kernel* roofline (each op vs its dtype ceiling); for diffusion we also

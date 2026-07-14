@@ -147,7 +147,7 @@ These are consumed by `install.sh` / `inference_optimizer optimize` /
 RayJob pod reads them. Forwarding them pollutes the pod env and risks
 shadowing real values.
 
-- `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_OPT_*`
+- `KERNEL_OPT_*`
 - `NODE_TLS_REJECT_UNAUTHORIZED`
 - `RANDOM_RANGE_RATIO`, `RUN_EVAL`
 - `MODEL_PATH`, `FRAMEWORK`, `TP`, `EP`, `ISL`, `OSL`, `CONC`, `PRECISION`,
@@ -176,8 +176,7 @@ Environment block / `setup_env.sh`; do not treat literals below as defaults):
 export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
 export HYPERLOOM_MN_HEALTH_WAIT_S=1800
 # Optional kernel exports — only when the prompt specifies them
-export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-forge,geak_v3}"
-export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
+export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-forge}"
 
 setsid nohup inference_optimizer --verbose optimize \
   --model "$MODEL_PATH" \

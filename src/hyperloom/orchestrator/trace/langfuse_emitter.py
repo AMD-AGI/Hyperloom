@@ -972,7 +972,7 @@ class LangfuseEmitter:
     def _flush_ext_shards(self) -> None:
         """Backfill out-of-process children's token rows from ext/*.jsonl.
 
-        Children (geak / oob / robustness / specialist subprocess) never
+        Children (geak / forge / robustness / specialist subprocess) never
         connect to Langfuse; their tokens land in ``ext/<component>-<pid>.
         jsonl`` once the parent parses them. We emit those as text-less
         Generations here so the trace still accounts their spend.

@@ -629,7 +629,7 @@ def test_collect_phase_breakdown_buckets_by_phase():
             ],
         },
     }
-    out = collect_attribution(state, [], [], [], [])
+    out = collect_attribution(state, [], [], [])
     pb = out["phase_breakdown"]
     assert pb["explore"]["total_gain_pct"] == 5.0
     assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
@@ -658,7 +658,7 @@ def test_collect_phase_breakdown_falls_back_to_action_family_when_history_empty(
         "phase_history": [],
     }
     warnings: list[str] = []
-    out = collect_attribution(state, [], [], [], warnings)
+    out = collect_attribution(state, [], [], warnings)
     pb = out["phase_breakdown"]
     assert pb["explore"]["total_gain_pct"] == 2.5
     # Default provenance bucket when winners_history doesn't supply one.
@@ -681,5 +681,5 @@ def test_collect_phase_breakdown_skips_zero_or_negative_deltas():
             {"to_phase": "EXPLORE", "ts_unix": 0.0, "reason": "prelude_done"},
         ],
     }
-    out = collect_attribution(state, [], [], [], [])
+    out = collect_attribution(state, [], [], [])
     assert out["phase_breakdown"]["explore"]["total_gain_pct"] == 0.0

@@ -144,11 +144,6 @@ class Fact:
         return _pct(self.properties.get("gain"))
 
     @property
-    def loss(self) -> float:
-        """Return the loss magnitude as a float, or ``0.0`` when absent."""
-        return _pct(self.properties.get("loss"))
-
-    @property
     def confidence(self) -> float:
         """Return the fact confidence in ``[0,1]`` (defaults to ``0.8``)."""
         try:
@@ -1060,15 +1055,6 @@ class KGClient:
         except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
             log.warning("kg emit_fact degraded (skipped): %s", exc)
             return False
-
-    def retract_fact_safe(self, **kwargs: Any) -> bool:
-        """Call :meth:`retract_fact`, returning ``False`` on any backend error."""
-        try:
-            return self.retract_fact(**kwargs)
-        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
-            log.warning("kg retract_fact degraded (skipped): %s", exc)
-            return False
-
 
 def _page_content(page: Any, *, full: bool = False) -> str:
     """Extract a page's body (or full raw markdown) from a get_page result.

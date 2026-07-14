@@ -59,8 +59,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "robustness",
         "proposal_scorer",
         "geak",
-        "geak_v3",
-        "oob",
         "forge",
         "tracelens",
         "breakdown",
@@ -268,17 +266,6 @@ def _coerce_optional_str_list(value: Any) -> list[str] | None:
     return out or None
 
 
-def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the llm_calls closed schema."""
-    validate_closed_row(
-        row,
-        fields=_ROW_FIELDS,
-        valid_components=VALID_COMPONENTS,
-        error_cls=LLMTraceRowError,
-        label="llm_calls",
-    )
-
-
 def append_llm_call(
     *,
     session_dir: Path,
@@ -311,7 +298,13 @@ def append_llm_call(
         LLMTraceRowError: If the serialized row violates the closed schema.
     """
     row = record.to_row()
-    _validate_row(row)
+    validate_closed_row(
+        row,
+        fields=_ROW_FIELDS,
+        valid_components=VALID_COMPONENTS,
+        error_cls=LLMTraceRowError,
+        label="llm_calls",
+    )
     dest = llm_calls_path(session_dir)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)

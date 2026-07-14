@@ -10,8 +10,8 @@ These types live in their own module so:
   these dataclasses + the analyzer);
 * tests can construct ``BaselineSummary`` directly without mocking the
   upstream HTTP path;
-* on-disk JSON shape is pinned by ``BaselineSummary.to_dict``/
-  ``from_dict`` rather than scattered ad-hoc dict literals.
+* on-disk JSON shape is pinned by ``BaselineSummary.to_dict`` rather than
+  scattered ad-hoc dict literals.
 
 Design constraint (from the chat plan): this data is **report-only**.
 Nothing in SharedState / Objective / prompt_builder consumes these
@@ -158,42 +158,6 @@ class BaselineSummary:
             "warning": self.warning,
             "source": self.source,
         }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "BaselineSummary":
-        """Reconstruct a summary from its persisted dict representation.
-
-        Missing or malformed fields are tolerated and coerced to sensible
-        defaults so that loading a partial / older artefact never raises.
-
-        Args:
-            d (dict[str, Any]): A dictionary previously produced by
-                :meth:`to_dict` (or a compatible subset).
-
-        Returns:
-            BaselineSummary: The reconstructed summary instance.
-        """
-        q = d.get("query") or {}
-        best_raw = d.get("best")
-        return cls(
-            query=BaselineQuery(
-                model=str(q.get("model", "")),
-                gpu=str(q.get("gpu", "")),
-                framework=str(q.get("framework", "")),
-                precision=str(q.get("precision", "")),
-                isl=int(q.get("isl", 0) or 0),
-                osl=int(q.get("osl", 0) or 0),
-            ),
-            fetched_at=str(d.get("fetched_at", "")),
-            row_count=int(d.get("row_count", 0) or 0),
-            best=BaselinePoint(**best_raw) if isinstance(best_raw, dict) else None,
-            all_concurrencies=[BaselinePoint(**p) for p in (d.get("all_concurrencies") or []) if isinstance(p, dict)],
-            status=str(d.get("status", "ok")),
-            warning=str(d.get("warning", "")),
-            source=str(d.get("source", "")),
-            reason=str(d.get("reason", "")),
-        )
-
 
 __all__ = [
     "BaselineQuery",
