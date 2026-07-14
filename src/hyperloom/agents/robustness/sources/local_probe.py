@@ -2054,19 +2054,16 @@ async def _probe_gateway_health(
 
 
 def _gateway_probe_headers(url: str) -> dict[str, str]:
-    """Build direct HTTP headers for the external gateway health probe."""
-    env = dict(os.environ)
-    if url and not (env.get("OPENAI_BASE_URL") or "").strip():
-        # ``resolve_openai_client_config`` uses the base URL to decide whether
-        # AMD needs Ocp-Apim-Subscription-Key. External probe overrides point
-        # directly at /models, so strip that suffix for resolver parity.
-        base = url.rstrip("/")
-        if base.endswith("/models"):
-            base = base[: -len("/models")]
-        if base:
-            env["OPENAI_BASE_URL"] = base
+    """Build direct HTTP headers for the external gateway health probe.
+
+    Mirrors the OpenAI/Codex client auth: the operator's ``OPENAI_CUSTOM_HEADERS``
+    plus a Bearer token. Header injection is env-driven — there is no host-based
+    subscription-key auto-injection, so a gateway that needs a subscription key
+    must carry it in ``OPENAI_CUSTOM_HEADERS``.
+    """
+    del url  # the probe hits the OpenAI-side gateway; headers are env-driven
     try:
-        cfg = resolve_openai_client_config(env=env)
+        cfg = resolve_openai_client_config(env=dict(os.environ))
     except LLMConfigError:
         return {}
     headers = dict(cfg.default_headers)
