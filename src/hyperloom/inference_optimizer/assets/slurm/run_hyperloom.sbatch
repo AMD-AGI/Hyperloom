@@ -70,91 +70,14 @@ fi
 : "${OPENAI_BASE_URL:?export OPENAI_BASE_URL (or set it in proxy.env)}"
 export HF_TOKEN="${HF_TOKEN:-}"
 
-# --- write the in-container runner to weka (visible inside the container) ---
+# --- copy the shared in-container runner to the shared mount ----------------
+# run_hyperloom.sbatch and run_hyperloom-spur.sbatch execute the SAME
+# _incontainer.sh.in inside the container; keep it single-sourced to avoid
+# drift. HL_KERNEL_BACKEND selects the python carrier's kernel-agent backend
+# (stock Slurm -> claude); it is forwarded into the container.
+export HL_KERNEL_BACKEND="${HL_KERNEL_BACKEND:-claude}"
 INCONTAINER="$USER_DATA_PATH/_incontainer.sh"
-cat > "$INCONTAINER" <<'INCONTAINER_EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-echo "[hl] session=$CLAW_SESSION_ID model=$REPO_ID fw=$FRAMEWORK gpu=$GPU_TYPE tp=$TP backend=$BACKEND"
-
-# 1) host alias so the gateway domain resolves to the jump host (SNI).
-if [ -n "${HL_HOST_ALIAS_IP:-}" ] && [ -n "${HL_HOST_ALIAS_NAME:-}" ]; then
-  if ! grep -q "$HL_HOST_ALIAS_NAME" /etc/hosts 2>/dev/null; then
-    echo "${HL_HOST_ALIAS_IP} ${HL_HOST_ALIAS_NAME}" >> /etc/hosts \
-      || echo "[hl][warn] cannot write /etc/hosts; ensure --container-writable" >&2
-  fi
-fi
-
-# 2) gateway reachability preflight (non-fatal; surfaces misconfig early).
-curl -sS -o /dev/null -w "[hl] gateway /models HTTP=%{http_code}\n" \
-  -H "Authorization: Bearer ${OPENAI_API_KEY:-$SAFE_API_KEY}" \
-  "${OPENAI_BASE_URL}/models" || echo "[hl][warn] gateway preflight failed" >&2
-
-# 3) Hyperloom source. Precedence:
-#    - if HYPERLOOM_SOURCE_DIR already holds a checkout (pyproject.toml or .git),
-#      use it as-is (e.g. a bind-mounted /mnt/vast/hyperloom) -> no network clone;
-#    - otherwise clone from GitHub into the default temp dir.
-export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/tmp/Hyperloom-main}"
-if [ -f "$HYPERLOOM_SOURCE_DIR/pyproject.toml" ] || [ -d "$HYPERLOOM_SOURCE_DIR/.git" ]; then
-  echo "[hl] using existing Hyperloom source at $HYPERLOOM_SOURCE_DIR (no clone)"
-else
-  echo "[hl] cloning Hyperloom into $HYPERLOOM_SOURCE_DIR"
-  git clone --depth 1 --branch "${HYPERLOOM_SOURCE_REF:-main}" \
-    "${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}" "$HYPERLOOM_SOURCE_DIR"
-fi
-export REPO_ROOT="$HYPERLOOM_SOURCE_DIR"
-cd "$REPO_ROOT"
-
-# 4) install optimizer + components on top of the image's /opt/venv ROCm stack.
-#    NOTE: post tree-reform (src-layout) the installer lives under assets/.
-bash src/hyperloom/inference_optimizer/assets/install.sh
-. "${USER_DATA_PATH}/runtime/kernel-agent.env.sh"
-
-RUN_DIR="$USER_DATA_PATH/optimizer_runs"; mkdir -p "$RUN_DIR"
-LAUNCH_INFO_FILE="$RUN_DIR/launch_${CLAW_SESSION_ID}.json"
-
-case "$BACKEND" in
-  python)
-    # Workload envs the Coordinator reuses for baseline -> params -> sweep.
-    export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
-    exec inference_optimizer --verbose optimize \
-      --model "$MODEL_PATH" \
-      --framework "$FRAMEWORK" \
-      --gpu-type "$GPU_TYPE" \
-      --model-class "$MODEL_CLASS" \
-      --target-gain "$TARGET_GAIN" \
-      --max-hours "$MAX_HOURS" \
-      --tick-interval-sec 30 \
-      --kernel-claude \
-      --launch-info-file "$LAUNCH_INFO_FILE"
-    ;;
-  claude)
-    command -v claude >/dev/null 2>&1 || { echo "[hl] claude CLI not in image" >&2; exit 3; }
-    PROMPT="$(python3 - <<'PY'
-import os
-tpl = open("ci/prompt_template.md").read()
-tpl = tpl.replace("/wekafs/HyperloomV2/src/hyperloom/inference_optimizer/SKILL.md",
-                  os.environ["REPO_ROOT"] + "/src/hyperloom/inference_optimizer/SKILL.md")
-vals = dict(
-    model_hf=os.environ["REPO_ID"], model_path=os.environ.get("MODEL_PATH", os.environ["REPO_ID"]),
-    gpu_type=os.environ["GPU_TYPE"], gpu_type_lc=os.environ["GPU_TYPE"].lower(),
-    framework=os.environ["FRAMEWORK"], precision=os.environ["PREC"],
-    tp=os.environ["TP"], ep="1", conc=os.environ["CONC"],
-    isl=os.environ["ISL"], osl=os.environ["OSL"], nodes="1",
-    random_range_ratio="1.0", target_gain=os.environ["TARGET_GAIN"],
-    max_hours=os.environ["MAX_HOURS"], kernel_agent_build_geak_rag_index="1",
-    oob_path="", tracelens_root="", multinode_section="", inferenceX_data="(none)",
-)
-print(tpl.format(**vals))
-PY
-)"
-    exec claude --dangerously-skip-permissions -p "$PROMPT"
-    ;;
-  *)
-    echo "[hl] unknown backend: $BACKEND" >&2; exit 2 ;;
-esac
-INCONTAINER_EOF
+cp "$CONF_DIR/_incontainer.sh.in" "$INCONTAINER"
 chmod +x "$INCONTAINER"
 
 # --- launch the container --------------------------------------------------
@@ -191,7 +114,7 @@ case "$RUNTIME" in
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
              KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
-             MAX_HOURS TARGET_GAIN BACKEND HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
+             MAX_HOURS TARGET_GAIN BACKEND HL_KERNEL_BACKEND HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
              CURSOR_DEFAULT_MODEL GEAK_MODEL_NAME CLAUDE_MODEL CODEX_MODEL LLM_MODEL \
              RECIPE_KB_REMOTE GBRAIN_BASE_URL GBRAIN_TOKEN GBRAIN_KG_GUIDED \
              GBRAIN_KG_NATIVE GBRAIN_RECIPE_SCAN_BUDGET_SEC \
@@ -204,7 +127,10 @@ case "$RUNTIME" in
     CA_MOUNT=()
     [ -n "${HL_CA_BUNDLE_HOST:-}" ] && [ -f "${HL_CA_BUNDLE_HOST}" ] \
       && CA_MOUNT=(-v "${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro")
+    # --ulimit lifts the container's open-files hard cap so the Ray raylet's fd
+    # preflight can raise soft nofile high enough to stay up (issue #433).
     docker run --rm \
+      --ulimit "nofile=${HL_NOFILE:-1048576}:${HL_NOFILE:-1048576}" \
       --device=/dev/kfd --device=/dev/dri \
       --security-opt seccomp=unconfined --group-add video --ipc=host \
       --shm-size="${HL_SHM_SIZE:-64g}" \
