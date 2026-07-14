@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Attribution renderer — gain split across optimization sources (explore/sweep/geak/oob + legacy aliases)."""
+"""Attribution renderer — gain split across optimization sources."""
 
 from __future__ import annotations
 
@@ -45,7 +45,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ["params", sb.get("params_pct_of_total"), sb.get("params_share_pct")],
         ["sweep", sb.get("sweep_pct_of_total"), sb.get("sweep_share_pct")],
         ["geak", sb.get("geak_pct_of_total"), sb.get("geak_share_pct")],
-        ["oob", sb.get("oob_pct_of_total"), sb.get("oob_share_pct")],
     ]
 
     facts: list[str] = []

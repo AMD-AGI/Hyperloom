@@ -89,7 +89,7 @@ def _geak_accepted_kernels_from_journey(
         # The e2e optimizer's own kernel backend is the canonical ``geak`` (this
         # whole-pipeline optimizer, formerly labelled ``geak_v4`` / perfskills).
         # kernel_journey.json already labels it ``geak``, so it is kept verbatim;
-        # the legacy per-kernel backend is now the distinct ``geak_v3`` token.
+        # kernel_journey.json already labels it ``geak``, so it is kept verbatim.
         accepted.append(
             {
                 "kernel_id": kid,

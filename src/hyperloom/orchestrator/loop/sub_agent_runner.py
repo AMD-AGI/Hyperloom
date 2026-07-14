@@ -7,7 +7,7 @@ materializes them into ``tasks`` rows, and dispatches the work.
 
 Dispatches to one of two sub-agent forms: deterministic Python
 ``ActionRunner`` executors (looked up via ``EXECUTOR_REGISTRY[task.kind]``)
-or the LLM OOB sub-agent fallback (``backend.run()``).
+or the LLM external sub-agent fallback (``backend.run()``).
 """
 
 from __future__ import annotations
