@@ -2155,12 +2155,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
-        # Advisory multi-model specialist-proposal scorer. ``None`` when
-        # --no-proposal-scoring or an empty model list; otherwise scores
+        # Advisory multi-model specialist-proposal scorer. Disabled by
+        # default: ``None`` unless --proposal-scoring is passed (--no-proposal-
+        # scoring is the explicit off form), and still ``None`` in Anthropic-
+        # only deployments or with an empty model list. When active it scores
         # each proposal_set and surfaces the results to Orchestration as
-        # one reference among many (never gates anything). ``session_dir``
-        # is forwarded so the scorer can append its per-model token usage
-        # to the full-trace ledger (component=proposal_scorer).
+        # one reference among many (never gates anything). Not persisted
+        # across --resume (re-pass the flag). ``session_dir`` is forwarded
+        # so the scorer can append its per-model token usage to the
+        # full-trace ledger (component=proposal_scorer).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
