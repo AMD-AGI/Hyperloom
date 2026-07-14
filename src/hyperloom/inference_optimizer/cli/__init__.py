@@ -887,7 +887,7 @@ def _validate_and_resolve_claude_model(
 ) -> set[str] | None:
     """Hard-gate Claude model selection (must be in _CLAUDE_ALLOWED_MODELS); mutates ``args.claude_model``.
 
-    Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
+    Probes the gateway catalog (retries); falls back to a known-good model with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test).
 
     Args:
@@ -906,7 +906,7 @@ def _validate_and_resolve_claude_model(
     """
     chosen = (args.claude_model or "").strip()
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
-    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
+    # may not serve the AMD-blessed opus ids. The static allowlist is
     # an AMD-network safety default; an operator can opt out via
     # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
     # catalog probe below is the sole gate (a typo still fails because the id
@@ -1051,8 +1051,8 @@ def _validate_and_resolve_claude_model(
         return catalog_ids
 
     print(
-        f"ERROR: neither {_CLAUDE_PREFERRED_MODEL!r} nor "
-        f"{_CLAUDE_FALLBACK_MODEL!r} present in gateway catalog "
+        f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "
+        f"present in gateway catalog "
         f"(catalog has {sorted(m for m in catalog_ids if m.startswith('claude-'))}). "
         f"Refusing to start.",
         file=sys.stderr,
