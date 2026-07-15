@@ -325,6 +325,41 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
     assert summary.best is None
 
 
+def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
+    """A pre-existing (e.g. scout-authored) competitor_target.json must be
+    dropped when analyze() ends in no_match, so the advisory feed never reads a
+    non-API source. Guards the 'API-measured only' invariant."""
+    from hyperloom.inference_optimizer.session import session_paths
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    # Seed a stale scout-authored target on disk.
+    research_hints.write_competitor_target(
+        tmp_path,
+        {
+            "gpu": "b300",
+            "model": "MiniMax-M2.5",
+            "per_conc": [{"conc": 64, "tput_per_gpu": 12345.0, "source": "some blog"}],
+        },
+    )
+    assert session_paths.competitor_target_json(tmp_path).exists()
+
+    _patch_fetch_rows(monkeypatch, None)  # force fetch_error / no_match
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+        framework="vllm",
+        precision="fp8",
+        isl=1024,
+        osl=1024,
+    )
+    assert summary.status == "no_match"
+    assert not session_paths.competitor_target_json(tmp_path).exists()
+    assert research_hints.load_competitor_target(tmp_path) is None
+
+
 def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
     """Empty API result (``fetch_rows`` returns ``[]``) → ``no_inferencex_data``."""
     _patch_fetch_rows(monkeypatch, [])
