@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.loop.coordinator import (
+from hyperloom.orchestrator.loop.coordinator_helpers import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
 )

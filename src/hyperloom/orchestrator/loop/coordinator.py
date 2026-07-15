@@ -75,15 +75,8 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
-    _BASELINE_FINGERPRINT_KEYS,
-    _baseline_params_fingerprint,
-    _dedupe_extra_server_args,
+from .coordinator_helpers import (
     _infer_model_class_from_config,
-    _merge_cumulative_extra_server_args,
-    _parse_baseline_workload_extra,
-    _parse_iso_unix,
-    _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
     format_exc_brief,
     serialize_verdict_advisory,
@@ -2044,14 +2037,7 @@ __all__ = [
     "PendingProposal",
     "SharedState",
     # Re-exported from coordinator_helpers for callers/tests.
-    "_BASELINE_FINGERPRINT_KEYS",
-    "_baseline_params_fingerprint",
-    "_dedupe_extra_server_args",
     "_infer_model_class_from_config",
-    "_merge_cumulative_extra_server_args",
-    "_parse_baseline_workload_extra",
-    "_parse_iso_unix",
-    "_resolve_roofline_watermark_ratio",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
     "SPECIALIST_FROM_AGENT_PREFIX",
