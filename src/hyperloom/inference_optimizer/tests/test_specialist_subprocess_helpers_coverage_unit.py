@@ -28,7 +28,7 @@ class _CP:
 
 # -- _pick_worktree_base ---------------------------------------------------
 def test_pick_worktree_base_none(tmp_path: Path) -> None:
-    # directory without .git -> skipped -> None
+    # directory without .git yields None
     (tmp_path / "plain").mkdir()
     assert _pick_worktree_base((str(tmp_path / "plain"), str(tmp_path / "absent"))) is None
 
@@ -97,13 +97,10 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     )
     assert "--model" in cmd and "claude-opus-4-7" in cmd
     assert "--mcp-config" in cmd and "/cfg/mcp.json" in cmd
-    # emit_intent dropped from whitelist
     tools_idx = cmd.index("--allowedTools") + 1
     assert "emit_intent" not in cmd[tools_idx]
     assert "read_file" in cmd[tools_idx] and "edit" in cmd[tools_idx]
-    # worktree appears before workspace in --add-dir order
     assert str(wt) in cmd and str(ws) in cmd and str(fw) in cmd
-    # operator escape-hatch args appended verbatim
     assert cmd[-2:] == ["--foo", "bar"]
 
 
@@ -115,7 +112,7 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
         prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
-        allowed_tools=("emit_intent",),  # only the dropped tool -> no --allowedTools
+        allowed_tools=("emit_intent",),  # only the dropped tool
     )
     assert "--model" not in cmd
     assert "--mcp-config" not in cmd
@@ -149,7 +146,7 @@ def test_collect_patches(tmp_path: Path) -> None:
     (wt / "patches" / "a.patch").write_text("p", encoding="utf-8")
     (wt / "patches" / "b.diff").write_text("d", encoding="utf-8")
     (wt / "patches" / "ignore.txt").write_text("x", encoding="utf-8")
-    ws = tmp_path / "ws"  # no patches dir
+    ws = tmp_path / "ws"
     out = SpecialistSubprocessDispatcher._collect_patches(wt, ws)
     names = sorted(Path(p).name for p in out)
     assert names == ["a.patch", "b.diff"]
@@ -195,7 +192,6 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     out = SpecialistSubprocessDispatcher._read_done(p)
-    # outer keys merged with inner payload, envelope keys dropped
     assert out["domain"] == "kernel_switch_specialist"
     assert out["proposal_set"] == [{"name": "v1"}]
     assert "intent_type" not in out and "payload" not in out

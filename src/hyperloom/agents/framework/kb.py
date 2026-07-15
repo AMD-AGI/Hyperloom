@@ -22,9 +22,7 @@ from typing import Iterable
 from .models import Finding
 
 
-# Per-framework KB partition root: ``<KB_ROOT>/framework_optimization/
-# <framework>/`` keeps framework-specific findings out of the cross-framework
-# ``framework`` domain bag.
+# Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
 
 
@@ -100,7 +98,6 @@ def _resolve_kb_root() -> Path:
     root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
     if root:
         return Path(root).expanduser() / "kb"
-    # parents[2] of .../framework_agent/kb.py is .../framework-agent/.
     return Path(__file__).resolve().parents[2] / "kb"
 
 
@@ -386,8 +383,7 @@ def _synthesize_via_llm(
     prompt = _build_llm_prompt(domain, findings)
     options = sdk.ClaudeAgentOptions(model=model, system_prompt="")
     chunks: list[str] = []
-    # sdk.query is an async generator; block via asyncio.run() since the
-    # explore --execute call site has no event loop running.
+    # sdk.query is an async generator; block via asyncio.run().
     import asyncio
 
     async def _drive() -> None:

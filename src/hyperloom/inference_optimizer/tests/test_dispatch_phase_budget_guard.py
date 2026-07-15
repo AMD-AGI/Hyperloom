@@ -1,10 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase-budget dispatch guard (KERNEL/EXPLORE interleave-stall fix).
+"""Phase-budget dispatch guard for KERNEL/EXPLORE interleave.
 
-Regression for the bug where a long serially-drained KERNEL/EXPLORE grid kept
-``_pump_dispatcher_once`` from returning, starving the per-phase cyclic budget
-exit so the phase machine never advanced.
+Ensures a long serially-drained KERNEL/EXPLORE grid does not starve the
+per-phase cyclic budget exit and stall the phase machine.
 """
 
 from __future__ import annotations

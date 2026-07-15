@@ -3,12 +3,9 @@
 
 """Run forge-fusion as a Hyperloom kernel-agent tool.
 
-Mirrors ``forge_gemm_tuning.py`` at the kernel-agent tool layer: the orchestrator
-writes an input JSON and calls this script; the autonomous fusion loop itself
-lives in the standalone ``forge_fusion`` package (``forge-fusion run``: diagnose
--> discover(llm) -> author(few-shot) -> kernel-validate -> serving-smoke -> keep).
+The orchestrator writes an input JSON and calls this script; the autonomous
+fusion loop itself lives in the standalone ``forge_fusion`` package.
 
-Unlike the GEMM wrapper (which relays forge-gemm-tune's own result sentinel),
 forge-fusion emits a ``fusion_manifest.json``; this wrapper normalizes that into
 the Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
 sentinel + an on-disk ``result.json``) that ``run_fusion_handler`` parses. A KEPT
@@ -27,8 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling import works whether run as a standalone script or loaded via
-# importlib; the kernel-agent tools cannot rely on the ``hyperloom`` import root.
+# Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _io_utils import truthy  # noqa: E402
 
@@ -42,15 +38,14 @@ def _inject_author_gateway_env() -> None:
     """Seed the ``claude`` author subprocess's gateway auth from the OpenAI-proxy env.
 
     forge-fusion's ``author`` stage drives the ``claude`` CLI, which authenticates
-    via ``ANTHROPIC_*``. Hyperloom's session env (sourced from ``.env``) only carries
-    ``OPENAI_BASE_URL`` / ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so
-    derive the ``ANTHROPIC_*`` equivalents here (the old ``forge_submit`` backend did
-    the same) — otherwise the author has no gateway auth when only ``.env`` is sourced.
-    Only fills what is absent; explicit operator values always win.
+    via ``ANTHROPIC_*``. Hyperloom's session env only carries ``OPENAI_BASE_URL`` /
+    ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so derive the
+    ``ANTHROPIC_*`` equivalents here. Only fills what is absent; explicit operator
+    values always win.
     """
     openai_base = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
     if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
-        # ``.../api/v1/llm-proxy/v1`` -> ``.../api/v1/llm-proxy`` (claude appends /v1).
+        # Strip trailing /v1 (claude appends its own).
         os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
     token = str(
         os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
@@ -105,9 +100,8 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "ab_isl", "--ab-isl")
     _add_opt(cmd, args, "ab_osl", "--ab-osl")
     _add_opt(cmd, args, "framework_root", "--framework-root")
-    # Fusion authors ALL source-confirmed patterns together by default (the T3
-    # ZAYA recipe stacks 3 fusions and the A/B measures the combined gain);
-    # set fuse_all_confirmed=false to author only the top recipe.
+    # Author all source-confirmed patterns together by default; set
+    # fuse_all_confirmed=false to author only the top recipe.
     if bool(args.get("fuse_all_confirmed", True)):
         cmd.append("--fuse-all-confirmed")
     if not bool(args.get("author", True)):
@@ -166,13 +160,13 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         "baseline_env_flags": {f: "0" for f in best_flags},
         "artifact_files": changed,
         "patch": artifacts.get("patch"),
-        # For integrate's patch-apply path: primary edited source + its repo root.
+        # For integrate's patch-apply path.
         "source_file": src_file,
         "kernel_repo": _git_toplevel(src_file) if src_file else "",
         "best_pattern": loop.get("best_pattern"),
         "verdict": m.get("verdict"),
         # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
-        # still confirms the real e2e gain (and applies patch+env) via integrate.
+        # still confirms the real e2e gain via integrate.
         "requires_e2e_validation": kept,
     })
     return result
@@ -218,8 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = str(payload.get("output_dir") or "")
     result = _normalize_manifest(output_dir, proc.returncode)
     _emit(result, output_dir)
-    # Exit mirrors the forge-fusion subprocess: 0 when it ran (result carries the
-    # KEEP/REVERT verdict); non-zero only when the subprocess itself failed.
+    # Mirror the subprocess exit: non-zero only when the subprocess itself failed.
     return int(proc.returncode)
 
 

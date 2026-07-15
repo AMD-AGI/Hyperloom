@@ -21,42 +21,30 @@ from hyperloom.agents.critic.runtime.request_models import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# in_memory_kb_client pure helpers #
-# --------------------------------------------------------------------------- #
 def test_normalise_value_none() -> None:
-    assert _normalise_value(None) == ""  # line 36
+    assert _normalise_value(None) == ""
     assert _normalise_value("  HeLLo ") == "hello"
 
 
 def test_matches_metadata_branches() -> None:
-    # Nested expected but value not a dict (line 88).
     assert _matches_metadata({"k": "x"}, {"k": {"a": 1}}) is False
-    # Nested mismatch (line 90).
     assert _matches_metadata({"k": {"a": 2}}, {"k": {"a": 1}}) is False
-    # List filter but haystack not a list (line 100).
     assert _matches_metadata({"k": "x"}, {"k": [1]}) is False
-    # Scalar mismatch (lines 101-102).
     assert _matches_metadata({"k": "x"}, {"k": "y"}) is False
-    # Array-contains success.
     assert _matches_metadata({"k": [1, 2, 3]}, {"k": [1, 2]}) is True
 
 
 def test_deep_merge_nested() -> None:
     out = _deep_merge({"a": {"b": 1}}, {"a": {"c": 2}})
-    assert out == {"a": {"b": 1, "c": 2}}  # nested recursion (line 504)
+    assert out == {"a": {"b": 1, "c": 2}}
 
 
-# --------------------------------------------------------------------------- #
-# in_memory_kb_client list / upsert / batch / edges #
-# --------------------------------------------------------------------------- #
 def test_list_validation_and_filters() -> None:
     kb = InMemoryKBClient(time_fn=lambda: 1.0)
     with pytest.raises(KBValidationError):
-        kb.list(scope_filter="nope")  # type: ignore[arg-type]  # line 258
+        kb.list(scope_filter="nope")  # type: ignore[arg-type]
 
     kb.upsert({"scope": {"model": "M"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5})
-    # kind filter mismatch -> filtered out (line 264).
     res = kb.list(scope_filter={"model": "m"}, kind="pitfall")
     assert res["count"] == 0
     res2 = kb.list(scope_filter={"model": "m"}, kind="technique")
@@ -70,7 +58,6 @@ def test_upsert_normalization_warning_and_merge() -> None:
     )
     assert res["created"] is True
 
-    # Second upsert merges edges + raises importance (349-352, 357).
     res2 = kb.upsert(
         {
             "scope": {"model": "big-model"},
@@ -85,7 +72,6 @@ def test_upsert_normalization_warning_and_merge() -> None:
     assert res2["row"]["importance"] == 0.8
     assert "kb_x" in res2["row"]["edges"]["relates_to"]
 
-    # Lower importance -> protected.
     res3 = kb.upsert(
         {"scope": {"model": "big-model"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.1}
     )
@@ -95,43 +81,38 @@ def test_upsert_normalization_warning_and_merge() -> None:
 def test_batch_insert_conflict_modes() -> None:
     kb = InMemoryKBClient(time_fn=lambda: 1.0)
     with pytest.raises(KBValidationError):
-        kb.batch_insert([], on_conflict="bogus")  # line 388
+        kb.batch_insert([], on_conflict="bogus")
 
     item = {"scope": {"model": "m"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5}
-    kb.batch_insert([item], on_conflict="error")  # inserts (394-401)
+    kb.batch_insert([item], on_conflict="error")
     with pytest.raises(KBValidationError):
-        kb.batch_insert([item], on_conflict="error")  # conflict now raises
+        kb.batch_insert([item], on_conflict="error")
 
 
 def test_add_edges_branches() -> None:
     kb = InMemoryKBClient(time_fn=lambda: 1.0)
     with pytest.raises(KBValidationError):
-        kb.add_edges([{"kind": "relates_to"}])  # missing from/to -> line 435
+        kb.add_edges([{"kind": "relates_to"}])
 
-    # Source row missing -> skipped (439-440).
     out = kb.add_edges([{"kind": "relates_to", "from_id": "missing", "to_id": "x"}])
     assert out["mirror_skipped"][0]["reason"] == "src_missing"
 
 
-# --------------------------------------------------------------------------- #
-# request_models validators                                                   #
-# --------------------------------------------------------------------------- #
 def test_require_and_optional_validators() -> None:
     with pytest.raises(RequestValidationError):
-        _require_str({"k": 5}, "k", where="t")  # non-string -> line 159
+        _require_str({"k": 5}, "k", where="t")
     with pytest.raises(RequestValidationError):
-        _optional_str({"k": 5}, "k", where="t")  # present non-string -> line 181
+        _optional_str({"k": 5}, "k", where="t")
     with pytest.raises(RequestValidationError):
-        _optional_list({"k": 5}, "k", where="t")  # present non-list -> line 230
+        _optional_list({"k": 5}, "k", where="t")
     assert _optional_str({}, "k", where="t") is None
     assert _optional_list({}, "k", where="t") == []
 
 
 def test_parse_request_errors() -> None:
     with pytest.raises(RequestValidationError):
-        parse_request("not a dict")  # type: ignore[arg-type]  # line 253
+        parse_request("not a dict")  # type: ignore[arg-type]
 
-    # proposals[i] not an object -> line 281.
     with pytest.raises(RequestValidationError):
         parse_request(
             {

@@ -204,8 +204,7 @@ def test_patch_ref_read_oserror_skipped(fake_repo, output_dir, tmp_path):
         }],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
-    # Either skipped (permission denied) or read succeeds (root can read anything)
-    # Either way, should not crash
+    # Skipped or read-succeeds depending on privileges; must not crash.
     assert isinstance(result, list)
     ref_file.chmod(0o644)  # cleanup
 

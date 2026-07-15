@@ -226,7 +226,6 @@ def test_get_latest_commit_empty(monkeypatch):
 
 def test_fetch_amd_master_yaml(monkeypatch, tmp_path: Path):
     def fake_run(cmd, **kw):
-        # cmd: ["git","clone","--depth=1","--branch=main", url, tmpdir]
         tmpdir = Path(cmd[-1])
         cfgp = tmpdir / ".github" / "configs" / "amd-master.yaml"
         cfgp.parent.mkdir(parents=True, exist_ok=True)

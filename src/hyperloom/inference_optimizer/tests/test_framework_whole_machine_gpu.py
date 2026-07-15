@@ -66,7 +66,7 @@ def _build_coord(
     state = SharedState(session_id="framework-gpu")
     state.gpu_specialist_capacity = gpu_specialist_capacity
     state.tp = tp
-    # research_lane headroom so a GPU task is never blocked by the LLM lane.
+    # research_lane headroom so a GPU task is not blocked by the LLM lane.
     state.research_lane_capacity = 4
     state.save(tmp_path)
 
@@ -345,8 +345,8 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(
 ):
     """A bench-capable EXPLORE specialist (mode=patch & bench=true) leases the
     whole machine from ``framework_gpu_pool`` — so serving occupying the whole
-    node (TP == #GPUs, which empties the serving-disjoint pool) no longer leaves
-    it unschedulable. This is the EXPLORE-phase GPU-specialist fix."""
+    node (TP == #GPUs, which empties the serving-disjoint pool) does not leave
+    it unschedulable."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4, tp=4)
     # Serving carve empties the disjoint pool; the whole-machine pool is full.
     assert coord.gpu_specialist_pool.capacity == 0

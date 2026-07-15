@@ -91,9 +91,7 @@ MANIFEST = "manifest.json"
 UNPHASED = lfmap.UNPHASED
 
 
-# ---------------------------------------------------------------------------
 # Plan building (pure -- no SDK, dry-run friendly)
-# ---------------------------------------------------------------------------
 def build_plan(session_dir: Path) -> dict[str, Any]:
     """Parse the trace files into a Langfuse-shaped plan dict (pure).
 
@@ -116,13 +114,13 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         conv_by_key[lfmap.pair_key(c)] = c
 
     internal_id = str(manifest.get("session_id") or (llm[0].get("session_id") if llm else "") or session_dir.name)
-    # Correlate on claw_session_id (fallback internal id) so backfill and the
-    # live emitter land on one Langfuse trace.
+    # Correlate on claw_session_id so backfill and the live emitter land on one
+    # Langfuse trace.
     seed = lfmap.correlation_seed(manifest, internal_id)
     session_label = lfmap.langfuse_session_id(manifest, internal_id)
 
-    # phase -> agent -> [generation parts]; the span hierarchy mirrors the
-    # live emitter (trace -> phase span -> agent span -> generation).
+    # phase -> agent -> [generation parts]; mirrors the live emitter's
+    # trace -> phase span -> agent span -> generation hierarchy.
     phases: "OrderedDict[str, OrderedDict[str, list[dict]]]" = OrderedDict()
     paired = 0
     for row in llm:
@@ -197,9 +195,7 @@ def _phase_time_bounds(
     return _time_bounds(flat)
 
 
-# ---------------------------------------------------------------------------
 # Dry-run printer
-# ---------------------------------------------------------------------------
 def print_plan(plan: dict[str, Any]) -> None:
     """Print a human-readable dry-run summary of a backfill plan.
 
@@ -241,9 +237,7 @@ def print_plan(plan: dict[str, Any]) -> None:
     print(f"  Recipe-snapshot reads: {len(plan.get('recipe_audit') or [])} audit row(s)")
 
 
-# ---------------------------------------------------------------------------
 # Real ingest (needs the langfuse SDK)
-# ---------------------------------------------------------------------------
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree.
 
@@ -280,7 +274,7 @@ def ingest(plan: dict[str, Any]) -> int:
         trace_context={"trace_id": trace_id},
         metadata=plan["metadata"],
     )
-    # Version-tolerant (v2/v3 update_trace -> v4 OTEL attrs); never raises.
+    # Version-tolerant across SDK versions; never raises.
     _set_trace_attrs(
         root,
         name=plan["name"],
@@ -288,8 +282,7 @@ def ingest(plan: dict[str, Any]) -> int:
         metadata=plan["metadata"],
     )
 
-    # trace -> phase span -> agent span -> generation. Keep the agent spans so
-    # decision scores can attach to the agent that produced them.
+    # Keep the agent spans so decision scores can attach to their producer.
     agent_spans: dict[tuple[str, str], Any] = {}
     last_end = trace_start
     for phase, agents in plan["phases"].items():
@@ -335,7 +328,7 @@ def ingest(plan: dict[str, Any]) -> int:
         if p_hi is not None:
             last_end = p_hi
 
-    # Recipe-snapshot / gbrain remote reads -> spans under a recipe_kb agent.
+    # Recipe-snapshot remote reads -> spans under a recipe_kb agent.
     recipe_audit = plan.get("recipe_audit") or []
     if recipe_audit:
         ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
@@ -369,10 +362,8 @@ def ingest(plan: dict[str, Any]) -> int:
             _end_obs(obs, r_start)
         _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
 
-    # Decision scores -> the owning agent span (trace-level fallback).
-    # ``component`` is the resolved proposer (specialist:<domain> / grid /
-    # orchestration); normalise it back to a span-attachable agent so the score
-    # still lands under a real agent span. operation_kind rides in score metadata.
+    # Decision scores -> the owning agent span (trace-level fallback). Normalise
+    # the resolved ``component`` proposer back to a span-attachable agent.
     def _span_agent_for(proposer: str) -> str:
         """Normalize a resolved proposer name to a span-attachable agent name.
 
@@ -425,9 +416,7 @@ def ingest(plan: dict[str, Any]) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser.
 

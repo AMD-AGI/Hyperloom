@@ -50,8 +50,7 @@ class InternalTasksPhase(PhaseHandler):
                 "sources; do not benchmark or patch."
             ),
             "gap_layer": "research",
-            # Depth is bounded by the wall-clock budget, not by turns —
-            # omit max_turns so the scout runs to a deliverable conclusion.
+            # Depth bounded by wall-clock budget, not turns (max_turns omitted).
             "source": "coordinator_internal",
             "reason": str(reason),
             "seen_pr_ids": seen,
@@ -141,13 +140,10 @@ class InternalTasksPhase(PhaseHandler):
     ) -> "Task | None":
         """Enqueue the Coordinator-owned read-only static-recon specialist task.
 
-        Mirrors :meth:`_enqueue_internal_research_scout_task` but seeds a source
-        -code reconnaissance mandate: the specialist greps the framework source
-        tree for un-bridged capability switches (predicates that silently
-        disable a faster path for the current model/GPU/precision). Read-only —
-        produces bridge candidates only; the EXPLORE freeform specialist authors
-        any patch under the normal KEEP gate. Idempotency keyed to the session
-        (PRELUDE one-shot). Returns None when disabled or enqueue fails.
+        Seeds a source-code reconnaissance mandate: the specialist greps the
+        framework source for un-bridged capability switches and produces bridge
+        candidates only (read-only). Idempotency keyed to the session (PRELUDE
+        one-shot). Returns None when disabled or enqueue fails.
 
         Args:
             reason: Tag distinguishing the enqueue site, recorded on the task.
@@ -178,9 +174,7 @@ class InternalTasksPhase(PhaseHandler):
             "mode": "research",
             "lane": "cpu",
         }
-        # Seed the curated checklist + its rendered prompt block for the current
-        # (model_class, gpu, precision). Best-effort; an empty checklist still
-        # runs a generic recon pass.
+        # Seed the curated checklist + rendered prompt block; best-effort.
         try:
             from ..knowledge import static_recon_checklist as _src_recon
 
@@ -288,7 +282,7 @@ class InternalTasksPhase(PhaseHandler):
                 "exhausted ones).\n" + (digest or "(no digest)")
             ),
             "gap_layer": "research",
-            # Bounded by the wall-clock budget, not by turns.
+            # Bounded by wall-clock budget, not turns.
             "source": "coordinator_internal",
             "reason": "plateau_trajectory_review",
             "readonly": True,
@@ -342,8 +336,7 @@ class InternalTasksPhase(PhaseHandler):
                 continue
             predicate_file = str(cand.get("predicate_file") or "").strip()
             why = str(cand.get("why_disabled_here") or "").strip()
-            # Mirror the specialist's drop rule: a candidate without a source
-            # anchor + an explanation of the disabled branch is not actionable.
+            # A candidate without a source anchor + explanation is not actionable.
             if not predicate_file or not why:
                 continue
             raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"

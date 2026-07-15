@@ -50,7 +50,7 @@ def test_below_warn_pct_emits_nothing():
 
 
 def test_warn_zone_no_validated_gain_emits_medium_alert():
-    # 75% burnt, validated_gain=0 → medium (between 0.70 and 0.85).
+    # 75% burnt, validated_gain=0 -> medium.
     ctx = _ctx(
         elapsed_minutes=270.0,
         remaining_minutes=90.0,
@@ -65,7 +65,7 @@ def test_warn_zone_no_validated_gain_emits_medium_alert():
 
 
 def test_imminent_zone_no_validated_gain_emits_deadline_imminent():
-    # 90% burnt, validated_gain=0 → deadline_imminent (HIGH).
+    # 90% burnt, validated_gain=0 -> deadline_imminent (HIGH).
     ctx = _ctx(
         elapsed_minutes=324.0,
         remaining_minutes=36.0,
@@ -82,8 +82,7 @@ def test_imminent_zone_no_validated_gain_emits_deadline_imminent():
 
 
 def test_imminent_zone_with_validated_gain_is_suppressed():
-    # 90% burnt but validated_gain > productive threshold → no symptom
-    # (the session has shippable progress; let it finish naturally).
+    # 90% burnt but validated_gain > productive threshold -> no symptom.
     ctx = _ctx(
         elapsed_minutes=324.0,
         remaining_minutes=36.0,
@@ -94,7 +93,6 @@ def test_imminent_zone_with_validated_gain_is_suppressed():
 
 
 def test_closing_phase_suppresses_signal():
-    # Already winding down; don't nag.
     ctx = _ctx(
         elapsed_minutes=324.0,
         remaining_minutes=36.0,
@@ -105,7 +103,7 @@ def test_closing_phase_suppresses_signal():
 
 
 def test_short_budget_below_minimum_is_silent():
-    # 20 min budget < 30 min min_budget_minutes → never fires.
+    # 20 min budget < 30 min min_budget_minutes -> never fires.
     ctx = _ctx(
         elapsed_minutes=18.0,
         remaining_minutes=2.0,
@@ -120,12 +118,11 @@ def test_custom_thresholds_apply():
         imminent_pct=0.6,
         min_budget_minutes=10.0,
         productive_gain_pct=2.0,
-        # Disable the absolute-time signals so we exercise the
-        # percentage-axis custom thresholds in isolation.
+        # Disable absolute-time signals to exercise percentage-axis thresholds in isolation.
         deadline_warning_minutes=0.0,
         deadline_hard_cutoff_minutes=0.0,
     )
-    # 65% burnt, validated_gain=1.0% < productive_gain_pct → HIGH.
+    # 65% burnt, validated_gain=1.0% < productive_gain_pct -> HIGH.
     ctx = _ctx(
         elapsed_minutes=39.0,
         remaining_minutes=21.0,
@@ -151,13 +148,11 @@ def test_dedup_key_is_session_wide():
     assert sym.dedup_key() == ("deadline_imminent",)
 
 
-# ---------------------------------------------------------------------------
-# H3 budget_strategy_drift — 50% burnt + 0 gain early warning
-# ---------------------------------------------------------------------------
+# budget_strategy_drift — 50% burnt + 0 gain early warning
 
 
 def test_strategy_drift_fires_at_half_burnt_with_zero_gain():
-    """50% burnt, validated_gain=0 → MEDIUM early hint."""
+    """50% burnt, validated_gain=0 gives a MEDIUM early hint."""
     ctx = _ctx(
         elapsed_minutes=180.0,
         remaining_minutes=180.0,
@@ -192,7 +187,7 @@ def test_strategy_drift_silent_when_validated_gain_present():
 
 
 def test_strategy_drift_does_not_double_fire_with_warn():
-    """Past warn_pct (0.7), warn_no_gain takes over and drift is suppressed."""
+    """Past warn_pct, warn_no_gain takes over and drift is suppressed."""
     ctx = _ctx(
         elapsed_minutes=270.0,
         remaining_minutes=90.0,
@@ -205,13 +200,11 @@ def test_strategy_drift_does_not_double_fire_with_warn():
     assert len(burn) == 1
 
 
-# ---------------------------------------------------------------------------
-# H1 deadline_warning — absolute-time 30-min predictive warning
-# ---------------------------------------------------------------------------
+# deadline_warning — absolute-time 30-min predictive warning
 
 
 def test_deadline_warning_fires_at_30min_remaining_with_zero_gain_high():
-    """Long session: 24h budget, 25 min remain, 0 validated gain → HIGH."""
+    """Long session: 24h budget, 25 min remain, 0 validated gain gives HIGH."""
     ctx = _ctx(
         elapsed_minutes=1415.0,
         remaining_minutes=25.0,
@@ -224,7 +217,7 @@ def test_deadline_warning_fires_at_30min_remaining_with_zero_gain_high():
 
 
 def test_deadline_warning_with_validated_gain_drops_to_medium():
-    """Long session, 25 min remain, validated gain present → MEDIUM only."""
+    """Long session, 25 min remain, validated gain present gives MEDIUM only."""
     ctx = _ctx(
         elapsed_minutes=1415.0,
         remaining_minutes=25.0,
@@ -247,8 +240,7 @@ def test_deadline_warning_silent_when_remaining_above_threshold():
 
 
 def test_deadline_warning_independent_of_burn_pct():
-    """Short 2h budget, 25 min remain = 79% burnt → between warn and
-    imminent, but deadline_warning still fires on the time axis."""
+    """79% burnt sits between warn and imminent, but deadline_warning still fires on the time axis."""
     ctx = _ctx(
         elapsed_minutes=95.0,
         remaining_minutes=25.0,
@@ -257,14 +249,11 @@ def test_deadline_warning_independent_of_burn_pct():
     out = evaluate_budget_signals(ctx)
     names = [s.name for s in out]
     assert "deadline_warning" in names
-    # The %-axis signal at this burn_pct is budget_burn_no_gain, not
-    # deadline_imminent (which fires at 85%).
+    # The %-axis signal at this burn_pct is budget_burn_no_gain, not deadline_imminent.
     assert "budget_burn_no_gain" in names
 
 
-# ---------------------------------------------------------------------------
-# H1 deadline_hard_cutoff — < 5 min emergency cut
-# ---------------------------------------------------------------------------
+# deadline_hard_cutoff — < 5 min emergency cut
 
 
 def test_hard_cutoff_fires_at_5min_remaining_always_high():
@@ -315,19 +304,11 @@ def test_hard_cutoff_silent_when_remaining_above_threshold():
     assert all(s.name != "deadline_hard_cutoff" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # Axis coexistence — absolute and percentage signals can overlap
-# ---------------------------------------------------------------------------
 
 
 def test_absolute_and_percentage_can_both_fire():
-    """24h budget, 25 min remain, 95% burnt, no validated gain.
-
-    Both ``deadline_warning`` (time-axis) and ``deadline_imminent``
-    (percentage-axis) fire because they cover complementary failure
-    modes. The Classifier's ``_dedup`` collapses identical names, not
-    different ones.
-    """
+    """Both deadline_warning (time-axis) and deadline_imminent (percentage-axis) fire on complementary failure modes."""
     ctx = _ctx(
         elapsed_minutes=1415.0,
         remaining_minutes=25.0,
@@ -340,7 +321,7 @@ def test_absolute_and_percentage_can_both_fire():
 
 
 def test_short_budget_below_min_silences_absolute_signals_too():
-    """20 min budget < 30 min min_budget_minutes → all signals silent."""
+    """20 min budget < 30 min min_budget_minutes silences all signals."""
     ctx = _ctx(
         elapsed_minutes=18.0,
         remaining_minutes=2.0,
@@ -378,7 +359,7 @@ def test_custom_thresholds_apply_to_new_signals():
     )
     out = evaluate_budget_signals(ctx, config=cfg)
     names = [s.name for s in out]
-    # strategy_drift_pct = 0.3, so 50% burnt triggers drift.
+    # 50% burnt triggers drift.
     assert "budget_strategy_drift" in names
-    # deadline_warning_minutes = 60, so 30 min remain trips warning.
+    # 30 min remain trips warning.
     assert "deadline_warning" in names

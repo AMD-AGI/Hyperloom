@@ -10,8 +10,7 @@ action-name lists.
 from __future__ import annotations
 
 
-# Actions owned by the Kernel role. Orchestration must use
-# request{target_agent="kernel_agent", kind=...}, not delegate/propose_action.
+# Actions owned by the Kernel role; requested via request{target_agent="kernel_agent"}.
 KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
     {
         "kernel_opt",
@@ -45,10 +44,8 @@ FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES
 
 
-# Robustness-only actions (driven via its action-ladder): in
-# PHASE_ALLOWED_ACTIONS but excluded from PHASE_LLM_PROPOSABLE_ACTIONS + the
-# prompt catalogue, so Orchestration must ALERT instead. ``recover`` walks
-# SIGTERM/SIGKILL against server owners (robustness gpu_memory_leaked ladder).
+# Robustness-only actions (driven via its action-ladder); Orchestration must
+# ALERT instead. ``recover`` walks SIGTERM/SIGKILL against server owners.
 ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
     {
         "recover",
@@ -66,8 +63,7 @@ GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset(
 
 
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
-# This is prompt visibility, not phase permission: phase_state and PolicyGate
-# still decide when an action is legal on a given tick.
+# Prompt visibility only; phase_state and PolicyGate decide legality per tick.
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",

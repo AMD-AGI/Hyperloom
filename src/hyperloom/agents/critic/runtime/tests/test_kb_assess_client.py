@@ -22,7 +22,7 @@ def test_from_env_builds_client_when_url_set(monkeypatch):
     monkeypatch.setenv("CORTEX_KB_HTTP_TIMEOUT_SEC", "1.5")
     client = KBAssessClient.from_env()
     assert client is not None
-    assert client.base_url == "http://kb.local"  # trailing slash stripped
+    assert client.base_url == "http://kb.local"
     assert client.timeout_sec == 1.5
 
 

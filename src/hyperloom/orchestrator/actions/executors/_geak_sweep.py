@@ -63,8 +63,7 @@ def _write_benchmark_report(
             json.dumps(report, indent=2), encoding="utf-8",
         )
     except OSError as exc:
-        # Best-effort reporting: a failed benchmark_report.json write must never
-        # break the sweep, so log and continue instead of propagating.
+        # Best-effort: a failed write must never break the sweep.
         log.warning("geak_sweep: could not write %s: %s",
                     out_dir / "benchmark_report.json", exc)
 
@@ -119,10 +118,9 @@ async def sweep_via_geak(
         pin_num_prompts: When True, also forward ``num_prompts`` from the
             protocol onto every point (NUM_PROMPTS). Off by default because a
             multi-conc sweep's prompt count is tied to each concurrency (a fixed
-            count would mis-size other concs); a SINGLE-point validated replay
-            (修改点7 2a) sets it True so the replay matches the headline result's
-            exact protocol (e.g. num_prompts=320) instead of bench_e2e.sh's
-            per-conc default (CONC*10).
+            count would mis-size other concs); a single-point validated replay
+            sets it True so the replay matches the headline result's exact
+            protocol instead of bench_e2e.sh's per-conc default.
     """
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     overlay = result.get("final_overlay") or ""
@@ -138,19 +136,15 @@ async def sweep_via_geak(
     backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
     tp = int(os.environ.get("TP", "1") or 1)
     gpus = _serving_gpus(tp)
-    # Reuse the SAME bench client the KERNEL_AGENT phase measured with (recorded in
-    # result.json) so sweep numbers stay 口径-consistent with the headline result.
+    # Reuse the SAME bench client the KERNEL_AGENT phase measured with.
     bench_client = str(result.get("bench_client") or "native").strip() or "native"
 
-    # ── Forward the validated measurement 口径 + client trust onto every variant ──
-    # The sweep must measure on the SAME workload shape the KERNEL_AGENT phase
-    # accepted, otherwise bench_e2e.sh falls back to its own standalone defaults
-    # (notably RANDOM_RANGE_RATIO=1 => fixed full-length prompts) and the grid
-    # is no longer 口径-comparable to the baseline/final. Prefer an explicit
-    # bench_protocol block, else the first validated regime. Only the
-    # concurrency-INDEPENDENT knobs are forwarded; num_prompts is deliberately
-    # left to bench_e2e.sh's per-conc default because the regime's count is tied
-    # to its own concurrency (forwarding a fixed count would mis-size other concs).
+    # Forward the validated measurement config + client trust onto every variant
+    # so the sweep measures on the same workload shape the KERNEL_AGENT phase
+    # accepted (else bench_e2e.sh falls back to its own defaults). Prefer an
+    # explicit bench_protocol block, else the first validated regime. Only
+    # concurrency-independent knobs are forwarded; num_prompts is left to
+    # bench_e2e.sh's per-conc default.
     _protocol = result.get("bench_protocol")
     if not isinstance(_protocol, dict):
         _regimes = result.get("validated_regimes") or []
@@ -161,18 +155,15 @@ async def sweep_via_geak(
         ("num_warmups", "NUM_WARMUPS"),
         ("seed", "SEED"),
     ]
-    # Single-point validated replay: also pin num_prompts so the replay matches
-    # the headline result's exact protocol (see pin_num_prompts docstring).
+    # Single-point validated replay: also pin num_prompts (see docstring).
     if pin_num_prompts:
         _protocol_map.append(("num_prompts", "NUM_PROMPTS"))
     for _src, _dst in _protocol_map:
         _val = _protocol.get(_src)
         if _val is not None:
             protocol_env[_dst] = str(_val)
-    # Mirror the server's --trust-remote-code onto the bench CLIENT: the accepted
-    # flags launch a custom-tokenizer server and bench_e2e.sh's client loads the
-    # same tokenizer (transformers raises ValueError without trust). Model-
-    # agnostic — keyed on the flags, never on a model name.
+    # Mirror the server's --trust-remote-code onto the bench client so its
+    # tokenizer load doesn't raise. Keyed on the flags, never a model name.
     if "trust-remote-code" in flags or "trust_remote_code" in flags:
         for _tk in ("BENCH_TRUST_REMOTE_CODE", "HF_HUB_TRUST_REMOTE_CODE", "MAGPIE_TRUST_REMOTE_CODE"):
             protocol_env.setdefault(_tk, "1")
@@ -184,10 +175,8 @@ async def sweep_via_geak(
     for conc in conc_values:
         for spec in isl_osl_configs:
             isl, osl = _parse_isl_osl(spec)
-            # Name the per-point dir so the session-breakdown sweep collector's
-            # on-disk scanner (_scan_sweep_variants / _VARIANT_NAME_RE expects
-            # ``variant_<idx>_conc<c>_isl<i>_osl<o>``) discovers it and populates
-            # ``sweep.all_variants`` with per-variant detail.
+            # Name matches the sweep collector's scanner regex
+            # (``variant_<idx>_conc<c>_isl<i>_osl<o>``) so it is discovered.
             variant_name = f"variant_{variant_idx}_conc{conc}_isl{isl}_osl{osl}"
             variant_idx += 1
             out_dir = output_root / variant_name
@@ -209,8 +198,7 @@ async def sweep_via_geak(
                 "EXTRA_ENV": env_str,
                 "BENCH_CLIENT": bench_client,
             })
-            # setdefault: the forwarded 口径/trust apply unless the operator
-            # already pinned the knob in the process env (explicit wins).
+            # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
             cmd = ["bash", str(bench_script)]
@@ -251,9 +239,8 @@ async def sweep_via_geak(
                 entry.update({"status": "failed", "error": err})
 
             # Emit a session-breakdown-compatible benchmark_report.json so the
-            # sweep collector parses this point with the SAME 口径 as the native
-            # sweep (output_throughput_tok_s / mean_ttft_ms / mean_tpot_ms /
-            # mean_e2el_ms). bench_summary.json is kept as the raw artifact.
+            # sweep collector parses this point like the native sweep;
+            # bench_summary.json is kept as the raw artifact.
             _write_benchmark_report(
                 out_dir, conc=conc, isl=isl, osl=osl, success=succeeded,
                 output_throughput_tok_s=tput if isinstance(tput, (int, float)) else None,

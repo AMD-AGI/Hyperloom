@@ -72,7 +72,7 @@ def test_export_and_restore_cover_sibling_file():
         # base_commit must have absorbed the pre-existing dirty file.
         assert base_commit, "base_commit must be set"
 
-        # --- simulate the loop: winning edit lands in the SIBLING config file ---
+        # Winning edit lands in the SIBLING config file.
         # iter1 (kept): config 64 -> 128, kernel untouched.
         config.write_text("BLOCK_SIZE = 128\n")
         _commit_all(repo, "iter1: tune config")
@@ -119,7 +119,7 @@ def test_restore_from_detached_head_preserves_dirty():
         env = _make_repo(tmp)
         repo, kernel, config, other = (env["repo"], env["kernel_agent"], env["config"], env["other"])
         branch = "forge/test/kernel"
-        # Detach HEAD at the current commit (the run6 sglang scenario).
+        # Detach HEAD at the current commit.
         head = _git(repo, "rev-parse", "HEAD")
         subprocess.run(["git", "-C", repo, "checkout", "--detach", head], capture_output=True)
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
@@ -152,17 +152,15 @@ def test_default_branch_resolves_main():
 
 
 def test_prepare_inplace_autorecovers_from_stale_forge_branch():
-    """A prior run SIGKILL'd before _restore_inplace leaves the repo stranded on
-    its forge/<ts>/... temp branch with an un-reverted optimization. The next
-    _prepare_inplace must AUTO-RECOVER (force-checkout the default branch, drop
+    """After a crash leaves the repo stranded on a stale forge temp branch,
+    _prepare_inplace must auto-recover (force-checkout the default branch, drop
     the stale branch, snapshot a pristine baseline) instead of refusing."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         env = _make_repo(tmp)
         repo, kernel = env["repo"], env["kernel_agent"]
 
-        # Simulate the crashed run: strand HEAD on a forge/ temp branch whose tip
-        # carries a leftover (never-restored) optimization.
+        # Strand HEAD on a forge/ temp branch carrying a leftover optimization.
         stale = "forge/20990101T000000Z/kernel"
         subprocess.run(["git", "-C", repo, "checkout", "-b", stale], capture_output=True)
         kernel.write_text("KERNEL_OPTIMIZED_LEFTOVER\n")

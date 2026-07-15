@@ -4,20 +4,16 @@
 stale-lock cleanup.
 
 aiter JIT-compiles GPU kernels on demand with ninja, guarding each module
-build with a per-module file lock (aiter ``jit/core.py`` ``mp_lock`` +
-``jit/utils/file_baton.py``). The lock is a zero-byte file (``O_CREAT|O_EXCL``,
-no pid inside) and ``FileBaton.wait()`` spins forever with no timeout. A
-``hipcc`` build process killed mid-compile (timeout / OOM / KILL_TASK) never
-releases its lock, so every later process compiling that module spins forever.
+build with a per-module file lock. The lock is a zero-byte file with no pid
+inside and ``FileBaton.wait()`` spins forever with no timeout, so a ``hipcc``
+build killed mid-compile never releases its lock and every later process
+compiling that module spins forever.
 
-This module resolves the aiter jit dir and sweeps these orphaned locks before
-each cold server start, but ONLY when no compiler process is alive (the jit dir
-is node-global and shared across concurrent benchmarks, so a live ``hipcc`` may
-legitimately hold a lock). ninja resumes the build incrementally from existing
-``.o`` once the lock is gone, so we delete only locks — never build artifacts.
-
-The logic lives here so both ``cli.py`` (startup sweep) and ``baseline.py``
-(per-cold-start sweep) can import it without a circular dependency.
+This module resolves the aiter jit dir and sweeps orphaned locks before each
+cold server start, but ONLY when no compiler process is alive (the jit dir is
+node-global and shared across concurrent benchmarks). ninja resumes the build
+incrementally once the lock is gone, so we delete only locks — never build
+artifacts.
 """
 
 from __future__ import annotations
@@ -35,9 +31,8 @@ log = logging.getLogger(__name__)
 # < N .so files under aiter jit/ ⇒ COLD start (first-time JIT compile pending).
 COLD_START_KERNEL_THRESHOLD = 20
 
-# Fallback probe paths for aiter's JIT cache dir, tried when aiter cannot be
-# resolved via import machinery. First existing path wins. Override via env
-# `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
+# Fallback probe paths for aiter's JIT cache dir; first existing wins. Override
+# via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
@@ -49,15 +44,13 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/opt/venv/lib/python3.12/site-packages/aiter/jit",
 )
 
-# Default mtime gate (minutes) for the lock sweep. Used as the belt-and-
-# suspenders fallback when compiler liveness is UNKNOWN; the proven-dead path
-# (no live compiler) bypasses it with stale_minutes=0. 5 min sits above a
-# cold-start MoE module build's lock churn, below the hang-suspicion cliff.
+# Default mtime gate (minutes) for the lock sweep; fallback when compiler
+# liveness is unknown. The proven-dead path bypasses it with stale_minutes=0.
 AITER_LOCK_STALE_MINUTES = 5
 
 # Process names that indicate an in-flight aiter/ninja compile. hipcc is a
-# perl/bash wrapper, so its ``name`` can surface as ``perl``/``sh`` — we also
-# match on the cmdline's first token (see ``_any_live_compiler``).
+# wrapper whose ``name`` can surface as ``perl``/``sh``, so we also match on
+# the cmdline's first token (see ``_any_live_compiler``).
 COMPILER_PROCESS_NAMES = frozenset({
     "hipcc",
     "hipcc.bin",
@@ -75,9 +68,8 @@ _LOCK_NAMES = {"lock", ".ninja_lock"}
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     """Locate aiter's ``jit/`` dir via Python's import machinery.
 
-    Counting at ``<aiter>/jit/`` reflects a warm wheel install (~80
-    pre-built ``.so``), so ``jit`` is preferred over ``jit/build``. Returns an
-    ordered candidate list; empty if aiter not found.
+    ``jit`` is preferred over ``jit/build``. Returns an ordered candidate list;
+    empty if aiter not found.
 
     Returns:
         An ordered list of candidate aiter ``jit/`` directory paths, or an
@@ -175,14 +167,12 @@ def clean_stale_aiter_locks(
 ) -> dict[str, Any]:
     """Sweep aiter's JIT build dir for stale plain-file locks left by killed runs.
 
-    Killed runs leave locks that block the next compile (aiter's untimed
-    FileBaton wait). Only deletes locks with mtime older than ``stale_minutes``
-    (default 5; above cold-start MoE build time, below the hang-suspicion
-    cliff). Pass ``stale_minutes=0`` only when liveness has proven the locks
-    are orphaned (see ``sweep_stale_aiter_locks_if_dead``). Build dir
-    resolution: caller arg → $INFERENCE_OPTIMIZER_AITER_JIT_DIR → dynamic
-    <aiter>/jit/build → legacy fallbacks. Returns a stats dict; never raises
-    (errors counted).
+    Killed runs leave locks that block the next compile. Only deletes locks
+    with mtime older than ``stale_minutes`` (default 5). Pass
+    ``stale_minutes=0`` only when liveness has proven the locks are orphaned
+    (see ``sweep_stale_aiter_locks_if_dead``). Build dir resolution: caller arg
+    → $INFERENCE_OPTIMIZER_AITER_JIT_DIR → dynamic <aiter>/jit/build → legacy
+    fallbacks. Never raises (errors counted).
 
     Args:
         aiter_jit_dir (Path | None): Explicit JIT build dir; when ``None`` it

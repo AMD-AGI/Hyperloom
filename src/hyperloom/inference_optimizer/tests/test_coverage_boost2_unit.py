@@ -18,7 +18,7 @@ def test_deterministic_memory_fallback_bad_gain() -> None:
     state = SimpleNamespace(
         current_best={"tput": 123.0},
         optimization_stack=[],
-        cumulative_gain_validated="not-a-number",  # triggers except (lines 235-236)
+        cumulative_gain_validated="not-a-number",  # triggers except
         phase="EXPLORE",
         macro_cycle=2,
     )
@@ -33,12 +33,12 @@ def test_deterministic_memory_fallback_bad_gain() -> None:
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    assert sp._coerce_bool("off", default=True) is False  # line 119
+    assert sp._coerce_bool("off", default=True) is False
     assert sp._coerce_bool("yes", default=False) is True
     assert sp._coerce_bool(None, default=True) is True
     assert sp._coerce_bool("???", default=True) is True
 
-    # Bare dispatch with no anchors -> freeform scope (line 142 path).
+    # Bare dispatch with no anchors -> freeform scope.
     profile = sp.resolve_specialist_profile({})
     assert profile.scope == sp.SCOPE_FREEFORM
 
@@ -77,7 +77,7 @@ def test_parse_quality_gate_paths(tmp_path) -> None:
     # No report present.
     assert ag.parse_quality_gate(tmp_path)["quality_gate"] is None
 
-    # Malformed JSON (lines 160-161).
+    # Malformed JSON.
     (tmp_path / "benchmark_report.json").write_text("{not valid json", encoding="utf-8")
     res = ag.parse_quality_gate(tmp_path)
     assert res["quality_gate"] is None
@@ -104,9 +104,9 @@ def test_env_flag_tokens(monkeypatch) -> None:
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
     assert trace_env.env_flag("HL_TEST_FLAG") is True
-    monkeypatch.setenv("HL_TEST_FLAG", "off")  # lines 61-62
+    monkeypatch.setenv("HL_TEST_FLAG", "off")
     assert trace_env.env_flag("HL_TEST_FLAG") is False
-    monkeypatch.setenv("HL_TEST_FLAG", "maybe")  # unrecognized -> default (line 63)
+    monkeypatch.setenv("HL_TEST_FLAG", "maybe")  # unrecognized -> default
     assert trace_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
     assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
@@ -118,7 +118,7 @@ def test_env_flag_tokens(monkeypatch) -> None:
 def test_parse_gpu_list() -> None:
     from hyperloom.orchestrator.bus.gpu_pool import _parse_gpu_list
 
-    # Mixed valid / invalid / duplicate / negative entries (lines 52-53 except).
+    # Mixed valid / invalid / duplicate / negative entries.
     assert _parse_gpu_list("0, 1 ; 2, x, 1, -3") == [0, 1, 2]
     assert _parse_gpu_list("") == []
     assert _parse_gpu_list(None) == []  # type: ignore[arg-type]

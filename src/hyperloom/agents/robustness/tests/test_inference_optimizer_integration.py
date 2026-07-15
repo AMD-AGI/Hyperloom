@@ -61,7 +61,7 @@ def _to_upstream(local_intent):
 
 
 async def _drive_reactor_with_prompt(config, prompt: str):
-    """Run one reactor tick from a Coordinator prompt, returning ``(intents, bundle)`` (mirrors ``_run_tick`` without subprocess startup)."""
+    """Run one reactor tick from a Coordinator prompt, returning ``(intents, bundle)``."""
     from hyperloom.agents.robustness.factory import build_reactor_components
     from hyperloom.agents.robustness.role.prompt_inputs import from_coordinator_prompt
 
@@ -114,7 +114,6 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
         gate = _gate()
         assert intents
         types_emitted = {i.type.value for i in intents}
-        # Strategic HIGH symptoms emit alert(high) only; escalate/prune/delegate auto-emits dropped.
         assert "alert" in types_emitted
         assert "escalate_strategy_change" not in types_emitted
         for intent in intents:
@@ -128,23 +127,14 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
 async def test_heartbeat_passes_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
-    # Heartbeat path requires no live alarms — disable the auto-probe
-    # default so an inert test host (no inference server) doesn't fire
-    # ``local_server_unreachable`` alerts that would mask the heartbeat
-    # ``send_message``.
+    # Disable auto-probe so an inert test host doesn't fire alerts that mask the heartbeat.
     config = Config(
         session_dir=tmp_path,
         robustness_server_url="",
         auto_probe_inference_server=False,
-        # Inert hosts have no Ray head running; the LocalProbe A6 sub-
-        # probe would otherwise time out at ``ray status`` and fire
-        # ``ray_head_dead`` alongside the heartbeat, breaking the
-        # single-intent gate assertion below.
+        # Inert hosts have no Ray head; disable the probe so it doesn't fire alongside the heartbeat.
         ray_probe_enabled=False,
-        # CI containers lack the TraceLens CLI / WekaFS mounts; turn
-        # off the J external_deps probe so the heartbeat envelope is
-        # not crowded out by ``tracelens_cli_missing`` /
-        # ``wekafs_degraded`` alerts.
+        # CI containers lack the TraceLens CLI / WekaFS mounts the external_deps probe expects.
         external_deps_enabled=False,
     )
     intents, bundle = await _drive_reactor_with_prompt(
@@ -167,7 +157,7 @@ async def test_heartbeat_passes_gate(tmp_path):
 
 @pytest.mark.asyncio
 async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_path):
-    """Full Change A/B round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate (escalate dropped). Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
+    """Round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate. Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
     from hyperloom.agents.robustness.config import Config
     from hyperloom.agents.robustness.factory import build_reactor_components
     from hyperloom.agents.robustness.role.prompt_inputs import (
@@ -291,7 +281,7 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
 async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
-    # Inbox can't carry delegated_result, so inject a fake coordinator.db with state=failed twice on the same family.
+    # Inject a fake coordinator.db with state=failed twice on the same family.
     import json
     import sqlite3
 

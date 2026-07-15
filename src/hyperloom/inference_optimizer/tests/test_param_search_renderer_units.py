@@ -52,7 +52,6 @@ class TestParamSearchRenderer:
                 },
             }
         )
-        # Non-empty flags inventory keeps the section unskipped.
         assert any("discovered_flags[sglang]" in f and "param=1" in f for f in out.key_facts)
         assert out.skipped is False
 

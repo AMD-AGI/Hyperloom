@@ -7,15 +7,9 @@
 """Independent benchmark/test-file discovery for the bypass analysis backend.
 
 Populates ``benchmark_files`` on routable hot-kernel candidates so the shared
-GEAK harness generator (``harness_generator.maybe_generate_harness``) can build
-a runnable per-kernel benchmark when downstream tools need one.
-
-Compact, independent reimplementation of the discovery *logic* used by
-``tracelens_analysis.find_benchmark_files`` (content-grep over the kernel repo's
-benchmark/test subdirs). It does **not** import TraceLens and does not carry
-TraceLens' curated op->file mapping — a content match finds tests even when the
-file name does not contain the op (e.g. ``silu_and_mul`` lives in
-``test_activation.py``), which a name-only match would miss.
+GEAK harness generator can build a runnable per-kernel benchmark. Discovery is a
+content-grep over the kernel repo's benchmark/test subdirs, so a content match
+finds tests even when the file name does not contain the op.
 """
 
 from __future__ import annotations
@@ -25,12 +19,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# Repo subdirs that conventionally hold tests/benchmarks (aiter/sglang/vllm).
+# Repo subdirs that conventionally hold tests/benchmarks.
 _BENCHMARK_DIRS = ("op_tests", "tests", "benchmarks", "benchmark", "test", "perf")
 # Only files whose name looks like a test/benchmark are trusted as harness seeds.
 _BENCH_NAME_HINTS = ("test_", "_test", "bench", "benchmark")
-# Multi-GPU / distributed harnesses are demoted (a single-GPU rocprof run cannot
-# drive them and they mismeasure the isolated kernel).
+# Multi-GPU / distributed harnesses are demoted.
 _MULTIGPU_RE = re.compile(r"(?i)multi_?gpu|distributed|_dist\b|all_?reduce|all_?gather|world_size")
 
 
@@ -38,8 +31,7 @@ def repo_root_from_source(source_file: str) -> str:
     """Best-effort kernel-repo root for a resolved source path.
 
     Walks up from ``source_file`` until an ancestor directory contains one of
-    :data:`_BENCHMARK_DIRS` (e.g. ``/sgl-workspace/aiter/csrc/kernels/x.cu`` ->
-    ``/sgl-workspace/aiter`` because it has ``op_tests/``).
+    :data:`_BENCHMARK_DIRS`.
 
     Args:
         source_file: Resolved kernel source path.
@@ -126,7 +118,7 @@ def find_benchmark_files(op_name: str, source_file: str, *, max_files: int = 10)
                     continue
                 seen.add(line)
                 found.append(line)
-    # Stable order: single-GPU harnesses first (multi-GPU can't be profiled solo).
+    # Single-GPU harnesses first.
     found.sort(key=lambda s: 1 if _MULTIGPU_RE.search(s) else 0)
     return found[:max_files]
 

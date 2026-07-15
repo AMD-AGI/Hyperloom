@@ -34,7 +34,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 
 
-# Section 1: _write_variant_abort_marker (formerly test_grid_runner_abort_marker.py)
+# Section 1: _write_variant_abort_marker
 
 
 def _read_marker(slot):
@@ -161,7 +161,7 @@ def test_variant_result_carries_error_class_field():
     assert vr_ok.to_dict()["error_class"] == ""
 
 
-# Section 2: helper-level units (formerly test_grid_runner_helpers_units.py)
+# Section 2: helper-level units
 
 
 class TestResolveSkipSpec:
@@ -196,9 +196,8 @@ class TestReorderGridForMultiNode:
     """reorder is wired into explore/sweep; single-node MUST be a no-op."""
 
     def _grid(self):
-        # Deliberately ordered so a real reorder would change it: a
-        # low-priority backend variant first, a high-priority param variant
-        # last, and an untagged variant in the middle.
+        # Ordered so a real reorder would change it: low-priority backend first,
+        # high-priority param last, untagged in the middle.
         return [
             GridVariant(name="tier5_comm_custom_ar", note="tier5_comm"),
             GridVariant(name="untagged_misc"),
@@ -206,7 +205,7 @@ class TestReorderGridForMultiNode:
         ]
 
     def test_single_node_preserves_order_bit_for_bit(self, monkeypatch):
-        # Hard requirement: single-node grid order is never altered.
+        # Single-node grid order is never altered.
         from hyperloom.orchestrator.actions.executors import (
             _multi_node_env as mne,
         )
@@ -231,7 +230,7 @@ class TestReorderGridForMultiNode:
             priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
         )
         # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the
-        # untagged variant sinks to the end. Stable sort keeps ties in order.
+        # untagged variant sinks to the end (stable sort).
         assert [v.name for v in out] == [
             "cuda_graph_max_bs_64",
             "tier5_comm_custom_ar",
@@ -422,7 +421,6 @@ class TestCoerceExtraEnvs:
 
 
 # Section 3: per-variant mtime gating + param overrides
-# The autouse fixture below pins INFERENCE_OPTIMIZER_LEAK_ROOTS to an empty sandbox so the harvest doesn't scrape the host's /workspace.
 
 
 @pytest.fixture(autouse=True)
@@ -430,9 +428,6 @@ def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
     """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
-# mtime gating subsection helpers
 
 
 def _write_baseline_yaml_mtime(path: Path) -> None:
@@ -563,9 +558,6 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     assert any((w or "").startswith("rescued_from_leaked_path:") for w in r.nonfatal_warnings)
 
 
-# param overrides subsection helpers
-
-
 def _write_baseline_yaml_overrides(path: Path) -> None:
     cfg = {
         "benchmark": {
@@ -630,7 +622,7 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
 
 
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
-    """Regression (2026-06-02 conc_sweep bug): a stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must NOT downgrade a YAML-pinned TP."""
+    """A stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must not downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")
     bench = {
         "framework": "sglang",
@@ -987,7 +979,7 @@ class TestDedupVllmServerArgs:
     """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
 
     def test_duplicate_attention_backend_keeps_last(self):
- # The exact repro: YAML base + variant both inject the flag.
+        # YAML base + variant both inject the flag.
         out = _grid_runner.dedup_vllm_server_args(
             "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
             "vllm",
@@ -1095,10 +1087,8 @@ class TestDedupVllmServerArgs:
         assert out == "--attention-backend C"
 
     def test_json_space_value_flag_left_untouched(self):
- # a flag carrying a JSON/space value must NOT be tokenized
-        # and re-joined (would drop quotes -> {temperature: 0.7}). Leave the
-        # whole string verbatim, even with a duplicate single-value flag also
-        # present (the unquoted $EXTRA_*_ARGS expansion can't round-trip it).
+        # A flag carrying a JSON/space value must not be tokenized and re-joined;
+        # leave the whole string verbatim even with a duplicate flag present.
         raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
@@ -1132,13 +1122,9 @@ class TestCompactJsonServerArgs:
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
-        # json.dumps keeps spaces INSIDE string values; only separators shrink.
-        # Such a value is therefore NOT made a single shell word — under
-        # Magpie's unquoted $EXTRA_VLLM_ARGS expansion it still word-splits, so
-        # this flag shape is explicitly unsupported (documented limitation). We
-        # leave the value intact (do not corrupt it by stripping inner spaces),
-        # but assert the limitation so callers are not misled into thinking it
-        # is boot-safe.
+        # Spaces inside JSON string values are not collapsed, so the value is not
+        # a single shell word under Magpie's unquoted expansion; this flag shape
+        # is unsupported. The value is left intact, not corrupted.
         out = _grid_runner.compact_json_server_args(
             '--speculative-config {"model": "draft model name"}', "vllm"
         )

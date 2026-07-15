@@ -14,26 +14,24 @@ incremental writes (``emit_fact`` / ``retract_fact``).
 
 Two execution modes:
 
-* **Short-term (legacy)** — client-side simulation. ``query_facts``
-  drives gbrain ``search`` + client-side fence parsing/filtering;
-  ``graph_traverse`` runs a client BFS over ``query_facts``; writes are
-  read-modify-write over ``get_page`` / ``put_page``.
+* **Simulation** — client-side. ``query_facts`` drives gbrain ``search`` +
+  client-side fence parsing/filtering; ``graph_traverse`` runs a client BFS
+  over ``query_facts``; writes are read-modify-write over ``get_page`` /
+  ``put_page``.
 * **Native (``use_native_kg``)** — maps the triple API onto gbrain's
-  first-class *link graph*. A triple ``(subject, predicate, object)``
-  becomes an edge ``add_link(from=subject, to=object, link_type=predicate,
-  context=json(properties))``; reads use ``get_links`` / ``get_backlinks``
-  / ``traverse_graph``. Because gbrain edges carry no structured
-  properties, fact properties are encoded in the edge ``context`` JSON.
-  ``add_link`` requires both endpoints to exist, so writes materialize
-  missing nodes; ``remove_link`` is pair-coarse, so ``retract_fact`` does a
+  first-class *link graph*. A triple ``(subject, predicate, object)`` becomes
+  an edge ``add_link(from=subject, to=object, link_type=predicate,
+  context=json(properties))``; reads use ``get_links`` / ``get_backlinks`` /
+  ``traverse_graph``. Fact properties are encoded in the edge ``context`` JSON.
+  ``add_link`` requires both endpoints to exist, so writes materialize missing
+  nodes; ``remove_link`` is pair-coarse, so ``retract_fact`` does a
   read-modify-write that preserves the other link types on the same pair.
-  gbrain reports some write failures (e.g. ``add_link`` to a missing page)
-  as an in-band ``{"error": ...}`` payload rather than a transport error,
+  gbrain reports some write failures as an in-band ``{"error": ...}`` payload,
   so the write paths inspect the decoded result via :func:`_rpc_failed`.
 
-Every read method has a ``*_safe`` companion that swallows transport
-failures and returns an empty result, so the KG layer can never block or
-break a warm-start that would otherwise succeed from the local store.
+Every read method has a ``*_safe`` companion that swallows transport failures
+and returns an empty result, so the KG layer can never block or break a
+warm-start that would otherwise succeed from the local store.
 """
 
 from __future__ import annotations
@@ -365,9 +363,8 @@ def _conditions_match(fact: Fact, conditions: dict[str, Any] | None) -> bool:
 class KGClient:
     """Knowledge-graph query surface over the gbrain page store.
 
-    Short-term implementation simulates graph queries client-side via
-    ``search`` + fence parsing; long-term it delegates to native gbrain KG
-    tools when ``use_native_kg`` is set.
+    Simulates graph queries client-side via ``search`` + fence parsing, or
+    delegates to native gbrain KG tools when ``use_native_kg`` is set.
     """
 
     def __init__(self, mcp: Any, *, use_native_kg: bool = False, search_limit: int = 100) -> None:
@@ -383,12 +380,9 @@ class KGClient:
         self._search_limit = max(1, int(search_limit))
         # query_str -> (monotonic_ts, [(slug, body), ...]); bounded by TTL.
         self._search_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
-        # Slugs confirmed to exist (or just created) as pages. ``add_link``
-        # requires both endpoints to exist, so the native write path
-        # materializes missing nodes and memoizes them here.
+        # Slugs confirmed to exist as pages, memoized by the native write path.
         self._known_nodes: set[str] = set()
 
-    # -- availability ------------------------------------------------------
     def is_available(self) -> bool:
         """Probe whether the backing store is reachable.
 
@@ -404,7 +398,6 @@ class KGClient:
             log.info("kg backend unavailable: %s", exc)
             return False
 
-    # -- page access -------------------------------------------------------
     def _cache_ttl(self) -> float:
         """Return the search-cache TTL in seconds (env-overridable)."""
         raw = os.environ.get("GBRAIN_KG_CACHE_TTL_SEC", "").strip()
@@ -418,11 +411,9 @@ class KGClient:
     def _search_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
         """Search pages and return ``(slug, body)`` pairs (TTL-cached).
 
-        Tolerates list / ``{results|pages|hits: [...]}`` envelopes and
-        fetches the body via ``get_page`` when the hit omits it. Results are
-        memoized per query string for :data:`_SEARCH_CACHE_TTL_SEC` so one
-        warm-start enhancement (many repeated searches) does not re-hit the
-        foreground HTTP budget for identical terms.
+        Tolerates list / ``{results|pages|hits: [...]}`` envelopes and fetches
+        the body via ``get_page`` when the hit omits it. Results are memoized
+        per query string for :data:`_SEARCH_CACHE_TTL_SEC`.
 
         Args:
             query: Free-text search string.
@@ -479,7 +470,6 @@ class KGClient:
             return ""
         return _page_content(page)
 
-    # -- native link-graph access ------------------------------------------
     @staticmethod
     def _as_edges(raw: Any) -> list[dict[str, Any]]:
         """Coerce a link-graph tool result into a list of edge rows.
@@ -568,7 +558,6 @@ class KGClient:
         self._known_nodes.add(slug)
         return True
 
-    # -- query -------------------------------------------------------------
     def query_facts(
         self,
         *,
@@ -636,12 +625,9 @@ class KGClient:
         """Run ``query_facts`` over gbrain's native link graph.
 
         Anchors on the concrete side of the triple: ``get_links`` when a
-        subject is given, otherwise ``get_backlinks`` on the object. Edges
-        are mapped to facts and filtered locally by the predicate/object/
-        subject sets and conditions (reusing the simulation filter logic).
-        Predicate-only queries cannot be served (no global edge scan) and
-        return ``[]`` — production callers always anchor on a subject or
-        object.
+        subject is given, otherwise ``get_backlinks`` on the object. Edges are
+        mapped to facts and filtered locally. Predicate-only queries cannot be
+        served (no global edge scan) and return ``[]``.
 
         Args:
             subject: Subject filter (slug or list of slugs).
@@ -736,14 +722,11 @@ class KGClient:
     ) -> list[GraphNode]:
         """Run ``graph_traverse`` over gbrain's native link graph.
 
-        Maps to ``traverse_graph(slug, depth, direction)``. Passing
-        ``direction`` makes gbrain return per-hop edges (``GraphPath[]``);
-        the ``link_type`` filter is intentionally omitted so multi-relation
-        paths (e.g. ``USES_ARCH`` then ``VARIANT_OF``) are followed, then the
-        edges are filtered locally by ``predicate_filter``. Each surviving
-        edge yields a :class:`GraphNode` for its far endpoint relative to the
-        traversal direction. Output is capped at :data:`_MAX_TRAVERSE_NODES`
-        so a high-fan-in hub node cannot blow up the foreground warm-start.
+        Maps to ``traverse_graph(slug, depth, direction)``. The ``link_type``
+        filter is omitted so multi-relation paths are followed, then edges are
+        filtered locally by ``predicate_filter``. Each surviving edge yields a
+        :class:`GraphNode` for its far endpoint. Output is capped at
+        :data:`_MAX_TRAVERSE_NODES`.
 
         Args:
             start_entity: Seed entity.
@@ -805,11 +788,8 @@ class KGClient:
         knob_set = {_entity(k) for k in knobs if str(k or "").strip()}
         if len(knob_set) < 2:
             return []
-        # CONFLICTS_WITH relations are structural (the mirror emits them with
-        # only ``severity``, no hw/fw props), so hardware/framework are NOT
-        # applied as hard conditions — doing so would filter out every
-        # conflict and silently disable detection. They are accepted for API
-        # parity and used only to scope conditional conflicts in the future.
+        # CONFLICTS_WITH relations are structural (no hw/fw props), so
+        # hardware/framework are accepted for API parity but not applied.
         del hardware, framework
         out: list[dict[str, Any]] = []
         reported: set[frozenset[str]] = set()
@@ -835,7 +815,7 @@ class KGClient:
                 )
         return out
 
-    # -- write (read-modify-write over get_page/put_page) ------------------
+    # Writes: read-modify-write over get_page/put_page.
     def emit_fact(
         self,
         *,
@@ -925,13 +905,10 @@ class KGClient:
     ) -> bool:
         """Emit a fact as a native link-graph edge.
 
-        Materializes both endpoint nodes (``add_link`` requires them to
-        exist) then creates the edge. ``add_link`` is idempotent on
-        ``(from, to, link_type)``, so re-emitting upserts the context. The
-        page-anchored ``page_slug`` is irrelevant in the link-graph model
-        (the subject node is the edge source). The ``add_link`` result is
-        inspected so an in-band error reports ``False`` rather than a false
-        success.
+        Materializes both endpoint nodes (``add_link`` requires them) then
+        creates the edge. ``add_link`` is idempotent on ``(from, to,
+        link_type)``, so re-emitting upserts the context. The ``add_link``
+        result is inspected so an in-band error reports ``False``.
 
         Args:
             subject: Subject entity.
@@ -1023,7 +1000,6 @@ class KGClient:
         content = _page_content(page, full=True)
         return content or None
 
-    # -- graceful wrappers -------------------------------------------------
     def query_facts_safe(self, **kwargs: Any) -> list[Fact]:
         """Call :meth:`query_facts`, returning ``[]`` on any backend error."""
         try:
@@ -1083,11 +1059,9 @@ def _page_content(page: Any, *, full: bool = False) -> str:
     body = str(body) if body is not None else ""
     if not full:
         return body
-    # Full markdown reconstruction. Prefer a verbatim frontmatter string;
-    # otherwise re-serialize the parsed frontmatter dict so a read-modify-
-    # write never drops ``type``/``tags``/``attrs`` (which would corrupt the
-    # page). gbrain's get_page returns frontmatter as a dict, so the dict
-    # branch is the live path.
+    # Full markdown reconstruction: prefer a verbatim frontmatter string,
+    # otherwise re-serialize the parsed dict so a read-modify-write never drops
+    # ``type``/``tags``/``attrs``.
     fm_raw = page.get("frontmatter_raw")
     if isinstance(fm_raw, str) and fm_raw.strip():
         return f"{fm_raw}\n\n{body}" if body else fm_raw
@@ -1101,10 +1075,8 @@ def _page_content(page: Any, *, full: bool = False) -> str:
 def _serialize_frontmatter(fm: dict[str, Any]) -> str:
     """Re-serialize a parsed frontmatter dict into a ``---`` YAML block.
 
-    Mirrors the kb-mirror writer's frontmatter shape: scalars as
-    ``key: value``, lists as ``key: [a, b]``, and nested maps (``attrs``)
-    as compact JSON. Not guaranteed byte-identical to the original, but
-    preserves every semantic field so the page keeps its type/tags/config.
+    Scalars as ``key: value``, lists as ``key: [a, b]``, nested maps as compact
+    JSON. Not byte-identical to the original, but preserves every semantic field.
 
     Args:
         fm: The parsed frontmatter mapping.
@@ -1154,9 +1126,8 @@ def generate_variants_graph_guided(
 
     Queries ``IMPROVES*`` facts for the current architecture+hw+fw, drops
     anything already tried / blocked / in the active stack, resolves
-    ``REQUIRES`` dependencies (must be satisfied by the current stack), and
-    rejects candidates that ``CONFLICTS_WITH`` an in-stack knob. Returns the
-    surviving candidates ordered by expected gain.
+    ``REQUIRES`` dependencies, and rejects candidates that ``CONFLICTS_WITH`` an
+    in-stack knob. Returns the survivors ordered by expected gain.
 
     Args:
         kg: The KG client used for fact lookups (degradation-safe).
@@ -1220,9 +1191,8 @@ def generate_variants_graph_guided(
 def _knob_object_nodes(architectures: Sequence[str], precision: str) -> list[str]:
     """Build the ``"{arch}+{precision}"`` object nodes for knob queries.
 
-    Mirrors the journal-knob mirror writer: precision is folded into the
-    object node so per-precision knob evidence stays distinct. Falls back to
-    the bare arch when precision is unknown.
+    Precision is folded into the object node so per-precision knob evidence
+    stays distinct; falls back to the bare arch when precision is unknown.
 
     Args:
         architectures: Current model architecture list.
@@ -1251,14 +1221,11 @@ def generate_knob_candidates_graph_guided(
 ) -> list[dict[str, Any]]:
     """Propose runnable config knobs from journal-derived KG knob edges.
 
-    Distinct from :func:`generate_variants_graph_guided` (which mines
-    patch-keyed ``IMPROVES`` knowledge): this reads the ``KNOB_IMPROVES`` /
-    ``KNOB_REVERTED_ON`` predicates emitted by the journal-knob mirror, whose
-    subjects are ``variant_fingerprint`` hashes (the optimizer's own knob
-    dedup identity) and whose context carries the runnable ``args``/``envs``.
-
-    Candidates with a ``KNOB_REVERTED_ON`` edge for the same arch+precision,
-    or already in ``tried`` / ``in_stack`` (by fingerprint), are dropped.
+    Distinct from :func:`generate_variants_graph_guided`: this reads the
+    ``KNOB_IMPROVES`` / ``KNOB_REVERTED_ON`` predicates whose subjects are
+    ``variant_fingerprint`` hashes and whose context carries the runnable
+    ``args``/``envs``. Candidates with a ``KNOB_REVERTED_ON`` edge for the same
+    arch+precision, or already in ``tried`` / ``in_stack``, are dropped.
 
     Args:
         kg: The KG client (degradation-safe).
@@ -1341,17 +1308,13 @@ def generate_warmstart_donor_graph_guided(
 ) -> dict[str, Any] | None:
     """Synthesize a cross-model warm-start config donor from KG knob edges.
 
-    The warm-replay "borrow a sibling's champion" path historically searched
-    the recipe-KB for same-architecture siblings. This KG-native variant reads
-    the cross-model ``KNOB_IMPROVES`` evidence aggregated under the
-    ``{arch}+{precision}`` object node (model-agnostic by construction) and
-    adopts the SINGLE highest-evidence, positive-gain, non-reverted knob as the
-    donor config (``single_top`` — no multi-knob composition, so the replayed
-    config was actually validated as a unit).
+    Reads the cross-model ``KNOB_IMPROVES`` evidence aggregated under the
+    ``{arch}+{precision}`` object node and adopts the single highest-evidence,
+    positive-gain, non-reverted knob as the donor config (no multi-knob
+    composition, so the replayed config was validated as a unit).
 
     Reuses :func:`generate_knob_candidates_graph_guided` (``max_variants=1``)
-    for identical filtering/ranking, then wraps the top candidate in a
-    recipe-shaped row so the downstream warm-replay path is unchanged.
+    for filtering/ranking, then wraps the top candidate in a recipe-shaped row.
 
     Args:
         kg: The KG client (degradation-safe).

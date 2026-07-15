@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 
 
-# Fakes
 @dataclass
 class FakeMessage:
     content: str
@@ -64,7 +63,6 @@ def _make_backend(replies: list[str], model: str = "gpt-5.4") -> CodexBackend:
     return CodexBackend(model=model, client_factory=lambda: client)
 
 
-# _extract_envelope
 def test_extract_envelope_fenced_json():
     text = """Reasoning here.
 ```json
@@ -103,7 +101,6 @@ def test_extract_envelope_returns_none_for_json_without_intents_key():
     assert _extract_envelope(text) is None
 
 
-# CodexBackend.run
 @pytest.mark.asyncio
 async def test_run_extracts_review_verdict_intent():
     reply = """```json
@@ -175,7 +172,6 @@ async def test_run_records_call_metadata():
     assert b.calls[0]["reply_chars"] == len(reply)
 
 
-# Construction
 def test_construct_without_creds_raises_backend_error(monkeypatch):
     for var in (
         "OPENAI_API_KEY",

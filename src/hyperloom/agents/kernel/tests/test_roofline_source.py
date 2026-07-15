@@ -42,9 +42,7 @@ def test_bypass_roofline_uses_shared_enum():
 def test_tracelens_row_emits_shared_enum():
     import tracelens_analysis as tl
 
-    # A candidate whose per-op perf model produced numbers -> analytical.
     row = tl._kernel_roofline_row({"kernel_id": "k001", "name": "x", "efficiency_percent": 40.0})
     assert row["roofline_source"] == rs.ANALYTICAL
-    # A bare candidate with no perf-model numbers -> placeholder.
     bare = tl._kernel_roofline_row({"kernel_id": "k002", "name": "y"})
     assert bare["roofline_source"] == rs.PLACEHOLDER

@@ -2,30 +2,23 @@
 
 """Local-first recipe-snapshot KB for the inference optimizer.
 
-This package owns the Commit-2 cutover described in the design doc
-(ChatGPT discussion 2026-05-28):
-
 * Writes go LOCAL ONLY — never to the central kb-service. The store
   on disk is the single source of truth in degraded / offline mode
   and the authoritative source in healthy mode (the central service
   becomes a read-side cache, not a write target).
-* Reads are dispatched at a higher layer (Commit 3 introduces
-  ``recipe_kb.dispatcher.RecipeKB``); the local store implemented
-  here is the read fallback.
+* Reads are dispatched at a higher layer (``recipe_kb.dispatcher.RecipeKB``);
+  the local store implemented here is the read fallback.
 
-The on-disk layout follows the 5-tuple canonical id introduced in
-Commit 1: ``inference:{model}:{hardware}:{framework}:
-{framework_version}:{precision}`` is mapped to a 5-level directory
-tree under :data:`LocalRecipeStore.root`. Each leaf directory holds
-``recipe.json`` (live), ``history/v{N}.json`` (archived prior
-versions), ``attempts.ndjson`` (append-only attempts log), and
-``.lock`` (flock target).
+The on-disk layout maps the canonical id
+``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``
+to a directory tree under :data:`LocalRecipeStore.root`. Each leaf directory
+holds ``recipe.json`` (live), ``history/v{N}.json`` (archived prior
+versions), ``attempts.ndjson`` (append-only attempts log), and ``.lock``
+(flock target).
 
-The wire shapes (``Recipe`` / ``Attempt`` dataclasses) mirror the
-central kb-service v2 contract documented in
-``primus-cortex-internal/docs/recipe-snapshot-api-reference.md``,
-so a dispatcher consumer sees identical dicts whether they come
-from the local store or a central GET.
+The wire shapes (``Recipe`` / ``Attempt`` dataclasses) mirror the central
+kb-service v2 contract, so a dispatcher consumer sees identical dicts whether
+they come from the local store or a central GET.
 """
 
 from __future__ import annotations

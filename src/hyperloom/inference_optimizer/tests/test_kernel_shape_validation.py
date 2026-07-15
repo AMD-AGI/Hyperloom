@@ -158,7 +158,6 @@ async def test_run_optimization_single_rejects_empty_shape(tmp_path: Path):
     assert res["error_class"] == "empty_kernel_shape"
 
 
-# shape_provenance stamping in tracelens finalization
 def test_finalize_candidates_stamps_trace_provenance():
     import importlib.util
     import sys
@@ -171,8 +170,7 @@ def test_finalize_candidates_stamps_trace_provenance():
             str(tools_dir / "tracelens_analysis.py"),
         )
         mod = importlib.util.module_from_spec(spec)
-        # Register before exec so self-referential dataclass annotations (e.g.
-        # OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
+        # Register before exec so self-referential dataclass annotations resolve under py3.10.
         sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
     finally:
