@@ -249,9 +249,10 @@ def find_reference_rows(
     point of the comparison is that the shapes match. Disaggregated and
     multinode rows are dropped as well: their per-GPU throughput is not
     comparable to a single-node colocated run (they use a different serving
-    topology). ``precision`` is applied only when supplied *and* at least one
-    row matches it, so an unset or unavailable precision degrades to "any"
-    instead of dropping everything.
+    topology). ``precision`` is **also strict when supplied**: rows of a
+    different precision are dropped rather than substituted, so an fp4 run is
+    never compared against fp8 numbers. When ``precision`` is empty the filter
+    is skipped (precision unconstrained).
 
     Args:
         rows (list[dict]): Raw benchmark records from :func:`fetch_rows`.
@@ -259,7 +260,8 @@ def find_reference_rows(
             ``hardware`` field (case-insensitive).
         isl (int): Required input sequence length.
         osl (int): Required output sequence length.
-        precision (str): Optional precision label (e.g. ``fp8`` / ``fp4``).
+        precision (str): Optional precision label (e.g. ``fp8`` / ``fp4``);
+            a hard filter when supplied.
 
     Returns:
         list[dict]: The subset of ``rows`` matching the required dimensions
@@ -278,12 +280,10 @@ def find_reference_rows(
     ]
     prec = str(precision or "").strip().casefold()
     if prec:
-        same_prec = [
+        matched = [
             r for r in matched
             if str(r.get("precision") or "").strip().casefold() == prec
         ]
-        if same_prec:
-            matched = same_prec
     return matched
 
 
