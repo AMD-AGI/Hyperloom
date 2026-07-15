@@ -639,11 +639,13 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     pid_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve lifecycle params (port, framework) from the materialized config.
+    lc_reason = "resolve_failed"
     try:
         lc_params = resolve_lifecycle_params(base_yaml_path)
         port = int(lc_params.get("port") or 8888)
         framework = str(lc_params.get("framework") or "")
         lc_eligible = bool(lc_params.get("eligible"))
+        lc_reason = str(lc_params.get("reason") or "")
     except Exception:  # noqa: BLE001
         log.debug("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
         lc_eligible = False
@@ -657,7 +659,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); "
             "using per-variant server restart (Option B)",
             arm_name,
-            lc_params.get("reason") if lc_eligible is False else "resolve_failed",
+            lc_reason,
         )
         return await _sweep_arm_option_b(
             arm_name=arm_name,
