@@ -69,7 +69,6 @@ Hyperloom is dependent on the following components:
 | TraceLens | <https://github.com/AMD-AGI/TraceLens> |
 | Magpie | <https://github.com/AMD-AGI/Magpie> |
 | IntelliKit | <https://github.com/AMDResearch/intellikit> |
-| KernelForge | To be open-sourced separately |
 | GEAK | <https://github.com/AMD-AGI/GEAK> |
 | AgentKernelArena (optional; not in the default install / optimization loop) |<https://github.com/AMD-AGI/AgentKernelArena> |
 | AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |
