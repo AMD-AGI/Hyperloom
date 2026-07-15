@@ -1,11 +1,11 @@
 ---
-name: hyperloom-qwen3-8b-8h
-description: Run an 8-hour Hyperloom Qwen3-30B-A3B optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
+name: hyperloom-gpt-oss-120b-24h
+description: Run a long-horizon Hyperloom gpt-oss-120b optimization session. Use when the user wants the cyclic macro-cycle behavior for a roughly 24-hour demo.
 ---
 
-# Hyperloom Qwen3-30B-A3B 8h Run
+# Hyperloom gpt-oss-120b Long-Horizon Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@../../inference_optimizer/SKILL.md`. This skill provides the concrete workload and launch constraints for an 8-hour Qwen3-30B-A3B demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@../../inference_optimizer/SKILL.md`. This skill provides the concrete workload and launch constraints for a long-horizon gpt-oss-120b demo.
 
 ## Run Mode
 
@@ -61,9 +61,18 @@ After that, run all remaining commands for this demo inside the same container w
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 ```
 
+## Long-Horizon Gate
+
+Current Hyperloom treats `--max-hours 24` as a long-horizon run. Long-horizon cyclic macro-cycles require one of:
+
+1. `--max-hours >= 24`
+2. an unbounded run (`max_minutes == 0`)
+
+`INFERENCE_OPTIMIZER_CYCLIC_PHASES` is enabled by default, but a falsy value (`0`, `false`, `no`, or `off`) disables cyclic macro-cycles. For this skill, ensure it is unset or truthy.
+
 ## Environment
 
-- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-30B-A3B from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
+- `MODEL_PATH=<optional; if unset, download openai/gpt-oss-120b from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
 Required optimize CLI flags:
@@ -73,16 +82,17 @@ Required optimize CLI flags:
 - `--isl 1024`
 - `--osl 1024`
 - `--precision bf16`
+- `INFERENCE_OPTIMIZER_CYCLIC_PHASES=1`
 - `--target-gain 30`
-- `--max-hours 8`
+- `--max-hours 24`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
-If `MODEL_PATH` is set, inspect that path first: use it when it already contains `config.json`; otherwise download `Qwen/Qwen3-30B-A3B` into that exact directory. If `MODEL_PATH` is unset, ask the user whether they want to provide a target model path. If they provide one, export `MODEL_PATH` to that path; if not, use `.cache/hyperloom-models/Qwen3-30B-A3B`. Do not assume the Hugging Face CLI exists; resolve or download the model with Python:
+If `MODEL_PATH` is set, inspect that path first: use it when it already contains `config.json`; otherwise download `openai/gpt-oss-120b` into that exact directory. If `MODEL_PATH` is unset, ask the user whether they want to provide a target model path. If they provide one, export `MODEL_PATH` to that path; if not, use `.cache/hyperloom-models/gpt-oss-120b`. Do not assume the Hugging Face CLI exists; resolve or download the model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
-export MODEL_PATH="${MODEL_PATH:-$(pwd)/.cache/hyperloom-models/Qwen3-30B-A3B}"
+export MODEL_PATH="${MODEL_PATH:-$(pwd)/.cache/hyperloom-models/gpt-oss-120b}"
 python - <<'PY'
 import os
 from pathlib import Path
@@ -93,7 +103,7 @@ if (target / "config.json").is_file():
     print(f"Using existing model at {target.resolve()}")
 else:
     snapshot_download(
-        repo_id="Qwen/Qwen3-30B-A3B",
+        repo_id="openai/gpt-oss-120b",
         local_dir=str(target),
         local_dir_use_symlinks=False,
     )

@@ -297,8 +297,8 @@ When the user picks a length, load the matching demo skill and follow it — you
 stop acting on this setup skill and run the demo skill's instructions instead:
 
 - `3h` → `@.agents/skills/hyperloom-qwen3-8b-3h/SKILL.md`
-- `8h` → `@.agents/skills/hyperloom-qwen3-8b-8h/SKILL.md`
-- `24h` → `@.agents/skills/hyperloom-qwen3-8b-24h/SKILL.md`
+- `8h` → `@.agents/skills/hyperloom-qwen3-30b-a3b-8h/SKILL.md`
+- `24h` → `@.agents/skills/hyperloom-gpt-oss-120b-24h/SKILL.md`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
 `FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. Where the demo
