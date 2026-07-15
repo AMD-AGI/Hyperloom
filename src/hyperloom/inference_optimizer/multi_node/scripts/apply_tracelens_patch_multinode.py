@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 # NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only. The
-# dynamo (SSH) backend runs this script with ``--local`` on each GPU pod where
+# infera (SSH) backend runs this script with ``--local`` on each GPU pod where
 # ray is not installed, so a top-level ``import ray`` would crash --local before
 # it can run. The ray fan-out path imports it on demand.
 
@@ -349,7 +349,7 @@ def _fanout_to_all_nodes(
 ) -> list[dict[str, Any]]:
     """Spawn one actor per alive node; collect all summaries.
 
-    ray is imported here (not at module top) so the ``--local`` dynamo path
+    ray is imported here (not at module top) so the ``--local`` infera path
     runs on pods without ray installed.
 
     Raises:
@@ -417,7 +417,7 @@ def main() -> int:
     parser.add_argument(
         "--local",
         action="store_true",
-        help="patch THIS pod only (no ray fan-out). Used by the dynamo SSH "
+        help="patch THIS pod only (no ray fan-out). Used by the infera SSH "
         "backend, which ships+runs this script on each GPU pod directly. "
         "ray is never imported in this mode.",
     )
@@ -449,7 +449,7 @@ def main() -> int:
         )
         return 2
 
-    # --local: dynamo SSH backend. Patch only this pod (no ray). The caller
+    # --local: infera SSH backend. Patch only this pod (no ray). The caller
     # fans this out over SSH to every GPU pod, so the NFS-shared trace dir ends
     # up annotated the same as the ray path — only the dispatch differs.
     if args.local:

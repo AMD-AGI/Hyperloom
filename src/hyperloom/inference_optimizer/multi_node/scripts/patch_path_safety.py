@@ -1,6 +1,6 @@
 """Path constraints for kernel patch apply/revert on inference pods (stdlib only).
 
-Shared by ``kernel_node_ops.py`` (Dynamo SSH) and ``kernel_patch_multinode.py``
+Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
 (RayJob). Keeps patch targets under framework install roots and backups under
 ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default ``/var/kernel_patch_backups``).
 """

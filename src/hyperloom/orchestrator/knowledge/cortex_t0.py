@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB, recipe_canonical_id
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
 
@@ -888,6 +888,15 @@ def run_t0_anchor(
 
     workload = (workload or "").strip() or "unknown_model"
     hw = (hw or "").strip() or "unknown_gpu"
+    # Topology-aware KB hardware dim: single-node leaves ``hw`` unchanged;
+    # multi-node appends ``_ws{world_size}`` so the cluster reads/writes an
+    # isolated recipe key and never overwrites (or warm-replays) the single-node
+    # recipe stored under the bare gpu_type. Applied ONCE here so the cid, the
+    # put_recipe ``hardware`` field, and every L1/L2/L3 warm-start search below
+    # all use the identical slug.
+    from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
+
+    hw = kb_hardware_slug(hw, **resolve_kb_topology())
 
     # Short-circuit when already anchored (via ``warm_start_ts``); resume=True bypasses.
     if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
