@@ -785,7 +785,6 @@ class ProfileExecutor(BaselineExecutor):
             params["unset_envs"] = [raw_unset] if isinstance(raw_unset, str) else list(raw_unset or [])
         if str(params.get("base_args_mode") or "").strip().lower() == "replace":
             params.setdefault("args_mode", "replace")
-        params.pop("extra_sglang_args", None)
         extra = getattr(ctx, "extra", None) or {}
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
