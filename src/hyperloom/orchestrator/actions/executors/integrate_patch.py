@@ -2305,9 +2305,17 @@ class IntegratePatchExecutor:
             }
 
         accuracy_pass: bool | None = None
+        # lm-eval writes to ``$EVAL_RESULT_DIR`` (== ``RESULT_DIR`` = the grid
+        # slot, i.e. the parent of ``VariantResult.workspace``), not inside the
+        # ``benchmark_*`` workspace. Grade from that slot so the eval output is
+        # found; honor an explicit ``result_dir`` override the same way the grid
+        # subprocess does.
+        eval_search_root = override_result_dir or (
+            str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
+        )
         if bench.get("status") == "succeeded":
             accuracy_pass = self._grade_accuracy(
-                bench["workspace"],
+                eval_search_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
@@ -2317,7 +2325,7 @@ class IntegratePatchExecutor:
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
             try:
                 eval_results = parse_eval_results(
-                    bench["workspace"],
+                    eval_search_root,
                     framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
                 )
                 acc = eval_results.get("accuracy")
@@ -2454,9 +2462,14 @@ class IntegratePatchExecutor:
             magpie_python=params.get("magpie_python") or None,
             base_args_mode=str(params.get("base_args_mode") or "append"),
         )
+        # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
+        # ``rebench.workspace``), so grade from there, honoring ``result_dir``.
+        rebench_eval_root = override_result_dir or (
+            str(Path(rebench.workspace).parent) if rebench.workspace else ""
+        )
         accuracy_pass = (
             self._grade_accuracy(
-                rebench.workspace,
+                rebench_eval_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
