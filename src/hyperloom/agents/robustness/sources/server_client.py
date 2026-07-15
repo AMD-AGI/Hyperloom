@@ -24,15 +24,14 @@ from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
 
 @dataclass
 class _MetricsWindow:
-    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics``
-    and ``/summary``. M1 defaults to the last 5 minutes."""
+    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics`` and ``/summary``."""
 
     start_unix: int
     end_unix: int
 
 
 class RobustnessServerClient:
-    """HTTP client for the subset of robustness-server we use in M1."""
+    """HTTP client for the subset of robustness-server we use."""
 
     def __init__(
         self,
@@ -400,15 +399,12 @@ class RobustnessServerSource:
         self._faults_lookback_s = max(0, int(faults_lookback_s))
         self._faults_page_size = max(1, min(500, int(faults_page_size)))
         self._enable_cluster_faults = bool(enable_cluster_faults)
-        # Off by default: fans out one HTTP call per pod per tick. Enabling
-        # makes signals/local_health.py prefer server-decoded GPU data over
-        # LocalProbe rocm-smi.
+        # Off by default: fans out one HTTP call per pod per tick.
         self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
         self._pod_metrics_categories = tuple(pod_metrics_categories)
         self._max_pods_per_tick = max(1, int(max_pods_per_tick))
-        # ``workload_uid`` opts into hierarchy-based pod discovery so
-        # multi-node RayJobs reconcile the full pod set (head + workers).
-        # Empty string keeps the legacy ``list_session_pods`` path.
+        # ``workload_uid`` opts into hierarchy-based pod discovery; empty keeps
+        # the ``list_session_pods`` path.
         self._workload_uid = (workload_uid or "").strip()
 
     async def fetch(self, ctx: Any) -> SourceData:
@@ -456,9 +452,7 @@ class RobustnessServerSource:
         if window.start_unix and window.end_unix:
             summary = await self._client.get_session_summary(session_id, window)
 
-        # When workload_uid is configured, merge cluster-hierarchy pods with
-        # the session view so the fan-out covers Ray workers the session has
-        # not yet seen (consistent multi-node view for downstream signals).
+        # When workload_uid is set, merge cluster-hierarchy pods with the session view.
         hierarchy_pods: list[dict[str, Any]] = []
         if self._workload_uid:
             try:
@@ -479,8 +473,7 @@ class RobustnessServerSource:
                     page_size=self._faults_page_size,
                 )
             except SourceUnavailable:
-                # Transport-level failure (timeouts / 5xx wrapped by
-                # _get_json): re-raise so DegradeRouter counts it.
+                # Transport-level failure: re-raise so DegradeRouter counts it.
                 raise
 
         local_gpu: dict[str, Any] = {}

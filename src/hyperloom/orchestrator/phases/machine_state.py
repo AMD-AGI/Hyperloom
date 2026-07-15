@@ -50,8 +50,8 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# Phase ↔ allowed action set: ALLOWED passes R1 phase_incompatible but
-# Coordinator-auto actions stay out of PROPOSABLE so LLM proposals are denied.
+# Phase ↔ allowed action set: ALLOWED passes R1; Coordinator-auto actions stay
+# out of PROPOSABLE so LLM proposals are denied.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset(
         {
@@ -74,12 +74,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
     PHASE_EXPLORE: frozenset(
         {
-            # merged grid runner + LLM specialist dispatch.
             "explore",
             "specialist",
             # Specialist source patches apply only through integrate_patch.
             "integrate_patch",
-            # roofline/profile auto-enqueued on cumulative_gain_validated watermark.
+            # roofline/profile auto-enqueued on the cumulative-gain watermark.
             "roofline",
             "profile",
             "recover",
@@ -87,7 +86,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
     PHASE_KERNEL_AGENT: frozenset(
         {
-            # KERNEL_AGENT_OWNED_ACTIONS from policy.py.
             "kernel_opt",
             "integrate",
             "deep_kernel_analysis",
@@ -101,7 +99,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
     PHASE_SWEEP: frozenset(
         {
-            # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark; discovery-only.
+            # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark.
             "sweep",
             "conc_sweep",
             "recover",
@@ -144,7 +142,7 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
 
 
 # Phase ↔ LLM-proposable set: allowlist minus Coordinator-managed and
-# robustness-delegate-only actions, matching what PolicyGate accepts for Orchestration.
+# robustness-delegate-only actions (what PolicyGate accepts for Orchestration).
 PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
     phase: actions - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
     for phase, actions in PHASE_ALLOWED_ACTIONS.items()
@@ -392,21 +390,14 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_context_window_too_small",
         # Model-arch preflight: multimodal/vision model unsupported.
         "unsupported_model_arch",
-        # Pre-run model-config compatibility preflight
-        # (``cli._preflight_model_config_compat``): config.json is present but
-        # corrupt/non-dict, or declares RoPE scaling without any max-position
-        # field — both make vLLM/transformers crash at config load (e.g.
-        # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
-        # Fail fast instead of booting a server that dies in engine init.
+        # Pre-run model-config compatibility preflight: config.json is corrupt or
+        # declares RoPE scaling without a max-position field (both crash at load).
         "model_config_incompatible",
-        # Baseline arg-validation fast-exit: >=2 consecutive baseline
-        # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
-        # deterministic, so stop instead of burning the slow-baseline retry budget.
+        # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts
+        # exited <30s on a bad CLI arg.
         "baseline_arg_error",
-        # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive enablement
-        # rounds made no forward progress (neither runnable nor advanced to a new
-        # failure signature). Stop instead of re-deriving the same fix until the
-        # wall-clock deadline. A progressing round resets the streak.
+        # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive rounds made
+        # no forward progress. A progressing round resets the streak.
         "enablement_stalled",
     }
 )
@@ -445,8 +436,7 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
-    # FRAMEWORK 0.15 deducted 0.075 each from EXPLORE / KERNEL so the phase
-    # self-caps instead of monopolising the run.
+    # FRAMEWORK self-caps so it does not monopolise the run.
     PHASE_FRAMEWORK_AGENT: 0.15,
     PHASE_EXPLORE: 0.375,
     PHASE_KERNEL_AGENT: 0.305,
@@ -477,29 +467,24 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
-# When EXPLORE↔KERNEL interleave is on, kernel work runs *inside* EXPLORE, so the
-# time gate only needs to guarantee SWEEP → CLOSE + report can finish: it collapses
-# to a small CLOSE-buffer instead of reserving time for a separate KERNEL_AGENT phase. The phase-budget
-# fraction gate is disabled in this mode for the same reason (EXPLORE legitimately
-# spends the bulk of the budget because it is also doing KERNEL work). Both are
-# overridable via the explicit thresholds the caller passes.
+# When EXPLORE↔KERNEL interleave is on, kernel work runs inside EXPLORE, so the
+# time gate collapses to a small CLOSE-buffer and the phase-budget fraction gate
+# is disabled. Both are overridable via explicit caller thresholds.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 
 # FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
 DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-import os as _os_fw_ratio  # noqa: E402 — env override for #5-P2 cross-framework budget
+import os as _os_fw_ratio  # noqa: E402
 
 def _default_framework_force_exit_ratio() -> float:
     """FRAMEWORK force-exit ratio; env-overridable via
     ``INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO``.
 
-    Default 0.6 reserves the last 40% of budget for later phases. When the
-    FRAMEWORK cross-framework pipeline is the primary objective (#5-P2) and
-    earlier phases already consumed budget, lower this so FRAMEWORK can spend
-    the remaining wall-clock processing forced candidates instead of
-    force-exiting to SWEEP with a full pending queue.
+    Default 0.6 reserves the last 40% of budget for later phases; lower it when
+    the FRAMEWORK pipeline is the primary objective so it can process forced
+    candidates instead of force-exiting with a full pending queue.
     """
     raw = (_os_fw_ratio.environ.get(
         "INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", ""
@@ -515,21 +500,13 @@ def _default_framework_force_exit_ratio() -> float:
 
 
 DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
-# FRAMEWORK per-candidate plateau: after this many consecutive *benchmarked*
-# candidate tests (status ``reverted``/``kept``) without a KEEP, the phase has
-# shown no leverage on the current batch and exits to EXPLORE. Non-benchmarked
-# outcomes (``not_applicable``/``apply_failed``/``already_present``/audit-skip/
-# critic_denied) are neither a test nor a reset — they're skipped. A KEEP resets
-# the streak.
+# FRAMEWORK per-candidate plateau: after this many consecutive benchmarked
+# candidate tests without a KEEP, the phase exits to EXPLORE. A KEEP resets it.
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 3
 
 
-# ---------------------------------------------------------------------------
-# R1 cyclic phase machine
-# ---------------------------------------------------------------------------
-# When enabled, SWEEP loops back to EXPLORE (a new macro-cycle) while budget
-# remains and the run hasn't globally converged, instead of always terminating
-# at CLOSE.
+# R1 cyclic phase machine: when enabled, SWEEP loops back to EXPLORE (a new
+# macro-cycle) while budget remains and the run hasn't globally converged.
 
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
@@ -547,14 +524,12 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
 
-# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle so
-# late cycles can still capture small wins while the run still converges once
-# even the relaxed bar is unmet. The KEEP threshold, the stack-stable threshold
-# (=keep/2) and the convergence gain bar all ride this single curve.
+# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. The
+# KEEP threshold, stack-stable threshold (=keep/2) and convergence gain bar all
+# ride this single curve.
 KEEP_THRESHOLD_FLOOR_PCT: float = 0.1
 KEEP_THRESHOLD_SPAN_PCT: float = 0.9
-# Multi-node baseline noise floor is ~2x single-node; keep the same relative
-# shape by scaling the curve.
+# Multi-node baseline noise floor is ~2x single-node; scale the curve to match.
 MULTI_NODE_KEEP_THRESHOLD_FACTOR: float = 2.0
 
 
@@ -679,19 +654,14 @@ def should_reloop_to_explore(
     if not is_cyclic_phases_enabled():
         return False, evidence
 
-    # Short bounded runs (``--max-hours < 24``) never open a new macro-cycle:
-    # they wind down to CLOSE on a single pass exactly like the legacy chain,
-    # even though cyclic mode is on by default. Without this gate a 4h run that
-    # reached SWEEP with ≥30min remaining would reloop.
+    # Short bounded runs (``--max-hours < 24``) never open a new macro-cycle;
+    # they wind down to CLOSE on a single pass.
     if not is_long_run(state):
         evidence["reloop_blocked"] = "short_run_single_pass"
         return False, evidence
 
-    # Per-cycle gain since this cycle started → effective no-gain streak. A
-    # cycle only "gained" when its validated gain rose by at least the cycle's
-    # own (decaying) KEEP bar, so once even the relaxed bar is unmet for
-    # ``no_gain_cycles`` cycles in a row the run converges instead of looping
-    # forever on sub-threshold noise.
+    # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
+    # "gained" only when its validated gain rose by at least the decaying KEEP bar.
     effective_min_gain = decaying_keep_threshold_pct(cycle) if min_gain_pct is None else float(min_gain_pct)
     cur_gain = _cumulative_gain_validated(state)
     start_gain = float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0)
@@ -708,10 +678,8 @@ def should_reloop_to_explore(
         evidence["reloop_blocked"] = "max_cycles"
         return False, evidence
 
-    # Physical ceiling convergence. If every roofline family that
-    # has dominated across cycles is now within its configured roofline
-    # saturation threshold, stop cleanly instead of relooping on noise-floor
-    # 0.1% gains.
+    # Physical ceiling convergence: if every roofline family that dominated is
+    # now within its saturation threshold, stop cleanly.
     sat = getattr(state, "saturated_directions", {}) or {}
     if isinstance(sat, dict) and sat:
         rows = [v for v in sat.values() if isinstance(v, dict)]
@@ -737,7 +705,7 @@ def should_reloop_to_explore(
     return True, evidence
 
 
-# escalate_strategy_change hint vocabulary. Closed enum; unknown hints logged, never change phase.
+# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored).
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
@@ -746,9 +714,7 @@ ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
 # ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal:
-# from EXPLORE it advances to KERNEL (switch lever, via ``explore_no_more_leverage``);
-# from KERNEL it winds down to SWEEP → CLOSE (via ``kernel_no_more_leverage``).
-# Unlike terminal ``skip_to_close``, it never ends the run on its own.
+# from EXPLORE it advances to KERNEL, from KERNEL it winds down to SWEEP → CLOSE.
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -1527,16 +1493,10 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     Fires once the consecutive baseline-failure streak reaches 3, routing
     the session straight to CLOSE with ``prelude_baseline_failed``.
 
-    **Enablement-aware:** a *serial* enablement makes the baseline re-fail on
-    purpose — each round clears gap #n and the next boot stops at a new, deeper
-    gap #(n+1). Those crashes are forward progress, not a stuck baseline, so
-    this terminal exit is suppressed while enablement is actively engaged (a
-    progressing patch already stacked, a specialist currently dispatched, or at
-    least one enablement attempt made). In that regime the honest
-    ``enablement_stalled`` cap (consecutive NO-progress rounds, in
-    ``Coordinator._maybe_rearm_enablement``) is the correct fast-fail. Kept in
-    lockstep with the Coordinator's baseline backstop suppression so the two
-    baseline-failure stop paths never disagree.
+    Enablement-aware: suppressed while enablement is actively engaged (a
+    progressing patch stacked, a specialist dispatched, or ≥1 attempt made),
+    because serial-enablement baseline crashes are forward progress and the
+    ``enablement_stalled`` cap is the correct fast-fail there.
 
     Args:
         state (Any): Frozen SharedState view exposing ``baseline_failure_streak``
@@ -1572,8 +1532,7 @@ def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
         A ``(reason, metadata)`` tuple when an abort reason is present,
         otherwise ``None``.
     """
-    # Treat cortex_t0_failed / time_exhausted_during_prelude etc. as a PRELUDE
-    # abort so phase_history captures the boundary.
+    # Treat these stop reasons as a PRELUDE abort so phase_history records it.
     sr = (getattr(state, "stop_reason", "") or "").strip()
     if sr in ("cortex_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
         return sr, {"reason_origin": "shared_state.stop_reason"}
@@ -1633,9 +1592,8 @@ def exit_normal_explore(
             "evidence": "explore_no_more_leverage",
             "hint": hint,
         }
-    # A detected EXPLORE plateau is not terminal: exhausted leverage at this
-    # layer means switch lever (→ KERNEL_AGENT), flagging that the next macro-cycle
-    # should steer off the plateaued bottleneck. Advisory-only off cyclic mode.
+    # A detected EXPLORE plateau is not terminal: switch lever (→ KERNEL_AGENT)
+    # and flag that the next macro-cycle should steer off the bottleneck.
     if is_cyclic_phases_enabled():
         plateaued, plateau_ev = compute_plateau_explore(state)
         if plateaued:
@@ -1920,13 +1878,8 @@ def _framework_agent_consecutive_no_keep(state: Any) -> int:
         if not isinstance(row, dict):
             continue
         status = str(row.get("status") or "").strip().lower()
-        # Macro-cycle boundary: framework_agent_phase_progress is preserved across
-        # cyclic reloops (for candidate dedup), but the consecutive-no-keep
-        # plateau gate must only see the CURRENT cycle's rows. A boundary marker
-        # appended at reloop (_apply_macro_cycle_reloop) stops the streak walk so
-        # a prior cycle's trailing no-KEEP rows cannot instantly re-plateau the
-        # next cycle's FRAMEWORK (observed: cycle 1 plateaued the same tick it
-        # selected its first candidate).
+        # Macro-cycle boundary marker stops the streak walk so a prior cycle's
+        # trailing no-KEEP rows cannot instantly re-plateau the next cycle.
         if status == "cycle_boundary":
             break
         is_keep = bool(row.get("kept")) or status == "kept"
@@ -1994,11 +1947,8 @@ def exit_normal_framework_agent(
                 "pending_candidate_count": _framework_agent_pending_candidate_count(state),
             }
 
-    # Per-phase wall-clock budget cap: now that FRAMEWORK carries a budget
-    # fraction (DEFAULT_PHASE_BUDGET_PCT), rotate to EXPLORE once the phase has
-    # burned its share — guarantees the phase cannot monopolise the run even if
-    # neither plateau nor force-exit fires (e.g. a long stream of slow but
-    # technically-distinct candidates).
+    # Per-phase wall-clock budget cap: rotate to EXPLORE once the phase has
+    # burned its share so it cannot monopolise the run.
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
         cap = phase_cap_seconds(state, budget_pct=budget_pct)
         return "framework_agent_budget_cap", {
@@ -2156,9 +2106,8 @@ def compute_next_phase(
             ),
         )
         if norm is not None:
-            # Exhausted EXPLORE leverage (plateau / skip_to_sweep) is not
-            # terminal: switch lever by advancing to KERNEL rather than skipping
-            # it. Only when KERNEL is disabled does EXPLORE wind down to SWEEP.
+            # Exhausted EXPLORE leverage is not terminal: advance to KERNEL;
+            # only when KERNEL is disabled does EXPLORE wind down to SWEEP.
             if kernel_enabled:
                 return PHASE_KERNEL_AGENT, norm[0], norm[1]
             return (
@@ -2194,10 +2143,8 @@ def compute_next_phase(
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and (framework_agent_phase_enabled or explore_enabled):
-                # Reloop to the highest-leverage layer still available: FRAMEWORK
-                # (also picks up newly-merged upstream PRs) when enabled, else
-                # EXPLORE. The Coordinator resets that phase's per-cycle state so
-                # it does not instantly self-skip as "already done".
+                # Reloop to the highest-leverage layer available: FRAMEWORK when
+                # enabled, else EXPLORE.
                 reloop_target = PHASE_FRAMEWORK_AGENT if framework_agent_phase_enabled else PHASE_EXPLORE
                 return (
                     reloop_target,
@@ -2208,11 +2155,8 @@ def compute_next_phase(
                         "loopback": True,
                     },
                 )
-            # R7: if cyclic looping was blocked because leverage is exhausted
-            # (global convergence) or the safety cap is hit, terminate the run
-            # with a terminal stop_reason instead of idling in CLOSE until the
-            # deadline. ``insufficient_remaining`` defers to the run-loop
-            # deadline (non-terminal CLOSE), matching the monotonic chain.
+            # R7: if looping was blocked by global convergence or the safety cap,
+            # terminate with a terminal stop_reason instead of idling in CLOSE.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
             if blocked in ("global_converged", "max_cycles"):
                 return (
@@ -2272,30 +2216,16 @@ def make_history_row(
     }
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle events — operator-facing phase/step boundary log
-# ---------------------------------------------------------------------------
-#
-# The coordinator's internal phase vocabulary (PRELUDE…CLOSE) and step /
-# handler names (trace_analyze / run_optimization / integrate / report) are
-# precise but unfamiliar to operators reading chat. A lifecycle event makes
-# every phase/step boundary visible together with where its artifacts landed.
-#
-# A lifecycle event carries both naming dimensions in parallel: ``phase`` is
-# the real coordinator phase active when the event fired, ``step`` is the
-# machine step/handler name, and ``label`` is the human-friendly name used in
-# user-facing docs.
-#
-# ``make_lifecycle_event`` is a pure builder mirroring ``make_history_row``;
-# ``SharedState.record_lifecycle_event`` is the single stateful writer
+# Lifecycle events — operator-facing phase/step boundary log. Each event carries
+# ``phase`` (the coordinator phase active when it fired), ``step`` (the machine
+# step/handler name), and ``label`` (the human-friendly name). ``make_lifecycle_event``
+# is a pure builder; ``SharedState.record_lifecycle_event`` is the single writer
 # (``policy.CORE_STATE_FIELDS`` guards the ``lifecycle`` field).
 LIFECYCLE_STATUS_START = "START"
 LIFECYCLE_STATUS_END = "END"
 LIFECYCLE_STATUS_ERROR = "ERROR"
-# Phase-boundary marker. Unlike START (which pairs with a later END for the
-# same step), ENTER is a point-in-time "entered <phase>" mark: the next
-# phase's ENTER implies the previous one finished, so phase rows are never
-# expected to have a matching END (see SKILL.md reading tip).
+# Phase-boundary marker: a point-in-time "entered <phase>" mark with no
+# matching END (unlike START, which pairs with a later END for the same step).
 LIFECYCLE_STATUS_ENTER = "ENTER"
 LIFECYCLE_STATUSES: frozenset[str] = frozenset(
     {
@@ -2316,11 +2246,8 @@ PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_CLOSE: "Close (report)",
 }
 
-# Human-friendly labels for the lifecycle *steps* surfaced to operators,
-# mirroring the names used in issue #266 (TraceLens / GEAK / Integrate /
-# Validate / Report). Keys are the coordinator's machine step / handler
-# names; several map to the same label because the simplified #266 pipeline
-# collapses multiple internal steps.
+# Human-friendly labels for the lifecycle steps surfaced to operators. Keys are
+# the coordinator's machine step/handler names; several map to the same label.
 LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "roofline": "TraceLens",
     "trace_analyze": "TraceLens",
@@ -2336,11 +2263,9 @@ LIFECYCLE_STEP_LABELS: dict[str, str] = {
 
 
 def lifecycle_label(name: str) -> str:
-    """Resolve a human-friendly label for a step or phase name (#266).
+    """Resolve a human-friendly label for a step or phase name.
 
-    Falls back to the phase-label table, then to the verbatim name, so an
-    unmapped step still produces a sensible event rather than an empty
-    label.
+    Falls back to the phase-label table, then to the verbatim name.
 
     Args:
         name (str): A coordinator step or phase name; stripped before lookup.
@@ -2370,13 +2295,10 @@ def make_lifecycle_event(
     seq: int,
     ts: str,
 ) -> dict[str, Any]:
-    """Construct a canonical lifecycle event row (#266).
+    """Construct a canonical lifecycle event row.
 
-    ``status`` is not hard-validated here (mirroring ``make_history_row``'s
-    lenience) so recovery / resume tools can emit synthetic rows; callers
-    that want the strict check go through :data:`LIFECYCLE_STATUSES`.
-    Empty / ``None`` artifact values are dropped so the rendered event only
-    advertises paths that actually exist.
+    ``status`` is not hard-validated here so recovery/resume tools can emit
+    synthetic rows. Empty / ``None`` artifact values are dropped.
 
     Args:
         step (str): Machine step/handler name.
@@ -2409,20 +2331,14 @@ def make_lifecycle_event(
         try:
             event["duration_s"] = round(float(duration_s), 3)
         except (TypeError, ValueError):
-            # A malformed duration_s is intentionally omitted rather than
-            # failing event creation: lifecycle logging is operator-facing
-            # diagnostics and must never break the orchestration loop.
+            # A malformed duration_s is omitted rather than failing creation.
             pass
     return event
 
 
-# ---------------------------------------------------------------------------
-# Phase-transition / lifecycle write-owner functions. They take ``state`` first
-# and own the phase_history / lifecycle bookkeeping, which belongs to this
-# phase-state domain (they build rows via make_history_row / make_lifecycle_event
-# defined above). ``SharedState`` exposes forwarding shims so existing callers
-# (``state.record_phase_transition`` etc.) reach these.
-# ---------------------------------------------------------------------------
+# Phase-transition / lifecycle write-owner functions (take ``state`` first and
+# own the phase_history / lifecycle bookkeeping). ``SharedState`` exposes
+# forwarding shims so existing callers reach these.
 def record_phase_transition(
     state,
     *,
@@ -2484,21 +2400,12 @@ def record_lifecycle_event(
     duration_s: float | None = None,
     ts: str | None = None,
 ) -> dict[str, Any]:
-    """Append a structured lifecycle event (#266, method 1).
+    """Append a structured lifecycle event marking a phase/step boundary.
 
-    Each event marks a phase/step boundary so operators can see — in
-    state.json, and via the launcher in chat — that a phase ran, where
-    its outputs went, and which artifact feeds the next phase.
-
-    ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
-    ``label`` defaults to the human-friendly name from
-    :data:`LIFECYCLE_STEP_LABELS` so both naming dimensions are carried.
-    ``phase`` defaults to the current coordinator phase. ``seq`` is
-    monotonic across the cap so consumers can order events even after the
-    oldest rows are trimmed.
-
-    Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
-    ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+    ``step`` is the machine step/handler name; ``label`` defaults to the
+    human-friendly name from :data:`LIFECYCLE_STEP_LABELS`. ``phase`` defaults to
+    the current coordinator phase; ``seq`` is monotonic across the cap.
+    Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards ``lifecycle``).
     Returns the inserted row.
 
     Args:
@@ -2535,9 +2442,7 @@ def record_lifecycle_event(
         seq=next_seq,
         ts=ts or _now_iso(),
     )
-    # Append in place and trim only when over the cap, so the common
-    # per-step-boundary path is an O(1) append rather than copying the
-    # whole list on every call.
+    # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)
     if len(events) > _LIFECYCLE_CAP:
         del events[: -_LIFECYCLE_CAP]

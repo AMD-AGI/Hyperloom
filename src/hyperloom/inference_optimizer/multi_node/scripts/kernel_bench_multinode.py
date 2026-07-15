@@ -27,7 +27,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
-# Per-artifact read-back cap so a runaway script can't blow up the stdout buffer.
+# Per-artifact read-back cap.
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 # Stdout/stderr tail size returned to the caller.
 _STREAM_TAIL_BYTES = 32 * 1024

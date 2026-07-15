@@ -86,8 +86,6 @@ IMPORTER_VERSION = "1.1.0"
 # ---------------------------------------------------------------------------
 
 DEFAULT_IMAGES: Dict[str, str] = {
-    # sglang profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
-    # Pre-profilerfix image (restore when reverting): "harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
     "sglang": "harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix",
     "vllm": "harbor.core42.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.19.0",
 }
@@ -470,9 +468,8 @@ def compute_framework_gain(attribution: Dict) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # Workload-dim defaults and framework_args parsing
 #
-# Most JSONs leave workload.tp/isl/... null (launcher arg string is the real
-# source of truth); we parse it and fall back to platform defaults. Duplicates
-# scripts/fix_null_fields.py:derive_fields().
+# Most JSONs leave workload.tp/isl/... null; parse the launcher arg string and
+# fall back to platform defaults.
 # ---------------------------------------------------------------------------
 
 DEFAULT_DURATION_SECONDS = 10800  # 3 hours
@@ -582,7 +579,6 @@ def _infer_tp_from_name(name: str) -> int:
         try:
             sizes.append(float(m.group(1)))
         except ValueError:
-            # Non-numeric size token; skip it.
             pass
     if not sizes:
         n_lower = name.lower()
@@ -700,8 +696,7 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     attribution = data.get("attribution") or {}
     attribution_src = attribution.get("source_breakdown") or {}
 
-    # model_name sometimes arrives as a filesystem path; clean prefixes so the
-    # leaderboard shows a HF-style name and unique_key stays comparable.
+    # model_name sometimes arrives as a filesystem path; clean the prefixes.
     model_name = _clean_model_name(workload.get("model_name")) or (workload.get("model_name") or "").strip()
     framework_name = (workload.get("framework") or "").strip()
     framework_ver = (workload.get("framework_version") or "").strip()
@@ -712,14 +707,13 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     baseline_tput = baseline.get("throughput_tok_s_per_gpu")
     opt_tput = final.get("throughput_tok_s_per_gpu")
 
-    # Resolve normally-null columns (prec/tp/isl/osl/conc/duration) by parsing
-    # launcher args + platform defaults; replaces scripts/fix_null_fields.py.
+    # Resolve normally-null columns (prec/tp/isl/osl/conc/duration).
     dims = resolve_workload_dims(data)
 
     code_rev = session.get("code_revision") or ""
 
-    # gain: prefer final.cumulative_gain_pct_validated (trusted end-to-end metric
-    # for ranking); fall back to raw throughput delta % for legacy sessions.
+    # gain: prefer final.cumulative_gain_pct_validated; fall back to raw
+    # throughput delta % for legacy sessions.
     validated_gain = final.get("cumulative_gain_pct_validated")
     throughput_delta_pct = compute_gain_pct(baseline_tput, opt_tput)
     if isinstance(validated_gain, (int, float)):
@@ -762,8 +756,7 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     }
 
     # Derivation provenance, persisted by enrich_raw_data.
-    row["_meta"] = {
-        "gain_source": gain_source,
+    row["_meta"] = {        "gain_source": gain_source,
         "validated_gain_pct": float(validated_gain) if isinstance(validated_gain, (int, float)) else None,
         "throughput_delta_pct": throughput_delta_pct,
     }
@@ -777,15 +770,14 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         elif isinstance(v, (int, float)):
             row[key] = round(float(v), 2)
 
-    # Clip negative gains to 0 (only when present and < 0). Process-history paths
-    # in raw_data keep negatives (meaningful for REVERT/NEEDS_REVIEW);
-    # enrich_raw_data() mirrors this clip only on display-facing nested paths.
+    # Clip negative gains to 0 (only when present and < 0). raw_data
+    # process-history paths keep negatives.
     for key in ("gain", "kernel_gain", "param_gain", "backend_gain", "geak_gain", "oob_gain", "framework_gain"):
         v = row.get(key)
         if isinstance(v, (int, float)) and v < 0:
             row[key] = 0.0
 
-    # raw_data = original JSON + `_enrichment`; pop `_meta` before the SQL stage.
+    # raw_data = original JSON + `_enrichment`; drop `_meta` before the SQL stage.
     meta = row.pop("_meta", {}) or {}
     row["raw_data"] = enrich_raw_data(data, row, meta=meta)
 
@@ -855,9 +847,8 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
             workload[wl_key] = row[row_key]
             workload_fallbacks_applied[wl_key] = row[row_key]
 
-    # Mirror the column-level gain clip into display-facing raw_data paths so UIs
-    # see the same non-negative number as the column (only when present and < 0).
-    # Process-history paths are intentionally left untouched.
+    # Mirror the column-level gain clip into display-facing raw_data paths (only
+    # when present and < 0); process-history paths are left untouched.
     raw_clip_applied: Dict[str, Any] = {}
 
     def _clip_neg(container: Dict, key: str, full_path: str) -> None:
@@ -1378,7 +1369,7 @@ def looks_like_v1_flat_schema(data: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Universal migrator -- handles every schema variant we've seen in the wild
+# Universal migrator
 # ---------------------------------------------------------------------------
 
 
@@ -1780,13 +1771,13 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
             "precision": (v1.get("precision") or "").lower() if isinstance(v1.get("precision"), str) else None,
             "gpu_type": v1.get("gpu_type"),
             "invocation": {
-                "framework_args": "",  # V1 didn't preserve the launcher arg string
+                "framework_args": "",  # V1 has no launcher arg string
             },
         },
         "baseline": {
             "throughput_tok_s_per_gpu": baseline_per_gpu,
             "benchmark": {
-                "output_throughput": v1.get("baseline_tput"),  # total, kept for provenance
+                "output_throughput": v1.get("baseline_tput"),  # total
             },
         },
         "final": {
@@ -1803,7 +1794,6 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
             "image": v1.get("image"),  # usually None -> derive_image() falls back
             "stop_reason": "",
         },
-        # Stash the original V1 payload so raw_data preserves provenance.
         "_v1_source": v1,
     }
 
@@ -1913,7 +1903,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate table name early so we don't waste a connection.
+    # Validate table name before opening a connection.
     try:
         safe_table(args.table)
     except ValueError as e:

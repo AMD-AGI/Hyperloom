@@ -8,14 +8,12 @@
 
 Used by the bypass route (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``) to populate
 ``source_file`` on hot-kernel candidates so the downstream kernel optimizer can
-actually dispatch a rewrite (it filters out candidates with no ``source_file``).
+dispatch a rewrite (it filters out candidates with no ``source_file``).
 
-This module is a compact, independent reimplementation of the op->source lookup.
-It **reads only the shared ground-truth data file**
-``src/hyperloom/agents/kernel/tools/data/op_to_source.json`` (also read by tracelens_analysis /
-kernel_optimization / forge_submit) and never imports TraceLens or
-``tracelens_analysis.py`` — mirroring how ``_bypass_classify`` reimplements the
-kernel taxonomy independently.
+A compact, independent reimplementation of the op->source lookup that reads only
+the shared data file
+``src/hyperloom/agents/kernel/tools/data/op_to_source.json`` and never imports
+TraceLens.
 
 The dictionary maps a CPU op name to the device kernels seen per container
 (``vllm`` / ``sglang``), each ``{device_kernel_name: {kernel_source_path,
@@ -43,8 +41,7 @@ _PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*
 
 # Editable source extensions: native device code plus repo-resident Triton .py.
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
-# Where the op_to_source.json build image installed python packages; relative
-# JSON paths are absolutized against it (paths are usually already absolute).
+# dist-packages root; relative JSON paths are absolutized against it.
 _PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
 
 
@@ -63,10 +60,9 @@ def _load_mapping() -> dict[str, Any]:
 def _aiter_csrc_root() -> str:
     """Best-effort live aiter ``csrc/`` root via find-spec (no import), else ``""``.
 
-    The JSON is built where aiter ships as ``aiter_meta`` under dist-packages; on
-    a serve/GPU box aiter may live elsewhere, so build-time paths would fail the
-    on-disk gate. Discovering the live root lets the remap below recover CK/aiter
-    native sources. ``find_spec`` locates the package without importing it.
+    Discovering the live root lets the remap below recover CK/aiter native sources
+    when aiter lives outside the JSON's build-time path. ``find_spec`` locates the
+    package without importing it.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -109,9 +105,9 @@ def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool
     """Return whether ``path`` is a source we can route a kernel rewrite at.
 
     Editable == native device code (``.cu``/``.cuh``/``.hip``/``.h``) or a
-    repo-resident Triton/TileLang ``.py``. Generated Triton is excluded:
-    ``kernel_kind == "triton_inductor_generated"`` and any ``torchinductor`` /
-    ``/tmp/`` path are regenerated code, not an editable repo source.
+    repo-resident Triton/TileLang ``.py``. Generated Triton is excluded
+    (``triton_inductor_generated`` kind and any ``torchinductor`` / ``/tmp/``
+    path).
 
     Args:
         path: Candidate source path (from the JSON or a trace ``kernel_file``).

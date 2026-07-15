@@ -39,8 +39,7 @@ def test_explicit_pool_wins_and_caps(monkeypatch) -> None:
 
 
 def test_rocr_mask_scopes_pool_to_absolute_ids(monkeypatch) -> None:
-    # A ROCR-pinned run must keep specialists on the masked cards (absolute ids),
-    # never range(capacity) which would point at cards outside the mask.
+    # A ROCR-pinned run keeps specialists on the masked cards (absolute ids).
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     assert resolve_gpu_specialist_devices(4) == [4, 5, 6, 7]
 
@@ -67,9 +66,8 @@ def test_empty_mask_yields_empty_pool(monkeypatch) -> None:
     assert resolve_gpu_specialist_devices(4) == []
 
 
-# B1 — serving-disjoint leases: the live serving process holds the first
-# ``serving_tp`` cards, which must be carved off the specialist pool so a
-# specialist never co-resides on a card production is computing on.
+# Serving holds the first ``serving_tp`` cards; they are carved off the
+# specialist pool so a specialist never co-resides on a serving card.
 def test_serving_tp_carves_whole_machine_pool(monkeypatch) -> None:
     # No mask + 8-card box, TP=4 serving → specialist pool {4,5,6,7}.
     assert resolve_gpu_specialist_devices(8, serving_tp=4) == [4, 5, 6, 7]
@@ -83,7 +81,7 @@ def test_serving_tp_carves_rocr_mask_pool(monkeypatch) -> None:
 
 
 def test_serving_tp_zero_preserves_legacy_whole_pool(monkeypatch) -> None:
-    # serving_tp=0 (the default) must preserve the pre-B1 whole-pool behaviour.
+    # serving_tp=0 (the default) preserves the whole-pool behaviour.
     assert resolve_gpu_specialist_devices(8, serving_tp=0) == [0, 1, 2, 3, 4, 5, 6, 7]
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     assert resolve_gpu_specialist_devices(4, serving_tp=0) == [0, 1, 2, 3]

@@ -268,7 +268,7 @@ def test_normalize_task_result_missing_dir(tmp_path: Path):
 def test_normalize_task_result_session_breakdown_fallback(tmp_path: Path):
     task_dir = tmp_path / "t"
     task_dir.mkdir()
-    # No ci_metrics.json; only a session_breakdown variant via rglob fallback.
+    # only a session_breakdown variant via rglob fallback
     (task_dir / "session_breakdown_2026.json").write_text(
         json.dumps({"baseline_throughput": 10, "optimized_throughput": 11}), encoding="utf-8"
     )

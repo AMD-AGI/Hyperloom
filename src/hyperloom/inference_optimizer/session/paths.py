@@ -29,22 +29,19 @@ ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 
-# This module lives under ``inference_optimizer/session/``, but the shipped
-# read-only asset dirs it resolves (``scripts/``, ``actions/``,
-# ``kernel_opt/``) still live directly under ``inference_optimizer/`` —
-# hence ``.parent.parent``, not ``.parent``.
+# Shipped read-only asset dirs live directly under ``inference_optimizer/``,
+# one level up from this ``session/`` module — hence ``.parent.parent``.
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 # One-shot guard so the "USER_DATA_PATH unset" fallback warning fires at most
 # once per process (workspace_root() is on a hot path).
 _WARNED_NO_USER_DATA = False
 
-# Per-session directory skeleton mkdir-ed by make_session_dir(). The layout
-# splits into workspace-shared roots (runtime/, logs/ — one per
-# $USER_DATA_PATH) and per-session roots (storage/, agents/, runs/, ... —
-# one per model+timestamp). Default layout is ``per_model_ts``
-# (``$USER_DATA_PATH/<model>/<UTC_ts>/``); set
-# $INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for the legacy single-dir layout.
+# Per-session directory skeleton mkdir-ed by make_session_dir(). Splits into
+# workspace-shared roots (runtime/, logs/ — one per $USER_DATA_PATH) and
+# per-session roots (one per model+timestamp). Default layout is
+# ``per_model_ts``; set $INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for the
+# legacy single-dir layout.
 _SESSION_SKELETON: tuple[str, ...] = (
     "storage",
     "personas",
@@ -92,7 +89,7 @@ def workspace_root() -> Path:
     """Operator-facing workspace root: ``$USER_DATA_PATH`` (else
     ``DEFAULT_SESSION_DIR``), regardless of layout mode. Workspace-shared
     artefacts (runtime/, logs/) live here. Falling back to the default emits
-    one loud warning so a misconfigured launcher is visible.
+    one warning so a misconfigured launcher is visible.
 
     Returns:
         The workspace root path.
@@ -189,7 +186,7 @@ def find_latest_per_session_dir(
         candidates = [p for p in model_root.iterdir() if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z")]
     else:
         # Scan every model_basename subdir; the timestamp-shaped name check
-        # skips workspace-shared subdirs (runtime/, logs/).
+        # skips workspace-shared subdirs.
         candidates: list[Path] = []
         for model_dir in ws.iterdir():
             if not model_dir.is_dir() or model_dir.name in ("runtime", "logs"):
@@ -199,7 +196,7 @@ def find_latest_per_session_dir(
                     candidates.append(p)
     if not candidates:
         return None
-    candidates.sort(key=lambda p: p.name)  # lex == chronological for the ts name
+    candidates.sort(key=lambda p: p.name)  # lex == chronological for ts names
     return candidates[-1]
 
 
@@ -232,8 +229,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     sd.mkdir(parents=True, exist_ok=True)
     for sub in _SESSION_SKELETON:
         (sd / sub).mkdir(parents=True, exist_ok=True)
-    # Pin for downstream callers + subprocesses; overwrite any prior pin so
-    # the most recent make_session_dir() call is authoritative.
+    # Pin for downstream callers + subprocesses; the most recent call wins.
     os.environ[ENV_CURRENT_SESSION_DIR] = str(sd)
     return sd
 
@@ -284,16 +280,11 @@ def asset_actions_dir() -> Path:
 def asset_system_prompts_dir() -> Path:
     """Return the directory of shipped agent system prompts.
 
-    The orchestrator (and its prompt templates, now
-    ``orchestrator/prompts/`` after the stage-B subpackage split) moved
-    out of ``src/hyperloom/inference_optimizer/`` into the ``hyperloom.orchestrator``
-    package. When an operator has set ``$INFERENCE_OPTIMIZER_ASSET_ROOT``
-    (see SKILL.md's per-run asset override, which symlinks ``orchestrator/``
-    into the override root), the override is honoured as before. Otherwise
-    the path is resolved via the ``hyperloom.orchestrator.prompts`` package's
-    own ``__file__``, which is correct both in a source checkout (``src/``
-    layout) and in a real installed distribution (sibling site-packages
-    directory) — unlike a hardcoded relative filesystem path.
+    When ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is set (its per-run override
+    symlinks ``orchestrator/`` into the override root) the override is honoured.
+    Otherwise the path is resolved via the ``hyperloom.orchestrator.prompts``
+    package's own ``__file__``, which is correct in both a source checkout and
+    an installed distribution.
 
     Returns:
         Path: ``<asset_root>/orchestrator/prompts`` (override) or
@@ -323,9 +314,9 @@ def open_source_root() -> Path:
     """Pod-local base for auto-cloned open-source deps, mirroring the install
     scripts: ``$HYPERLOOM_OPEN_SOURCE_ROOT`` else
     ``/opt/hyperloom/open-source-repos``. A pod-internal, non-ephemeral dir
-    (NOT /tmp): a tmp-reaper wiping /tmp mid-run left TRACELENS_ROOT dangling
-    and broke trace_analyze (#722). Decoupled from ``$USER_DATA_PATH`` so a
-    shared workspace root never collocates concurrent pods' checkouts.
+    (NOT /tmp, which a reaper can wipe mid-run). Decoupled from
+    ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
+    pods' checkouts.
 
     Returns:
         The pod-local open-source repos root path.

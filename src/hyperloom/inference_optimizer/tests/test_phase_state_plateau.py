@@ -34,7 +34,6 @@ from hyperloom.orchestrator.phases.machine_state import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-# 1. ESCALATE_HINT vocab
 def test_escalate_hint_vocab_closed():
     assert ESCALATE_HINT_VOCAB == frozenset(
         {
@@ -63,7 +62,6 @@ def test_is_pause_specialist_hint_requires_suffix():
     assert not is_pause_specialist_hint("skip_to_kernel")
 
 
-# compute_plateau_explore AND condition.
 def test_plateau_explore_empty_state_returns_false():
     state = SimpleNamespace()
     triggered, ev = compute_plateau_explore(state)
@@ -118,7 +116,7 @@ def test_plateau_explore_short_empty_streak_blocks_trigger():
         explore_search={"winners_history": [{"gain_pct": 0.1}]},
         specialist_rounds=[
             {"proposals_total": 0, "proposals_kept": 0},
-            # newest round produced something → streak resets to 0
+            # newest round produced something → streak resets to 0.
             {"proposals_total": 5, "proposals_kept": 2},
         ],
     )
@@ -134,10 +132,10 @@ def test_plateau_explore_supports_threshold_overrides():
             {"proposals_total": 0, "proposals_kept": 0},
         ],
     )
-    # Defaults: 0.5% threshold, 3-streak → not triggered (gain too high).
+    # Defaults → not triggered (gain too high).
     triggered, _ = compute_plateau_explore(state)
     assert triggered is False
-    # Raise threshold to 3.0 (gain 1.5 < 3.0) and drop streak to 1.
+    # Raise threshold above the gain and drop streak to 1 → triggers.
     triggered, _ = compute_plateau_explore(
         state,
         keep_gain_threshold_pct=3.0,
@@ -146,7 +144,6 @@ def test_plateau_explore_supports_threshold_overrides():
     assert triggered is True
 
 
-# compute_plateau_kernel OR condition.
 def test_plateau_kernel_revert_streak_triggers():
     """3 consecutive REVERTs → triggered."""
     state = SimpleNamespace(
@@ -238,7 +235,6 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
     assert ev.get("reason") == "no_kernel_attempts_yet"
 
 
-# 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
 def test_exit_normal_explore_exits_on_plateau():
     """A bare EXPLORE plateau signal advances to the next lever."""
     state = SimpleNamespace(
@@ -360,7 +356,7 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
 
 
 def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
-    # skip_to_sweep exhausts the explore lever (non-terminal).
+    # skip_to_sweep exhausts the explore lever, non-terminal.
     out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
     assert out is not None
     reason, evidence = out
@@ -369,7 +365,7 @@ def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
 
 
 def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
-    # Exhausted explore leverage switches lever (EXPLORE -> KERNEL), non-terminal.
+    # Exhausted explore leverage switches lever EXPLORE -> KERNEL, non-terminal.
     out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
     assert out is not None
     target, reason, evidence = out
@@ -461,7 +457,6 @@ def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
     assert reason == "kernel_no_more_leverage"
 
 
-# 5. apply_escalate_budget_bump
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
         {"EXPLORE": 0.60},
@@ -483,11 +478,10 @@ def test_apply_escalate_budget_bump_clamps_to_cap():
 def test_apply_escalate_budget_bump_ignores_unknown_phase():
     inp = {"EXPLORE": 0.60}
     out = apply_escalate_budget_bump(inp, phase="NOT_A_PHASE")
-    # No bump, but the helper returns a normalised copy with all known phases populated.
+    # No bump; returns a normalised copy with all known phases populated.
     assert out["EXPLORE"] == 0.60
 
 
-# 6. SharedState — escalate hint plumbing + stop_reason ENUM
 def test_set_pending_escalate_hint_accepts_vocab():
     s = SharedState()
     assert s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL) == "skip_to_kernel"
@@ -564,7 +558,6 @@ def test_stop_reason_vocab_has_v08_additions():
         assert is_valid_stop_reason(new)
 
 
-# 7. plateau advances EXPLORE — pure compute_plateau_* still works
 def test_compute_next_phase_advances_on_plateau():
     """When the EXPLORE plateau judge fires, compute_next_phase routes to KERNEL_AGENT."""
     state = SimpleNamespace(
@@ -592,7 +585,6 @@ def test_compute_next_phase_advances_on_plateau():
     assert triggered is True
 
 
-# 8. breakdown.attribution.phase_breakdown
 def test_collect_phase_breakdown_buckets_by_phase():
     from hyperloom.inference_optimizer.breakdown.collectors import collect_attribution
 
@@ -635,7 +627,6 @@ def test_collect_phase_breakdown_buckets_by_phase():
     assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
     assert pb["kernel_agent"]["total_gain_pct"] == 7.5
     assert pb["kernel_agent"]["by_kernel_id"]["fmoe_fp8"] == 7.5
-    # No prelude/sweep contributions.
     assert pb["prelude"]["total_gain_pct"] == 0.0
     assert pb["sweep"]["total_gain_pct"] == 0.0
 
@@ -663,7 +654,6 @@ def test_collect_phase_breakdown_falls_back_to_action_family_when_history_empty(
     assert pb["explore"]["total_gain_pct"] == 2.5
     # Default provenance bucket when winners_history doesn't supply one.
     assert pb["explore"]["by_domain"].get("default_grid", 0.0) == 2.5
-    # Warning logged for the fallback path.
     assert any("phase_history empty" in w for w in warnings)
 
 

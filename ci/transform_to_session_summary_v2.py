@@ -180,8 +180,7 @@ def _patch_capability_summary(data: Dict) -> List[str]:
 
     vs = cs.get("validate_stack")
     if isinstance(vs, dict) and "best_gain_pct" not in vs:
-        # Mirror last_validated_gain_pct -> best_gain_pct so the frontend can
-        # read either uniformly.
+        # Mirror last_validated_gain_pct -> best_gain_pct.
         v = vs.get("last_validated_gain_pct")
         vs["best_gain_pct"] = float(v) if isinstance(v, (int, float)) else None
         notes.append("capability_summary.validate_stack.best_gain_pct <- last_validated_gain_pct")
@@ -304,7 +303,6 @@ def _patch_detected_kernels(data: Dict) -> List[str]:
             continue
         kid = k.get("kernel_id") or ""
 
-        # Only fill if missing or null
         if k.get("geak") is None:
             k["geak"] = _aggregate_backend(data, kid, "geak")
             notes.append(f"kernel[{kid}].geak")
@@ -464,7 +462,6 @@ def _output_name_for(input_file: Path, in_dir: Path) -> Path:
 
     if session_id:
         return Path(f"{session_id}.json")
-    # fallback: mirror input layout, force .json
     return rel.with_suffix(".json")
 
 

@@ -2,9 +2,8 @@
 
 """cuda-graph capture failure classification + one-shot --enforce-eager fallback.
 
-A cuda-graph capture failure (``operation not permitted when stream is
-capturing`` / ``Capture cuda graph failed``) is often recoverable by retrying
-with ``--enforce-eager``. These tests pin the classifier, the idempotent flag
+A cuda-graph capture failure is often recoverable by retrying with
+``--enforce-eager``. These tests pin the classifier, the idempotent flag
 injection, and the one-shot consume contract.
 """
 
@@ -34,15 +33,13 @@ def test_cuda_graph_capture_markers_detected():
     assert _is_cuda_graph_capture_failure(
         "torch.AcceleratorError: HIP error: operation not permitted when stream is capturing"
     )
-    # Non-OOM capture failure (stream-capture incompatibility) IS recoverable.
+    # Non-OOM capture failure is recoverable.
     assert _is_cuda_graph_capture_failure("Capture cuda graph failed: HIP error: operation not permitted")
     assert _is_cuda_graph_capture_failure("hipErrorStreamCaptureUnsupported")
 
 
 def test_oom_capture_failure_not_flagged():
-    # Real server.log form: "Capture cuda graph failed" whose ROOT CAUSE is OOM.
-    # Disabling cuda-graph does NOT recover OOM (eager peaks can be higher), so
-    # it must NOT arm the one-shot fallback; let it fall to subprocess_nonzero.
+    # An OOM-rooted capture failure must not arm the one-shot fallback.
     assert not _is_cuda_graph_capture_failure(
         "Exception: Capture cuda graph failed: HIP out of memory. Tried to allocate 4.78 GiB."
     )
@@ -50,9 +47,8 @@ def test_oom_capture_failure_not_flagged():
 
 
 def test_unrelated_earlier_oom_does_not_mask_capture_failure():
-    # False-negative regression: an UNRELATED OOM warning early in the log must
-    # not mask a genuine stream-capture failure many lines later. OOM exclusion
-    # is scoped to the marker's local context, not the whole blob.
+    # An unrelated OOM warning must not mask a genuine stream-capture failure;
+    # OOM exclusion is scoped to the marker's local context, not the whole blob.
     blob = "\n".join(
         ["[warn] some cache out of memory, retrying"]
         + ["  ... unrelated startup line ..."] * 20
@@ -62,32 +58,30 @@ def test_unrelated_earlier_oom_does_not_mask_capture_failure():
 
 
 def test_compile_error_capture_failure_not_flagged():
-    # Bare "Capture cuda graph failed" rooted in a compile/lowering error is
-    # NOT recoverable by disabling cuda-graph; it must stay a weak signal only.
+    # A bare marker rooted in a compile/lowering error stays a weak signal only.
     assert not _is_cuda_graph_capture_failure("Capture cuda graph failed: LoweringException: AssertionError")
     assert not _is_cuda_graph_capture_failure("Capture cuda graph failed\n  CompilationError: invalid kernel")
 
 
 def test_strong_marker_ignores_compile_error_in_context():
-    # A strong stream-capture marker arms the fallback even if a compile error
-    # sits nearby; compile-error exclusion only gates the bare/weak marker.
+    # A strong stream-capture marker arms the fallback even with a nearby
+    # compile error; compile-error exclusion only gates the bare/weak marker.
     assert _is_cuda_graph_capture_failure(
         "AssertionError: shape mismatch\noperation not permitted when stream is capturing"
     )
 
 
 def test_strong_and_weak_same_line_with_compile_error_is_recoverable():
-    # Regression: a line matching BOTH the strong and weak markers, with a
-    # compile error in context, must be RECOVERABLE — strong wins, the
-    # weak-only compile gate must not demote it (false negative).
+    # A line matching both markers with a compile error is recoverable: strong
+    # wins and the weak-only compile gate must not demote it.
     assert _is_cuda_graph_capture_failure(
         "Capture cuda graph failed: LoweringException: operation not permitted when stream is capturing"
     )
 
 
 def test_strong_marker_with_adjacent_unrelated_oom_warning_is_recoverable():
-    # False-negative guard: an unrelated OOM warning a few lines away from a
-    # strong marker must NOT demote it (strong uses a tight ±1-line window).
+    # An unrelated OOM warning a few lines from a strong marker must not demote
+    # it (strong uses a tight ±1-line window).
     blob = "\n".join(
         ["[warn] kv cache out of memory, shrinking"]
         + ["  ... startup line ..."] * 3
@@ -97,14 +91,12 @@ def test_strong_marker_with_adjacent_unrelated_oom_warning_is_recoverable():
 
 
 def test_strong_marker_with_oom_on_same_line_not_flagged():
-    # OOM directly on the strong marker line IS a real OOM-rooted capture
-    # failure; disabling cuda-graph cannot recover it.
+    # OOM on the strong marker line is a real OOM-rooted capture failure.
     assert not _is_cuda_graph_capture_failure("HIP out of memory; operation not permitted when stream is capturing")
 
 
 def test_weak_marker_with_distant_oom_not_flagged():
-    # Weak marker keeps whole-blob OOM exclusion: an OOM anywhere (even far in
-    # the stack trace) demotes the bare "Capture cuda graph failed".
+    # Weak marker keeps whole-blob OOM exclusion: an OOM anywhere demotes it.
     blob = "\n".join(
         ["Capture cuda graph failed"]
         + ["  at frame %d" % i for i in range(20)]
@@ -120,10 +112,10 @@ def test_non_cuda_graph_failures_not_flagged():
 
 
 def test_disable_cuda_graph_flag_per_framework():
-    # sglang rejects vLLM's --enforce-eager; it must use --disable-cuda-graph.
+    # sglang uses --disable-cuda-graph; vLLM uses --enforce-eager.
     assert _disable_cuda_graph_flag("sglang") == "--disable-cuda-graph"
     assert _disable_cuda_graph_flag("vllm") == "--enforce-eager"
-    # unknown / empty framework defaults to the sglang-safe flag.
+    # Unknown / empty framework defaults to the sglang-safe flag.
     assert _disable_cuda_graph_flag("") == "--disable-cuda-graph"
     assert _disable_cuda_graph_flag("atom") == "--disable-cuda-graph"
 
@@ -138,6 +130,7 @@ def test_with_cuda_graph_disabled_is_idempotent():
     assert _with_cuda_graph_disabled("--a --disable-cuda-graph --b", "sglang").count("--disable-cuda-graph") == 1
     # Token-level dedup: a longer flag must not block the real one.
     assert (
+
         _with_cuda_graph_disabled("--disable-cuda-graph-extra=1", "sglang")
         == "--disable-cuda-graph-extra=1 --disable-cuda-graph"
     )
@@ -163,8 +156,8 @@ def test_eager_fallback_absent_returns_false(tmp_path: Path):
 
 
 def test_capture_failure_wins_over_server_init_dead_marker_helper():
-    # error_class priority at the marker level: a capture marker co-occurring
-    # with a server-death marker must still classify as a capture failure.
+    # A capture marker co-occurring with a server-death marker still classifies
+    # as a capture failure.
     blob = (
         "server engine/worker init failed (reaped by liveness watchdog)\n"
         "operation not permitted when stream is capturing"
@@ -204,9 +197,10 @@ def _run_executor_with_server_log(
     shared_state: SharedState | None = None,
     make_workspace: bool = False,
 ) -> tuple[dict, dict]:
-    """Run BaselineExecutor.__call__ with a mocked Magpie that writes a
-    server.log. By default produces NO benchmark_* workspace (no_workspace
-    path); with ``make_workspace`` it creates one with an invalid report so the
+    """Run BaselineExecutor.__call__ with a mocked Magpie that writes a server.log.
+
+    By default produces no benchmark_* workspace (no_workspace path); with
+    ``make_workspace`` it creates one with an invalid report so the
     invalid_measurement branch is exercised instead.
 
     Returns (result, captured) where captured["extra_server_args"] is the
@@ -228,8 +222,8 @@ def _run_executor_with_server_log(
         slot.mkdir(parents=True, exist_ok=True)
         (slot / "server.log").write_text(server_log_text, encoding="utf-8")
         if make_workspace:
-            # A benchmark_* workspace whose report yields no valid measurement,
-            # so __call__ reaches the invalid_measurement branch.
+            # A workspace whose report yields no valid measurement, so __call__
+            # reaches the invalid_measurement branch.
             ws = slot / "benchmark_sglang_20260101_000000"
             ws.mkdir(parents=True, exist_ok=True)
             (ws / "benchmark_report.json").write_text("{}", encoding="utf-8")
@@ -271,9 +265,8 @@ def _run_executor_with_server_log(
 
 
 def test_executor_capture_failure_wins_over_server_init_dead(tmp_path: Path):
-    # #5: server-death marker + capture marker co-occur in server.log; the
-    # no_workspace branch must classify it as cuda_graph_capture_failed so the
-    # one-shot fallback is armed (capture wins over server_init_dead).
+    # server-death + capture markers co-occur; the no_workspace branch must
+    # classify cuda_graph_capture_failed so the one-shot fallback is armed.
     log_text = (
         "server engine/worker init failed (reaped by liveness watchdog)\n"
         "operation not permitted when stream is capturing\n"
@@ -284,8 +277,8 @@ def test_executor_capture_failure_wins_over_server_init_dead(tmp_path: Path):
 
 
 def test_executor_consumes_flag_and_injects_disable_flag(tmp_path: Path):
-    # #6: with the eager flag armed, the next baseline must consume it and the
-    # disable-cuda-graph flag must actually reach materialization (launch args).
+    # With the eager flag armed, the next baseline consumes it and the
+    # disable-cuda-graph flag reaches materialization.
     result, captured = _run_executor_with_server_log(
         tmp_path,
         "boot failed\n",
@@ -293,7 +286,7 @@ def test_executor_consumes_flag_and_injects_disable_flag(tmp_path: Path):
     )
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" in captured["extra_server_args"]
-    # One-shot: the flag is consumed (cleared) after this run.
+    # One-shot: the flag is consumed after this run.
     assert SharedState.load_or_init(tmp_path).baseline_eager_fallback is False
 
 
@@ -301,9 +294,8 @@ def test_executor_keeps_flag_armed_when_framework_unknown(
     tmp_path: Path,
     monkeypatch,
 ):
-    # Unknown framework cannot pick a safe flag (sglang's --disable-cuda-graph
-    # would break a vLLM retry). The one-shot must stay ARMED (not consumed) so
-    # a later baseline with a known framework can still apply it.
+    # Unknown framework cannot pick a safe flag, so the one-shot stays armed for
+    # a later baseline with a known framework.
     monkeypatch.delenv("FRAMEWORK", raising=False)
     result, captured = _run_executor_with_server_log(
         tmp_path,
@@ -331,10 +323,9 @@ def test_executor_no_inject_when_flag_not_armed(tmp_path: Path):
 def test_executor_capture_wins_over_server_init_dead_invalid_measurement(
     tmp_path: Path,
 ):
-    # #3: a benchmark_* workspace EXISTS but yields no valid measurement, and
-    # server.log carries both a server-death marker and a capture marker. The
-    # invalid_measurement branch must still classify cuda_graph_capture_failed
-    # (capture wins over server_init_dead), mirroring the no_workspace branch.
+    # A workspace exists but yields no valid measurement, and server.log carries
+    # both a server-death and a capture marker; the invalid_measurement branch
+    # must still classify cuda_graph_capture_failed.
     log_text = (
         "server engine/worker init failed (reaped by liveness watchdog)\n"
         "operation not permitted when stream is capturing\n"

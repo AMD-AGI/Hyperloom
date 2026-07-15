@@ -340,7 +340,7 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
 async def test_run_stops_on_emergency_crash_count(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        # Record crashes through the counter so the trailing-window rate sees them.
+        # Record crashes so the trailing-window rate sees them.
         for _ in range(30):
             c.shared_state.increment_crash_count()
         reason = await c.run(max_ticks=10)

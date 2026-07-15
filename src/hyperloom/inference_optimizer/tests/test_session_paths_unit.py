@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the per-session path helpers (single source of truth for
-every path inside a session directory)."""
+"""Unit tests for the per-session path helpers."""
 
 from __future__ import annotations
 
@@ -22,7 +21,6 @@ def test_top_level_files():
 
 def test_runs_root_and_dir():
     assert sp.runs_root(SD) == SD / "runs"
-    # baseline is in the runs-workspace action set (fallback or registry)
     p = sp.runs_dir(SD, "baseline", "t1")
     assert p == SD / "runs" / "baseline" / "t1"
     # blank task_id falls back to "unknown"

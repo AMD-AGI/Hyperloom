@@ -85,7 +85,6 @@ class OpenAIHttpClient:
             user=user,
             max_output_tokens=self.max_output_tokens,
             timeout_sec=self.timeout_sec,
-            # narrative pass — keep prose stable but not robotic
             temperature=0.2,
         )
 

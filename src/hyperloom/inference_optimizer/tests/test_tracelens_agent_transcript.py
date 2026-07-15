@@ -1,12 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CI-collected tests for TraceLens agent transcript persistence .
+"""CI-collected tests for TraceLens agent transcript persistence.
 
-The broader ``src/hyperloom/agents/kernel/tests/test_tracelens_csv.py`` file
-exercises many TraceLens integration paths that require repo-local TraceLens
-assets. These tests isolate the small SDK-runner transcript contract so CI
-covers the transcript feature without pulling in those environment-dependent
-cases.
+Isolate the small SDK-runner transcript contract so CI covers the transcript
+feature without pulling in environment-dependent TraceLens integration paths.
 """
 
 from __future__ import annotations

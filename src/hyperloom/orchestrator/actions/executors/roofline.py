@@ -36,20 +36,16 @@ log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
 
-# seconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = functools.partial(now_iso, "seconds")
 
 
-# Auto-recover from TraceLens steady_state_chunk_* failures: when
-# trace_analyze fails with one of these warnings carrying ``non_empty_modes``,
-# re-issue ONCE with the first non-empty mode (from TraceLens's splitter, not
-# a local heuristic). Single-retry to prevent loops.
+# Auto-recover from TraceLens steady_state_chunk_* failures: re-issue ONCE with
+# the first non-empty mode from the warning's ``non_empty_modes``.
 _AUTO_RETRY_WARNING_CODES = frozenset(
     {
         "steady_state_chunk_empty",
         "steady_state_chunk_missing",
-        # low-quality chunk (non-empty but busy_ratio below threshold with a
-        # better alternate); same recovery path via ``non_empty_modes``.
+        # low-quality chunk; same recovery path via ``non_empty_modes``.
         "steady_state_chunk_low_quality",
     }
 )
@@ -78,8 +74,7 @@ def _extract_steady_state_retry_mode(
             continue
         if w.get("code") not in _AUTO_RETRY_WARNING_CODES:
             continue
-        # Both warnings name the splitter-accepted alternates
-        # (non_empty_modes / available_modes).
+        # Splitter-accepted alternates (non_empty_modes / available_modes).
         modes = w.get("non_empty_modes") or w.get("available_modes") or []
         if not isinstance(modes, list):
             continue
@@ -174,9 +169,9 @@ def _profile_err_text(profile_result: Any) -> str:
 def _profile_server_log_tail(profile_result: Any, max_bytes: int = 16384) -> str:
     """Return the tail of the newest engine ``server.log`` for a profile run.
 
-    The seq_lens/get_num_new_pages assert and SIGQUIT surface only in the engine
-    ``server.log`` (not the profile result fields), so feed it to the cuda-graph
-    capture-failure detector. Best-effort: returns "" on any miss.
+    Some crashes surface only in the engine ``server.log`` (not the profile
+    result fields), so it feeds the cuda-graph capture-failure detector.
+    Best-effort: returns "" on any miss.
     """
     if not isinstance(profile_result, dict):
         return ""
@@ -235,22 +230,17 @@ class RooflineExecutor:
         Returns:
             A result dict describing the roofline outcome and artifacts.
         """
-        # atom: the profile sub-step produces *.pt.trace.json.gz that
-        # TraceLens consumes unchanged, so this falls through to the
-        # sglang/vllm path. Lazy imports keep shell-out/yaml off module load.
+        # atom: the profile sub-step produces *.pt.trace.json.gz that TraceLens
+        # consumes unchanged. Lazy imports keep shell-out/yaml off module load.
         from ...kernel.request_handlers import trace_analyze_handler
         from .profile import profile_executor
 
         session_dir = self._resolve_session_dir(ctx)
-        # Time the composite so the END lifecycle event reports how
-        # long the auto-roofline TraceLens run took.
+        # Time the composite so the END lifecycle event reports its duration.
         _lc_t0 = time.monotonic()
 
         # Emit a paired START so the auto-roofline path (which bypasses
-        # Coordinator._handle_request) does not show a lone END. Without it the
-        # operator sees nothing for the whole profile-retry + TraceLens run —
-        # potentially minutes — then a sudden END. Best-effort, never blocks the
-        # run; the END below carries the produced artifact paths + duration.
+        # Coordinator._handle_request) does not show a lone END. Best-effort.
         try:
             self.shared_state.record_lifecycle_event(
                 step="roofline",
@@ -264,11 +254,9 @@ class RooflineExecutor:
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
 
         # ---- Profile (with retry) --------------------------------------------
-        # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
-        # failure rate (SIGQUIT / "Profiling is not in progress" / engine init
-        # crash). Retry up to _PROFILE_MAX_ATTEMPTS times; each call to
-        # profile_executor manages its own server lifecycle, so a fresh attempt
-        # starts with a clean profiling state.
+        # sglang's torch profiler on MI300X/ROCm is unstable, so retry up to
+        # _PROFILE_MAX_ATTEMPTS times; each profile_executor call manages its own
+        # server lifecycle so a fresh attempt starts clean.
         profile_result: dict[str, Any] | None = None
         trace_path = ""
         last_error = ""
@@ -276,13 +264,11 @@ class RooflineExecutor:
         # Track the last failure kind so the no-trace contract is preserved
         # (profile_no_trace_failed) instead of collapsing into profile_failed.
         last_phase = "profile"
-        # One-shot: after a cuda-graph capture crash
-        # (hipErrorStreamCaptureUnsupported) the next attempt boots eager so the
-        # torch-profiler stream capture cannot collide (mirrors baseline).
+        # After a cuda-graph capture crash the next attempt boots eager so the
+        # torch-profiler stream capture cannot collide.
         disable_cuda_graph = False
         # Resolve framework so the eager fallback picks the correct flag (vLLM
-        # needs --enforce-eager, sglang --disable-cuda-graph). Internal roofline
-        # tasks omit params["framework"], so fall back to env then shared_state.
+        # --enforce-eager, sglang --disable-cuda-graph).
         framework = self._resolve_framework(ctx)
         from .baseline import (
             _disable_cuda_graph_flag,
@@ -328,8 +314,8 @@ class RooflineExecutor:
             trace_path = _extract_trace_path(profile_result)
             if profile_result.get("status") != "succeeded":
                 if trace_path:
-                    # SGLang/InferenceX can emit a duplicate stop_profile
-                    # failure after a trace was already flushed successfully.
+                    # A duplicate stop_profile failure can arrive after a trace
+                    # was already flushed successfully.
                     profile_warning = {
                         "status": profile_result.get("status"),
                         "error_class": profile_result.get("error_class"),
@@ -375,17 +361,11 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                 )
                 continue
-            # #735: a capture-only profile yielded only CUDA-graph capture
-            # sidecars (no annotated steady-state trace flushed). Feeding those
-            # to the steady-state splitter produces "0 execution steps" and the
-            # run dies downstream with the misleading trace_split_no_steady_state.
-            # This is transient (the annotated trace flush was cut short, not a
-            # config problem — a plain re-profile self-heals, observed on
-            # gpt-oss vLLM), so just re-do the profile + trace with the SAME
-            # graph-capture settings. Do NOT escalate to eager: graph-capture is
-            # the robust/correct profiling mode and eager changes the measured
-            # workload. If every attempt stays capture-only, fail with an
-            # accurate message instead.
+            # A capture-only profile yielded only CUDA-graph capture sidecars
+            # (no annotated steady-state trace). This is transient, so re-profile
+            # with the SAME graph-capture settings (do NOT escalate to eager,
+            # which changes the measured workload). If every attempt stays
+            # capture-only, fail with an accurate message.
             if profile_result.get("profile_trace_selection_reason") == "capture_only_fallback":
                 last_phase = "profile_capture_only"
                 last_error = (
@@ -402,12 +382,8 @@ class RooflineExecutor:
                 )
                 continue
             # Op count == 0: the torch-profiler active window captured no ops
-            # (metadata-only trace). The steady-state splitter yields no
-            # execution_details.csv and roofline REVERTs with an empty snapshot.
-            # Re-profile rather than cache an empty snapshot; if every attempt
-            # is zero-ops, fail with an accurate message. The most common cause
-            # (LLM start_step applied to a scriptable/diffusion run) is fixed at
-            # window-computation time, so a re-profile self-heals a transient.
+            # (metadata-only trace). Re-profile rather than cache an empty
+            # snapshot; if every attempt is zero-ops, fail with an accurate message.
             if bool((profile_result.get("trace_health") or {}).get("zero_ops")):
                 last_phase = "profile_zero_ops"
                 last_error = (
@@ -438,30 +414,23 @@ class RooflineExecutor:
                 sub_result=profile_result,
             )
 
-        # Inline-promote only the profile fields trace_analyze needs (not
-        # current_best / cumulative_gain). Do NOT clear last_trace_analyze
-        # here: record_trace_analyze derives the next snapshot_id from it, so
-        # clearing would reset the monotonic counter. The
-        # clear happens only on the trace_analyze failure path below.
+        # Inline-promote only the profile fields trace_analyze needs. Do NOT
+        # clear last_trace_analyze here: record_trace_analyze derives the next
+        # snapshot_id from it. The clear happens only on the failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
         self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
 
         # ---- trace_analyze -------------------------------------------------
-        # Pin the snapshot's arm so the ceiling's precision is anchored to the
-        # arm this roofline actually profiled. A PRELUDE roofline measures the
-        # baseline arm; without this the recorder would infer "current_best"
-        # from a warm-replay-promoted state and retro-inflate the ceiling.
+        # Pin the snapshot's arm explicitly so the ceiling precision never relies
+        # on a transient current_best inference: PRELUDE measures the baseline
+        # arm; all other reasons measure current_best.
         _task_params = ctx.task.params or {}
-        # Pin every roofline's arm explicitly so the ceiling precision never
-        # relies on a transient current_best inference: PRELUDE measures the
-        # baseline arm; all other reasons (watermark etc.) measure current_best.
         _reason = str(_task_params.get("reason") or "")
         roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
         # Route each roofline to its own report so the PRELUDE baseline snapshot
-        # (kernel_roofline.json) is never overwritten: prelude keeps the default
-        # file, close_post_opt writes the "after" file, every other reason
-        # (watermark/cycle current_best) writes a rolling current snapshot.
+        # is never overwritten: prelude keeps the default file, close_post_opt
+        # writes the "after" file, every other reason writes a rolling current one.
         if _reason == "prelude_initial":
             roofline_output_name = ""
         elif _reason == "close_post_opt":
@@ -479,9 +448,8 @@ class RooflineExecutor:
                 session_dir=session_dir,
             )
         except Exception as exc:  # noqa: BLE001
-            # Stale-cache invariant: clear the cache so the prompt shows
-            # "(no TraceLens snapshot yet)" instead of advice tied to the
-            # previous trace.
+            # Clear the cache so the prompt shows no snapshot rather than advice
+            # tied to the previous trace.
             self.shared_state.last_trace_analyze = {}
             return _failed("trace_analyze", f"trace_analyze_handler raised: {exc!r}")
         if not isinstance(ta_result, dict):
@@ -491,13 +459,10 @@ class RooflineExecutor:
                 f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
             )
 
-        # N26 auto-retry: on a recovery warning naming an alternate mode the
-        # splitter can serve, re-split the SAME trace with that mode and
-        # re-issue trace_analyze ONCE — no re-benchmark is required (cheap).
-        # Single-retry is enforced by the handler idempotency key + the local
-        # gate below. This is a self-healing step, not a genuine failure; the
-        # log below makes that explicit so monitoring cannot mistake the pause
-        # for a hang.
+        # N26 auto-retry: on a recovery warning naming an alternate mode, re-split
+        # the SAME trace with that mode and re-issue trace_analyze ONCE (no
+        # re-benchmark). Single-retry is enforced by the handler idempotency key
+        # + the local gate below.
         retry_hint: "tuple[str, dict[str, Any]] | None" = None
         if ta_result.get("status") != "ok":
             retry_hint = _extract_steady_state_retry_mode(ta_result)
@@ -523,8 +488,7 @@ class RooflineExecutor:
             ta_payload_retry: dict[str, Any] = {
                 "trace_input": str(trace_path),
                 "steady_state_mode": retry_mode,
-                # Marker against retry loops; single-retry is enforced by not
-                # re-entering this block regardless of the second outcome.
+                # Marker against retry loops.
                 "_n26_auto_retry": True,
                 "_n26_retry_from_mode": from_mode,
             }
@@ -579,8 +543,7 @@ class RooflineExecutor:
                     ta_result.get("status"),
                     retry_mode,
                 )
-            # Stamp ``n26_auto_retry`` so the recorder / prompt surface
-            # "snapshot came from an auto-retry" (best-effort).
+            # Stamp ``n26_auto_retry`` for the recorder / prompt (best-effort).
             if isinstance(ta_result, dict):
                 ta_result.setdefault(
                     "n26_auto_retry",
@@ -600,7 +563,9 @@ class RooflineExecutor:
                 sub_result=ta_result,
             )
 
-        # trace_analyze status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers (degraded input, not a TraceLens failure). Append a trace_health_warnings entry so the LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
+        # status=ok but ZERO hot kernels means cuda-graph capture folded
+        # per-kernel time into hipGraphLaunch wrappers. Append a warning so the
+        # LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
         hot = ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
         trace_health = profile_result.get("trace_health") or {}
         attribution_degraded = bool(not hot and trace_health.get("per_kernel_attribution_degraded"))
@@ -623,20 +588,14 @@ class RooflineExecutor:
             health.append(warning)
             ta_result["trace_health_warnings"] = health
 
-        # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
+        # Cache via the C1 recorder (bumps roofline_snapshot_id, writes analysis_md).
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
 
         # The auto-roofline TraceLens run does NOT pass through
-        # Coordinator._handle_request, so emit its lifecycle event here so
-        # operators still see "TraceLens finished -> analysis at <path>".
-        # Best-effort. The event is recorded into the coordinator's shared
-        # SharedState object, so it is durable as soon as ANY later
-        # coordinator save runs; the explicit save below is only a fast-path
-        # to flush it immediately when a real session dir already exists
-        # (tests may resolve session_dir to "."). Note: if auto-roofline ever
-        # became the very first writer of state.json, this in-memory event
-        # would rely on that later coordinator save to reach disk.
+        # Coordinator._handle_request, so emit its lifecycle event here.
+        # Best-effort; the explicit save below is a fast-path to flush it when a
+        # real session dir already exists.
         try:
             self.shared_state.record_lifecycle_event(
                 step="roofline",
@@ -664,10 +623,8 @@ class RooflineExecutor:
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),
-            # False on a healthy run; True when trace_analyze produced
-            # 0 hot kernels because cuda-graph folding stripped per-kernel
-            # attribution (a ``cuda_graph_attribution_degraded`` entry was
-            # appended to trace_health_warnings for the prompt/audit).
+            # True when trace_analyze produced 0 hot kernels because cuda-graph
+            # folding stripped per-kernel attribution.
             "kernel_attribution_degraded": attribution_degraded,
         }
         if profile_warning is not None:
@@ -693,8 +650,7 @@ class RooflineExecutor:
 
     def _resolve_framework(self, ctx: RunnerContext) -> str:
         """Resolve the active framework: task params > FRAMEWORK env >
-        shared_state.framework. Internal roofline tasks omit params["framework"],
-        so the fallbacks keep the eager flag framework-correct (mirrors baseline).
+        shared_state.framework.
         """
         params = ctx.task.params or {}
         fw = str(params.get("framework") or "").strip()
@@ -712,12 +668,10 @@ class RooflineExecutor:
     ) -> RunnerContext:
         """Construct a child RunnerContext for profile_executor.
 
-        Bypasses SubAgentRunner's child Task creation (avoids double task
-        accounting); the child carries kind="profile" + same params and
-        inherits the lease (no profile_lane re-acquire). When
-        ``disable_cuda_graph`` is set (post capture-crash retry), the
-        framework-correct eager flag is folded into ``base_extra_args``
-        (``framework`` resolved by the caller via params/env/shared_state).
+        Bypasses SubAgentRunner's child Task creation; the child carries
+        kind="profile" + same params and inherits the lease. When
+        ``disable_cuda_graph`` is set, the framework-correct eager flag is folded
+        into ``base_extra_args``.
 
         Args:
             parent_ctx: The parent runner context to derive the child from.

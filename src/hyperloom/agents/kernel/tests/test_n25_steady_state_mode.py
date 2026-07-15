@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""N25 — TraceLens splitter steady-state chunk selection contract (SOLAR-10.7B TP=1 case).
+"""N25 — TraceLens splitter steady-state chunk selection contract.
 
-Explicit chunk selection (``--steady-state-mode`` + ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE``) that hard-fails on a structurally-empty chunk (num_gpu_events==0 OR gpu_busy_duration==0.0); busy-% judgment stays with the T3 idle gate.
+Explicit chunk selection (``--steady-state-mode`` + ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE``) hard-fails on a structurally-empty chunk (num_gpu_events==0 OR gpu_busy_duration==0.0); busy-% judgment stays with the T3 idle gate.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 
-# Import module-level helpers without the heavy __main__ path (Claude SDK, creds).
+# Import module-level helpers without the heavy __main__ path.
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
 if str(TOOLS_DIR) not in sys.path:

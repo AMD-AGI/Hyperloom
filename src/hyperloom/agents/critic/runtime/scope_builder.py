@@ -36,7 +36,7 @@ CRITICAL_SCOPE_KEYS: tuple[str, ...] = (
 OPTIONAL_SCOPE_KEYS: tuple[str, ...] = ("scale", "objective")
 
 
-# Crude model-family heuristic (extend as new model families enter Hyperloom).
+# Crude model-family heuristic.
 _MODEL_FAMILY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^deepseek", re.IGNORECASE), "deepseek"),
     (re.compile(r"^qwen", re.IGNORECASE), "qwen"),
@@ -156,7 +156,6 @@ def build_scope(
             continue
         value = _pick(key, pc, sc)
         if not value and key == "model_family":
-            # Derive from model when family is missing.
             model_value = _pick("model", pc, sc)
             value = derive_model_family(model_value) or ""
         scope[key] = value or "unknown"

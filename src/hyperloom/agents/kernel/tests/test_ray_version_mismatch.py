@@ -120,8 +120,7 @@ def test_quiet_ray_init_no_mismatch_succeeds_first_try(monkeypatch):
 
 def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
     """``force_restart_local_cluster`` must ``ray stop --force`` then
-    ``ray start --head`` with the requested num_gpus, logging to the audit
-    file."""
+    ``ray start --head`` with the requested num_gpus, logging to the audit file."""
     log_path = tmp_path / "ray_lifecycle.log"
     runs = []
 
