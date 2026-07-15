@@ -1717,6 +1717,12 @@ class BaselineExecutor:
         # (else they fall back to ``/workspace/``); scripts that ignore it
         # are caught by the ``extract_benchmark_measurement`` salvage pass.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
+        # InferenceX ``run_lm_eval`` reads ``$EVAL_RESULT_DIR`` for lm-eval's
+        # ``--output_path``; unset it defaults to ``/tmp/eval_out-*`` and the
+        # ``results*.json`` never reach the task workspace, so the accuracy gate
+        # finds no baseline. Mirror it to ``$RESULT_DIR`` so eval artifacts land
+        # under ``output_dir`` (a sibling of the Magpie ``benchmark_*`` dir).
+        env["EVAL_RESULT_DIR"] = env["RESULT_DIR"]
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into
         # the task workspace instead of leaking to ``/workspace/``;
         # ``harvest_leaked_artifacts`` below is the defense-in-depth net.
@@ -2087,7 +2093,12 @@ class BaselineExecutor:
         from ._accuracy_gate import parse_eval_results
 
         eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
-        eval_data = parse_eval_results(workspace, framework=eval_framework)
+        # lm-eval writes ``results*.json`` under ``$EVAL_RESULT_DIR`` (== the
+        # ``RESULT_DIR`` set above), i.e. ``output_dir/<model>/results_*.json`` --
+        # a sibling of, not inside, the Magpie ``benchmark_*`` workspace. Search
+        # from that root so the recursive ``**/results*.json`` glob finds it.
+        eval_search_root = Path(env["EVAL_RESULT_DIR"])
+        eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
         if eval_data.get("accuracy") is not None:
             result["accuracy"] = eval_data["accuracy"]
             result["accuracy_task"] = eval_data.get("task", "gsm8k")
