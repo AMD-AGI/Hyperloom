@@ -99,10 +99,11 @@ class BaselineSummary:
           "row_count":     22,
           "best":          {tput_per_gpu, conc, decode_tp, ...} | null,
           "all_concurrencies": [{conc, tput_per_gpu, decode_tp, ...}],
-          "status":        "ok" | "no_match" | "fetch_error" | "skipped",
+          "status":        "ok" | "no_match" | "skipped",
           "reason":        "ok" | "model_mapping_miss" |
-                           "no_target_gpu_configured" | "fetch_error" |
-                           "no_match",
+                           "no_target_gpu_configured" | "unsupported_target_gpu" |
+                           "dimension_mismatch" | "no_inferencex_data" |
+                           "fetch_error" | "no_valid_rows",
           "warning":       "<human-readable note, empty when status=ok>",
           "source":        "https://inferencex.semianalysis.com/api/v1"
         }

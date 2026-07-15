@@ -100,8 +100,11 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
     Matching algorithm:
 
     1. Take the basename (``Path.name``).
-    2. Strip a leading vendor prefix.
-    3. Case-insensitive exact match against the known list.
+    2. Try a case-insensitive exact match against the known list first, so
+       canonical names that themselves begin with a vendor-like token (e.g.
+       ``DeepSeek-R1-0528``, ``Qwen-3.5-397B-A17B``) are not mangled.
+    3. Otherwise strip a leading vendor prefix and match again, which handles
+       HF-style paths like ``MiniMaxAI-MiniMax-M2.5``.
 
     Args:
         model_path_or_name (str): A local weights path, HuggingFace repo
@@ -119,11 +122,14 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
 
     candidate = Path(raw).name if ("/" in raw or "\\" in raw) else raw
     stripped = _VENDOR_PREFIX_RE.sub("", candidate, count=1)
-    needle = stripped.casefold()
 
-    for known in KNOWN_INFERENCEX_MODELS:
-        if known.casefold() == needle:
-            return known
+    # Try the full candidate before the vendor-stripped form: several canonical
+    # InferenceX names start with a token the prefix regex would strip
+    # (``DeepSeek-``, ``Qwen-``), so stripping first would break exact matches.
+    for needle in (candidate.casefold(), stripped.casefold()):
+        for known in KNOWN_INFERENCEX_MODELS:
+            if known.casefold() == needle:
+                return known
 
     return None
 
