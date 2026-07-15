@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import gpu_types as _gpu_types
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _config_architectures,
@@ -37,64 +38,14 @@ __all__ = ["_GEMMA2_ARCHITECTURES", "_config_architectures", "_load_model_config
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# GPU-type resolution (folded back from cli_gpu.py; phase 6D). Pure helpers
-# that detect / normalize the AMD GPU type from args, env, and ``rocm-smi``.
+# GPU-type resolution. Implementations live below the CLI package so runtime
+# orchestrator modules can use them without importing ``cli.__init__``.
 # ---------------------------------------------------------------------------
-_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
+_AMD_GPU_TYPES = _gpu_types._AMD_GPU_TYPES
+_GFX_TO_RUNNER = _gpu_types._GFX_TO_RUNNER
+_gpu_runner_type = _gpu_types._gpu_runner_type
+_resolve_gpu_type = _gpu_types._resolve_gpu_type
 
-_GFX_TO_RUNNER: dict[str, str] = {
-    # Mirror Magpie/modes/benchmark/image_selector.py:138-140 so we can log resolved value at session start.
-    "gfx942":  "mi300x",
-    "gfx950":  "mi355x",
-}
-
-
-def _gpu_runner_type(gpu_type: str) -> str:
-    """Return the Magpie runner label for a resolved real GPU type.
-
-    MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
-    the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
-
-    Args:
-        gpu_type (str): The resolved real GPU type (e.g. ``mi325x``).
-
-    Returns:
-        str: The Magpie runner label (``mi325x`` / ``mi308x`` collapse to
-            ``mi300x``).
-    """
-    normalized = str(gpu_type or "").strip().lower()
-    if normalized in ("mi325x", "mi308x"):
-        return "mi300x"
-    return normalized
-
-def _resolve_gpu_type(
-    user_specified: str,
-    probed: str,
-) -> tuple[str, list[str]]:
-    """Resolve effective gpu_type from a user hint and a hardware probe; pure for unit testing.
-
-    Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
-    only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
-    the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
-
-    Args:
-        user_specified (str): The user-supplied ``--gpu-type`` hint.
-        probed (str): The hardware-probed GPU type.
-
-    Returns:
-        tuple[str, list[str]]: ``(effective_gpu_type, warnings)`` — the probe
-            wins on disagreement; ``warnings`` carries any stderr notes.
-    """
-    warnings: list[str] = []
-    if probed and user_specified and probed != user_specified:
-        warnings.append(
-            f"WARN: --gpu-type={user_specified!r} disagrees with probed "
-            f"{probed!r}; using probed {probed!r}. The probe wins because "
-            f"Magpie runner_type + KB recipe rows must match the actual "
-            f"hardware to keep baseline numbers comparable across sessions."
-        )
-        return probed, warnings
-    return (probed or user_specified), warnings
 
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort).
@@ -102,26 +53,7 @@ def _autodetect_gpu_type() -> str | None:
     Returns:
         str | None: The detected GPU type, or ``None`` when undetectable.
     """
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rocm-smi", "--showproductname"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
-            if tag in out:
-                return tag.lower()
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        # rocm-smi missing / slow / not permitted — fall through to the torch
-        # gcnArchName probe below (autodetect is best-effort).
-        pass
-    try:
-        import torch
-        arch = torch.cuda.get_device_properties(0).gcnArchName
-        gfx = arch.split(":", 1)[0].lower()
-        return _GFX_TO_RUNNER.get(gfx)
-    except Exception:  # noqa: BLE001
-        return None
+    return _gpu_types._autodetect_gpu_type()
 
 def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     """Resolve the current AMD GPU type, or None when not on AMD/unknown.
@@ -141,10 +73,12 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
         str | None: The resolved AMD runner type, or ``None`` when not on a
             known AMD GPU.
     """
-    for cand in (explicit, os.environ.get("GPU_TYPE")):
-        norm = str(cand or "").strip().lower()
-        if norm in _AMD_GPU_TYPES:
-            return norm
+    explicit_norm = str(explicit or "").strip().lower()
+    if explicit_norm:
+        return explicit_norm if explicit_norm in _AMD_GPU_TYPES else None
+    env_norm = os.environ.get("GPU_TYPE", "").strip().lower()
+    if env_norm:
+        return env_norm if env_norm in _AMD_GPU_TYPES else None
     detected = (_autodetect_gpu_type() or "").strip().lower()
     return detected if detected in _AMD_GPU_TYPES else None
 
