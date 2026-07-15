@@ -183,6 +183,21 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
+# Print the serving framework (sglang|vllm), or nothing when none is importable.
+resolve_installed_framework() {
+  if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
+    printf '%s' "$INSTALL_FRAMEWORK"; return 0
+  fi
+  local py; py="$(resolve_python)" || return 0
+  if _py_has "$py" sglang; then printf 'sglang'; return 0; fi
+  local vllm_py="$py"
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    vllm_py="${VLLM_VENV_ROOT}/bin/python"
+  fi
+  if _py_has "$vllm_py" vllm; then printf 'vllm'; return 0; fi
+  return 0
+}
+
 
 python_venv_root() {
   local py="$1" bin_dir venv_dir
@@ -1036,6 +1051,22 @@ upsert_dotenv_var() {
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
 
+remove_dotenv_var() {
+  local key="$1" tmp line stripped
+  [ -f "$DOTENV" ] || return 0
+  tmp="$(mktemp)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    case "$stripped" in
+      "${key}="*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" ;;
+    esac
+  done < "$DOTENV"
+  mv "$tmp" "$DOTENV"
+  chmod 600 "$DOTENV" 2>/dev/null || true
+}
+
 # Resolve LLM gateway credentials, accepting either the AMD single-gateway pair
 # (SAFE_API_KEY + OPENAI_BASE_URL) or split Anthropic/OpenAI entrypoints. Mirrors
 # inference_optimizer/cli.py::_validate_credentials: a usable endpoint needs at
@@ -1044,7 +1075,7 @@ resolve_credentials() {
   log "Phase 4: credentials"
   local safe_key openai_key anthropic_key anthropic_token openai_url anthropic_url
   local dv_safe dv_openai_key dv_anthropic_key dv_anthropic_token dv_openai_url dv_anthropic_url
-  local has_url=0 has_key=0
+  local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
   if [ ! -f "$DOTENV" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if [ -f "$ENV_TEMPLATE" ]; then
@@ -1063,6 +1094,23 @@ resolve_credentials() {
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
   dv_openai_url="$(read_dotenv_var OPENAI_BASE_URL || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
+  setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
+  setup_llm_mode="$(echo "$setup_llm_mode" | tr '[:upper:]' '[:lower:]')"
+  if [ "${HYPERLOOM_SETUP_ENV_AUTHORITATIVE:-}" = "1" ]; then
+    setup_env_authoritative=1
+  fi
+  if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
+    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_anthropic_url" ]; then
+      setup_llm_mode="anthropic"
+    elif [ -n "$(read_dotenv_var DEEPSEEK_API_KEY || true)" ] || [ -n "$(read_dotenv_var DEEPSEEK_BASE_URL || true)" ]; then
+      setup_llm_mode="deepseek"
+    elif [ -n "$dv_openai_key" ] || [ -n "$dv_safe" ] || [ -n "$dv_openai_url" ]; then
+      setup_llm_mode="openai"
+    fi
+  fi
+  if [ "$setup_env_authoritative" -eq 1 ] && [ -n "$setup_llm_mode" ]; then
+    export HYPERLOOM_SETUP_LLM_MODE="$setup_llm_mode"
+  fi
 
   # Precedence: flags > process env > .env (flags exist only for the single-gateway pair).
   safe_key="${SAFE_API_KEY_ARG:-${SAFE_API_KEY:-$dv_safe}}"
@@ -1071,6 +1119,28 @@ resolve_credentials() {
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
   openai_url="${OPENAI_BASE_URL_ARG:-${OPENAI_BASE_URL:-$dv_openai_url}}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
+
+  # In the interactive setup flow, .env is the source of truth the user just
+  # confirmed. Do not let stale OpenAI/SaFE values leak into the chained
+  # installers, because those scripts source env with "env wins" and may persist
+  # or propagate the wrong provider back into runtime env files.
+  if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
+    safe_key=""
+    openai_key=""
+    openai_url=""
+    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+  elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
+    safe_key=""
+    openai_key=""
+    openai_url=""
+    anthropic_key=""
+    anthropic_token=""
+    anthropic_url=""
+    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+  fi
 
   # Prompt for the single-gateway key only when no key of any kind is available.
   if [ -z "$safe_key" ] && [ -z "$openai_key" ] && [ -z "$anthropic_key" ] \
@@ -1105,12 +1175,48 @@ resolve_credentials() {
 
   # Persist resolved values to .env (skip on check-only / dry-run).
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    [ -n "$safe_key" ] && upsert_dotenv_var SAFE_API_KEY "$safe_key"
-    [ -n "$openai_key" ] && upsert_dotenv_var OPENAI_API_KEY "$openai_key"
-    [ -n "$anthropic_key" ] && upsert_dotenv_var ANTHROPIC_API_KEY "$anthropic_key"
-    [ -n "$anthropic_token" ] && upsert_dotenv_var ANTHROPIC_AUTH_TOKEN "$anthropic_token"
-    [ -n "$openai_url" ] && upsert_dotenv_var OPENAI_BASE_URL "$openai_url"
-    [ -n "$anthropic_url" ] && upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
+    if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
+      [ -n "$(read_dotenv_var DEEPSEEK_API_KEY || true)" ] && upsert_dotenv_var DEEPSEEK_API_KEY "$(read_dotenv_var DEEPSEEK_API_KEY || true)"
+      [ -n "$(read_dotenv_var DEEPSEEK_BASE_URL || true)" ] && upsert_dotenv_var DEEPSEEK_BASE_URL "$(read_dotenv_var DEEPSEEK_BASE_URL || true)"
+      remove_dotenv_var OPENAI_API_KEY
+      remove_dotenv_var OPENAI_BASE_URL
+      remove_dotenv_var ANTHROPIC_API_KEY
+      remove_dotenv_var ANTHROPIC_BASE_URL
+    else
+      local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
+      local persist_openai_key="${openai_key:-$safe_key}"
+      if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
+        persist_openai_key=""
+        openai_url=""
+      elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "openai" ]; then
+        persist_anthropic_key=""
+        anthropic_url=""
+      fi
+      if [ -n "$persist_anthropic_key" ]; then
+        upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
+      else
+        remove_dotenv_var ANTHROPIC_API_KEY
+      fi
+      if [ -n "$anthropic_url" ]; then
+        upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
+      else
+        remove_dotenv_var ANTHROPIC_BASE_URL
+      fi
+      if [ -n "$persist_openai_key" ]; then
+        upsert_dotenv_var OPENAI_API_KEY "$persist_openai_key"
+      else
+        remove_dotenv_var OPENAI_API_KEY
+      fi
+      if [ -n "$openai_url" ]; then
+        upsert_dotenv_var OPENAI_BASE_URL "$openai_url"
+      else
+        remove_dotenv_var OPENAI_BASE_URL
+      fi
+    fi
+    remove_dotenv_var SAFE_API_KEY
+    remove_dotenv_var LLM_GATEWAY_KEY
+    remove_dotenv_var ANTHROPIC_AUTH_TOKEN
+    remove_dotenv_var OPENAI_CUSTOM_HEADERS
     log "credentials written to ${DOTENV}"
   fi
 }
@@ -1119,6 +1225,13 @@ write_combined_env() {
   local combined="$1" ka_env="$2"
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would write combined env: ${combined}"; return 0; fi
   mkdir -p "$(dirname "$combined")"
+  # FRAMEWORK for downstream demo skills; empty when none is importable.
+  local detected_framework; detected_framework="$(resolve_installed_framework)"
+  if [ -n "$detected_framework" ]; then
+    log "detected serving framework: ${detected_framework}"
+  else
+    warn "no serving framework detected; leaving FRAMEWORK unset in ${DOTENV}"
+  fi
   {
     echo '#!/bin/sh'
     echo '# Generated by src/hyperloom/inference_optimizer/assets/install_baremetal.sh'
@@ -1146,6 +1259,7 @@ write_combined_env() {
       printf 'export LD_LIBRARY_PATH=%q:"${LD_LIBRARY_PATH:-}"\n' "${ROCM_PATH}/lib"
     fi
     [ -n "${SGLANG_USE_AITER:-}" ] && printf 'export SGLANG_USE_AITER=%q\n' "$SGLANG_USE_AITER"
+    [ -n "${detected_framework}" ] && printf 'export FRAMEWORK=%q\n' "$detected_framework"
     printf 'export HYPERLOOM_FRAMEWORK_ENV=%q\n' "$FRAMEWORK_ENV"
     if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
       printf 'export VLLM_VENV_ROOT=%q\n' "$VLLM_VENV_ROOT"
@@ -1171,6 +1285,7 @@ write_combined_env() {
   [ -n "${HYPERLOOM_ENV_FILE:-}" ] && upsert_dotenv_var HYPERLOOM_ENV_FILE "$HYPERLOOM_ENV_FILE"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
+  [ -n "${detected_framework}" ] && upsert_dotenv_var FRAMEWORK "$detected_framework"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
@@ -1180,7 +1295,7 @@ write_combined_env() {
 }
 
 print_next_steps() {
-  local combined_env="$1" framework_hint
+  local framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
   [ "$framework_hint" = "none" ] && framework_hint="sglang"
   cat <<EOF
@@ -1189,9 +1304,6 @@ print_next_steps() {
 
 Open this folder in Cursor as the workspace:
   ${REPO_ROOT}
-
-Before launching, source the single combined env file:
-  source '${combined_env}'
 
 Then paste this into Cursor Chat and fill in your workload:
 
@@ -1207,11 +1319,6 @@ Optimize inference for this workload:
 - OSL: 1024
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
-
-Before launch, run exactly:
-\`\`\`bash
-source '${combined_env}'
-\`\`\`
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
@@ -1301,7 +1408,7 @@ main() {
   if [ "$DRY_RUN" -eq 1 ]; then log "done (dry-run: no changes made)"; return 0; fi
   if [ "$CHECK_ONLY" -eq 1 ]; then log "done (check-only: verification pass complete)"; return 0; fi
 
-  print_next_steps "$combined_env"
+  print_next_steps
 }
 
 main "$@"
