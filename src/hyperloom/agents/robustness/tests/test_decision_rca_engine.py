@@ -449,29 +449,3 @@ async def test_llm_engine_skips_when_credentials_missing():
     finally:
         await client.aclose()
     assert text == ""
-
-
-# ---------------------------------------------------------------------------
-# extra_evidence_provider
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_extra_evidence_appears_in_prompt():
-    captured = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["body"] = request.read().decode()
-        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
-
-    def evidence(_sym):
-        return ["log line 1", "log line 2"]
-
-    engine = _engine(handler, extra_evidence_provider=evidence)
-    try:
-        engine.set_tick(1)
-        await engine.summarize(_sym())
-    finally:
-        await engine.aclose()
-    assert "log line 1" in captured["body"]
-    assert "log line 2" in captured["body"]

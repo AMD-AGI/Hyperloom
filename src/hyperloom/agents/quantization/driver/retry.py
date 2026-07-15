@@ -268,7 +268,7 @@ def _decide_next_step(
         return _RetryDecision(retry=True, note="")
 
     # Other ASK rows (none currently — partition keeps them in the sets above).
-    return _RetryDecision(retry=False, note=f"non_retryable_ask:{outcome}")
+    raise AssertionError(f"_decide_next_step: unhandled outcome {outcome!r} fell through the partition")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -326,8 +326,7 @@ async def quantize_via_prompt(
             OutcomeId.quark_root_missing,
             f"quark_root path does not exist or is not a directory: {quark_root_path} "
             f"(set $QUARK_ROOT or pass quark_root=; default is {DEFAULT_QUARK_ROOT}"
-            + (f", clone from {DEFAULT_QUARK_GIT_URL}" if DEFAULT_QUARK_GIT_URL else "")
-            + ")",
+            f", clone from {DEFAULT_QUARK_GIT_URL})",
         )
 
     interactive_resolved = _resolve_interactive(interactive)

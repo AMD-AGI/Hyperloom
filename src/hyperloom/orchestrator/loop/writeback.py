@@ -1192,10 +1192,7 @@ class WritebackCollaborator:
                         break
             out.append({
                 "kernel_id":     str(kid),
-                # source persisted under last_source_file; source_file is a legacy fallback.
-                "source_file":   str(
-                    e.get("last_source_file") or e.get("source_file") or ""
-                ),
+                "source_file":   str(e.get("last_source_file") or ""),
                 "artifact_path": str(e.get("last_artifact_path") or ""),
                 "micro_speedup": micro,
                 "decision":      "KEEP",
@@ -1203,7 +1200,7 @@ class WritebackCollaborator:
                 "e2e_tput":      e2e_tput,
                 "e2e_decision":  e2e_decision,
                 "integrated":    integrated,
-                "ts":            str(e.get("last_ts") or e.get("ts") or ""),
+                "ts":            str(e.get("last_ts") or ""),
             })
         return out
 
@@ -1269,7 +1266,7 @@ class WritebackCollaborator:
             cb_args = current_best.get("extra_server_args")
             if cb_args:
                 best_config["extra_server_args"] = str(cb_args)
-            for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
+            for key in ("extra_envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
         # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
@@ -2280,7 +2277,10 @@ class WritebackCollaborator:
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
-            if task is not None and str((task.params or {}).get("source") or "") == "resume_stack_revalidate":
+            if task is not None and str((task.params or {}).get("source") or "") in {
+                "resume_stack_revalidate",
+                "resume_reverify_best",
+            }:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
                 # A GEAK revalidation (2b) must not blindly stamp validated
@@ -3375,34 +3375,24 @@ class WritebackCollaborator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            if self._geak_legacy_promote():
-                # Legacy: current_best/stack were written up front; stamp the
-                # same-harness validated watermark from GEAK's OWN headline speedup.
-                self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
-                self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                self.shared_state.cumulative_gain_provenance = "geak_same_harness_geak"
-                self.shared_state.resume_pending_revalidation = False
-                gain_out = (geak_sp - 1.0) * 100.0
-            else:
-                # Rebench-first: write the headline from the GEAK-harness MEASURED
-                # throughput (engages by construction via the launch-script replay),
-                # keeping the leaderboard number a same-harness total rather than a
-                # self-reported speedup.
-                measured = _geak_sweep_measured_tput(res)
-                if measured is None:
-                    log.warning(
-                        "geak 2a: succeeded sweep but no measurable throughput; "
-                        "candidate stays pending"
-                    )
-                    return {"validated": False, "status": res.get("status"), "reason": reason}
-                self._promote_geak_from_candidate(
-                    ps,
-                    measured_tput=measured,
-                    provenance="geak_same_harness_geak",
+            # Rebench-first: write the headline from the GEAK-harness MEASURED
+            # throughput (engages by construction via the launch-script replay),
+            # keeping the leaderboard number a same-harness total rather than a
+            # self-reported speedup.
+            measured = _geak_sweep_measured_tput(res)
+            if measured is None:
+                log.warning(
+                    "geak 2a: succeeded sweep but no measurable throughput; "
+                    "candidate stays pending"
                 )
-                base = float(self.shared_state.baseline_tput or 0.0)
-                gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
+                return {"validated": False, "status": res.get("status"), "reason": reason}
+            self._promote_geak_from_candidate(
+                ps,
+                measured_tput=measured,
+                provenance="geak_same_harness_geak",
+            )
+            base = float(self.shared_state.baseline_tput or 0.0)
+            gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive
