@@ -167,7 +167,12 @@ Before launching optimization, source the generated env file:
 
 ```bash
 export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-source "$USER_DATA_PATH/runtime/hyperloom.env.sh"
+# The standard install.sh writes runtime/kernel-agent.env.sh; the bare-metal
+# installer (install_baremetal.sh) writes a combined runtime/hyperloom.env.sh.
+# Source whichever your install produced.
+for _env in hyperloom.env.sh kernel-agent.env.sh; do
+  [ -f "$USER_DATA_PATH/runtime/$_env" ] && source "$USER_DATA_PATH/runtime/$_env"
+done
 ```
 
 ### Workspace variables
