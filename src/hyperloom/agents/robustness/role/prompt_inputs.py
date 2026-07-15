@@ -33,6 +33,7 @@ import ast
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -319,32 +320,10 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         if key not in _SCALAR_KEYS:
             continue
         head = _split_double_space(value)
-        if key == "session_id":
-            snapshot.session_id = "" if head == "(unset)" else head
-        elif key == "baseline_tput":
-            snapshot.baseline_tput = to_float(head, default=0.0)
-        elif key == "cumulative_gain":
-            snapshot.cumulative_gain = to_float(head.rstrip("%"), default=0.0)
-        elif key == "cumulative_gain_validated":
-            # Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``; take the leading number.
-            head_clean = head.rstrip("%")
-            for sep in (" ", "%"):
-                head_clean = head_clean.split(sep, 1)[0]
-            snapshot.cumulative_gain_validated = to_float(head_clean, default=0.0)
-        elif key == "crash_count":
-            snapshot.crash_count = to_int(head, default=0)
-        elif key == "current_action":
-            snapshot.current_action = "" if head == "(idle)" else head
-        elif key == "tick":
-            snapshot.tick = to_int(head, default=0)
-        elif key == "stop_reason":
-            snapshot.stop_reason = "" if head == "(none)" else head
-        elif key == "optimization_stack":
-            snapshot.optimization_stack_size = _count_optimization_stack(head)
-        elif key == "kernel_opt_attempts_count":
-            snapshot.kernel_opt_attempts_count = to_int(head, default=0)
-        elif key == "has_keep_pending_integrate":
-            snapshot.has_keep_pending_integrate = head.lower() == "true"
+        spec = _SCALAR_FIELD_TABLE.get(key)
+        if spec is not None:
+            attr, coerce = spec
+            setattr(snapshot, attr, coerce(head))
         elif key in _EXPLORE_FAMILY_KEYS:
             # Any non-``(none)`` value flips ``explore_started`` True; idempotent so a later ``(none)`` must not clear it.
             if head and head != "(none)":
@@ -376,6 +355,44 @@ def _count_optimization_stack(head: str) -> int:
     if isinstance(value, str):
         return 0 if value == "(none)" else 1
     return 0
+
+
+def _coerce_cumulative_gain_validated(head: str) -> float:
+    """Decode a ``cumulative_gain_validated`` head into a float percentage.
+
+    Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``;
+    take the leading number only.
+
+    Args:
+        head: The rendered ``cumulative_gain_validated`` head value.
+
+    Returns:
+        The leading percentage as a float (``0.0`` when unparseable).
+    """
+    head_clean = head.rstrip("%")
+    for sep in (" ", "%"):
+        head_clean = head_clean.split(sep, 1)[0]
+    return to_float(head_clean, default=0.0)
+
+
+#: ``rendered key -> (SharedStateSnapshot attr, head-string coercion)`` table
+#: driving :func:`_parse_shared_state`. Replaces the per-key ``if/elif`` ladder
+#: with a single ``setattr`` loop; ``optimization_stack`` is the one key whose
+#: attr name differs from its rendered key. Explore-family keys are handled
+#: separately because they set a shared flag idempotently rather than a 1:1 attr.
+_SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
+    "session_id": ("session_id", lambda head: "" if head == "(unset)" else head),
+    "baseline_tput": ("baseline_tput", lambda head: to_float(head, default=0.0)),
+    "cumulative_gain": ("cumulative_gain", lambda head: to_float(head.rstrip("%"), default=0.0)),
+    "cumulative_gain_validated": ("cumulative_gain_validated", _coerce_cumulative_gain_validated),
+    "crash_count": ("crash_count", lambda head: to_int(head, default=0)),
+    "current_action": ("current_action", lambda head: "" if head == "(idle)" else head),
+    "tick": ("tick", lambda head: to_int(head, default=0)),
+    "stop_reason": ("stop_reason", lambda head: "" if head == "(none)" else head),
+    "optimization_stack": ("optimization_stack_size", _count_optimization_stack),
+    "kernel_opt_attempts_count": ("kernel_opt_attempts_count", lambda head: to_int(head, default=0)),
+    "has_keep_pending_integrate": ("has_keep_pending_integrate", lambda head: head.lower() == "true"),
+}
 
 
 def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:

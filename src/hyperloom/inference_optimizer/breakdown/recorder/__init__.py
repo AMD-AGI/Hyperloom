@@ -39,11 +39,12 @@ from .instrument import (
     record_tool_version,
     snapshot_state_sections,
 )
-from .recorder import Recorder, get_recorder
-from .sections import (
+from .recorder import (
     DERIVED_SECTIONS,
     SECTION_SHAPES,
+    Recorder,
     SectionShape,
+    get_recorder,
     section_shape,
 )
 

@@ -24,11 +24,8 @@ Sites intentionally NOT delegated here (kept local by design):
   module-global ``os``/``tempfile`` being monkeypatched by its tests.
 * ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
   ``shutil.copystat`` preserves the target's mode.
-* ``recipe_kb/local_store._atomic_write_json`` — best-effort ``fsync`` + DEBUG
-  logging for durability on journaling mounts.
 * ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run
-  standalone, so they must not gain a ``hyperloom`` import dependency (they keep
-  their own bytes writer; this module intentionally has no bytes variant).
+  standalone, so they must not gain a ``hyperloom`` import dependency.
 """
 
 from __future__ import annotations
@@ -46,6 +43,50 @@ def _best_effort_fsync(fh: Any) -> None:
     with suppress(OSError):
         fh.flush()
         os.fsync(fh.fileno())
+
+
+def atomic_write_bytes(
+    path: Path,
+    data: bytes,
+    *,
+    make_parents: bool = False,
+    fsync: bool = False,
+    mode: int | None = None,
+) -> None:
+    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``).
+
+    Args:
+        path: Destination file path.
+        data: Bytes to write.
+        make_parents: When ``True``, create ``path.parent`` (``parents=True,
+            exist_ok=True``) before writing.
+        fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
+            rename (OSError swallowed on mounts that reject the syscall).
+        mode: Optional file mode applied to the temp file before rename.
+
+    Raises:
+        Exception: Re-raised after a best-effort unlink of the temp file when
+            writing or replacing fails.
+    """
+    path = Path(path)
+    if make_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            if fsync:
+                _best_effort_fsync(fh)
+        if mode is not None:
+            # Strip group/other bits: written files may hold sensitive payloads,
+            # so never expose them beyond the owner regardless of caller intent.
+            os.chmod(tmp, mode & 0o700)
+        os.replace(tmp, path)
+    except Exception:
+        with suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def atomic_write_text(
@@ -157,8 +198,29 @@ def append_jsonl(
             _best_effort_fsync(fh)
 
 
+def safe_mtime(path: Path) -> float:
+    """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails.
+
+    Never raises: a missing entry (concurrent cleanup mid-scan) or an
+    ``OSError`` from ``stat`` (e.g. an NFS stale handle) degrades to ``0.0``,
+    which sorts oldest for the ``key=`` / mtime-cutoff comparisons that use it.
+
+    Args:
+        path: Filesystem path to stat.
+
+    Returns:
+        The ``st_mtime`` of ``path``, or ``0.0`` on any ``stat()`` failure.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 __all__ = [
+    "atomic_write_bytes",
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
+    "safe_mtime",
 ]
