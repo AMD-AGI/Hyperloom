@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
+
 
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
@@ -698,9 +700,18 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
     if not cfg.is_file():
         return None
     try:
-        return json.loads(cfg.read_text(encoding="utf-8"))
+        data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(data, dict):
+        return None
+    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape /
+    # MoE config under text_config/llm_config/language_config; flatten it (nested
+    # wins) so num_experts / hidden_size / moe_intermediate_size / kv-heads reach
+    # the ceiling readers instead of degrading to a dense full-weight roofline
+    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls
+    # back to the legacy top-down formula).
+    return _merge_config_scopes(data)
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:

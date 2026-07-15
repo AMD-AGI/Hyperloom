@@ -322,6 +322,42 @@ class TestLoadModelMeta:
         assert meta is not None
         assert meta.head_dim == 200
 
+    def test_nested_text_config_moe_is_read(self, tmp_path):
+        # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the decoder shape/MoE
+        # config under text_config; the ceiling reader must flatten it or it
+        # degrades to a dense full-weight roofline (num_experts=0 -> PerfModel
+        # falls back to legacy, active_weight_bytes = full weight_bytes).
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "kimi_k25",
+                    "text_config": {
+                        "num_hidden_layers": 4,
+                        "num_attention_heads": 16,
+                        "num_key_value_heads": 8,
+                        "hidden_size": 2048,
+                        "num_experts": 64,
+                        "num_experts_per_tok": 8,
+                        "moe_intermediate_size": 1024,
+                        "torch_dtype": "bfloat16",
+                    },
+                }
+            )
+        )
+        (d / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 10_000_000_000}, "weight_map": {}})
+        )
+        meta = load_model_meta(d)
+        assert meta is not None
+        assert meta.num_experts == 64
+        assert meta.experts_per_tok == 8
+        assert meta.hidden_size == 2048
+        assert meta.num_kv_heads == 8
+        # MoE decomposition applied -> per-token active bytes below full weights.
+        assert 0 < meta.active_weight_bytes < meta.weight_bytes
+
     def test_missing_safetensors_index_uses_safetensor_file_sizes(self, tmp_path):
         d = tmp_path / "m"
         d.mkdir()
