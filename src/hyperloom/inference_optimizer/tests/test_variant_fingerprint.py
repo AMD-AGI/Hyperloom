@@ -7,6 +7,7 @@ from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    variant_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
 
@@ -57,6 +58,29 @@ def test_fingerprint_empty_inputs_stable() -> None:
     assert fp1 == fp2
     assert isinstance(fp1, str)
     assert len(fp1) == 16
+
+
+def test_fingerprint_includes_removal_controls_without_changing_legacy() -> None:
+    legacy = variant_fingerprint("", {})
+    explicit_append = variant_fingerprint("", {}, args_mode="append")
+    remove_flag = variant_fingerprint("", {}, remove_args=["--enable-prefix-caching"])
+    unset_env = variant_fingerprint("", {}, unset_envs=["SGLANG_ENABLE_FOO"])
+    replace_mode = variant_fingerprint("--max-num-seqs 256", {}, args_mode="replace")
+    append_mode = variant_fingerprint("--max-num-seqs 256", {}, args_mode="append")
+
+    assert explicit_append == legacy
+    assert remove_flag != legacy
+    assert unset_env != legacy
+    assert replace_mode != append_mode
+
+
+def test_grid_variant_fingerprint_carries_removal_controls() -> None:
+    a = GridVariant("without_cache", remove_args=["--enable-prefix-caching"])
+    b = GridVariant("identity")
+    c = GridVariant("without_cache_rename", remove_args=["--enable-prefix-caching"])
+
+    assert a.fingerprint != b.fingerprint
+    assert a.fingerprint == c.fingerprint
 
 
 def test_fingerprint_unbalanced_quotes_does_not_crash() -> None:
