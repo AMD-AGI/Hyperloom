@@ -447,6 +447,43 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
     assert "installed claude-agent-sdk" in captured
 
 
+# _ensure_ray
+def test_ensure_ray_skips_when_importable(monkeypatch, capsys):
+    """`import ray` returns rc=0 → no pip install fires (probe uses the interpreter)."""
+    runner = _RecordingRun([_Completed(returncode=0)])
+    monkeypatch.setattr(cli.subprocess, "run", runner)
+
+    cli._ensure_ray("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 1
+    probe = runner.calls[0]
+    # Probe imports ray with the SAME interpreter, not shutil.which on PATH.
+    assert probe == ["/opt/venv/bin/python", "-c", "import ray"]
+    assert "ray OK" in capsys.readouterr().out
+
+
+def test_ensure_ray_installs_when_not_importable(monkeypatch, capsys):
+    """When `import ray` fails, pip install runs with the SAME interpreter.
+
+    Guards the bypass-only regression: a stray ``ray`` on PATH must not stop
+    the install when the active interpreter cannot import ray.
+    """
+    runner = _RecordingRun([_Completed(returncode=1), _Completed(returncode=0)])
+    monkeypatch.setattr(cli.subprocess, "run", runner)
+
+    cli._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
+
+    assert len(runner.calls) == 2
+    install_call = runner.calls[1]
+    assert install_call[0] == "/opt/venv/bin/python"
+    assert install_call[1:4] == ["-m", "pip", "install"]
+    assert "--break-system-packages" in install_call
+    assert any(arg.startswith("ray[default]==") for arg in install_call)
+    captured = capsys.readouterr().out
+    assert "ray not importable" in captured
+    assert "ray installed OK" in captured
+
+
 # _unset_hip_visible_devices
 def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")

@@ -1165,7 +1165,10 @@ acquire_install_lock
 # bypass backend drives InferenceX directly (see benchmark_backend.py), so
 # skip the Magpie clone/install and its script-patch when bypass is selected.
 # Default (unset/blank) stays magpie, preserving existing behavior.
-HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
+# Mirror Python's resolve_backend_name() normalization (strip THEN lower): a
+# value like " bypass" / "bypass " must skip Magpie here too, otherwise the
+# runtime picks bypass while install still clones/installs Magpie.
+HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
   log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
 else

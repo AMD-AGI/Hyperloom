@@ -53,7 +53,13 @@ def test_preflight_resolves_interpreter_via_backend_not_magpie():
     assert "resolve_benchmark_interpreter" in src
     # Ray installs with the backend interpreter, not a hardcoded Magpie one.
     assert "benchmark_python" in src
-    assert "[benchmark_python, \"-m\", \"pip\", \"install\"" in src
+    assert "_ensure_ray(benchmark_python, pip_extra)" in src
+    # Ray availability is probed by importing with the SAME interpreter (not
+    # shutil.which, which only inspects PATH and would false-positive on a
+    # bypass-only host that has a stray ``ray`` on PATH but cannot import it).
+    ray_src = inspect.getsource(preflight_mod._ensure_ray)
+    assert '[python_exe, "-c", "import ray"]' in ray_src
+    assert "shutil.which" not in ray_src
     # Magpie interpreter is no longer resolved unconditionally in _preflight;
     # it comes through resolve_benchmark_interpreter for the Magpie backend.
     assert "_resolve_magpie_python" not in src
@@ -69,6 +75,9 @@ def test_install_sh_gates_magpie_calls():
     # Backend-based gate present.
     assert "HYPERLOOM_BENCHMARK_BACKEND" in text
     assert 'if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then' in text
+    # Normalization must strip whitespace (mirrors Python's .strip().lower()) so
+    # " bypass"/"bypass " skip Magpie at install time too, matching runtime.
+    assert "tr -d '[:space:]'" in text
     # Magpie stages are inside the else branch (only run for non-bypass).
     gate_idx = text.index('HYPERLOOM_BENCHMARK_BACKEND_LC=')
     else_idx = text.index("else", gate_idx)

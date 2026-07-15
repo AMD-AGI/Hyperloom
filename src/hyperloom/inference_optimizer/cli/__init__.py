@@ -264,6 +264,7 @@ from .preflight import (  # noqa: F401 - re-exported for callers/tests
     _clone_inferencex as _clone_inferencex,
     _emit_preflight_diagnostics as _emit_preflight_diagnostics,
     _ensure_python_sdks as _ensure_python_sdks,
+    _ensure_ray as _ensure_ray,
     _inferencex_checkout_ok as _inferencex_checkout_ok,
     _is_placeholder_tracelens_path as _is_placeholder_tracelens_path,
     _load_dotenv_fallback as _load_dotenv_fallback,

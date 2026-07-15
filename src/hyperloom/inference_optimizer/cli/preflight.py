@@ -282,6 +282,35 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: installed {pip_spec}")
 
 
+def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install Ray using the interpreter that will import it.
+
+    Ray is used broadly (multi-node scheduling, kernel/profile/recover
+    executors), not only by Magpie. The probe imports ``ray`` with
+    ``python_exe`` instead of ``shutil.which("ray")`` on purpose: a
+    bypass-only host may have a stray ``ray`` executable on ``PATH`` from an
+    unrelated venv while ``python_exe`` still cannot ``import ray``, so a
+    PATH-only check would false-positive and the Ray-backed executors would
+    then fail at runtime.
+
+    Args:
+        python_exe (str): The interpreter that will import Ray (and run the
+            probe / install).
+        pip_extra (list[str]): Extra arguments threaded into the ``pip
+            install`` invocation (e.g. ``--break-system-packages``).
+    """
+    check = subprocess.run([python_exe, "-c", "import ray"], capture_output=True)
+    if check.returncode == 0:
+        print("Preflight: ray OK")
+        return
+    print("Preflight: ray not importable, installing ray[default]==2.44.1 + click<8.3.0 ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+        check=True,
+    )
+    print("Preflight: ray installed OK")
+
+
 def _unset_hip_visible_devices() -> None:
     """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
 
@@ -799,13 +828,7 @@ def _preflight(
     # executors), not only by Magpie, so it is installed regardless of backend.
     # Install it with the active backend's interpreter so a bypass-only box
     # gets Ray in its own venv instead of Magpie's.
-    if shutil.which("ray") is None:
-        print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
-        subprocess.run(
-            [benchmark_python, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
-            check=True,
-        )
-        print("Preflight: ray installed OK")
+    _ensure_ray(benchmark_python, pip_extra)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to
     # ($MAGPIE_PATH override; auto-clones if missing). Skipped entirely when the
