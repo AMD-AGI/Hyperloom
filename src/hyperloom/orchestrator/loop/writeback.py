@@ -762,12 +762,26 @@ class WritebackCollaborator:
         full_args = ""
         if isinstance(bv, dict):
             full_args = str(bv.get("extra_server_args") or bv.get("extra_sglang_args") or "").strip()
-        # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
-        full_args = _merge_cumulative_extra_sglang_args(
-            base_args,
-            candidate_args,
-            full_args,
+        controls_effective = bool(
+            isinstance(bv, dict)
+            and (
+                bv.get("remove_args")
+                or bv.get("unset_envs")
+                or str(bv.get("args_mode") or "").strip().lower() == "replace"
+            )
         )
+        # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
+        if controls_effective:
+            # Removal/replace winners publish their effective cumulative config
+            # from ExploreExecutor. Prepending the prior current_best would
+            # reintroduce flags the variant deliberately removed.
+            full_args = _dedupe_extra_server_args(full_args)
+        else:
+            full_args = _merge_cumulative_extra_sglang_args(
+                base_args,
+                candidate_args,
+                full_args,
+            )
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -806,12 +820,21 @@ class WritebackCollaborator:
                         fp_val = canonical_fingerprint(
                             candidate_args or full_args,
                             dict(bv.get("extra_envs") or {}),
+                            remove_args=bv.get("remove_args"),
+                            unset_envs=bv.get("unset_envs"),
+                            args_mode=str(bv.get("args_mode") or "append"),
                         )
                     prov_val = str(bv.get("provenance") or "").strip()
                 if fp_val:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
+                if isinstance(bv, dict):
+                    for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                        if bv.get(_ctrl_key):
+                            stack_entry[_ctrl_key] = bv.get(_ctrl_key)
+                    if bv.get("effective_extra_server_args"):
+                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -834,7 +857,7 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
-        self.shared_state.current_best = {
+        current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
@@ -846,6 +869,13 @@ class WritebackCollaborator:
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
+        if isinstance(bv, dict):
+            for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                if bv.get(_ctrl_key):
+                    current_best[_ctrl_key] = bv.get(_ctrl_key)
+            if bv.get("effective_extra_server_args"):
+                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+        self.shared_state.current_best = current_best
         if self.shared_state.baseline_tput > 0:
             self.shared_state.cumulative_gain = (
                 (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0

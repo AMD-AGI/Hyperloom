@@ -63,7 +63,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._grid_server_args import compose_server_args
+from ._grid_server_args import compose_server_args, server_args_env_name
 from ._stack_rebench import measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -183,6 +183,25 @@ def _entry_control_fields(entry: Any) -> dict[str, Any]:
         out["unset_envs"] = unset_envs
     if args_mode == "replace":
         out["args_mode"] = "replace"
+    return out
+
+
+def _flag_names_for_removal(args_text: str) -> list[str]:
+    """Return flag names from an arg string for base replace-mode ablation."""
+    if not args_text.strip():
+        return []
+    import shlex
+
+    try:
+        tokens = shlex.split(args_text)
+    except ValueError:
+        tokens = args_text.split()
+    out: list[str] = []
+    for tok in tokens:
+        if tok.startswith("--"):
+            flag = tok.split("=", 1)[0]
+            if flag not in out:
+                out.append(flag)
     return out
 
 
@@ -637,6 +656,9 @@ class ExploreExecutor:
         # ----- Inputs ------------------------------------------------------
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
+        base_remove_args = _coerce_str_list(params.get("base_remove_args"))
+        base_unset_envs = _coerce_str_list(params.get("base_unset_envs"))
+        base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
         # Backstop: when params carries no positive ``base_tput``, recover the
         # comparison anchor from live SharedState (else every ``_gain_pct``
@@ -733,10 +755,13 @@ class ExploreExecutor:
             # Pull CONC so the seed grid's cudagraph-bracket variant brackets
             # the live decode concurrency.
             _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
+            _base_inherited_args = str(_yaml_envs.get(server_args_env_name(framework)) or "").strip()
         except (OSError, yaml.YAMLError) as exc:
             log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
             framework = ""
             _yaml_envs = {}
+            _base_inherited_args = ""
+        _effective_inherited_args = "" if base_args_mode == "replace" else _base_inherited_args
 
         # ----- Variant grid ------------------------------------------------
         grid_payload = params.get("grid") or []
@@ -913,10 +938,21 @@ class ExploreExecutor:
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
+            identity_controls = _variant_control_fields(gv)
+            identity_remove_args = list(
+                dict.fromkeys(base_remove_args + _coerce_str_list(identity_controls.get("remove_args")))
+            )
+            identity_unset_envs = list(
+                dict.fromkeys(base_unset_envs + _coerce_str_list(identity_controls.get("unset_envs")))
+            )
+            if identity_remove_args:
+                identity_controls["remove_args"] = identity_remove_args
+            if identity_unset_envs:
+                identity_controls["unset_envs"] = identity_unset_envs
             fp = canonical_fingerprint(
                 gv.extra_server_args,
                 gv.extra_envs,
-                **_variant_control_fields(gv),
+                **identity_controls,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in seen_fps:
@@ -989,6 +1025,8 @@ class ExploreExecutor:
         # the next variant is benched on the freshest stack.
         stack_extra_args = base_extra_args
         stack_extra_envs = dict(base_extra_envs)
+        stack_remove_args = list(dict.fromkeys(base_remove_args))
+        stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         running_base_tput = base_tput
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
@@ -1035,6 +1073,31 @@ class ExploreExecutor:
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
+                run_remove_args = list(
+                    dict.fromkeys(stack_remove_args + _coerce_str_list(getattr(gv, "remove_args", [])))
+                )
+                run_unset_envs = list(
+                    dict.fromkeys(stack_unset_envs + _coerce_str_list(getattr(gv, "unset_envs", [])))
+                )
+                run_gv = GridVariant(
+                    name=gv.name,
+                    extra_server_args=gv.extra_server_args,
+                    extra_envs=dict(gv.extra_envs),
+                    note=gv.note,
+                    remove_args=run_remove_args,
+                    unset_envs=run_unset_envs,
+                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                )
+                for attr in (
+                    "provenance",
+                    "scope",
+                    "overlay_pythonpath",
+                    "kb_evidence",
+                    "pr_evidence",
+                    "source_evidence",
+                ):
+                    if hasattr(gv, attr):
+                        setattr(run_gv, attr, getattr(gv, attr))
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # Round 1 + round 2 share this slot as the lifecycle pid_dir so
@@ -1057,7 +1120,7 @@ class ExploreExecutor:
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[gv],
+                            grid=[run_gv],
                             output_root=warmup_slot,
                             variant_timeout_sec=timeout_sec,
                             model_path=resolved_model,
@@ -1066,6 +1129,7 @@ class ExploreExecutor:
                             result_dir=override_result_dir,
                             soft_deadline_sec=None,
                             server_lifecycle=round1_lifecycle,
+                            base_args_mode=base_args_mode,
                         )
                         w = warmup_results[0] if warmup_results else None
                         if w is None or getattr(w, "status", "") != "succeeded":
@@ -1138,7 +1202,7 @@ class ExploreExecutor:
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
-                        grid=[gv],
+                        grid=[run_gv],
                         output_root=slot,
                         variant_timeout_sec=timeout_sec,
                         model_path=resolved_model,
@@ -1147,6 +1211,7 @@ class ExploreExecutor:
                         result_dir=override_result_dir,
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=round1_lifecycle,
+                        base_args_mode=base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                     )
@@ -1341,12 +1406,41 @@ class ExploreExecutor:
 
                     # ---- KEEP path (with warm round-2 rebench) ------------
                     if outcome == "KEEP":
+                        # Layer onto the running stack BEFORE rebench. For
+                        # removal variants, next_args/next_envs are the
+                        # effective launch config that must persist if the KEEP
+                        # survives; gv.extra_* remain only the candidate delta.
+                        next_effective_args = compose_server_args(
+                            inherited_args=_effective_inherited_args,
+                            base_extra_args=stack_extra_args,
+                            variant_extra_args=gv.extra_server_args,
+                            remove_args=run_remove_args,
+                            args_mode=getattr(gv, "args_mode", "append"),
+                        )
+                        next_stack_args = compose_server_args(
+                            inherited_args="",
+                            base_extra_args=stack_extra_args,
+                            variant_extra_args=gv.extra_server_args,
+                            remove_args=run_remove_args,
+                            args_mode=getattr(gv, "args_mode", "append"),
+                        )
+                        next_envs = dict(stack_extra_envs)
+                        for k in run_unset_envs:
+                            next_envs.pop(str(k), None)
+                        next_envs.update(gv.extra_envs)
+                        effective_control_fields = dict(control_fields)
+                        if run_remove_args:
+                            effective_control_fields["remove_args"] = list(run_remove_args)
+                        if run_unset_envs:
+                            effective_control_fields["unset_envs"] = list(run_unset_envs)
                         keep_entry = {
                             "fingerprint": fp,
                             "name": gv.name,
-                            "extra_server_args": gv.extra_server_args,
-                            "extra_envs": dict(gv.extra_envs),
-                            **control_fields,
+                            "candidate_extra_server_args": gv.extra_server_args,
+                            "extra_server_args": next_stack_args,
+                            "effective_extra_server_args": next_effective_args,
+                            "extra_envs": dict(next_envs),
+                            **effective_control_fields,
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
@@ -1357,17 +1451,6 @@ class ExploreExecutor:
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
                         }
-                        # Layer onto the running stack BEFORE rebench.
-                        next_args = compose_server_args(
-                            inherited_args=stack_extra_args,
-                            variant_extra_args=gv.extra_server_args,
-                            remove_args=getattr(gv, "remove_args", []),
-                            args_mode=getattr(gv, "args_mode", "append"),
-                        )
-                        next_envs = dict(stack_extra_envs)
-                        for k in getattr(gv, "unset_envs", []) or []:
-                            next_envs.pop(str(k), None)
-                        next_envs.update(gv.extra_envs)
                         in_batch_keeps.append(keep_entry)
 
                         stack_rebench_tput: float | None = None
@@ -1388,8 +1471,8 @@ class ExploreExecutor:
                                 extra_server_args=gv.extra_server_args,
                                 extra_envs=dict(gv.extra_envs),
                                 note="stack_rebench",
-                                remove_args=list(getattr(gv, "remove_args", []) or []),
-                                unset_envs=list(getattr(gv, "unset_envs", []) or []),
+                                remove_args=list(run_remove_args),
+                                unset_envs=list(run_unset_envs),
                                 args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                             )
                             round2_lifecycle = (
@@ -1414,6 +1497,7 @@ class ExploreExecutor:
                                 benchmark_script=override_script,
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
+                                base_args_mode=base_args_mode,
                                 preclean_before_run=not lifecycle_eligible,
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
@@ -1472,8 +1556,10 @@ class ExploreExecutor:
                                 # recompute gain from it and fold the variant onto
                                 # the stack so the next variant benches against it.
                                 gain = _gain_pct(stack_rebench_tput, running_base_tput)
-                                stack_extra_args = next_args
+                                stack_extra_args = next_stack_args
                                 stack_extra_envs = next_envs
+                                stack_remove_args = list(run_remove_args)
+                                stack_unset_envs = list(run_unset_envs)
                                 running_base_tput = stack_rebench_tput
                                 last_run_tput = stack_rebench_tput
                                 keep_entry["gain_pct"] = gain
@@ -1489,8 +1575,10 @@ class ExploreExecutor:
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
                             # measurement, advance the running baseline naively.
-                            stack_extra_args = next_args
+                            stack_extra_args = next_stack_args
                             stack_extra_envs = next_envs
+                            stack_remove_args = list(run_remove_args)
+                            stack_unset_envs = list(run_unset_envs)
                             running_base_tput = cold_tput or running_base_tput
                             last_run_tput = cold_tput
 
