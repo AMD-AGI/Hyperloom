@@ -803,7 +803,19 @@ def load_model_meta(
         return None
     p = Path(model_path).expanduser()
     if not p.is_dir():
-        return None
+        # ``model_path`` may be an HF repo id (the CLI ``--model`` is persisted
+        # verbatim); resolve it to the engine's local HF cache dir via the shared
+        # resolver so the decode ceiling isn't null for repo-id launches. Lazy
+        # import avoids an import-time orchestrator -> inference_optimizer cycle;
+        # ``None`` preserves the prior "unreadable -> None" behavior.
+        from hyperloom.inference_optimizer.model_config_utils import (
+            resolve_local_model_dir,
+        )
+
+        resolved = resolve_local_model_dir(model_path)
+        if resolved is None:
+            return None
+        p = resolved
     cfg = _read_hf_config(p)
     if cfg is None:
         return None

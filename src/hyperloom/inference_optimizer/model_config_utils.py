@@ -15,11 +15,57 @@ import struct
 from pathlib import Path
 
 
+def resolve_local_model_dir(model: str | Path | None) -> Path | None:
+    """Resolve a ``--model`` value (local path OR HF repo id) to a local model dir.
+
+    The CLI ``--model`` accepts either form and it is persisted verbatim into
+    ``state.model_path``. In-process metadata readers (roofline ceiling, model
+    config summary, KB tags, model-class inference, fp8 detection) need a real
+    directory; a bare repo id makes them silently degrade. Two cases, mirroring
+    how the serving engine treats the value:
+
+    * **Local path** -- an existing directory is returned unchanged.
+    * **HF repo id** (e.g. ``Qwen/Qwen3-0.6B``) -- reuse the HuggingFace hub
+      cache the serving engine (vLLM/SGLang) already populated. The snapshot dir
+      carries a non-derivable commit-hash segment, so ``huggingface_hub``
+      locates it (honoring ``HF_HOME`` / ``HF_HUB_CACHE``) rather than
+      string-building the path.
+
+    Args:
+        model: A model directory path or a HuggingFace repo id.
+
+    Returns:
+        The resolved local model directory, or ``None`` when unresolved (repo id
+        neither a dir nor cached, or ``huggingface_hub`` unavailable) so callers
+        keep their existing degrade path.
+    """
+    raw = ("" if model is None else str(model)).strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if p.is_dir():
+        return p
+    # Repo id: reuse the engine's HF hub cache. Lazy import keeps this module a
+    # stdlib-only leaf -- a missing huggingface_hub just degrades to None.
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except Exception:  # noqa: BLE001 -- optional dep; degrade to no-resolution.
+        return None
+    try:
+        hit = try_to_load_from_cache(repo_id=raw, filename="config.json")
+    except Exception:  # noqa: BLE001 -- cache probe is best-effort.
+        return None
+    if isinstance(hit, str) and Path(hit).is_file():
+        return Path(hit).parent
+    return None
+
+
 def _load_model_config_dict(model_path: str) -> dict | None:
     """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure.
 
     Args:
-        model_path: Filesystem path to the model directory.
+        model_path: Filesystem path to the model directory, or an HF repo id
+            (resolved to the local HF cache dir via ``resolve_local_model_dir``).
 
     Returns:
         The parsed ``config.json`` dict, or ``None`` when the path is empty,
@@ -28,7 +74,11 @@ def _load_model_config_dict(model_path: str) -> dict | None:
     """
     if not model_path:
         return None
-    cfg_path = Path(model_path) / "config.json"
+    # --model may be an HF repo id rather than a local dir; resolve it (a real
+    # dir is returned unchanged) so config-derived metadata isn't silently empty
+    # for repo-id launches.
+    base = resolve_local_model_dir(model_path) or Path(model_path)
+    cfg_path = base / "config.json"
     try:
         raw = cfg_path.read_text(encoding="utf-8")
     except FileNotFoundError:
