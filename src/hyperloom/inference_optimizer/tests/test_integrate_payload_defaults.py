@@ -93,7 +93,7 @@ class TestFillIntegrateDefaultsFromState:
         assert out["extra_server_args"] == "--from-payload"
 
     def test_empty_state_no_op(self, session_dir):
-        _seed_state(session_dir)  # all defaults zero/empty
+        _seed_state(session_dir)
 
         out = krh._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},

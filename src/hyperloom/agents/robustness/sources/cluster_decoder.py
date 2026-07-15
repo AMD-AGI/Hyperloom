@@ -15,9 +15,7 @@ from typing import Any, Mapping
 from hyperloom.common.coerce import to_int
 
 
-# Map of metric_name -> SourceData.local_gpu field. Keys cover the three
-# exporter conventions seen on core42 (rocm exporter, DCGM, generic) so
-# signals work uniformly regardless of who scraped the raw counter.
+# metric_name -> SourceData.local_gpu field, covering rocm/DCGM/generic exporters.
 _GPU_METRIC_FIELD: Mapping[str, str] = {
     # rocm-exporter
     "rocm_temperature_celsius": "temperature_c",
@@ -41,8 +39,7 @@ _GPU_METRIC_FIELD: Mapping[str, str] = {
 }
 
 
-# Series labels used to deduce gpu_id; first match wins. Exporters
-# disagree on the label name so we accept all conventions.
+# Series labels used to deduce gpu_id; first match wins.
 _GPU_ID_LABELS: tuple[str, ...] = (
     "gpu",
     "device",
@@ -109,7 +106,6 @@ def decode_gpu_snapshot(
                 latest = _latest_value(series.get("values"))
                 if latest is None:
                     continue
-                # Key by (ns, name, gpu_id) so same-node pods with overlapping IDs don't collide.
                 key = (ns, name, gpu_id)
                 snap = by_id.setdefault(
                     key,
@@ -156,7 +152,6 @@ def merge_gpu_snapshots(
                 rows.append(dict(row))
     if not rows:
         return {}
-    # Stable ordering by (pod_namespace, pod_name, gpu_id).
     rows.sort(
         key=lambda r: (
             str(r.get("pod_namespace") or ""),

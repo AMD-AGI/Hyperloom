@@ -31,7 +31,6 @@ def _resolve_current_tput(state: "SharedState") -> float:
     return float(state.baseline_tput or 0.0)
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class Objective(ABC):
     """Goal optimized against (pure functions of SharedState)."""
@@ -75,7 +74,6 @@ class Objective(ABC):
         """
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class TargetGainObjective(Objective):
     """Reach ``target_gain_pct`` % over baseline_tput (progress = cumulative_gain / target, capped at 1.0)."""
@@ -321,7 +319,6 @@ class TimeOnlyObjective(Objective):
         return "time_only (no target)"
 
 
-# ---------------------------------------------------------------------------
 def build_objective(env: dict[str, Any]) -> Objective:
     """Factory: requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly).
 

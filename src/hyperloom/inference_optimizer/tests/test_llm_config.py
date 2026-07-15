@@ -61,8 +61,8 @@ def test_openai_kwargs_reads_openai_custom_headers():
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
-    """Strict separation: the OpenAI/Codex client reads only OPENAI_CUSTOM_HEADERS
-    and does no host-based (AMD) auto-injection. Base URL is still derived."""
+    """The OpenAI/Codex client reads only OPENAI_CUSTOM_HEADERS and does no
+    host-based auto-injection. Base URL is still derived."""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -72,7 +72,7 @@ def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
     )
     assert kwargs["api_key"] == "ak-anthropic"
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
-    # Empty headers are omitted from kwargs entirely (as_kwargs drops falsy).
+    # Empty headers are omitted from kwargs entirely.
     assert "default_headers" not in kwargs
 
 
@@ -135,8 +135,8 @@ def test_claude_sdk_env_options_forwards_anthropic_custom_headers():
 
 
 def test_claude_sdk_env_options_no_header_auto_injection():
-    """Strict + no host magic: an AMD gateway without an explicit
-    ANTHROPIC_CUSTOM_HEADERS gets NO auto-injected subscription header."""
+    """A gateway without an explicit ANTHROPIC_CUSTOM_HEADERS gets NO
+    auto-injected subscription header."""
     opts = claude_sdk_env_options(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -148,8 +148,8 @@ def test_claude_sdk_env_options_no_header_auto_injection():
 
 
 def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
-    """Strict separation: OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude
-    (Anthropic) side; the claude path reads only ANTHROPIC_CUSTOM_HEADERS."""
+    """OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude (Anthropic) side; the
+    claude path reads only ANTHROPIC_CUSTOM_HEADERS."""
     opts = claude_sdk_env_options(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",

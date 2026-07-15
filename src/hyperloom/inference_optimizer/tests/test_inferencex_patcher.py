@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
 
 @pytest.fixture(autouse=True)
 def _isolate_inferencex_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every test hermetic w.r.t. the discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
+    """Clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout."""
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
@@ -337,8 +337,8 @@ def test_benchmark_serving_patched_line_is_executable_python(
         os.environ.pop("PROFILE_EXTRA_BODY", None)
 
 
-# #210 fix (Deval comments 4 + 6): patch every InferenceX root, not just
-# $INFERENCEX_PATH — Magpie loads its bundled $MAGPIE_PATH/InferenceX at runtime.
+# Patch every InferenceX root, not just $INFERENCEX_PATH — Magpie loads its
+# bundled $MAGPIE_PATH/InferenceX at runtime.
 def _make_inferencex_tree_with_serving(
     root: Path,
     profile_by_stage: bool = True,

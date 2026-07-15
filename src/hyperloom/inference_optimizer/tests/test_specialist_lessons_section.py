@@ -27,7 +27,6 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 
 
-# Coordinator-warmer integration
 @dataclass
 class _BareState:
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
@@ -140,7 +139,7 @@ def test_section_lessons_renders_each_lesson_with_metadata():
 
 
 def test_section_lessons_renders_dict_measured_impact_as_human_readable_line():
-    """GAP 3 — a dict ``measured_impact`` is rendered as a human-readable summary instead of raw JSON."""
+    """A dict ``measured_impact`` is rendered as a human-readable summary instead of raw JSON."""
     lessons = [
         {
             "canonical_id": "lesson:dict",
@@ -165,7 +164,7 @@ def test_section_lessons_renders_dict_measured_impact_as_human_readable_line():
 
 
 def test_section_lessons_renders_validated_count_when_above_1():
-    """GAP 4 — when multiple sessions validated a lesson, surface the count."""
+    """When multiple sessions validated a lesson, surface the count."""
     lessons = [
         {
             "canonical_id": "lesson:multi",
@@ -276,7 +275,7 @@ def test_section_pitfalls_skips_pitfalls_with_empty_description():
     """Defensive against partial / legacy rows lacking ``attrs.description``."""
     pitfalls = [
         {"canonical_id": "pitfall:empty", "attrs": {"description": ""}},
-        # Legacy shape from the broken traps(symptom=) era.
+        # Legacy row shape lacking attrs.description.
         {"raw": '{"points":[...legacy json blob...]}'},
         {"canonical_id": "pitfall:real", "attrs": {"description": "real one", "severity": "crash"}},
     ]

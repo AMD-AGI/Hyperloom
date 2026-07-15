@@ -17,7 +17,6 @@ from typing import Any, Callable, Pattern
 
 
 # --- Failure kinds ---------------------------------------------------------
-# String ids for each failure kind.
 
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
@@ -158,23 +157,15 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"size mismatch"),
             re.compile(r"mat1 and mat2 shapes cannot be multiplied"),
             re.compile(r"[Ee]xpected .*? but got .*? \(size"),
-            # torch .narrow()/.slice() bounds error surfaced by weight loaders
-            # when a fused projection's checkpoint shard width does not match
-            # the model class's expected dim (e.g. a new attention variant
-            # loaded through an older model implementation).
+            # torch .narrow()/.slice() bounds error from weight loaders on shard-width mismatch.
             re.compile(r"start\s*\(\s*\d+\s*\)\s*\+\s*length\s*\(\s*\d+\s*\)\s*exceeds dimension size"),
         ),
         confidence=0.7,
     ),
     _Rule(
-        # A model implementation that declares parameters the checkpoint does
-        # not carry (or vice-versa): the strict weight-init check refuses to
-        # boot. Common when a new architecture shares/omits per-layer tensors
-        # (e.g. index-sharing) but the framework instantiates them on every
-        # layer. Distinct from SHAPE_MISMATCH so it registers as a *different*
-        # (deeper) failure once a prior shape fix is applied — this is what lets
-        # the enablement loop detect forward progress instead of re-deriving the
-        # same fix (see ``enablement_made_progress``).
+        # Model params mismatch the checkpoint's tensors; the strict weight-init
+        # check refuses to boot. Kept distinct from SHAPE_MISMATCH so it registers
+        # as a different (deeper) failure for enablement progress detection.
         kind=MISSING_WEIGHT,
         bridge_layer="framework",
         patterns=(
@@ -485,15 +476,11 @@ def runnable_decision(
 def _failure_identity(sig: FailureSignature | None) -> tuple[str, str, str]:
     """A coarse, taxonomy-independent identity for a failure signature.
 
-    Deliberately does NOT rely on the enumerated ``kind`` alone: two *different*
-    boot crashes can both classify as ``UNKNOWN`` (a brand-new failure the rule
-    table has never seen), yet still represent real forward progress when the
-    error text / offending site changed. The identity is ``(kind, offending_file,
-    normalized_excerpt)`` where the excerpt is whitespace-collapsed, lower-cased,
-    truncated, and has run-to-run numeric operands (sizes / addresses / layer
-    indices) masked to ``#`` so "size 704 vs 576" and "size 512 vs 384" compare
-    equal (same failure, different operands) but a genuinely different error does
-    not.
+    The identity is ``(kind, offending_file, normalized_excerpt)`` where the
+    excerpt is whitespace-collapsed, lower-cased, truncated, and has numeric
+    operands masked to ``#`` so differing operands compare equal but a genuinely
+    different error does not. This lets two ``UNKNOWN`` crashes still be told
+    apart when the error text / offending site changed.
 
     Args:
         sig: The failure signature (may be ``None``).
@@ -511,10 +498,8 @@ def _failure_identity(sig: FailureSignature | None) -> tuple[str, str, str]:
 def _has_failure(sig: FailureSignature | None) -> bool:
     """True when a signature represents a real (post-)boot failure, not a clean boot.
 
-    ``kind`` is always populated (at least ``UNKNOWN``), so it cannot be used to
-    tell "no failure" apart from "unclassified failure". A real failure is either
-    actionable OR carries error text / an offending file; a clean boot is a
-    non-actionable signature with no content.
+    A real failure is either actionable OR carries error text / an offending
+    file; a clean boot is a non-actionable signature with no content.
     """
     if sig is None:
         return False
@@ -529,23 +514,15 @@ def enablement_made_progress(
 ) -> bool:
     """Whether a patch advanced the boot to a *new, deeper* failure.
 
-    Enablement gaps are frequently **serial**: fixing gap #1 (e.g. a shape
-    mismatch in the weight loader) only reveals gap #2 (e.g. a missing-weight
-    error deeper in model construction). A patch that clears the original crash
-    but stops at a *different* failure has made real forward progress and its
-    diff is a necessary building block — it must be **kept / stacked**, not
-    reverted and re-derived from the stale original log.
+    Enablement gaps are frequently serial: clearing one crash reveals a deeper
+    one. A patch that clears the original crash but stops at a different failure
+    has made forward progress and must be kept/stacked, not reverted.
 
-    **Taxonomy-independent (see Q1 hardening):** progress is judged by whether
-    the failure *identity* changed (:func:`_failure_identity`), NOT by whether
-    the enumerated ``kind`` changed. So a brand-new gap that the classifier has
-    never seen (``kind == UNKNOWN``) still registers as progress as long as its
-    error text / offending site differs from the prior failure. This removes the
-    dependency on adding a new ``FAILURE_KINDS`` entry for every novel gap.
-
-    A clean boot (``after`` carries no error text at all) is **not** "progress"
-    here; that is the terminal *runnable* case handled by
-    :func:`runnable_decision`.
+    Progress is judged by whether the failure *identity* changed
+    (:func:`_failure_identity`), not by whether the enumerated ``kind`` changed,
+    so a novel ``UNKNOWN`` gap still registers as progress. A clean boot
+    (``after`` carries no error text) is the terminal runnable case handled by
+    :func:`runnable_decision`, not progress here.
 
     Args:
         before_signature: Failure signature before applying the patch.
@@ -558,8 +535,7 @@ def enablement_made_progress(
     if not _has_failure(after_signature):
         return False
     if not _has_failure(before_signature):
-        # No known prior failure to compare against: any post-patch failure is
-        # treated as a (first) forward step.
+        # No prior failure to compare: any post-patch failure is a first step.
         return True
     return _failure_identity(after_signature) != _failure_identity(before_signature)
 

@@ -52,9 +52,8 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
-    # SAFE_API_KEY stays the primary source so the single-gateway setup is
-    # unchanged; a split deploy (no SAFE_API_KEY) falls back to the per-provider
-    # key. GEAK speaks the OpenAI protocol so it takes the OpenAI-side key.
+    # SAFE_API_KEY is the primary source; a split deploy falls back to the
+    # per-provider key. GEAK takes the OpenAI-side key.
     openai_key = (
         env.get("SAFE_API_KEY")
         or env.get("OPENAI_API_KEY")
@@ -202,7 +201,7 @@ def run_one_attempt(
     # Do NOT set HIP/ROCR/CUDA_VISIBLE_DEVICES here; Ray assigns them in workers.
     local_env = {
         **env,
-        # Forward workspace-path as USER_DATA_PATH so nested subprocesses share the artefact root.
+        # Forward workspace-path so nested subprocesses share the artefact root.
         "USER_DATA_PATH": str(args.workspace_path),
         "KERNEL_AGENT_NUM_GPUS": str(num_gpus),
     }
@@ -226,7 +225,6 @@ def run_one_attempt(
     if harness_path:
         cmd.extend(["--test-harness-path", harness_path])
     started = time.time()
-    # Match the backend budget plus finalization grace.
     _effective_budget_min = args.backend_budget_min
     try:
         result = run_json(cmd, env=local_env, timeout_s=int(_effective_budget_min * 60) + 360, log_path=log_path)
@@ -357,7 +355,7 @@ def main() -> int:
     env = {
         **os.environ,
         **load_env_file(Path(args.env_file)),
-        # Forward workspace-path as USER_DATA_PATH so children share the artefact root.
+        # Forward workspace-path so children share the artefact root.
         "USER_DATA_PATH": str(workspace),
     }
 
@@ -385,7 +383,7 @@ def main() -> int:
             candidates = (
                 data if isinstance(data, list) else (data.get("hot_kernels") or data.get("kernel_candidates") or [])
             )
-            # Mirror to this session's default candidates_path so kernel_optimization finds it.
+            # Mirror to the default candidates_path so kernel_optimization finds it.
             (run_dir / "kernel_candidates.json").write_text(json.dumps(candidates, indent=2))
             analysis = {"trace_report_path": str(src), "reused": True}
         else:
@@ -417,9 +415,9 @@ def main() -> int:
         summary["selected_kernel"] = selected
 
         source_file = str(selected.get("source_file") or "")
-        # Use `benchmark_files` (plural); prefer `bench`-style scripts then `test_*`.
+        # Prefer `bench`-style scripts then `test_*`.
         bench_files = list(selected.get("benchmark_files") or [])
-        # is_multigpu := TraceLens flag OR kernel name matches a known collective (fallback for r24 custom_allreduce).
+        # is_multigpu := TraceLens flag OR kernel name matches a known collective.
         selected_name = str(selected.get("name") or "")
         name_says_collective = kernel_name_implies_multigpu(selected_name)
         is_multigpu = bool(selected.get("is_multigpu")) or name_says_collective
@@ -438,13 +436,13 @@ def main() -> int:
         if not harness_path:
             summary["benchmark_resolution"] = "no benchmark/test harness resolved; GEAK may be slower or fail"
 
-        # GPU budgeting: collectives need >=2 GPUs; compute kernels run on 1 (concurrency capped by total_gpus).
+        # GPU budgeting: collectives need >=2 GPUs; compute kernels run on 1.
         if args.num_gpus_override > 0:
             per_task_gpus = args.num_gpus_override
         else:
             per_task_gpus = int(selected.get("num_gpus_recommended") or 1)
             if is_multigpu and per_task_gpus < 2:
-                # Collective but TraceLens reported <2; force-bump to args.tp (or 2 floor).
+                # Collective but TraceLens reported <2; force-bump to args.tp (2 floor).
                 per_task_gpus = max(2, int(getattr(args, "tp", 0) or 2))
                 summary.setdefault(
                     "per_task_gpus_inferred",
@@ -472,7 +470,7 @@ def main() -> int:
         ray_log = run_dir / "logs" / "ray.log"
         ray_started_by_runner = _ensure_ray_via_helper(args.tp, ray_log)
         summary["ray_started_by_runner"] = ray_started_by_runner
-        # ThreadPool only issues Ray submissions; Ray serialises GPU contention via num_gpus.
+        # ThreadPool only issues Ray submissions; Ray serialises GPU contention.
         with ThreadPoolExecutor(max_workers=min(total_jobs, max_concurrent)) as pool:
             for backend in backends:
                 for replica in range(args.replicas_per_backend):

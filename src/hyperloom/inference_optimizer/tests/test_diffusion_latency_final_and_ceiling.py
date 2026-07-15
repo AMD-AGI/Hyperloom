@@ -60,7 +60,6 @@ class TestCollectRooflineProgressLatencyCeiling:
         }
 
     def test_latency_ceiling_surfaced_when_no_tok_s_ceiling(self, tmp_path):
-        # xDiT snapshot: no tok/s ceiling, but latency roofline pair present.
         snap = {
             "snapshot_id": 2,
             "ts": "2026-01-01T00:10:00",

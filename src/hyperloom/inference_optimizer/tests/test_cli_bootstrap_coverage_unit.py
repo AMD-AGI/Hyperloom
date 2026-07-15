@@ -189,7 +189,6 @@ def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
     built = m.build_manifest(tmp_path, args=args, session_id="s-q")
     assert built["model_name"] == "google-gemma-4-26B-A4B-it-quantized"
     assert built["model_name"] != "quantized"
-    # the real path is still recorded faithfully
     assert built["model_path"].endswith("/quantized")
 
 

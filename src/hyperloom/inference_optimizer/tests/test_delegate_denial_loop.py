@@ -244,7 +244,6 @@ def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
 
 
-# Coordinator-internal analysis actions are never LLM-proposable
 # ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any
 # propose/delegate/request that names either action.
 _INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")

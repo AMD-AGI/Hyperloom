@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import json
 
-# Matches the previous per-call-site default in
-# ``breakdown/reporters/llm_client.py`` (``timeout_sec: float = 60.0``).
 DEFAULT_HTTP_TIMEOUT_SEC = 60.0
 
 

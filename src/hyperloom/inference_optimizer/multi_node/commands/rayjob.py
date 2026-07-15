@@ -5,15 +5,13 @@
 Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``create-rayjob`` (create via SaFE + wait for Running, checkpointing
 ``rayjob_id`` so retries don't leak a second workload), ``bootstrap``,
-``verify``, ``restart-server`` (kill + relaunch nohup'd server,
-idempotent), ``kill-inference``, ``stop-rayjob``.
+``verify``, ``restart-server``, ``kill-inference``, ``stop-rayjob``.
 
 State lives in ``$MULTI_NODE_STATE_FILE`` (default:
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
-when the session is pinned, else legacy ``/tmp/multi_node_state.json``).
-HTTP polls under the sandbox's 120s ceiling (ADDENDUM-09) and surface
-progress on stderr. Credentials must already be in sandbox env
-(ADDENDUM-13); this module never invents URLs or keys.
+when the session is pinned, else ``/tmp/multi_node_state.json``).
+Credentials must already be in sandbox env; this module never invents
+URLs or keys.
 """
 
 from __future__ import annotations
@@ -43,7 +41,6 @@ def _mn_cli():
 # SaFE read-after-write lag: GET /workloads/{id} may 404 briefly post-create.
 _SAFE_GET_WORKLOAD_404_GRACE_S = 30.0
 
-# RayJob phase strings reported by SaFE.
 _TERMINAL_FAIL_PHASES = {"Failed", "Stopped", "Cancelled"}
 
 _TERMINAL_OK_PHASES = {"Running"}
@@ -280,13 +277,12 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     extra_labels = _mn_cli()._parse_kv_list(args.extra_label)
     pending_dashboard_token: str | None = None
 
-    # ownerId: --owner-id > $WORKLOAD_ID (the sandbox workload, for SaFE GC
-    # cascade); omitted when neither is set.
+    # ownerId: --owner-id > $WORKLOAD_ID; omitted when neither is set.
     owner_id = args.owner_id or os.environ.get("WORKLOAD_ID", "").strip() or None
     if owner_id and not args.owner_id:
         info(f"ownerId derived from $WORKLOAD_ID: {owner_id}")
 
-    # workspace: --workspace > $SAFE_WORKSPACE; bail fast with a clear error if neither is set.
+    # workspace: --workspace > $SAFE_WORKSPACE; bail fast if neither is set.
     workspace = args.workspace or os.environ.get("SAFE_WORKSPACE", "").strip()
     if not workspace:
         raise RuntimeError(
@@ -301,7 +297,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     display_name = os.environ.get("DISPLAY_NAME", "").strip() or args.display_name or f"multi_node_{int(time.time())}"
     info(f"displayName: {display_name}")
 
-    # session_id from $CLAW_SESSION_ID; when unset the label is skipped (dev/local runs).
+    # session_id from $CLAW_SESSION_ID; when unset the label is skipped.
     session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
     if session_id:
         info(f"sessionId derived from $CLAW_SESSION_ID: {session_id}")

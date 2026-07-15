@@ -18,8 +18,7 @@ from _io_utils import safe_float
 UNIFIED_CSV = "unified_perf_summary.csv"
 GPU_TIMELINE_CSV = "gpu_timeline.csv"
 
-# torch.compile fuses ops into single kernels with very long generated names,
-# which can exceed csv's default 128 KiB field limit; lift it to the platform max.
+# Lift the csv field-size limit to the platform max for very long fused-kernel names.
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
 # Column names as emitted by generate_perf_report_pytorch's unified summary.
@@ -127,8 +126,7 @@ def dit_analytic_flops(
 
     scaled by ``num_layers * num_tokens * num_denoise_steps``. Positional MLPs,
     adaLN modulation, patch/embed projections and the VAE are ignored, so this
-    is a lower bound on the true DiT compute (an optimistic ceiling for the
-    reconciliation cross-check, never a hard limit).
+    is a lower bound on the true DiT compute.
 
     Args:
         hidden_size: Transformer hidden dimension ``h``.
@@ -186,10 +184,9 @@ def reconcile(
     Compares the analytic compute-ideal time (from a-priori FLOPs / achievable
     TFLOPS) against TraceLens' summed per-kernel ideal + actual times:
 
-      - ``analytic_vs_trace_ideal_ratio`` ~ 1 => the a-priori model matches the
-        kernels TraceLens attributed a perf model to (roofline is trustworthy).
-        >> 1 => the trace's per-kernel roofline under-counts DiT compute
-        (missing/unmodeled kernels); << 1 => the model omits real work.
+      - ``analytic_vs_trace_ideal_ratio`` ~ 1 => model matches the kernels
+        TraceLens modelled; >> 1 => trace under-counts DiT compute; << 1 => the
+        model omits real work.
       - ``analytic_achieved_efficiency`` = analytic_ideal / trace_actual, the
         end-to-end HW efficiency implied by the a-priori compute lower bound.
 
@@ -268,9 +265,8 @@ def assemble_report(
 
     Backend-agnostic single source of truth for the report *shape* (totals +
     timeline + end-to-end efficiency + per-denoise-step split + optional analytic
-    DiT ceiling). Fed either by the TraceLens perf CSVs (``build_report``) or by
-    the bypass analytical candidate set (``build_report_from_bypass``), so both
-    routes emit an identically-shaped ``diffusion_roofline.json``.
+    DiT ceiling). Fed either by ``build_report`` or ``build_report_from_bypass``
+    so both routes emit an identically-shaped ``diffusion_roofline.json``.
 
     Args:
         totals: Workload totals (see ``aggregate_unified`` for the key contract).
@@ -305,9 +301,8 @@ def assemble_report(
             "ideal_roofline_us": totals["sigma_ideal_roofline_us"] / num_denoise_steps,
         }
 
-    # Optional a-priori DiT compute ceiling + reconciliation cross-check. Only
-    # emitted when the model geometry + achievable TFLOPS are supplied; never
-    # fabricated from the trace alone.
+    # Optional a-priori DiT compute ceiling + reconciliation cross-check, only
+    # when model geometry + achievable TFLOPS are supplied.
     if dit_geometry and achievable_tflops and num_denoise_steps and num_denoise_steps > 0:
         try:
             flops = dit_analytic_flops(
@@ -324,7 +319,6 @@ def assemble_report(
                 if recon:
                     report["reconciliation"] = recon
         except (KeyError, TypeError, ValueError):
-            # Optional reconciliation data missing/malformed; skip it.
             pass
     return report
 
@@ -334,10 +328,9 @@ def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, 
 
     The bypass backend has no TraceLens perf CSV; it carries the same numbers on
     each candidate: ``duration_us`` (summed GPU time = the actual side) and
-    ``efficiency_percent`` (ideal/actual, from the analytical roofline) with a
-    ``bound_type`` for the compute/memory split. Candidates whose roofline is a
-    placeholder (no shapes) contribute only to ``no_perf_model_us`` so the kernel
-    efficiency reflects modelled kernels only. Mirrors ``aggregate_unified``.
+    ``efficiency_percent`` (ideal/actual) with a ``bound_type`` for the
+    compute/memory split. Placeholder-roofline candidates contribute only to
+    ``no_perf_model_us``. Mirrors ``aggregate_unified``.
 
     Args:
         hot_kernels: The bypass candidate dicts (``hot_kernels`` list).
@@ -354,8 +347,7 @@ def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, 
         actual = safe_float(c.get("duration_us"))
         sigma_actual += actual
         src = str(c.get("roofline_source") or "")
-        # Binding-side attainment (cross-route comparable), not the compute-side
-        # efficiency_percent which reads ~0 for memory-bound kernels.
+        # Binding-side attainment (cross-route comparable).
         attain = safe_float(c.get("roofline_attainment_pct"))
         if src not in ("", "placeholder") and attain > 0:
             sigma_ideal += actual * (attain / 100.0)
@@ -446,9 +438,7 @@ def build_report_from_bypass(
         achievable_tflops=achievable_tflops,
         source="bypass_analytical",
     )
-    # ``all_device_kernels`` when totals cover every kernel; else the top-k subset.
-    # kernels_aggregated must match that scope: the caller's all-kernel count when
-    # full scope, else the (top-k) candidate count actually aggregated.
+    # Scope + count reflect all kernels under full scope, else the top-k subset.
     report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
     report["kernels_aggregated"] = (
         int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
@@ -531,15 +521,13 @@ def main() -> int:
     )
     parser.add_argument("--top-k", type=int, default=10, help="Hottest kernels to list.")
     parser.add_argument("--output", default="", help="Optional path to write the report JSON.")
-    # Approach-a absolute analytic ceiling: resolve per-architecture forward
-    # FLOPs from the model's own diffusers config (no hand-passed geometry).
+    # Approach-a absolute analytic ceiling from the model's diffusers config.
     parser.add_argument("--model-dir", default="", help="Local diffusers model dir; enables the per-architecture analytic ceiling (diffusion_flops).")
     parser.add_argument("--height", type=int, default=1024, help="Output image height (px) for the analytic ceiling.")
     parser.add_argument("--width", type=int, default=1024, help="Output image width (px) for the analytic ceiling.")
     parser.add_argument("--precision", default="bf16", help="Runtime precision for the peak-TFLOPS ceiling (bf16 / fp8 / mxfp4).")
     parser.add_argument("--cfg-batch", type=int, default=0, help="Forwards per denoise step (0 = family default; 2 = classifier-free guidance).")
-    # Optional a-priori DiT ceiling cross-check (all four geometry flags + a
-    # ceiling source required to activate).
+    # Optional a-priori DiT ceiling cross-check (needs all geometry flags + a ceiling source).
     parser.add_argument("--dit-hidden-size", type=int, default=0, help="DiT hidden dim h (analytic ceiling).")
     parser.add_argument("--dit-num-layers", type=int, default=0, help="DiT transformer block count.")
     parser.add_argument("--dit-num-tokens", type=int, default=0, help="Latent patch/token count per forward.")
@@ -583,7 +571,7 @@ def main() -> int:
         achievable_tflops=achievable,
     )
 
-    # Approach-a absolute analytic ceiling (per-architecture, config-derived).
+    # Approach-a absolute analytic ceiling (config-derived).
     if args.model_dir:
         try:
             import diffusion_flops as _dflops
@@ -600,7 +588,7 @@ def main() -> int:
             )
             if est:
                 report["analytic_ceiling"] = est
-                # reconcile against the trace-measured actual kernel time.
+                # Reconcile against the trace-measured actual kernel time.
                 actual_us = report["totals"].get("sigma_actual_kernel_us", 0.0)
                 if est.get("ideal_ms") and actual_us > 0:
                     report["analytic_within_pct"] = round(

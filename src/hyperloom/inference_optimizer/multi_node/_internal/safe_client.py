@@ -5,7 +5,6 @@
 Endpoints (under ``/api/v1/workloads``): POST create, GET ``{id}`` (full
 state incl. ``.pods``), GET ``{id}/service``, POST ``{id}/stop``
 (idempotent), DELETE ``{id}``. The path id is the workload id from create.
-Uses :mod:`httpx` (already a dep) to avoid a new sandbox dependency.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import httpx
 
 from .log import warn
 
-# 60s read upper bound so a slow/hung SaFE call doesn't wedge the CLI poll loop.
+# 60s read upper bound so a slow/hung SaFE call doesn't wedge the poll loop.
 _HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)
 
 
@@ -40,7 +39,6 @@ class SafeApiError(RuntimeError):
             body: Raw response body (truncated in the message).
             endpoint: The SaFE endpoint that produced the error.
         """
-        # Truncate body to keep the agent's stderr legible.
         snippet = body[:500] + ("..." if len(body) > 500 else "")
         super().__init__(f"SaFE {endpoint} -> status={status} body={snippet}")
         self.status = status
@@ -117,7 +115,6 @@ class SafeClient:
         Returns:
             str: The fully-qualified request URL.
         """
-        # path always begins with "/api/v1/..."
         return f"{self._base}{path}"
 
     def _decode(self, resp: httpx.Response, endpoint: str) -> Any:
@@ -155,7 +152,7 @@ class SafeClient:
         if not (200 <= resp.status_code < 300):
             raise SafeApiError(resp.status_code, resp.text, endpoint=endpoint)
         data = self._decode(resp, endpoint)
-        # Tolerate both the bare {"workloadId": ...} and handle()-wrapped shapes.
+        # Tolerate bare and ``data``-wrapped response shapes.
         wid = data.get("workloadId") or (data.get("data") or {}).get("workloadId") or data.get("workload_id")
         if not wid:
             raise SafeApiError(resp.status_code, resp.text, endpoint=endpoint)

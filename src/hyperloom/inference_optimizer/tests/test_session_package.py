@@ -71,7 +71,7 @@ def _build_session(sd: Path) -> None:
     _write(sd / "critic-workdir" / "000001" / "request.json", "{}")
     _write(sd / "robustness-workdir" / "000001" / "request.json", "{}")
     _write(sd / "hands.log", "log")
-    _write(sd / "runs" / "specialist" / "s1" / "prompt.md", "prompt")  # not in spec
+    _write(sd / "runs" / "specialist" / "s1" / "prompt.md", "prompt")
 
 
 def _zip_names(zip_path: Path) -> set[str]:
@@ -144,7 +144,6 @@ def test_package_includes_curated_excludes_noise(tmp_path: Path) -> None:
 def test_manifest_records_included_and_missing(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
-    # remove one curated file so its glob shows up as unmatched
     (sd / "reports" / "kernel_roofline.json").unlink()
     dest = tmp_path / "workspace"
 
@@ -167,7 +166,7 @@ def test_manifest_records_included_and_missing(tmp_path: Path) -> None:
 def test_empty_session_returns_none(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     sd.mkdir()
-    (sd / "runs").mkdir()  # only noise-ish empty dirs
+    (sd / "runs").mkdir()
     out = package_session_artifacts(sd, session_id="empty", dest_root=tmp_path / "ws")
     assert out is None
 
@@ -208,8 +207,7 @@ def test_loose_files_dropped_at_dest_root(tmp_path: Path) -> None:
     assert out.exists()  # zip still under the package subdir
     assert out == dest / PACKAGE_SUBDIR / "sid-123.zip"
 
-    # loose files land DIRECTLY under the dest root (not under <sid>/),
-    # preserving each file's original relative path
+    # loose files land directly under the dest root, keeping their relative path
     for rel in (
         "session_breakdown.json",
         "state.json",
@@ -245,7 +243,6 @@ def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.breakdown import session_package as sp
-    # Force a tiny byte cap so the bundle truncates after the first file.
     monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
     sd = tmp_path / "session"
     _build_session(sd)
@@ -279,7 +276,6 @@ def test_loose_does_not_wipe_dest_root(tmp_path: Path) -> None:
     _build_session(sd)
     dest = tmp_path / "workspace"
     dest.mkdir()
-    # a pre-existing unrelated file at the dest root must survive
     keep = dest / "unrelated-other-session.txt"
     keep.write_text("keep me", encoding="utf-8")
 

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for pod-side patch path constraints (P0-3 / F005.7)."""
+"""Unit tests for pod-side patch path constraints."""
 
 from __future__ import annotations
 

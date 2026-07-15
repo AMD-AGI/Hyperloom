@@ -57,8 +57,8 @@ class ConcSweepExecutor:
             }
 
         params = ctx.task.params or {}
-        # ``None`` falls back to run_conc_sweep's DEFAULT_CONCS; an empty
-        # list short-circuits (respects an explicit "no concs" choice).
+        # ``None`` falls back to run_conc_sweep's DEFAULT_CONCS; an empty list
+        # short-circuits (respects an explicit "no concs" choice).
         concs_raw = params.get("concs")
         if concs_raw is None:
             concs: list[int] | None = list(state.conc_sweep_concs) if state.conc_sweep_concs else None
@@ -75,10 +75,8 @@ class ConcSweepExecutor:
             variant_timeout_sec=variant_timeout,
             total_budget_sec=total_budget,
         )
-        # Map run_conc_sweep's skip envelope onto the SubAgentRunner
-        # contract: a skip is not an executor failure (precondition unmet),
-        # so surface as succeeded+was_skipped (Coordinator records it as
-        # decision='discarded').
+        # Map run_conc_sweep's skip envelope onto the SubAgentRunner contract:
+        # a skip is not an executor failure, so surface as succeeded+was_skipped.
         if payload.get("status") == "skipped":
             payload = dict(payload)
             payload["status"] = "succeeded"

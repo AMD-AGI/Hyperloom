@@ -7,10 +7,8 @@ Usage:
     event_counts.py [SESSION_DIR] [--all] [--limit N]
 
 SESSION_DIR defaults to $USER_DATA_PATH or /workspace/hyperloom.
-By default reads the last 500 events to mirror the legacy behaviour; pass
-``--all`` for full history or ``--limit N`` for a custom window. The
-500-event default rotates older rounds out and silently undercounts on
-long runs — use ``--all`` when comparing totals against the run report.
+Reads the last 500 events by default; pass ``--all`` for full history or
+``--limit N`` for a custom window.
 """
 
 from __future__ import annotations
@@ -57,8 +55,7 @@ def main() -> int:
     if args.session_dir is not None:
         session_dir = pathlib.Path(args.session_dir)
     else:
-        # Defer to hyperloom.inference_optimizer.session.paths so resolution rules
-        # (env > default) stay in one place.
+        # Resolve via session.paths (env > default).
         from hyperloom.inference_optimizer.session.paths import session_dir as _resolve_sd
 
         session_dir = _resolve_sd()

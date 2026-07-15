@@ -48,8 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import model_compat  # noqa: E402  (local sibling module)
 
 MODELS_DIR = os.environ.get("CI_MODELS_DIR", "/wekafs/models")
-# Target GPU for the gpu-specific rules (FP4 unsupported on MI300X). core42 is
-# MI300X, so default there; override via SAFE_OPTIMIZE_GPU_TYPE.
+# Target GPU for the gpu-specific rules; override via SAFE_OPTIMIZE_GPU_TYPE.
 GPU_TYPE = os.environ.get("SAFE_OPTIMIZE_GPU_TYPE", "MI300X")
 OUT_DIR = os.environ.get(
     "CI_FILTER_OUT_DIR", "/wekafs/weilei/claw-dev/ci-candidates-filtered")
@@ -84,8 +83,7 @@ def classify_local(repo):
     mdir = os.path.join(MODELS_DIR, slug(repo))
     cfg_path = os.path.join(mdir, "config.json")
     if not os.path.isfile(cfg_path):
-        # Some non-LLM repos (for example FLUX Diffusers pipelines) have no
-        # root config.json, so still apply repo-id-only compatibility gates.
+        # No root config.json: apply repo-id-only compatibility gates.
         return model_compat.unrunnable_reason(None, repo=repo)
     try:
         with open(cfg_path) as fh:
@@ -119,8 +117,7 @@ def gated_check_all(repos):
     print(f"[gated] cached={len(cache)} todo={len(todo)}", flush=True)
     with open(GATED_CACHE, "a") as fh:
         for i, repo in enumerate(todo):
-            # gated/not_found first; if servable, also reject weights-only repos
-            # (no tokenizer) via the HF file listing so they never reach a slot.
+            # gated/not_found first; if servable, reject weights-only repos.
             status = hf_gated(repo)
             if not status:
                 status = model_compat.hf_missing_tokenizer(repo, HF_TOKENS) or "ok"
@@ -138,9 +135,8 @@ def main(argv):
              if argv else DEFAULT_POOLS)
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Phase 1: local config rules -> tentative keep set per pool. Repos in the
-    # curated daily-fixed whitelist are exempt from ALL filtering (kept as-is,
-    # no config rule, no gated check).
+    # Phase 1: local config rules -> tentative keep set per pool. Whitelisted
+    # repos are exempt from all filtering.
     whitelist = model_compat.load_whitelist()
     pools_local = {}
     keep_repos = []
@@ -152,7 +148,7 @@ def main(argv):
         for c in cands:
             repo = c.get("repo_id")
             if not repo or repo in whitelist:
-                local_keep.append((c, None))  # exempt: keep, skip gated lookup
+                local_keep.append((c, None))  # exempt
                 continue
             r = classify_local(repo)
             if r:

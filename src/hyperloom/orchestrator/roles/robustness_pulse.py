@@ -40,8 +40,7 @@ def _enabled() -> bool:
     Returns:
         ``True`` if the pulse is enabled in the current environment.
     """
-    # Disable inside pytest — the pulse spawns a real subprocess that bypasses
-    # test mocks. Mirrors ``_run_magpie``'s guard.
+    # Disable inside pytest — the pulse spawns a real subprocess.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
     # On by default; truthy unless explicitly set to an off token (0/false/no/

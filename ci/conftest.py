@@ -2,14 +2,10 @@
 
 """Shared shims for the ci/ unit-test package.
 
-The unit-test CI image does not install ``requests``. Sibling suites
-(``inference_optimizer``) therefore drop a minimal ``requests`` stub into
-``sys.modules`` exposing only ``HTTPError`` / ``exceptions`` / ``utils``.
-The ci modules under test reference ``requests.get`` / ``requests.post`` /
-``requests.Session``, so augment whichever ``requests`` module is live (real
-or stub) *in place* before the ci tests import their targets: tests can then
-monkeypatch those attributes and client construction does not explode.
-No-op when the real ``requests`` package is installed.
+Augments whichever ``requests`` module is live (real or a minimal stub) in
+place with ``get`` / ``post`` / ``Session`` / ``HTTPError`` / ``exceptions`` /
+``utils`` so the ci tests can monkeypatch them. No-op when the real
+``requests`` package is installed.
 """
 
 from __future__ import annotations

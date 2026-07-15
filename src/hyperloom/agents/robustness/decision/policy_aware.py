@@ -71,8 +71,6 @@ class PolicyAware:
                 violations.append(exc)
         return violations
 
-    # -- internal checks -------------------------------------------------
-
     def _check_role(self, intent: Intent) -> None:
         """Verify the intent type is in the robustness role allowlist.
 

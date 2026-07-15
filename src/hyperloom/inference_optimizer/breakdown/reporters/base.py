@@ -3,8 +3,8 @@
 """Shared data structures + registry for ``session_breakdown`` section renderers.
 
 A renderer is a deterministic function turning one breakdown section into
-a :class:`RenderedSection`. Numbers stay deterministic (the LLM has
-historically hallucinated them); the LLM only narrates ``key_facts``.
+a :class:`RenderedSection`. Numbers stay deterministic; the LLM only
+narrates ``key_facts``.
 """
 
 from __future__ import annotations
@@ -57,8 +57,7 @@ class RenderedSection:
 RendererFn = Callable[[dict[str, Any]], RenderedSection]
 
 
-# Renderers self-register at import time; compose.py walks this in
-# insertion order so section ordering is stable.
+# Renderers self-register at import time; walked in insertion order.
 REGISTRY: list[tuple[str, RendererFn]] = []
 
 
@@ -92,7 +91,7 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
     return _wrap
 
 
-# Small markdown helpers — kept here so individual renderers stay terse.
+# Small markdown helpers.
 def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
     """Render a GitHub-flavored markdown table; empty rows yield ``""``.
 

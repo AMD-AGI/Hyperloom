@@ -87,7 +87,7 @@ def test_render_report_missing_values_render_dash():
     )
     kw["exec_summary"]["top_bottleneck_category"] = ""
     md = am.render_report(**kw)
-    # no model -> plain title (no em-dash suffix)
+    # no model -> plain title
     assert md.splitlines()[0] == "# Performance Analysis Report"
     assert f"| Total GPU Time | {am.DASH} ms |" in md
     assert f"| GPU idle | {am.DASH} | - |" in md
@@ -104,9 +104,9 @@ def test_extra_sections_appended_under_divider():
     assert md.index("## Top Hot Kernels") < md.index("## Route Extra")
 
 
-# ── cross-route consistency: identical canonical spine ───────────────────────
+# cross-route consistency: identical canonical spine
 
-# The section headings + table-header rows both routes MUST emit identically.
+# Section headings + table-header rows both routes must emit identically.
 _SHARED_SPINE = (
     "# Performance Analysis Report",
     "> Generated via ",
@@ -148,22 +148,19 @@ def test_both_routes_share_canonical_spine(tmp_path):
     # route ids differ in the provenance line, titles match format
     assert "route=bypass" in bypass_md.replace("HYPERLOOM_TRACE_ANALYSIS_ROUTE=", "route=")
     assert "route=deterministic" in det_md.replace("HYPERLOOM_TRACE_ANALYSIS_ROUTE=", "route=")
-    # bypass carries its richer extras under the divider; deterministic does not
+    # bypass carries extras under the divider; deterministic does not
     assert "Additional route-specific detail below" in bypass_md
     assert "Additional route-specific detail below" not in det_md
 
 
 def test_category_vocabulary_canonical_and_consistent(tmp_path):
-    # Category display uses ONE canonical vocabulary on both routes: no raw
-    # lowercase leaks (e.g. "gemm"), and the shared spine before the bypass
-    # divider carries canonical TitleCase labels.
+    # Category display uses one canonical vocabulary on both routes.
     det_md = _deterministic_md(tmp_path)
     # deterministic fed raw tracelens_category "gemm" -> must render canonical
     assert "| GEMM |" in det_md
     assert "| gemm |" not in det_md
     assert "### P0: GEMM kernels" in det_md
-    # bypass Top Hot Kernels categories are canonical TitleCase too (fixture is
-    # SDPA + GEMM); "Others" would have collapsed to "Other" had it appeared.
+    # bypass Top Hot Kernels categories are canonical TitleCase too.
     bypass_spine = _bypass_md().split("Additional route-specific detail below")[0]
     assert "| Others |" not in bypass_spine
     assert "| GEMM |" in bypass_spine and "| SDPA |" in bypass_spine

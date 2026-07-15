@@ -2,17 +2,12 @@
 
 """Base class for per-phase handler collaborators.
 
-Each phase's coordinator methods are extracted into a ``PhaseHandler`` subclass
-that holds a back-reference to its owning ``Coordinator`` and delegates every
-attribute it does not define itself back to that coordinator via ``__getattr__``
-(the ``IntentRouter``/``ResultRecorder`` pattern). Method bodies keep using
-``self.shared_state`` / ``self.bus`` / sibling ``self._foo`` calls, which resolve
-onto the coordinator (and, for methods now owned by other collaborators, onward
-via the coordinator's own ``__getattr__`` delegation).
-
-State rebinds (``self.<attr> = ...``) in the extracted bodies are rewritten to
-``self._coord.<attr> = ...`` so they land on the coordinator, not the (stateless)
-handler.
+Each phase's coordinator methods live in a ``PhaseHandler`` subclass that holds
+a back-reference to its owning ``Coordinator`` and delegates every attribute it
+does not define itself back to that coordinator via ``__getattr__``. Method
+bodies keep using ``self.shared_state`` / ``self.bus`` / sibling ``self._foo``
+calls, which resolve onto the coordinator. State rebinds land on the coordinator
+via ``self._coord.<attr> = ...``.
 """
 
 from __future__ import annotations

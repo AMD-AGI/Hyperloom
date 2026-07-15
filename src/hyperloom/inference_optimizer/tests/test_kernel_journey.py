@@ -144,7 +144,7 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
 
 
 def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None:
-    # Same kernel/backend, two different runs -> two distinct attempts.
+    # Same kernel/backend, two runs -> two distinct attempts.
     for run in ("r1", "r2"):
         instrument.record_kernel_backend_result(
             tmp_path,
@@ -162,8 +162,7 @@ def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None
 
 
 def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> None:
-    # Backend failed before running any attempt (empty attempts + failed status)
-    # -> a synthetic FAILED marker so the failure is visible in kernel_journey.
+    # Empty attempts + failed status -> a synthetic FAILED marker in kernel_journey.
     instrument.record_kernel_backend_result(
         tmp_path,
         {
@@ -189,9 +188,8 @@ def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> N
 
 
 def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
-    # kernel-agent emits elapsed_s / created_at / error_type and keeps the
-    # achieved speedup at the kernel level in verification (best attempt). The
-    # recorder must map those onto the journey attempt + entry.
+    # The recorder maps kernel-agent's elapsed_s / created_at / error_type and
+    # the kernel-level best speedup onto the journey attempt + entry.
     instrument.record_kernel_backend_result(
         tmp_path,
         {
@@ -221,16 +219,14 @@ def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
     a1, a2 = entry["backend_attempts"]
     assert a1["duration_sec"] == 87.5
     assert a1["ts"] == "2026-06-12T00:00:00Z"
-    # kernel-level best speedup stamped onto the adopted attempt.
     assert a1["micro_speedup"] == 1.42
     assert a2["error_class"] == "timeout"
-    # Entry exposes the best achieved speedup for the e2e correlation.
     assert entry["micro_speedup"] == 1.42
 
 
 def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     # Discovery + backend recording feed the top-level versions map (one object
-    # per tool, keyed by tool name), and no longer inline `tool` per element.
+    # per tool, keyed by tool name).
     instrument.record_kernel_discovery(
         tmp_path,
         source="tracelens",
@@ -253,15 +249,14 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     assert isinstance(versions, dict)
     assert set(versions) >= {"tracelens", "geak"}
     assert versions["geak"]["tool"] == "geak"
-    # Inline tool metadata is gone from the per-element shapes.
+    # No inline tool metadata in the per-element shapes.
     assert "tool" not in out["kernel_journey"]["discovery_runs"][0]
     assert "tool" not in out["kernel_journey"]["kernels"][0]["backend_attempts"][0]
 
 
 def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
-    # forge is its own backend: a forge attempt keeps
-    # backend="forge" in the journey and mints a distinct versions["forge"]
-    # provenance entry (via _TOOL_PROVENANCE), so A8b can group by forge version.
+    # A forge attempt keeps backend="forge" in the journey and mints a distinct
+    # versions["forge"] provenance entry.
     sha = _init_git_repo(tmp_path)
     instrument.record_kernel_discovery(
         tmp_path,
@@ -286,10 +281,8 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
         },
     )
     out = assemble_parts(tmp_path)
-    # The attempt keeps its own backend label in the journey.
     atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert atts[0]["backend"] == "forge"
-    # Distinct provenance entry.
     versions = out["versions"]
     assert versions["forge"]["tool"] == "forge"
     assert versions["forge"]["version"] == sha
@@ -298,9 +291,8 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
 def test_geak_provenance_resolves_geak_root_env_without_explicit_root(
     tmp_path: Path, monkeypatch
 ) -> None:
-    # No producer-supplied root: the e2e optimizer component ``geak`` must fall
-    # back to $GEAK_ROOT (the GEAK e2e checkout), so versions["geak"] records
-    # that repo's SHA.
+    # With no producer-supplied root, ``geak`` falls back to $GEAK_ROOT so
+    # versions["geak"] records that repo's SHA.
     geak_root = tmp_path / "GEAK"
     geak_root.mkdir()
     geak_sha = _init_git_repo(geak_root)
@@ -328,9 +320,8 @@ def test_discovery_run_carries_duration(tmp_path: Path) -> None:
 
 
 def test_bypass_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
-    # The deterministic (no-LLM) route surfaces as source="bypass" for the
-    # dashboard, but it runs the same TraceLens toolchain -> version provenance
-    # must stay under "tracelens" and NOT mint an empty versions["bypass"].
+    # The bypass route runs the same TraceLens toolchain, so version provenance
+    # stays under "tracelens" and mints no versions["bypass"].
     instrument.record_kernel_discovery(
         tmp_path,
         source="bypass",
@@ -353,8 +344,7 @@ def test_bypass_discovery_decouples_source_from_version_tool(tmp_path: Path) -> 
 
 
 def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
-    # Back-compat: callers that omit ``tool`` keep version provenance keyed by
-    # ``source`` (the historical behavior for the tracelens route).
+    # Callers that omit ``tool`` keep version provenance keyed by ``source``.
     instrument.record_kernel_discovery(
         tmp_path,
         source="tracelens",
@@ -368,15 +358,14 @@ def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
 
 def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     sha = _init_git_repo(tmp_path)
-    # geak -> git short SHA (NOT pip mini-swe-agent); commit == version.
+    # geak -> git short SHA; commit == version.
     meta = instrument._tool_metadata("geak", root=str(tmp_path))
     assert meta["commit"] == sha
     assert meta["version"] == sha
     # tracelens -> git describe (--always falls back to the short sha here).
     meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
-    # forge -> git short SHA (own backend, $FORGE_PATH-rooted); same strategy
-    # as geak so a real session mints a populated versions["forge"].
+    # forge -> git short SHA (own backend); same strategy as geak.
     meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
     assert meta_forge["commit"] == sha
     assert meta_forge["version"] == sha
@@ -390,7 +379,7 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
 
 
 def test_tool_version_probe_cmd_and_dist() -> None:
-    # CLI strategy: python3 --version is always available in CI.
+    # CLI strategy: python3 --version.
     assert (
         instrument._probe_tool_version(
             ("cmd", ("python3", "--version")),
@@ -399,7 +388,7 @@ def test_tool_version_probe_cmd_and_dist() -> None:
         .lower()
         .startswith("python")
     )
-    # dist strategy resolves an installed package and rejects bogus 0.0.0.
+    # dist strategy resolves an installed package and rejects a bogus name.
     assert instrument._dist_version(("pytest",))
     assert instrument._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
 
@@ -442,7 +431,7 @@ def test_attach_kernel_roofline_enriches_journey() -> None:
     entry = kernel_journey["kernels"][0]
     assert entry["roofline"]["arithmetic_intensity"] == 3.5
     assert entry["roofline"]["rocprof_roofline"] == {"foo": "bar"}
-    # Header + discovery numeric fields backfilled from roofline.
+    # Header + discovery fields backfilled from roofline.
     assert entry["bound_type"] == "memory"
     assert entry["discovery"]["bound_type"] == "memory"
     assert entry["discovery"]["arithmetic_intensity"] == 3.5
@@ -463,14 +452,13 @@ def test_merge_phase_timeline_unit_keeps_collector_and_dedups() -> None:
         },
     ]
     fragment = [
-        # Same attempt as the collector baseline row -> must dedupe (no dup).
+        # Same attempt as the collector baseline row -> must dedupe.
         {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "task_id": "t1", "decision": "promoted"},
         # An audit row the on-disk state lost -> must be appended.
         {"action": "explore", "ts": "2026-06-12T00:00:03Z", "task_id": "t2", "decision": "promoted"},
     ]
     merged = _merge_phase_timeline(fragment, collector)
     actions = [e["action"] for e in merged]
-    # Collector's journal/kernel lanes preserved + the missing audit row added.
     assert actions == ["baseline", "kernel_opt", "explore"]
     # Sorted by ts and no duplicate baseline event.
     assert sum(1 for e in merged if e["action"] == "baseline") == 1
@@ -479,9 +467,8 @@ def test_merge_phase_timeline_unit_keeps_collector_and_dedups() -> None:
 def test_build_phase_timeline_merges_journal_and_kernel_lanes(
     tmp_path: Path,
 ) -> None:
-    # Regression: a recorder phase_timeline fragment must NOT erase the
-    # optimization_journal KEEP/REVERT or the kernel_opt/integrate lanes that
-    # only the collector folds in (the fragment carries audit actions only).
+    # A recorder phase_timeline fragment must NOT erase the optimization_journal
+    # KEEP/REVERT or the kernel_opt/integrate lanes the collector folds in.
     import json
 
     from hyperloom.inference_optimizer.breakdown import exporter
@@ -534,7 +521,7 @@ def test_build_phase_timeline_merges_journal_and_kernel_lanes(
         ),
         encoding="utf-8",
     )
-    # Record an audit-action fragment -> triggers the v3 assembled/merge path.
+    # An audit-action fragment triggers the assembled/merge path.
     instrument.record_phase_event(
         tmp_path,
         action="baseline",
@@ -544,7 +531,6 @@ def test_build_phase_timeline_merges_journal_and_kernel_lanes(
     out = exporter.build(tmp_path)
     timeline = out["phase_timeline"]
     actions = {e.get("action") for e in timeline}
-    # Journal KEEP/REVERT + both kernel lanes survived the fragment merge.
     assert "baseline" in actions
     assert "explore" in actions
     assert "kernel_opt" in actions
@@ -552,5 +538,5 @@ def test_build_phase_timeline_merges_journal_and_kernel_lanes(
     decisions = {(e.get("action"), e.get("decision")) for e in timeline}
     assert ("explore", "REVERT") in decisions
     assert ("integrate", "KEEP") in decisions
-    # action_timeline aliases phase_timeline (same cascade source).
+    # action_timeline aliases phase_timeline.
     assert out["action_timeline"] == timeline

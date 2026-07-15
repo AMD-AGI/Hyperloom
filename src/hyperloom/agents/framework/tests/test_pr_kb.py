@@ -143,7 +143,7 @@ def test_build_client_from_env_none_when_unset(monkeypatch):
     assert build_gbrain_page_client_from_env() is None
 
 
-# --- P2: discovery source ---------------------------------------------------
+# --- discovery source ---------------------------------------------------
 
 from hyperloom.agents.framework import sources  # noqa: E402
 from hyperloom.agents.framework.models import Candidate, ExploreRequest  # noqa: E402
@@ -208,8 +208,7 @@ def test_enumerate_pr_kb_index_union_query(monkeypatch):
 
 
 def test_enumerate_pr_kb_list_pages_fallback(monkeypatch):
-    # No index page + query surfaces no pr-kb-meta hits -> list_pages fallback,
-    # client-side filtered to this repo's meta prefix.
+    # No index page + no meta hits -> list_pages fallback filtered to this repo's meta prefix.
     monkeypatch.setenv("PR_KB_ENABLE", "1")
     listed = [
         {"slug": "pr-kb-files/sgl-project-sglang/pr/29881"},

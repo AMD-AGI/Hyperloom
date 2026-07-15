@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.sources.primus_cortex. Hermetic - monkeypatches urllib.request.urlopen to return canned payloads; no real HTTP traffic."""
+"""Tests for framework_agent.sources.primus_cortex. Hermetic - no real HTTP."""
 
 from __future__ import annotations
 
@@ -35,13 +35,10 @@ class _FakeResp:
 def _install_urlopen(monkeypatch, handler) -> None:
     """Replace urllib.request.urlopen used by primus_cortex with handler."""
 
-    def fake(req, timeout):  # noqa: ARG001 - signature mirrors urlopen
+    def fake(req, timeout):  # noqa: ARG001
         return handler(req)
 
     monkeypatch.setattr(pc.urllib.request, "urlopen", fake)
-
-
-# Shared helpers ---------------------------------------------------------
 
 
 def test_repo_slug_parses_https_ssh_and_git_suffix() -> None:
@@ -63,9 +60,6 @@ def test_repo_slug_rejects_github_substring_in_path() -> None:
         _repo_slug("https://evil.com/github.com/owner/repo.git")
     with pytest.raises(ValueError):
         _repo_slug("https://github.com.evil.com/owner/repo.git")
-
-
-# list_perf_prs ----------------------------------------------------------
 
 
 def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
@@ -127,9 +121,6 @@ def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
         )
 
 
-# pr_patches -------------------------------------------------------------
-
-
 def test_pr_patches_renders_unified_diff_from_json(monkeypatch) -> None:
     """pr_patches converts primus-cortex JSON array into a unified diff stream."""
     payload = [
@@ -159,9 +150,7 @@ def test_pr_patches_renders_unified_diff_from_json(monkeypatch) -> None:
     assert "--- a/a/x.py" in text
     assert "+++ b/a/x.py" in text
     assert "+new" in text
-    # added file gets /dev/null as the old side
     assert "--- /dev/null" in text
-    # deleted file gets /dev/null as the new side
     assert "+++ /dev/null" in text
 
 
@@ -170,9 +159,6 @@ def test_pr_patches_handles_empty_list(monkeypatch) -> None:
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"[]"))
     text = pc.pr_patches("o/r", 1, base_url="http://x")
     assert text == ""
-
-
-# pr_files / pr_get ------------------------------------------------------
 
 
 def test_pr_files_extracts_list(monkeypatch) -> None:

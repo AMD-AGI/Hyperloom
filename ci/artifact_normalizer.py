@@ -95,9 +95,6 @@ def _first_of(data: dict[str, Any], *keys: str) -> Any | None:
 def _first_nested(data: dict[str, Any], *paths: str) -> Any | None:
     """Return the first non-None value found among dotted paths.
 
-    Provides compatibility across the several flat and nested ci_metrics
-    schemas agents have emitted.
-
     Args:
         data: The mapping to traverse.
         *paths: Dotted key paths, probed in order.
@@ -201,7 +198,6 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
     data = data or {}
     baseline = _first_nested(
         data,
-        # Flat canonical / prior CI schema.
         "baseline_throughput",
         "tok_per_gpu_baseline",
         "baseline_output_tput_per_gpu",
@@ -222,7 +218,6 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "best.matched_n_baseline_tok_s_per_gpu",
         "best.matched_n_baseline_tok_s_at_192p",
         "best.matched_n_baseline_output_tok_s",
-        # Total throughput fallbacks, used only when no per-GPU field exists.
         "baseline.output_throughput_tok_s",
         "baseline.output_tok_per_s",
         "baseline.output_tok_s",
@@ -232,7 +227,6 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
     )
     optimized = _first_nested(
         data,
-        # Flat canonical / prior CI schema.
         "optimized_throughput",
         "tok_per_gpu_optimized",
         "optimized_output_tput_per_gpu",
@@ -241,7 +235,6 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "best_throughput_tok_per_s_per_gpu",
         "best_output_tput_tok_s_per_gpu",
         "best_output_throughput_tok_s_per_gpu",
-        # Nested best schemas.
         "best.output_throughput_per_gpu",
         "best.output_tok_per_s_per_gpu",
         "best.output_tok_s_per_gpu",
@@ -252,7 +245,6 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "best.output_throughput_tok_s_at_192p",
         "best.output_tok_s_at_192p",
         "best.output_tput_tok_s_at_192p",
-        # Total throughput fallbacks.
         "best.output_throughput_tok_s",
         "best.output_tok_per_s",
         "best.output_tok_s",
@@ -278,7 +270,7 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "improvement.output_tok_s_pct",
         "improvement.output_tps_pct",
     )
-    # Some agents report speedup as a multiplier (1.10x); convert to percent.
+    # Convert multiplier-style speedup (1.10x) to percent.
     ratio_gain = _first_nested(
         data,
         "best.speedup_vs_baseline",

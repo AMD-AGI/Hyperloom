@@ -27,10 +27,8 @@ from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _list_jsonl, 
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
-    """Recipes persisted before the framework->framework_name rename store the
-    serving framework under the legacy ``framework`` key. ``from_dict`` must
-    still hydrate ``framework_name`` from it and must not leak the legacy key
-    into ``extras``."""
+    """``from_dict`` must hydrate ``framework_name`` from the legacy ``framework``
+    key and must not leak the legacy key into ``extras``."""
     legacy = {
         "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
         "model": "m",
@@ -52,14 +50,12 @@ def test_from_dict_prefers_new_framework_name_over_legacy() -> None:
 
 def test_matches_labels_matches_legacy_framework_payload() -> None:
     """A search filtered by ``framework_name`` must still match recipe rows
-    persisted on disk with the legacy ``framework`` key (search reads raw JSON
-    without normalizing through ``Recipe.from_dict``)."""
+    persisted with the legacy ``framework`` key."""
     legacy_payload = {"model": "m", "hardware": "mi300x", "framework": "sglang"}
     assert _matches_labels(legacy_payload, {"framework_name": "sglang"}) is True
     assert _matches_labels(legacy_payload, {"framework_name": "vllm"}) is False
 
 
-# canonical_id <-> path components
 def _cid(
     *,
     model: str = "deepseek-r1",
@@ -88,7 +84,7 @@ def test_cid_to_path_components_roundtrip() -> None:
 
 
 def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
-    """Pre-Commit-1 4-segment ids like ``inference:m:fw:hw`` must NOT be accepted (would shadow real recipes)."""
+    """4-segment ids like ``inference:m:fw:hw`` must NOT be accepted."""
     with pytest.raises(InvalidCanonicalIdError):
         cid_to_path_components("inference:m:fw:hw")
 
@@ -139,7 +135,6 @@ def test_canonical_id_for_path_rejects_unexpected_depth(tmp_path: Path) -> None:
     assert "expected" in ei.value.reason
 
 
-# put_recipe — happy path + history archival
 def test_put_recipe_first_call_creates_live_at_version_1(
     tmp_path: Path,
 ) -> None:
@@ -160,14 +155,12 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == 1
-    # Top-level arbor identity fields stamped from put_recipe args.
     assert live["model"] == "deepseek-r1"
     assert live["hardware"] == "mi300x"
-    # arbor-style payload fields at the top level.
     assert live["best_config"] == {"tp": "8"}
     assert live["best_throughput"] == 24300.5
     assert live["created_at"] == live["updated_at"]
-    # Live row sits at the documented 7-level depth.
+    # Live row sits at the 7-level depth.
     rel = (
         tmp_path
         / "deepseek-r1"
@@ -202,7 +195,6 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     assert archived is not None
     assert archived["version"] == 1
     assert archived["best_throughput"] == 1000.0
-    # Live row carries the new throughput and the bumped version.
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == 2
@@ -219,7 +211,7 @@ def test_put_recipe_preserves_created_at_across_updates(
     first_live = store.get_recipe(canonical_id=cid)
     assert first_live is not None
     created_first = first_live["created_at"]
-    # Force at least one microsecond gap so the timestamps differ.
+    # Force a gap so the timestamps differ.
     import time
 
     time.sleep(0.001)
@@ -242,7 +234,6 @@ def test_put_recipe_rejects_malformed_canonical_id(tmp_path: Path) -> None:
         store.put_recipe(canonical_id="inference:bogus")
 
 
-# get_recipe — live + ?version=N
 def test_get_recipe_returns_none_for_unknown_cid(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     assert store.get_recipe(canonical_id=_cid(model="never-seen")) is None
@@ -282,9 +273,8 @@ def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
 
-# search
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
-    """Create three recipes spanning different identity/metrics, keyed by short alias."""
+    """Create three recipes spanning different identity/metrics, keyed by alias."""
     cid_a = recipe_canonical_id(
         model="m-a",
         hardware="mi300x",
@@ -397,7 +387,7 @@ def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
     """A row without the metric key cannot satisfy the filter and is excluded."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="no-tput")
-    # ``best_throughput`` defaults to 0.0; a high min trips the "missing key" path.
+    # ``best_throughput`` defaults to 0.0; a high min trips the missing-key path.
     store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
     rows = store.search(metric_filters={"throughput": {"min": 100}})
     assert rows == []
@@ -458,7 +448,6 @@ def test_search_limit_is_clamped_to_1_to_1000(tmp_path: Path) -> None:
     assert len(rows) == 2
 
 
-# attempts
 def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -487,7 +476,6 @@ def test_append_attempt_does_not_require_parent_recipe(tmp_path: Path) -> None:
         outcome="kept",
     )
     assert out["id"] == 1
-    # No recipe.json was created — attempts dir is independent.
     assert store.get_recipe(canonical_id=cid) is None
 
 
@@ -505,7 +493,6 @@ def test_append_attempt_id_is_monotonic_per_cid(tmp_path: Path) -> None:
     assert ids == [1, 2, 3]
 
 
-# Concurrency
 def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     tmp_path: Path,
 ) -> None:
@@ -549,7 +536,6 @@ def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
     assert sorted(ids) == list(range(1, n + 1))
 
 
-# Defensive: malformed on-disk content
 def test_search_skips_directories_with_corrupt_recipe_json(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -600,7 +586,7 @@ def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
-    # Inject a recipe.json at depth 3 (intentionally wrong).
+    # Inject a recipe.json at depth 3 (wrong depth).
     stray = tmp_path / "model" / "hw" / "fw" / RECIPE_FILENAME
     stray.parent.mkdir(parents=True)
     stray.write_text(json.dumps({"canonical_id": "stray", "version": 1}))
@@ -611,15 +597,14 @@ def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
 
 
 def test_construction_does_not_create_root(tmp_path: Path) -> None:
-    """Construction is cheap: a degraded run that never touches the KB
-    must not create any directory on disk."""
+    """A run that never touches the KB must not create any directory on disk."""
     root = tmp_path / "kb-never-used"
     LocalRecipeStore(root=root)
     assert not root.exists()
 
 
 def test_str_root_accepted(tmp_path: Path) -> None:
-    """``LocalRecipeStore(root=str(...))`` still works (defensive coercion in __post_init__)."""
+    """``LocalRecipeStore(root=str(...))`` still works via coercion in __post_init__."""
     store = LocalRecipeStore(root=str(tmp_path))
     cid = _cid(model="m-x")
     store.put_recipe(canonical_id=cid)
@@ -638,8 +623,8 @@ def test_recipe_payload_carries_canonical_id_and_version(tmp_path: Path) -> None
 
 
 def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
-    """``history/`` is the only directory that may sit below the
-    7-level recipe dir; the walker MUST NOT recurse into it."""
+    """``history/`` is the only directory that may sit below the 7-level recipe
+    dir; the walker MUST NOT recurse into it."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)

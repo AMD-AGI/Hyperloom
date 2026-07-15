@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from .symptom import Symptom, SymptomSeverity
 
 
-# "GEAK budget killed the run" markers in report_text (matched case-insensitive).
+# GEAK budget-kill markers in report_text (matched case-insensitive).
 _GEAK_SIGTERM_MARKERS: tuple[str, ...] = (
     "sigterm",
     "signal 15",
@@ -70,9 +70,7 @@ class RayPendingDetector:
         """
         self._config = config or KernelPipelineConfig()
         self._state_view = state_view
-        # Disk-backed counter — see GpuLeakDetector for the same
-        # reasoning. Without this, F1 (≥3 consecutive ticks) cannot
-        # fire under the subprocess-per-tick transport.
+        # Disk-backed counter so the multi-tick threshold survives ticks.
         loaded = state_view.load() if state_view is not None else {}
         try:
             self._consecutive_hits: int = max(0, int(loaded.get("consecutive_hits", 0)))
@@ -119,8 +117,7 @@ class RayPendingDetector:
             self._persist()
             return []
         if not ray_info.get("healthy"):
-            # Ray head dead is its own signal (A6); we don't pile
-            # pending-starvation on top.
+            # Ray head dead is its own signal; don't pile on.
             self._consecutive_hits = 0
             self._persist()
             return []
@@ -265,7 +262,7 @@ def _kernel_opt_no_progress_symptoms(
     if not isinstance(attempts, list) and not isinstance(integrate, list):
         return []
 
-    # Roll up per kernel from oob_attempts + recent_integrate; ``has_keep`` only on a positive speedup OR a KEEP decision.
+    # Roll up per kernel; ``has_keep`` only on a positive speedup OR a KEEP decision.
     rollups: dict[str, dict[str, Any]] = {}
     if isinstance(attempts, list):
         for entry in attempts:
