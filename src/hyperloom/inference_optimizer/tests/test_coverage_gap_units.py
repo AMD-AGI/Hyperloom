@@ -431,6 +431,19 @@ def _restart_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+def test_resolve_pd_node_counts_infers_from_pod_lists() -> None:
+    """PD node counts fall back to discovered pod-list lengths when CLI is unset."""
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    args = argparse.Namespace(pd_prefill_nodes=0, pd_decode_nodes=0)
+    state = {"prefill_pod_ips": ["10.0.1.1", "10.0.1.2"], "decode_pod_ips": ["10.0.2.1"]}
+    assert inf._resolve_pd_node_counts(args, state) == (2, 1)
+    assert inf._resolve_pd_node_counts(
+        argparse.Namespace(pd_prefill_nodes=3, pd_decode_nodes=0),
+        state,
+    ) == (3, 1)
+
+
 def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
@@ -481,6 +494,16 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     ) == 0
     assert [call[0] for call in fanout_calls[-2:]] == ["restart-prefill", "restart-decode"]
     assert saved[-1]["last_restart_pd_decode_tp"] == 4
+    assert saved[-1]["last_restart_pd_prefill_nodes"] == 1
+    assert saved[-1]["last_restart_pd_decode_nodes"] == 1
+
+    # CLI omits pd_*_nodes (0): infer from pod lists and persist inferred counts.
+    monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(pd_state))
+    assert inf._infera_restart_server(_restart_args()) == 0
+    assert saved[-1]["pd_prefill_nodes"] == 1
+    assert saved[-1]["pd_decode_nodes"] == 1
+    assert saved[-1]["last_restart_pd_prefill_nodes"] == 1
+    assert saved[-1]["last_restart_pd_decode_nodes"] == 1
 
     pd_state["framework"] = "vllm"
     with pytest.raises(RuntimeError, match="sglang-only"):
