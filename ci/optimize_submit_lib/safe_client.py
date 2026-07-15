@@ -329,6 +329,19 @@ class SafeOptimizeClient:
             body["oobPath"] = oob_path
         if tracelens_root:
             body["tracelensRoot"] = tracelens_root
+        # Long-run tuning: when the optimizer budget is at least 24h, ask the agent
+        # to enable phase interleaving + cyclic phases so the extra wall-clock is
+        # spent re-tuning in cycles instead of stalling after the first pass.
+        # Injected as shell exports (same prelude mechanism as HYPERLOOM_SOURCE_*).
+        if max_hours and max_hours >= 24:
+            longrun_hint = (
+                "LONG-RUN TUNING (optimizer budget >= 24h) — also run these exports "
+                "in the shell prelude before launching the optimizer:\n"
+                "  export INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1\n"
+                "  export INFERENCE_OPTIMIZER_CYCLIC_PHASES=1\n"
+                "  export INFERENCE_OPTIMIZER_CYCLE_HOURS=16\n\n"
+            )
+            prompt_prefix = longrun_hint + (prompt_prefix or "")
         # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the SaFE side.
         if prompt_prefix:
             body["promptPrefix"] = prompt_prefix
