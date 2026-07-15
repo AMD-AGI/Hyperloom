@@ -287,6 +287,37 @@ def test_harvest_research_scout_empty_and_populated(coord: Coordinator) -> None:
     )
 
 
+def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
+    """LLM-authored competitor numbers must never be persisted as a consumable
+    competitor target.
+
+    Previously the scout could emit ``competitor_target`` numbers that were
+    written to ``competitor_target.json`` and then consumed by the advisory
+    gap block, masquerading as InferenceX-measured data. The scout is now a
+    text-hints-only collector, so no competitor target must be persisted.
+    """
+    from hyperloom.inference_optimizer.session import session_paths
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    coord._harvest_research_scout(
+        {
+            "research": {
+                "hints": [{"what": "try mtp", "source": "https://pr/1"}],
+                "competitor_target": {
+                    "gpu": "b200",
+                    "model": "m",
+                    "per_conc": [
+                        {"conc": 64, "tput_per_gpu": 999999.0, "source": "some blog"},
+                    ],
+                },
+            }
+        }
+    )
+
+    assert not session_paths.competitor_target_json(coord.session_dir).exists()
+    assert research_hints.load_competitor_target(coord.session_dir) is None
+
+
 # -- _maybe_checkpoint_orchestration ---------------------------------------
 @pytest.mark.asyncio
 async def test_maybe_checkpoint_orchestration_non_conversational(coord: Coordinator) -> None:
