@@ -17,7 +17,7 @@ generates a report with all proposed changes and expected performance improvemen
 automation enables developers to achieve significant performance improvements while maintaining code
 quality and reducing the manual effort traditionally required for GPU optimization.
 
-<p align="center"><img width="600" alt="Hyperloom optimization loop" src="docs/images/optimization-loop.svg" /></p>
+<p align="center"><img width="600" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
 
 Hyperloom combines:
 
@@ -25,8 +25,7 @@ Hyperloom combines:
   [Magpie](https://github.com/AMD-AGI/Magpie).
 - Kernel optimization through the
   [GEAK](https://github.com/AMD-AGI/GEAK) backend.
-- A validated optimization loop that writes reproducible artifacts and
-  `session_breakdown.json` for downstream consumers.
+- Agentic search space exploration through [Arbor](https://arxiv.org/abs/2606.12563), a tree-based cognition layer with dynamic agents, long-horizon campaigns, and self-evolving optimization guided by a curated knowledge base of hardware learnings, pitfalls, and prior campaign artifacts.
 
 
 ## Get Started
