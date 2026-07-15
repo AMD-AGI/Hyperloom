@@ -1137,8 +1137,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default="1,2,4,8,16,32,64,128",
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 1,2,4,8,16,32,64,128.",
+        default="256,128,64,32,16,8,4,2",
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 256,128,64,32,16,8,4,2 (high-to-low for single-server arm reuse).",
     )
     opt.add_argument(
         "--conc-sweep-timeout-sec",
