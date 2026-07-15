@@ -1,6 +1,6 @@
 # Hyperloom Remote Demo — Multi-Node Inference Optimization
 
-Welcome! This tutorial is a hands-on walkthrough for running **Hyperloom**
+This tutorial is a hands-on walkthrough for running **Hyperloom**
 in **Remote Mode** with `--nodes >= 2`: the optimizer benchmarks against a
 long-lived remote inference server, restarts it each tuning round, and attempts
 to improve SGLang throughput.
