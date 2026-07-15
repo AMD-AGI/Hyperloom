@@ -771,17 +771,17 @@ class KernelPhase(PhaseHandler):
         )
 
     def _geak_legacy_promote(self) -> bool:
-        """Whether current_best/stack were promoted up front (legacy path).
+        """Whether the GEAK win was already written before revalidation.
 
-        Rebench-first is the default (False): the headline is written from the
-        measured rebench. Only when a geak_e2e win already sits in the stack
-        (and geak_pending is not awaiting a rebench) do we stamp the legacy
-        same-harness watermark instead of re-promoting.
+        Older sessions promoted GEAK directly into ``current_best`` /
+        ``optimization_stack`` before the same-harness replay. Rebench-first
+        sessions instead carry a ``geak_pending`` candidate and should promote
+        from the measured replay result.
         """
-        pending = self.shared_state.geak_pending or {}
-        if str(pending.get("status") or "") == "awaiting_rebench":
+        if self.shared_state.geak_pending:
             return False
-        return self._geak_win_already_recorded()
+        current_best = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        return self._geak_win_already_recorded() or str(current_best.get("action") or "") == "geak_e2e"
 
     @staticmethod
     def _parse_geak_accepted_config(

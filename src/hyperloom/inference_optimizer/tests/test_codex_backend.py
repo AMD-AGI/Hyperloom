@@ -11,7 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.roles import CodexBackend
 from hyperloom.orchestrator.roles.base import BackendError
-from hyperloom.orchestrator.roles.codex import _extract_envelope
+from hyperloom.orchestrator.roles.codex import _extract_envelope, _extract_responses_output
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     NoIntentEmitted,
@@ -52,15 +52,71 @@ class FakeChat:
         self.completions = completions
 
 
+@dataclass
+class FakeUsageResp:
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class FakeResponsesResult:
+    output: list[Any] = field(default_factory=list)
+    usage: FakeUsageResp = field(default_factory=FakeUsageResp)
+    status: str = "completed"
+
+
+class FakeResponses:
+    """Fake OpenAI Responses API endpoint (``client.responses.create``)."""
+
+    def __init__(self, replies: list[str], citations: list[str] | None = None):
+        self._replies = list(replies)
+        self._citations = list(citations or [])
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, *, model, input, tools, **kwargs):  # noqa: A002 — mirror SDK kwarg name
+        self.calls.append({"model": model, "input": input, "tools": tools, "kwargs": kwargs})
+        text = self._replies.pop(0) if self._replies else ""
+        annotations = [{"type": "url_citation", "url": u} for u in self._citations]
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": annotations}],
+        }
+        return FakeResponsesResult(
+            output=[{"type": "reasoning", "content": []}, message],
+            usage=FakeUsageResp(input_tokens=11, output_tokens=7),
+        )
+
+
 class FakeOpenAIClient:
-    def __init__(self, replies: list[str]):
+    def __init__(
+        self,
+        replies: list[str],
+        responses_replies: list[str] | None = None,
+        citations: list[str] | None = None,
+    ):
         self.completions = FakeChatCompletions(replies)
         self.chat = FakeChat(self.completions)
+        self.responses = FakeResponses(responses_replies or [], citations=citations)
 
 
 def _make_backend(replies: list[str], model: str = "gpt-5.4") -> CodexBackend:
     client = FakeOpenAIClient(replies)
     return CodexBackend(model=model, client_factory=lambda: client)
+
+
+def _make_ws_backend(
+    responses_replies: list[str],
+    model: str = "gpt-5.5",
+    citations: list[str] | None = None,
+) -> CodexBackend:
+    client = FakeOpenAIClient([], responses_replies=responses_replies, citations=citations)
+    return CodexBackend(
+        model=model,
+        web_search=True,
+        web_search_context_size="medium",
+        client_factory=lambda: client,
+    )
 
 
 def test_extract_envelope_fenced_json():
@@ -221,3 +277,81 @@ def test_codex_falls_back_to_anthropic_token_when_no_openai_key(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     captured = _construct_real_codex_capturing_kwargs(monkeypatch)
     assert captured["api_key"] == "safe-key"
+
+
+# ---------------------------------------------------------------------------
+# Web search (Responses API) path
+
+
+def test_extract_responses_output_text_and_citations():
+    resp = {
+        "output": [
+            {"type": "reasoning", "content": []},
+            {"type": "web_search_call", "action": {"query": "x"}},
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "the answer",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://a.example"},
+                            {"type": "url_citation", "url": "https://b.example"},
+                        ],
+                    }
+                ],
+            },
+        ]
+    }
+    text, citations = _extract_responses_output(resp)
+    assert text == "the answer"
+    assert citations == ["https://a.example", "https://b.example"]
+
+
+def test_extract_responses_output_empty():
+    assert _extract_responses_output({"output": []}) == ("", [])
+    assert _extract_responses_output({}) == ("", [])
+
+
+@pytest.mark.asyncio
+async def test_web_search_uses_responses_api_and_parses_envelope():
+    reply = '```json\n{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}\n```'
+    b = _make_ws_backend([reply], citations=["https://github.com/vllm-project/vllm/releases"])
+    res = await b.run("find the latest vLLM version", system_prompt="you are a researcher")
+
+    # Went through the Responses API, NOT chat.completions.
+    assert len(b._client.responses.calls) == 1
+    assert len(b._client.completions.calls) == 0
+
+    # web_search tool wired with the configured context size; system prompt as instructions.
+    call = b._client.responses.calls[0]
+    assert call["tools"][0]["type"] == "web_search"
+    assert call["tools"][0]["search_context_size"] == "medium"
+    assert call["kwargs"]["instructions"] == "you are a researcher"
+    assert "find the latest vLLM version" in call["input"]
+    assert "OUTPUT FORMAT" in call["input"]
+
+    # Envelope parsed from output_text; usage mapped; citations recorded.
+    assert len(res.intents) == 1
+    assert res.intents[0].type == IntentType.SEND_MESSAGE
+    assert res.metadata["input_tokens"] == 11
+    assert res.metadata["output_tokens"] == 7
+    assert res.metadata["web_search_citations"] == ["https://github.com/vllm-project/vllm/releases"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_disabled_uses_chat_completions():
+    """Default (web_search off) still uses chat.completions — no Responses call."""
+    reply = '{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}'
+    b = _make_backend([reply])
+    assert b.web_search is False
+    await b.run("p")
+    assert len(b._client.completions.calls) == 1
+    assert len(b._client.responses.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_web_search_no_envelope_raises_no_intent_emitted():
+    b = _make_ws_backend(["I searched but have nothing structured to say."])
+    with pytest.raises(NoIntentEmitted):
+        await b.run("p")

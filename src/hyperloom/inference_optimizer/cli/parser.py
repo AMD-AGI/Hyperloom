@@ -536,10 +536,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "reference data point; when unset, the JSON carries a "
             "structured reason='no_target_gpu_configured' marker so the "
             "report still has a deterministic 'External baseline' "
-            "section. The data is REPORT-ONLY: it does not influence "
-            "Objective, scoring, or any agent prompt. Other dimensions "
-            "(model / framework / precision / ISL / OSL) are derived "
-            "from the corresponding CLI arguments."
+            "section. The reference is API-measured and never influences "
+            "the Objective, scoring, or any KEEP/REVERT gate; a matching "
+            "row is surfaced to the EXPLORE gap advisory as direction only. "
+            "Other dimensions (model / framework / precision / ISL / OSL) "
+            "are derived from the corresponding CLI arguments."
         ),
     )
     opt.add_argument("--max-ticks", type=int, default=None, help="Hard tick cap (None = unlimited; mostly for tests)")
@@ -1137,8 +1138,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default="1,2,4,8,16,32,64,128",
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 1,2,4,8,16,32,64,128.",
+        default="256,128,64,32,16,8,4,2",
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 256,128,64,32,16,8,4,2 (high-to-low for single-server arm reuse).",
     )
     opt.add_argument(
         "--conc-sweep-timeout-sec",

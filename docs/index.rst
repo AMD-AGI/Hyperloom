@@ -34,8 +34,7 @@ AMD GPUs.
 - **Workload understanding and profiling** — Submit your inference workload; the agent profiles it with
    TraceLens (trace collection using Magpie), capturing bottlenecks and roofline targets.
 - **Optimization loop** — The agent explores candidates one change at a time: **Think → Decide →
-   Implement → Benchmark**. In parallel, hot kernels are optimized asynchronously using Kernel-Forge and
-   GEAK.
+   Implement → Benchmark**. In parallel, hot kernels are optimized asynchronously using GEAK.
 - **Validated delivery** — Every change is correctness-gated before acceptance. When the loop exits, the
    runtime writes the final report, reproducible session artifacts, and `session_breakdown.json` for
    downstream delivery workflows.

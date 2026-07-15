@@ -141,7 +141,7 @@ def process_model(
             detected.raw_config,
             repo=repo_id,
             model_dir=os.path.join(
-                os.environ.get("CI_MODELS_DIR", "/wekafs/models"),
+                os.environ.get("CI_MODELS_DIR", "/mnt/shared/models"),
                 repo_id.replace("/", "-")),
             whitelist=model_compat.load_whitelist(),
             gpu_type=gpu_type,
@@ -212,9 +212,9 @@ def process_model(
         rec.status = "dry-run"
         return rec
 
-    # If prewarm already populated /wekafs/models/<slug>/, use local_path mode so
+    # If prewarm already populated the shared model cache, use local_path mode so
     # SaFE sets phase=Ready immediately without re-downloading.
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = os.environ.get("NFS_ROOT", "/mnt/shared")
     target_slug = repo_id.replace("/", "-")
     target_dir = f"{nfs_root}/models/{target_slug}"
     use_local_path = False
@@ -255,7 +255,7 @@ def process_model(
     else:
         if safe_model:
             log.info(
-                "[%s] existing model %s is %s — re-registering (prewarm should have populated /wekafs/models/ already)",
+                "[%s] existing model %s is %s — re-registering (prewarm should have populated the shared model cache already)",
                 repo_id,
                 safe_model.get("id"),
                 safe_model.get("phase"),
