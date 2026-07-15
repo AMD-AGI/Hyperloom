@@ -1403,6 +1403,19 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
     return max(60, value)
 
 
+def _forge_fusion_timeout_sec(payload: dict) -> int:
+    """Resolve the forge-fusion subprocess timeout in seconds."""
+    raw = payload.get("timeout") or payload.get("timeout_sec") or os.environ.get(
+        "FORGE_FUSION_TIMEOUT",
+        "",
+    )
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = 7200
+    return max(1, value)
+
+
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
@@ -2515,7 +2528,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     llm_model = str(
         payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    timeout = int(payload.get("timeout") or os.environ.get("FORGE_FUSION_TIMEOUT") or 7200)
+    timeout = _forge_fusion_timeout_sec(payload)
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)

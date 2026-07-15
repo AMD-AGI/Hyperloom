@@ -635,6 +635,50 @@ class TestForgeGemmHelperCoverage:
         assert input_payload["max_turns"] == 7
         assert input_payload["timeout"] == 123
 
+    def test_forge_fusion_timeout_invalid_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+
+        assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_invalid_timeout_env_uses_default(
+        self, tmp_path, monkeypatch
+    ):
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+        calls: list[int] = []
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            calls.append(timeout_sec)
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n"
+                + json.dumps(result)
+                + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+
+        assert result["status"] == "complete"
+        assert calls == [7200]
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
+            .read_text(encoding="utf-8")
+        )
+        assert input_payload["timeout"] == 7200
+
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
         state = SharedState(framework="sglang", model_path="/models/zaya")
