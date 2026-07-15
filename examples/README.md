@@ -1,7 +1,7 @@
 # Hyperloom Setup and Examples
 
 This README is the main entry point for setting up Hyperloom and launching the
-Qwen3 demo skills. The recommended customer path is a packaged install with
+model demo skills. The recommended customer path is a packaged install with
 `pip install --target`; the source-clone path is kept at the end for developers
 and manual debugging.
 
@@ -110,7 +110,7 @@ Requirements:
   SGLang or vLLM.
 
 In this scenario, `/hyperloom-setup` writes `.env` only and skips host setup. It
-does **not** start a container. The selected Qwen3 demo skill later starts the
+does **not** start a container. The selected demo skill later starts the
 container, runs setup inside it with `--install-framework none --yes`, installs
 runtime dependencies with `install.sh`, and launches the optimization.
 
@@ -156,7 +156,7 @@ skill's `install.sh`.
 extra needs sourcing. `PATH` and `LD_LIBRARY_PATH` are derived at launch from
 `ROCM_PATH`, `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`.
 
-## Run a Qwen3 Demo
+## Run a Demo
 
 When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
 is written in `baremetal + Docker` mode, the setup skill offers a model demo run
