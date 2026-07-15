@@ -54,6 +54,31 @@ def _materialize(src, out, **kw):
     return yaml.safe_load(res.read_text())["benchmark"]
 
 
+def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    src = tmp_path / "base.yaml"
+    _write(
+        src,
+        envs={
+            "EXTRA_SGLANG_ARGS": "--bad-base 1 --keep-base 2",
+            "SGLANG_REMOVE_ME": "1",
+        },
+    )
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        extra_server_args="--variant 4",
+        extra_envs={"SGLANG_REMOVE_ME": "override"},
+        remove_args="--bad-base",
+        unset_envs="SGLANG_REMOVE_ME",
+    )
+    envs = bench["envs"]
+    assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
+    assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
+    assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
+    assert envs["SGLANG_REMOVE_ME"] == "override"
+
+
 # ---- _visible_gpu_count ---------------------------------------------------
 def test_visible_gpu_count_override_valid(monkeypatch):
     _clear_env(monkeypatch)
