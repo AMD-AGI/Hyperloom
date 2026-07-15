@@ -231,11 +231,14 @@ def test_find_reference_rows_case_insensitive_hardware():
     assert len(out) == 1
 
 
-def test_find_reference_rows_precision_filter_and_fallback():
+def test_find_reference_rows_precision_is_hard_filter():
     rows = [_bench_row(precision="fp8"), _bench_row(precision="fp4")]
+    # Exact precision keeps only that precision.
     assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="fp4")) == 1
-    # unavailable precision degrades to "any" instead of dropping everything
-    assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="bf16")) == 2
+    # Unavailable precision drops everything (never substitutes another precision).
+    assert ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="bf16") == []
+    # Empty precision leaves the precision dimension unconstrained.
+    assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="")) == 2
 
 
 def test_find_reference_rows_excludes_disagg_and_multinode():

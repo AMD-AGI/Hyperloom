@@ -305,6 +305,29 @@ def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
     assert summary.best is None
 
 
+def test_analyze_precision_mismatch(tmp_path, monkeypatch):
+    """GPU + shape exist but only at a different precision → ``precision_mismatch``.
+    An fp4 run must never be compared against fp8 reference numbers."""
+    # _make_rows() has b300/1024/1024 rows at fp8 (and one fp4 row); ask for a
+    # precision InferenceX does not carry for this shape.
+    _patch_fetch_rows(monkeypatch, _make_rows())
+
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+        framework="vllm",
+        precision="bf16",
+        isl=1024,
+        osl=1024,
+    )
+    assert summary.status == "no_match"
+    assert summary.reason == "precision_mismatch"
+    assert summary.best is None
+
+
 def test_analyze_fetch_error(tmp_path, monkeypatch):
     """API fetch failure (``fetch_rows`` returns ``None``) → ``fetch_error``."""
     _patch_fetch_rows(monkeypatch, None)
