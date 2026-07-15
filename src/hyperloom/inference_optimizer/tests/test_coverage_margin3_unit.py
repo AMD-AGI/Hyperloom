@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from types import SimpleNamespace
 import urllib.error
 
 import pytest
@@ -206,3 +209,110 @@ def test_hf_missing_tokenizer_rate_limit_and_http_fallbacks(monkeypatch) -> None
 
     monkeypatch.setattr(model_compat.urllib.request, "urlopen", _server_error)
     assert model_compat.hf_missing_tokenizer("org/model", ["tok"]) is None
+
+
+def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    assert gpu_types._gpu_runner_type("MI325X") == "mi300x"
+    assert gpu_types._gpu_runner_type("mi355x") == "mi355x"
+
+    resolved, warnings = gpu_types._resolve_gpu_type("mi300x", "mi355x")
+    assert resolved == "mi355x"
+    assert "disagrees" in warnings[0]
+    assert gpu_types._resolve_gpu_type("mi300x", "") == ("mi300x", [])
+
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    assert gpu_types._resolve_amd_gpu_type("mi308x") == "mi308x"
+    assert gpu_types._resolve_amd_gpu_type("nvidia") is None
+
+    monkeypatch.setenv("GPU_TYPE", " MI325X ")
+    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
+    monkeypatch.setenv("GPU_TYPE", "unknown")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "mi355x")
+    assert gpu_types._resolve_amd_gpu_type() == "mi355x"
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "gfx000")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+
+def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    class _Completed:
+        stdout = "GPU[0] : Card series: AMD Instinct MI325X"
+
+    def _rocm_ok(cmd, capture_output, text, timeout):
+        assert cmd == ["rocm-smi", "--showproductname"]
+        assert capture_output is True
+        assert text is True
+        assert timeout == 5
+        return _Completed()
+
+    monkeypatch.setattr(subprocess, "run", _rocm_ok)
+    assert gpu_types._autodetect_gpu_type() == "mi325x"
+
+    def _rocm_missing(*_args, **_kwargs):
+        raise FileNotFoundError("rocm-smi")
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-")
+        )
+    )
+    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert gpu_types._autodetect_gpu_type() == "mi355x"
+
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
+    assert gpu_types._autodetect_gpu_type() is None
+
+
+def test_action_registry_names_all_and_lazy_load(tmp_path) -> None:
+    from hyperloom.orchestrator.actions.registry import ActionRegistry
+
+    meta_dir = tmp_path / "_meta"
+    meta_dir.mkdir()
+    (meta_dir / "_ignored.yaml").write_text("name: ignored\n", encoding="utf-8")
+    (meta_dir / "target_analysis.yaml").write_text(
+        "\n".join(
+            [
+                "name: target_analysis",
+                "family: prep",
+                "cost_minutes_p50: 0.1",
+                "cost_minutes_p75: 0.2",
+                "expected_gain_pct: [0, 0]",
+                "accuracy_risk: 0",
+                "crash_risk: 0",
+                "requires_lanes: []",
+                "allowed_tools: [Read]",
+                "side_effects: [writes_state]",
+                "pipeline_phase: prep",
+                "verdict_class: archival",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    reg = ActionRegistry(tmp_path)
+    assert reg.names() == ["target_analysis"]
+    assert [meta.name for meta in reg.all()] == ["target_analysis"]
+    meta = reg.get("target_analysis")
+    assert meta is not None
+    assert meta.description == "target_analysis"
+    assert reg.get("missing") is None
+
+
+def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
+    from hyperloom.orchestrator.state import kernel_decision_settings as settings
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
+    assert settings.resolve_kernel_opt_max_failures() == 2
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
+    assert settings.resolve_kernel_opt_max_failures() == 1
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
+    assert settings.resolve_kernel_opt_max_failures() == 2
