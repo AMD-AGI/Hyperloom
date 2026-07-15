@@ -23,7 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env import env_str
-from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
+from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
+    _clear_competitor_target,
+    analyze,
+)
 from ...loop.sub_agent_runner import RunnerContext
 
 
@@ -113,6 +116,30 @@ class TargetAnalysisExecutor:
         except Exception:  # noqa: BLE001
             return None
 
+    def _resolve_session_dir_for_cleanup(self, ctx: RunnerContext) -> Path | None:
+        """Best-effort session root for stale artefact cleanup when analyze cannot run.
+
+        Unlike :meth:`_resolve_session_dir`, the fallback from
+        ``paths.session_dir()`` is returned even when the directory does not
+        yet exist, so a pre-existing ``competitor_target.json`` from an older
+        run can still be removed.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` and ``extra``.
+
+        Returns:
+            The resolved session directory, or ``None`` when nothing resolves.
+        """
+        resolved = self._resolve_session_dir(ctx)
+        if resolved is not None:
+            return resolved
+        try:
+            from hyperloom.inference_optimizer.session.paths import session_dir as _sd
+
+            return _sd()
+        except Exception:  # noqa: BLE001
+            return None
+
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the external-baseline comparison and persist report artefacts.
 
@@ -134,6 +161,9 @@ class TargetAnalysisExecutor:
         params = dict(ctx.task.params or {})
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
+            cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)
+            if cleanup_dir is not None:
+                _clear_competitor_target(cleanup_dir)
             log.warning(
                 "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
             )
