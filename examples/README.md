@@ -159,13 +159,14 @@ extra needs sourcing. `PATH` and `LD_LIBRARY_PATH` are derived at launch from
 ## Run a Qwen3 Demo
 
 When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
-is written in `baremetal + Docker` mode, the setup skill offers a Qwen3-8B demo
-run and hands off to the matching demo skill. Pick a length:
+is written in `baremetal + Docker` mode, the setup skill offers a model demo run
+and hands off to the matching demo skill. Pick a length:
 
-- [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — short, no-kernel run; best for a first
-  end-to-end check.
-- [`8h`](hyperloom-qwen3-8b-8h/SKILL.md) — medium-length run.
-- [`24h`](hyperloom-qwen3-8b-24h/SKILL.md) — long-horizon cyclic run.
+- [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
+  for a first end-to-end check.
+- [`8h`](hyperloom-qwen3-8b-8h/SKILL.md) — Qwen3-30B-A3B, medium-length run.
+- [`24h`](hyperloom-qwen3-8b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
+  run.
 
 The demo reuses the values already in `.env`, so nothing is re-entered.
 
