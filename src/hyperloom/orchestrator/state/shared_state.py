@@ -956,6 +956,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
+        if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
+            filtered["specialist_patch_verdicts"] = {}
         # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
         _legacy_drop_fields = (
             "action_scores",
@@ -1902,8 +1904,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
-        if not hasattr(self, attempts_attr) or not hasattr(self, last_attr):
-            return None
         result = result or {}
         metric_key, metric_kind = _KEY_METRIC_MAP.get(
             action,

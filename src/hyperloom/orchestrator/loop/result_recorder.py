@@ -838,10 +838,7 @@ class ResultRecorder:
                         break
             out.append({
                 "kernel_id":     str(kid),
-                # source persisted under last_source_file; source_file is a legacy fallback.
-                "source_file":   str(
-                    e.get("last_source_file") or e.get("source_file") or ""
-                ),
+                "source_file":   str(e.get("last_source_file") or ""),
                 "artifact_path": str(e.get("last_artifact_path") or ""),
                 "micro_speedup": micro,
                 "decision":      "KEEP",
@@ -849,7 +846,7 @@ class ResultRecorder:
                 "e2e_tput":      e2e_tput,
                 "e2e_decision":  e2e_decision,
                 "integrated":    integrated,
-                "ts":            str(e.get("last_ts") or e.get("ts") or ""),
+                "ts":            str(e.get("last_ts") or ""),
             })
         return out
 
@@ -872,7 +869,7 @@ class ResultRecorder:
             cb_args = current_best.get("extra_server_args")
             if cb_args:
                 best_config["extra_server_args"] = str(cb_args)
-            for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
+            for key in ("extra_envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
         # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
