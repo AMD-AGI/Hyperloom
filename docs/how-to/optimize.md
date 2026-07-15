@@ -10,7 +10,7 @@ This topic assumes you have already completed installation. If you haven't:
 
 - **Hosted UI** — see [Quickstart — hosted UI](../install/quickstart.md). No
   local setup needed; launch directly from the browser.
-- **Bare-metal** — see [Bare-metal quickstart](../install/bare-metal.md), then
+- **Bare-metal** — see [Bare-metal quickstart](../install/setup.md), then
   return here to launch your first run.
 
 ## Launch from Cursor

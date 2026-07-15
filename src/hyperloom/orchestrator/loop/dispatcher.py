@@ -279,7 +279,7 @@ class DispatcherCollaborator:
                 )
                 # Explicit wall-clock budget: lane-tiered base ×
                 # ``macro_cycle`` amplification, hard-capped at 4h. macro_cycle
-                # is 0 for ≤24h bounded runs (``is_long_run`` gate), so those
+                # is 0 for <24h bounded runs (``is_long_run`` gate), so those
                 # always get the base value and never degrade.
                 extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
                     needs_gpu=needs_gpu,
@@ -439,8 +439,8 @@ class DispatcherCollaborator:
 
             budget_min = min(base × (macro_cycle + 1), 240)
 
-        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >24h
-        gate), so ≤24h bounded runs always get the base value (cpu 10 / gpu 60)
+        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >=24h
+        gate), so <24h bounded runs always get the base value (cpu 10 / gpu 60)
         and never degrade.
 
         Args:
