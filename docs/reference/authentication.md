@@ -163,17 +163,9 @@ credentials are present.
 These are *not* secrets. You normally do not hand-export
 `INFERENCEX_PATH` or `TRACELENS_ROOT` — `install.sh` and its chained
 kernel-agent installer clone and pin the open-source checkouts when missing.
-Before launching optimization, source the generated env file:
-
-```bash
-export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-# The standard install.sh writes runtime/kernel-agent.env.sh; the bare-metal
-# installer (install_baremetal.sh) writes a combined runtime/hyperloom.env.sh.
-# Source whichever your install produced.
-for _env in hyperloom.env.sh kernel-agent.env.sh; do
-  [ -f "$USER_DATA_PATH/runtime/$_env" ] && source "$USER_DATA_PATH/runtime/$_env"
-done
-```
+Runtime paths are persisted into `.env` by the installer; the CLI preflight
+loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
+`VIRTUAL_ENV` / `VLLM_VENV_ROOT` at launch, so no separate file needs sourcing.
 
 ### Workspace variables
 
@@ -195,11 +187,11 @@ explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for open-source deps (TraceLens, InferenceX, Magpie, GEAK). Writable `/opt` required unless overridden. |
-| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; `install.sh` clones it when unset. |
+| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for open-source deps (TraceLens, InferenceX, GEAK). Writable `/opt` required unless overridden. |
+| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; the inference_optimizer installer (`hyperloom/inference_optimizer/assets/install.sh`) clones it when unset. |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (open-source-only)                                   | Internal TraceLens extension (roofline gap, MI355+ MAF). Hyperloom never clones it — set only when you maintain a checkout. |
-| `MAGPIE_PATH`                | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/Magpie`                    | Magpie benchmark wrappers; installed by `install.sh` when missing.                                                  |
+| `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
 
 ```{note}
 `INFERENCE_OPTIMIZER_SESSION_DIR` is no longer read. `WORKSPACE_PATH` is
@@ -224,7 +216,7 @@ At preflight, the inference optimizer CLI:
 
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
-2. Re-run preflight (any `inference_optimizer` CLI command) or
+2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
    `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    configured upstream gateway.
@@ -240,7 +232,7 @@ you do not need to set any of the variables above by hand. The
 sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
 populates the path env from sandbox defaults, and runs install/preflight
 so downstream tools inherit the gateway URL and aliases. See
-[Quickstart — hosted UI](../install/quickstart.md).
+[Quickstart](../../examples/README.md).
 
 ---
 

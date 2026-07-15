@@ -86,7 +86,7 @@ Gap / keywords are auto-composed from SharedState (`framework`,
 `gpu_type`, `model_class`, `precision`).
 
 ```bash
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
     --model "$MODEL_PATH" \
     --framework sglang \
     --model-class dense \

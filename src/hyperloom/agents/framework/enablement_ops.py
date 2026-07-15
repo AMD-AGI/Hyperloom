@@ -8,7 +8,7 @@ Two halves of the enablement flow that both build on a
 * **Discovery** — given a failure signature, decide which repos to scout for an
   enabling PR (the serving framework plus the ROCm / HIP / aiter bridge repos)
   and rank candidate PR titles by enablement intent ("enable / support / add /
-  fix / port to ROCm"). See :func:`build_search_plan`,
+  fix / port to ROCm"). See :func:`build_search_plan`, :func:`rank_titles`,
   :func:`score_enablement_title`.
 * **Authoring** — turn a request + ranked candidates into the
   :class:`EnablementMandate` (allowed source roots + task description + patch
@@ -165,6 +165,24 @@ def score_enablement_title(
     title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))
     intent = len(title_tokens & ENABLEMENT_INTENT_TERMS)
     return base + intent_weight * float(intent)
+
+
+def rank_titles(
+    titles: Sequence[str],
+    plan: EnablementSearchPlan,
+) -> list[tuple[str, float]]:
+    """Score and sort candidate titles by enablement relevance, descending.
+
+    Args:
+        titles: Candidate PR titles.
+        plan: The search plan carrying ranking keywords.
+
+    Returns:
+        list[tuple[str, float]]: ``(title, score)`` pairs, highest first;
+        ties keep input order (stable sort).
+    """
+    scored = [(t, score_enablement_title(t, plan)) for t in titles]
+    return sorted(scored, key=lambda pair: pair[1], reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -339,5 +357,6 @@ __all__ = [
     "EnablementSearchPlan",
     "build_mandate",
     "build_search_plan",
+    "rank_titles",
     "score_enablement_title",
 ]

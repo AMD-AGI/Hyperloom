@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-# Robustness monitor for long-running ``inference_optimizer optimize`` runs.
+# Robustness monitor for long-running ``python -m hyperloom.inference_optimizer.cli optimize`` runs.
 #
 # Polls ``$INFERENCE_OPTIMIZER_SESSION_DIR/state.json`` every 300s. On a
 # terminal session (any ``stop_reason`` in ``STOP_REASON_VOCAB``, ``phase=CLOSE``,
@@ -32,7 +32,7 @@
 #   MAX_HOURS                          24    deadline (this watchdog exits
 #                                            after MAX_HOURS + 1 buffer)
 #   TARGET_GAIN                        10    --target-gain forwarded to
-#                                            ``inference_optimizer optimize
+#                                            ``python -m hyperloom.inference_optimizer.cli optimize
 #                                            --resume --resume-from "$session_dir"``
 #   INFERENCE_OPTIMIZER_SESSION_DIR    (unset) session-dir holding state.json;
 #                                            when set it wins outright
@@ -334,7 +334,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   resume_log_dir="$(dirname "$PID_FILE")"
   mkdir -p "$resume_log_dir"
   resume_log="$resume_log_dir/resume_$(date +%Y%m%d_%H%M%S).log"
-  MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize \
+  MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
     --resume --resume-from "$session_dir" \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \
     --tick-interval-sec 30 --kernel-claude \
@@ -342,7 +342,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # Record the REAL resumed optimizer pid, not the setsid wrapper ($!), which
   # exits immediately and would make the next loop misfire another resume.
   sleep 5
-  resumed_pid="$(pgrep -f 'inference_optimizer --verbose optimize --resume --resume-from '"$session_dir" | head -1)"
+  resumed_pid="$(pgrep -f 'hyperloom.inference_optimizer.cli .*--verbose optimize --resume --resume-from '"$session_dir" | head -1)"
   if [ -n "$resumed_pid" ]; then
     echo "$resumed_pid" > "$PID_FILE"
     echo "[robustness] resumed optimizer pid=$resumed_pid log=$resume_log"

@@ -224,6 +224,21 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
                     if match.is_dir():
                         add(match)
 
+    # Isolated vLLM lives outside $VIRTUAL_ENV; only fall back to the installer's
+    # VLLM_VENV_ROOT when no vllm root was found in the main venv above.
+    if not any(r.rstrip("/").endswith("/vllm") for r in found):
+        vllm_venv = os.environ.get("VLLM_VENV_ROOT", "").strip()
+        if vllm_venv:
+            site = Path(vllm_venv) / "lib"
+            if site.is_dir():
+                for pattern in (
+                    "python*/site-packages/vllm",
+                    "python*/site-packages/aiter",
+                ):
+                    for match in sorted(site.glob(pattern)):
+                        if match.is_dir():
+                            add(match)
+
     for root in _glob_install_package_roots():
         add(root)
 

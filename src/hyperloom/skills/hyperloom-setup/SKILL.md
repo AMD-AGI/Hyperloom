@@ -1,6 +1,6 @@
 ---
 name: hyperloom-setup
-description: Configure Hyperloom after pip install --target by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend.
+description: Configure Hyperloom after pip install --target by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
 ---
 
 # Hyperloom Setup
@@ -14,12 +14,14 @@ pip install your_package.whl --target .
 The current directory should be the Hyperloom target directory, for example `~/hyperloom`. It is normal for this directory to contain many Python package folders; users do not need to inspect them.
 
 This skill resolves a run mode into `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`)
-for this session and runs the setup backend. It does **not** start any container.
+for this session. In `baremetal` mode it runs the setup backend on the host; in
+`docker` mode it writes `.env` only. It does **not** start any container.
 Whether to generate or run a Docker container is decided later by the example
 (workload) skill based on `HYPERLOOM_RUN_MODE`.
 
 - `baremetal`: the host provides ROCm, and setup can optionally install the SGLang or vLLM framework layer.
-- `docker`: the container (and its serving framework) is provided later by the example when it runs the workload, so setup installs no framework in this mode.
+- `docker`: writes `.env` and records the run mode; the example (workload) skill
+  starts the container and runs setup inside it.
 
 ## Run Mode Resolution
 
@@ -57,9 +59,16 @@ value.
    Present exactly those two option labels. Do not add parenthetical
    descriptions, vendor examples, or base URLs to this first question.
 
-2. Ask the base URL as a structured follow-up after the mode is chosen: two
-   options `Use default (<provider default URL>)` and `Custom`; if `Custom`,
-   ask a plain-text follow-up for the URL.
+2. Ask the base URL as a structured follow-up after the mode is chosen.
+   - For `Anthropic`, offer three options:
+     - `Use default (https://api.anthropic.com)` — this remains the recommended
+       default.
+     - `Use AMD gateway (https://llm-api.amd.com/anthropic)`.
+     - `Custom`.
+   - For `DeepSeek`, offer two options:
+     - `Use default (https://api.deepseek.com/anthropic)`.
+     - `Custom`.
+   - If the user picks `Custom`, ask a plain-text follow-up for the URL.
 
 3. Explain that secrets must be edited in `.env`, not pasted into chat.
    - Never ask the user to paste API keys into the conversation.
@@ -75,7 +84,8 @@ value.
 
    For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL`: options `Use default (https://api.anthropic.com)` / `Custom`.
+   - Ask `ANTHROPIC_BASE_URL`: options `Use default (https://api.anthropic.com)` /
+     `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
    - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-4-8)` / `Custom`.
 
    For `DeepSeek`:
@@ -105,11 +115,42 @@ value.
    - If the user is unsure and is already inside a framework image or shell with
      a working framework, recommend `baremetal`; otherwise recommend `docker`.
 
-7. Only when the user chose `baremetal`, ask whether to install a serving
+7. Only when the user chose `docker`, resolve the Docker target host
+   (`HYPERLOOM_DOCKER_TARGET_HOST`). This is where the example skill will run
+   `docker run` / `docker exec` later.
+
+   First inspect the current machine and any Slurm allocation:
+
+   ```bash
+   echo "current host: $(hostname)"
+   if command -v squeue >/dev/null 2>&1; then
+     echo "SLURM detected — current allocations:"
+     squeue -u "$USER" 2>/dev/null || squeue 2>/dev/null
+     echo "allocated nodes: $(squeue -u "$USER" -h -t RUNNING -o '%N' 2>/dev/null | paste -sd, -)"
+   else
+     echo "no SLURM (squeue not found) — use the current host"
+   fi
+   ```
+
+   - If `squeue` is not available, set `HYPERLOOM_DOCKER_TARGET_HOST` to the
+     current host (`$(hostname)`) without asking another question.
+   - If Slurm is detected but there are no allocated nodes, set
+     `HYPERLOOM_DOCKER_TARGET_HOST` to the current host and explain that no
+     Slurm allocation was available to choose.
+   - If Slurm is detected and the user has allocated nodes, ask which host should
+     run the Docker container. Offer the current host, each allocated node, and a
+     custom host option.
+   - If the chosen host is not the current host, tell the user that the demo
+     skill will first SSH to that host and run all Docker commands there. Do not
+     start or restart any Slurm job from setup.
+
+8. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4):
    - `none`: use an already-installed SGLang/vLLM framework stack on the host.
-   - `sglang`: install SGLang ROCm framework components.
-   - `vllm`: install vLLM ROCm framework components.
+   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
+   - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
+     pins its own torch, so it runs in an isolated env and never touches the
+     host torch/SGLang stack.
    - If the user is unsure, recommend `none` when a framework is already present;
      otherwise recommend `sglang`.
 
@@ -118,9 +159,10 @@ value.
 Create or update `.env` in the current directory.
 
 - For every value the user chose in this run (LLM mode, base URL, model, run
-  mode, `USER_DATA_PATH`), write exactly what the user selected. This wins over
-  any pre-existing value in `.env` or the shell environment — e.g. if the user
-  picked the Anthropic official URL, write `ANTHROPIC_BASE_URL=https://api.anthropic.com`
+  mode, `USER_DATA_PATH`, Docker target host), write exactly what the user
+  selected. This wins over any pre-existing value in `.env` or the shell
+  environment — e.g. if the user picked the Anthropic official URL, write
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com`
   even when a different `ANTHROPIC_BASE_URL` already exists.
 - Preserve existing keys unrelated to this setup.
 - Never print secret values back to the user.
@@ -137,6 +179,13 @@ Common keys (all modes):
 
 - `USER_DATA_PATH`
 - `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
+- `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`; the host
+  where the demo skill should run Docker)
+- `HYPERLOOM_SKILL_PATH` — absolute path to the optimizer skill
+  (`<workspace>/hyperloom/inference_optimizer/SKILL.md` for a wheel install,
+  `<workspace>/src/hyperloom/inference_optimizer/SKILL.md` for a source checkout).
+  Write it in both modes so the demo skill can resolve it even when `docker`
+  mode skips the host setup backend.
 
 ### AMD APIM subscription header
 
@@ -168,10 +217,9 @@ If any required secret is missing or still a placeholder, stop and ask the user 
 
 ## Step 4: Run Setup Backend
 
-Run the backend based on `HYPERLOOM_RUN_MODE`. The `--install-framework` value
-differs by mode: in `baremetal` mode use the framework the user chose in Step 2
-(`none` / `sglang` / `vllm`); in `docker` mode always use `none` because the
-container the example generates provides the framework.
+In `baremetal` mode, run the backend on the host. The `--install-framework` value
+is the framework the user chose in Step 2 (`none` / `sglang` / `vllm`). In
+`docker` mode, skip the backend on the host (see below).
 
 ### `baremetal`
 
@@ -190,21 +238,22 @@ For `sglang`:
 PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
-For `vllm`:
+For `vllm` (installs into an isolated venv; `--install-framework vllm` already
+defaults to isolated, the flag below is explicit):
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --yes
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 ### `docker`
 
-Run the backend with `--install-framework none` and `--skip-base-check`. The
-host does not need ROCm or a serving framework yet; the container the example
-generates later provides both:
+Do **not** run `hyperloom.inference_optimizer.setup` on the host.
+The example (workload) skill will start the container and run setup inside it.
 
-```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --skip-base-check --install-framework none --yes
-```
+After writing `.env`, tell the user:
+- setup on the host is skipped in docker mode;
+- the demo skill will `docker run` + `docker exec` setup inside the ROCm container;
+- `FRAMEWORK` being unset after this skill is expected.
 
 This skill does not start a container. `HYPERLOOM_RUN_MODE` is recorded so the
 example (workload) skill can decide whether to generate a Docker container when
@@ -212,8 +261,10 @@ it runs the optimization.
 
 ## Step 5: Confirm Detected Framework
 
-After setup completes, the backend writes the detected serving framework to
-`FRAMEWORK` in `.env` (`sglang` or `vllm`). Read `.env` back and check it:
+In `baremetal` mode, after setup completes, the backend writes the detected
+serving framework to `FRAMEWORK` in `.env` (`sglang` or `vllm`). In `docker`
+mode, skip this until the demo skill runs setup inside the container. Read
+`.env` back and check it:
 
 - If `FRAMEWORK` is set, report it. Downstream demo skills read this value.
 - If `HYPERLOOM_RUN_MODE` is `docker`, an unset `FRAMEWORK` is expected: the
@@ -233,8 +284,9 @@ After setup completes, the backend writes the detected serving framework to
 Report:
 - The `.env` path.
 - The run mode (`baremetal` or `docker`).
-- The setup command that was run.
-- Whether setup completed or failed.
+- The Docker target host when `HYPERLOOM_RUN_MODE=docker`.
+- The setup command that was run (or that host setup was skipped in `docker` mode).
+- Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
 - The last relevant error lines on failure.
 
@@ -242,25 +294,28 @@ Do not print secret values back to the user.
 
 ## Step 7: Hand Off to a Demo Skill
 
-Only when setup completed and `FRAMEWORK` is set, ask the user whether they want
-to run a demo optimization now, and if so which length:
+When setup completed in `baremetal` mode, or when `.env` is written in `docker`
+mode, ask the user whether they want to run a demo optimization now, and if so
+which length:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `8h` — medium-length run.
 - `24h` — long-horizon cyclic run.
 
-If the user declines, stop here. If `FRAMEWORK` is unset, do not offer a demo;
-tell the user to install a serving framework first (see Step 5).
+If the user declines, stop here. If `HYPERLOOM_RUN_MODE` is `baremetal` and
+`FRAMEWORK` is unset, do not offer a demo; tell the user to install a serving
+framework first (see Step 5).
 
 When the user picks a length, load the matching demo skill and follow it — you
 stop acting on this setup skill and run the demo skill's instructions instead:
 
-- `3h` → `@.agents/skills/hyperloom-qwen3-8b-3h/SKILL.md`
-- `8h` → `@.agents/skills/hyperloom-qwen3-8b-8h/SKILL.md`
-- `24h` → `@.agents/skills/hyperloom-qwen3-8b-24h/SKILL.md`
+The demo skills are installed under each agent's discovery dir (`.agents/skills/`,
+`.claude/skills/`, `.cursor/skills/`); load the matching one by name:
+
+- `3h` → `hyperloom-qwen3-8b-3h`
+- `8h` → `hyperloom-qwen3-30b-a3b-8h`
+- `24h` → `hyperloom-gpt-oss-120b-24h`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
-`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. Where the demo
-skill references `@../../inference_optimizer/SKILL.md`, that relative path does
-not resolve in an installed workspace; use the absolute optimizer skill path
-from `.env` `HYPERLOOM_SKILL_PATH` instead.
+`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. It resolves the
+optimizer skill from `.env` `HYPERLOOM_SKILL_PATH` (written by Step 3).
