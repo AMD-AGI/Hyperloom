@@ -22,6 +22,7 @@ from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _config_architectures,
     _load_model_config_dict,
+    resolve_local_model_dir,
 )
 
 # Re-exported from model_config_utils for callers/tests.
@@ -498,7 +499,7 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
     """
     if not model_path:
         return None
-    cfg_path = Path(model_path) / "config.json"
+    cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     try:
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
@@ -645,7 +646,7 @@ def _detect_mlx_quant_weights(model_path: str) -> str | None:
     tensors in the safetensors index. Only call this when no standard
     quant_method is declared; standard quant formats also ship scale tensors.
     """
-    idx = Path(model_path) / "model.safetensors.index.json"
+    idx = (resolve_local_model_dir(model_path) or Path(model_path)) / "model.safetensors.index.json"
     if not idx.is_file():
         return None
     try:
@@ -813,7 +814,7 @@ def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
     no causal-LM ``config.json``. Without this guard they can reach baseline and
     fail only after server health checks time out.
     """
-    idx = Path(model_path) / "model_index.json"
+    idx = (resolve_local_model_dir(model_path) or Path(model_path)) / "model_index.json"
     if not idx.is_file():
         return None
     try:
@@ -1491,7 +1492,7 @@ def _detect_incompatible_model_config(
     # Loading here also produces ``data`` for the registry detectors and gates
     # the absent short-circuit — an absent config must not run steps 3-15 (some
     # detectors, e.g. missing-tokenizer, would false-positive on a bare dir).
-    cfg_path = Path(model_path) / "config.json"
+    cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     if not cfg_path.is_file():
         return None
     data = _load_model_config_dict(model_path)
