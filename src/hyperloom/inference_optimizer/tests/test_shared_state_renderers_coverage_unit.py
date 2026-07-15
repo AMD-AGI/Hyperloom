@@ -95,7 +95,7 @@ def test_format_optimization_stack():
 
 def test_format_last_trace_analyze():
     st = SharedState()
-    assert st._format_last_trace_analyze() == "(none)"
+    assert st._format_trace_analyze_blob(st.last_trace_analyze) == "(none)"
     st.last_trace_analyze = {
         "trace_input": "t",
         "candidates_path": "c",
@@ -106,7 +106,7 @@ def test_format_last_trace_analyze():
             {"code": "crash", "returncode": 1},
         ],
     }
-    out = st._format_last_trace_analyze()
+    out = st._format_trace_analyze_blob(st.last_trace_analyze)
     assert "k1" in out
     assert "high_idle" in out
 

@@ -8,9 +8,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from . import RemoteRecipeClientError
 from .canonical_id import InvalidCanonicalIdError, cid_to_path_components
 from .local_store import LocalRecipeStore
-from .remote_client import RemoteRecipeClientError
 
 
 log = logging.getLogger(__name__)
@@ -144,9 +144,8 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics.
-        # kb-extract recipes may store optimized args directly in
-        # body.extra_server_args rather than body.best_config; synthesize
-        # best_config when absent.
+        # kb-extract recipes store optimized args directly in body.extra_server_args
+        # rather than body.best_config; synthesize best_config when absent.
         "best_config": dict(body.get("best_config") or {})
         or (
             {"extra_server_args": str(body.get("extra_server_args") or "").strip()}
@@ -304,25 +303,6 @@ class RecipeKB:
     remote: Any = None  # read-side gbrain client (duck-typed); None = local-only
     on_remote_failure: Any = None
     audit_hook: Any = None
-
-    # ------------------------------------------------------------------
-    # Capability flags
-    # ------------------------------------------------------------------
-    @property
-    def enabled(self) -> bool:
-        """Always ``True`` — the dispatcher is usable whenever it
-        exists, because the local store is always present (writes land
-        locally; reads fall back to local). Remote reachability is a
-        separate concern handled by :meth:`_remote_active`. Exposed so
-        call sites that historically probed ``client.enabled`` on the
-        old direct KB client keep working against the v2 dispatcher
-        (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
-        attribute there would silently skip the SDK-fallback T0 anchor.
-
-        Returns:
-            bool: Always ``True``.
-        """
-        return True
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -193,3 +193,85 @@ def test_run_with_tree_timeout_reaps_on_timeout():
             [forge_fusion.sys.executable, "-c", "import time; time.sleep(30)"],
             timeout_sec=1,
         )
+
+
+def test_normalize_manifest_kept_writes_keep_result(tmp_path, monkeypatch):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "fusion_loop": {
+            "kept": True,
+            "best": {"kernel_speedup": 1.12},
+            "best_env_flag": "VLLM_FUSE=1",
+            "best_pattern": "decode_fuse",
+        },
+        "validation": {"kept": True, "kernel_speedup": 1.12},
+        "artifacts": {
+            "patch": "diff --git a/foo.py",
+            "changes": [{"path": "foo.py"}],
+        },
+        "fusion": {"source_file": str(output_dir / "foo.py")},
+        "verdict": "keep",
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(forge_fusion, "_git_toplevel", lambda _path: "/repo/root")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "ok"
+    assert result["decision"] == "KEEP"
+    assert result["kept"] is True
+    assert result["requires_e2e_validation"] is True
+    assert result["env_flags"] == {"VLLM_FUSE=1": "1"}
+    assert result["kernel_repo"] == "/repo/root"
+    assert result["artifact_files"] == ["foo.py"]
+
+
+def test_normalize_manifest_missing_file_reports_error(tmp_path):
+    output_dir = tmp_path / "missing"
+    output_dir.mkdir()
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=1)
+
+    assert result["decision"] == "REVERT"
+    assert "no fusion_manifest.json" in result["error"]
+
+
+def test_normalize_manifest_parse_error_reports_error(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text("{not-json", encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["decision"] == "REVERT"
+    assert "parse error" in result["error"]
+
+
+def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.05}},
+        "validation": {},
+        "artifacts": {},
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    out = capsys.readouterr()
+    assert rc == 0
+    result = _sentinel_payload(out.out)
+    assert result["decision"] == "KEEP"
+    assert result["kept"] is True
+    assert result["requires_e2e_validation"] is True
