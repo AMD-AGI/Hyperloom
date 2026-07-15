@@ -17,12 +17,18 @@ from pathlib import Path
 
 from hyperloom.common.coerce import to_int
 
+# Single source of truth for --model (path OR HF repo id) -> local dir. Re-exported
+# here so existing callers keep ``from ..model_config_utils import
+# resolve_local_model_dir`` working.
+from hyperloom.common.model_paths import resolve_local_model_dir  # noqa: F401
+
 
 def _load_model_config_dict(model_path: str) -> dict | None:
     """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure.
 
     Args:
-        model_path: Filesystem path to the model directory.
+        model_path: Filesystem path to the model directory, or an HF repo id
+            (resolved to the local HF cache dir via ``resolve_local_model_dir``).
 
     Returns:
         The parsed ``config.json`` dict, or ``None`` when the path is empty,
@@ -31,7 +37,11 @@ def _load_model_config_dict(model_path: str) -> dict | None:
     """
     if not model_path:
         return None
-    cfg_path = Path(model_path) / "config.json"
+    # --model may be an HF repo id rather than a local dir; resolve it (a real
+    # dir is returned unchanged) so config-derived metadata isn't silently empty
+    # for repo-id launches.
+    base = resolve_local_model_dir(model_path) or Path(model_path)
+    cfg_path = base / "config.json"
     try:
         raw = cfg_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -212,7 +222,10 @@ def _fp8_weight_scale_is_per_channel(model_path: str) -> bool | None:
     """
     if not model_path:
         return None
-    files = sorted(Path(model_path).glob("*.safetensors"))
+    # --model may be an HF repo id; resolve to the local weights dir so the
+    # safetensors scan works for repo-id launches.
+    base = resolve_local_model_dir(model_path) or Path(model_path)
+    files = sorted(base.glob("*.safetensors"))
     if not files:
         return None
     for fpath in files:
