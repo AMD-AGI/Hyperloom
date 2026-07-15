@@ -33,29 +33,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
-from hyperloom.common.subprocess_bridge import emit_json as _common_emit_json
+from hyperloom.common.subprocess_bridge import emit_json
 
 from ..pr_kb_slug import normalise_repo as _normalise_pr_kb_repo
 
 if TYPE_CHECKING:
     from ..models import ExploreRequest
-
-
-# Framework's emit uses ``make_parents=True`` because its CLI is invoked with
-# ``--out`` paths under a fresh work dir that may not exist yet (Critic /
-# Robustness never create the parent). This thin wrapper keeps all call sites
-# using the bare ``_emit_json(obj, out)`` signature.
-def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path, creating parent dirs.
-
-    Delegates to :func:`hyperloom.common.subprocess_bridge.emit_json` with
-    ``make_parents=True``.
-
-    Args:
-        obj (Any): JSON-serialisable object to emit.
-        out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
-    """
-    _common_emit_json(obj, out, make_parents=True)
 
 
 def _load_request(path: str) -> "ExploreRequest":
@@ -92,7 +75,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (unused).
     """
     del args
-    _emit_json(
+    emit_json(
         {
             "required": ["framework", "repo_url", "baseline"],
             "subcommands_available": [
@@ -136,6 +119,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
             },
         },
         "-",
+        make_parents=True,
     )
 
 
@@ -150,7 +134,7 @@ def _cmd_explore(args: argparse.Namespace) -> None:
 
     request = _load_request(args.request)
     summary = explore(request, execute=bool(args.execute))
-    _emit_json(summary, args.out)
+    emit_json(summary, args.out, make_parents=True)
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
@@ -172,7 +156,7 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
         "count": len(candidates),
         "candidates": [asdict(c) for c in candidates],
     }
-    _emit_json(payload, args.out)
+    emit_json(payload, args.out, make_parents=True)
 
 
 def _read_json_request(path: str) -> dict[str, Any]:
@@ -552,7 +536,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     for rank, candidate in enumerate(out_cands, start=1):
         candidate["prior_rank"] = rank
 
-    _emit_json(
+    emit_json(
         {
             "batch_id": batch_id,
             "framework": framework,
@@ -569,6 +553,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             "candidates": out_cands,
         },
         args.out,
+        make_parents=True,
     )
 
 
@@ -594,7 +579,7 @@ def _cmd_phase_audit(args: argparse.Namespace) -> None:
 
     request = _read_json_request(args.request)
     result = run_phase_audit(request)
-    _emit_json(result, args.out)
+    emit_json(result, args.out, make_parents=True)
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
@@ -613,29 +598,31 @@ def _cmd_kb(args: argparse.Namespace) -> None:
 
     op = args.kb_op
     if op == "list":
-        _emit_json(
+        emit_json(
             {
                 "kb_root": str(kb_mod._resolve_kb_root()),
                 "domains": kb_mod.list_domains(),
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "show":
         files = kb_mod.get_domain_files(args.domain)
         if not files:
             raise RuntimeAdapterError(f"domain {args.domain!r} not found under {kb_mod._resolve_kb_root()}")
-        _emit_json(
+        emit_json(
             {
                 "domain": args.domain,
                 "files": [{"path": str(p), "size_bytes": p.stat().st_size} for p in files if p.is_file()],
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "search":
         hits = kb_mod.search_kb(args.query, domains=args.domain or None)
-        _emit_json(
+        emit_json(
             {
                 "query": args.query,
                 "domain_filter": list(args.domain) if args.domain else None,
@@ -643,6 +630,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
                 "hits": [{"domain": h.domain, "path": str(h.path)} for h in hits],
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "contribute":
@@ -655,7 +643,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
             source=args.source,
             session_id=args.session_id,
         )
-        _emit_json({"status": "appended", "path": str(path)}, args.out)
+        emit_json({"status": "appended", "path": str(path)}, args.out, make_parents=True)
         return
     if op == "synthesize":
         findings: list[Finding] = []

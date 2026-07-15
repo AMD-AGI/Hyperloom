@@ -25,6 +25,10 @@ import logging
 import os
 from typing import Any
 
+from hyperloom.common.env import env_bool
+
+from ..trace.trace_env import env_flag
+
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +41,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
-_TRUEY = {"1", "true", "yes", "on"}
-
-_FALSEY = {"0", "false", "no", "off"}
-
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag.
 
@@ -52,18 +52,19 @@ def _honest_flag(specific_env: str) -> bool:
     by real serving throughput, not a stored-scalar gain. Opt the whole cohort
     back out with ``HL_HONEST_E2E=0`` (or a single fix via its per-fix env).
 
+    The per-fix layer uses :func:`trace_env.env_flag` (the canonical superset
+    vocabulary that recognizes ``0/false/no/off`` as an *explicit* False and
+    falls back to its ``default`` for unset/unrecognized values), so an
+    unrecognized per-fix value defers to the umbrella exactly as before. The
+    umbrella layer is :func:`common.env.env_bool` (default ON).
+
     Args:
         specific_env: The per-fix environment variable name.
 
     Returns:
         bool: Whether the gated behavior should be enabled.
     """
-    raw = os.environ.get(specific_env, "").strip().lower()
-    if raw in _TRUEY:
-        return True
-    if raw in _FALSEY:
-        return False
-    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "1").strip().lower() in _TRUEY
+    return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
 
 # ===========================================================================
 # Kernel-decision write-owner functions. SharedState is a passive

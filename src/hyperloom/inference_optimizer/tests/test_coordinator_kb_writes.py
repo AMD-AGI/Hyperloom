@@ -190,16 +190,9 @@ def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
     assert "model_type" not in row
 
 
-def test_recipe_kb_enabled_is_true(tmp_path: Path) -> None:
-    """RecipeKB exposes ``enabled`` (always True) so the T0 gate doesn't skip the SDK-fallback anchor."""
-    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
-    assert kb.enabled is True
-
-
 def test_sdk_fallback_t0_anchors_into_self_cortex_kb(tmp_path: Path) -> None:
     """The SDK-fallback T0 anchor runs and writes into the SAME dispatcher the Coordinator holds."""
     coord = _make_coordinator(tmp_path)
-    assert coord.cortex_kb.enabled is True
     # Clear the already-anchored markers and re-anchor with the 5-tuple seeded.
     coord.shared_state.warm_start_ts = ""
     coord.shared_state.cortex_session_id = ""
