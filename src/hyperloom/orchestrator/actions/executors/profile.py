@@ -44,15 +44,11 @@ from .baseline import BaselineExecutor
 log = logging.getLogger(__name__)
 
 
-# Leading bytes of a trace to sample for sentinel substrings (full
-# decompress would burn tens of seconds on 100 MB+ traces; 2 MB catches
-# marker presence/absence).
+# Leading bytes of a trace to sample for sentinel substrings.
 _TRACE_INSPECT_BYTES = 2_000_000
 
-# Cap for the confirmation streaming scan used when the leading-window
-# sample finds zero of a sentinel; ``execute_*`` annotations land past the
-# 2 MB window on 600 MB+ traces, so confirm absence before warning. Override
-# via ``INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES``.
+# Cap for the confirmation streaming scan used when the leading-window sample
+# finds zero of a sentinel. Override via ``INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES``.
 _TRACE_CONFIRM_BYTES = 64_000_000
 
 # Min fraction of ``cpu_op`` events carrying ``Input Dims`` for a healthy
@@ -75,11 +71,8 @@ def _sanitize_profile_server_args(args: str) -> str:
     """Drop server flags known to conflict with profiler/shape discovery.
 
     Tokenize with ``posix=False`` and re-join with spaces so embedded JSON
-    values survive verbatim. ``shlex.split`` in POSIX mode strips the inner
-    double-quotes of values like
-    ``--speculative-config {"method":"deepseek_mtp",...}`` (yielding the
-    unparseable ``{method:...}``), which made every profile/roofline server
-    boot fail and starved the kernel phase of a fresh trace shape.
+    values (e.g. ``--speculative-config {"method":"deepseek_mtp",...}``)
+    survive verbatim rather than having their inner quotes stripped.
 
     Args:
         args: Raw server-args string to sanitize.
@@ -153,7 +146,7 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
                 read += len(chunk)
                 if substring in (carry + chunk):
                     return True
-                # Tail to catch a sentinel split across the chunk boundary.
+                # Carry tail to catch a sentinel split across the chunk boundary.
                 carry = chunk[-(len(substring)) :]
     except (OSError, EOFError, UnicodeDecodeError) as e:
         log.debug("_trace_contains: cannot stream %s: %s", path, e)
@@ -226,7 +219,11 @@ def _validate_trace_structure(
 
     Read-only; each check warns independently so partial signals stay actionable.
 
-    Returns a structured ``trace_health`` dict: ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, ``zero_ops`` (``"Op count": 0`` PyTorch Profiler span -> capture window never overlapped execution, metadata-only trace -> triggers roofline re-profile), and ``issues`` (logged warning strings).
+    Returns a structured ``trace_health`` dict:
+    ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events ->
+    per-kernel time folded, triggers eager re-profile), ``capture_traces_present``,
+    ``zero_ops`` (metadata-only trace, triggers roofline re-profile), and
+    ``issues`` (logged warning strings).
 
     Args:
         trace_dir: The profile workspace trace directory to inspect.
@@ -243,13 +240,8 @@ def _validate_trace_structure(
     zero_ops = False
 
     # Scriptable image frameworks (xDiT diffusion) produce a plain torch-
-    # profiler trace: no CUDA-graph capture sidecar (checks 1-2), no InferenceX
-    # execute_*/user_annotation per-step markers (check 3), and no steady-state
-    # splitter output (checks 4/6). Running those LLM/serving checks would emit
-    # spurious warnings and — worse — check 3 would set
-    # per_kernel_attribution_degraded and trigger a needless eager re-profile.
-    # For diffusion the only meaningful health signal is check 7 (zero_ops:
-    # metadata-only / repeat=0 empty window), which we always run below.
+    # profiler trace, so checks 1-6 (LLM/serving-specific) would emit spurious
+    # warnings; only check 7 (zero_ops) is meaningful and always runs below.
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     scriptable = _fw_reg.is_scriptable(framework)
@@ -272,7 +264,7 @@ def _validate_trace_structure(
 
     # --- Check 2 (Deval): capture file has cpu_op + Input Dims ---
     # Sample the heaviest capture file; gate cpu_op-with-Input-Dims fraction
-    # at _INPUT_DIMS_FRACTION_FLOOR (Deval ref 99.97%).
+    # at _INPUT_DIMS_FRACTION_FLOOR.
     if capture_files:
         target = max(capture_files, key=lambda p: p.stat().st_size)
         text = _sample_trace_text(target)
@@ -280,9 +272,8 @@ def _validate_trace_structure(
             cpu_op_count = _count_substring_occurrences(text, '"name": "cpu_op"')
             input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
             if cpu_op_count == 0:
-                # ROCm/SGLang often log graph-capture kernels under other
-                # names (e.g. ``sglang_profiler::*``), so zero cpu_op isn't
-                # itself a capture failure — informational, cross-check [5].
+                # ROCm/SGLang often log graph-capture kernels under other names,
+                # so zero cpu_op isn't itself a capture failure (cross-check [5]).
                 issues.append(
                     f"[2] capture file {target.name} has no literal "
                     f"'cpu_op' events in the first "
@@ -304,8 +295,7 @@ def _validate_trace_structure(
 
     # --- Check 3 (Deval): main trace has user_annotation + execute_* ---
     # execute_* annotations = InferenceX per-step writes when
-    # roofline_annotations is honoured; a separate failure mode from
-    # kernel_shape_profiler absence (check 5).
+    # roofline_annotations is honoured (distinct from check 5).
     main_traces = sorted(
         (p for p in trace_dir.glob("*.trace.json.gz") if p.is_file()),
         key=lambda p: p.stat().st_size,
@@ -320,11 +310,10 @@ def _validate_trace_structure(
                 '"name": "user_annotation"',
             )
             execute_count = _count_substring_occurrences(main_text, '"execute_')
-            # ``execute_*`` labels are the real health signal (the splitter +
-            # roofline consume them); ``user_annotation`` wrapper presence is
-            # profiler-version-dependent. Only warn when both are absent, and
-            # confirm via a streaming scan (the 2 MB window misses markers on
-            # 600 MB+ traces) to avoid false "annotations didn't fire" warnings.
+            # ``execute_*`` labels are the real health signal; ``user_annotation``
+            # presence is profiler-version-dependent. Only warn when both are
+            # absent, confirmed via a streaming scan (the 2 MB window can miss
+            # markers on large traces).
             confirmed_absent = (
                 not scriptable
                 and execute_count == 0
@@ -370,15 +359,13 @@ def _validate_trace_structure(
                 "(see check [3])."
             )
 
-    # --- Check 6 (Hyperloom-specific #210 smoking-gun): _extend_* / ---
-    # _decode_* without _steady_state_* in trace_split/.
+    # --- Check 6 (Hyperloom): _extend_* / _decode_* without ---
+    # _steady_state_* in trace_split/.
     if split.is_dir() and not scriptable:
         names = [p.name for p in split_files]
         has_extend = any("_extend_" in n or "extend_only_" in n for n in names)
         has_decode = any("_decode_" in n or "decode_only_" in n for n in names)
         has_steady_state = any("steady_state" in n for n in names)
-        # Failure mode is per-step ``_extend_*`` / ``_decode_*`` files
-        # without any ``steady_state`` marker.
         if (has_extend or has_decode) and not has_steady_state:
             issues.append(
                 "[6] trace_split/ has _extend_* / _decode_* files but NO "
@@ -390,16 +377,10 @@ def _validate_trace_structure(
             )
 
     # --- Check 7 (Hyperloom): torch-profiler captured zero ops ---
-    # A metadata-only trace (no ``cpu_op`` / ``kernel`` events, just process/
-    # thread labels + a lone ``hipDeviceSynchronize``) means the profiler active
-    # window never recorded real execution. Observed on xDiT diffusion: the
-    # ``torch.profiler.schedule`` default ``repeat=0`` cycles back to a new
-    # collection right after the single active step, discarding the recorded
-    # window (empty ``profile_trace_rank_*.json.gz``). The trace is unusable for
-    # roofline; flag it so roofline re-profiles instead of caching an empty
-    # snapshot (silent 0% gain). Note: the ``"Op count"`` value in the
-    # ``PyTorch Profiler`` span is 0 even on HEALTHY traces, so key on the
-    # presence of ``cpu_op`` / ``kernel`` events instead.
+    # A metadata-only trace (no ``cpu_op`` / ``kernel`` events) means the
+    # profiler active window never recorded real execution; flag it so roofline
+    # re-profiles rather than caching an empty snapshot. ``"Op count"`` is 0 even
+    # on healthy traces, so key on the presence of ``cpu_op`` / ``kernel`` events.
     if main_traces:
         has_ops = _trace_contains(
             main_traces[0], '"cat": "cpu_op"'
@@ -444,23 +425,21 @@ def _validate_trace_structure(
     }
 
 
-# Constant pointing at the sglang profile yaml, used by tests/fixtures.
-# Runtime sglang/vllm selection goes through `_default_profile_config()`.
+# sglang profile yaml, used by tests/fixtures; runtime selection goes through
+# `_default_profile_config()`.
 PROFILE_DEFAULT_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
-PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
+PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
 def _is_capture_trace(path: Path) -> bool:
     """True when ``path`` lives under a ``capture_traces`` directory.
 
     CUDA-graph capture sidecars are written under ``capture_traces/`` by both
-    frameworks: SGLang as ``bs_*_rank*.json.gz`` (no ``.trace`` infix) and vLLM
-    as ``graph_capture_*.pt.trace.json.gz`` (which DOES end in ``.trace.json.gz``
-    and so would otherwise be mistaken for a real annotated trace, #735). These
-    capture the one-time graph-capture window and carry no per-iteration
-    annotations, so the steady-state splitter cannot use them. The parent
-    directory is the only framework-agnostic discriminator — a real annotated
-    serving trace never lives under ``capture_traces/``.
+    frameworks: SGLang as ``bs_*_rank*.json.gz`` and vLLM as
+    ``graph_capture_*.pt.trace.json.gz`` (which also ends in ``.trace.json.gz``
+    and would otherwise be mistaken for a real annotated trace). They carry no
+    per-iteration annotations, so the steady-state splitter cannot use them; the
+    parent directory is the only framework-agnostic discriminator.
     """
     return any(part == "capture_traces" for part in path.parts)
 
@@ -470,7 +449,7 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
 
     Excludes capture sidecars under ``capture_traces/`` (see
     :func:`_is_capture_trace`) so a vLLM ``graph_capture_*.pt.trace.json.gz`` is
-    never promoted as the primary annotated trace (#735).
+    never promoted as the primary annotated trace.
 
     Args:
         trace_dir: The directory to scan recursively.
@@ -485,7 +464,7 @@ def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     """Return CUDA-graph capture sidecars under ``trace_dir`` (fallback only).
 
     Anything under a ``capture_traces/`` directory, regardless of name — both
-    SGLang ``bs_*`` and vLLM ``graph_capture_*`` sidecars (#735).
+    SGLang ``bs_*`` and vLLM ``graph_capture_*`` sidecars.
 
     Args:
         trace_dir: The directory to scan recursively.
@@ -758,14 +737,11 @@ class ProfileExecutor(BaselineExecutor):
             A result dict describing the profiling outcome and artifacts.
         """
         # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's
-        # --torch-profiler-dir; atom writes standard *.pt.trace.json.gz that
-        # _candidate_trace_dirs + TraceLens consume unchanged, so the executor
-        # falls through to the sglang/vllm path. (atom's TraceLens-flag guard
-        # lives in _workload_envs.py.)
+        # --torch-profiler-dir and writes standard *.pt.trace.json.gz, so the
+        # executor falls through to the sglang/vllm path.
         params = ctx.task.params or {}
-        # Merge current_best.extra_server_args (stamped into base_extra_args
-        # by the Coordinator) with caller args so profile reflects stable
-        # workload tweaks without carrying compile flags that break profiling.
+        # Merge current_best.extra_server_args (stamped into base_extra_args) with
+        # caller args, dropping compile flags that break profiling.
         base_args = _sanitize_profile_server_args(
             str(params.get("base_extra_args") or "").strip(),
         )
@@ -788,9 +764,8 @@ class ProfileExecutor(BaselineExecutor):
             else:
                 extra["workspace"] = str(output_dir)
 
-        # Mtime gate for the multi-node shared-trace-dir layout: captured
-        # before super().__call__ so this round's traces are newer than the
-        # watermark and earlier rounds' traces are filtered out below.
+        # Mtime gate for the multi-node shared-trace-dir layout: captured before
+        # super().__call__ so this round's traces are newer than the watermark.
         import time as _time
 
         task_started_unix = _time.time()
@@ -869,13 +844,10 @@ class ProfileExecutor(BaselineExecutor):
         # and bounds the trace by the start/stop wall-clock window instead.
         _SAFE_PROFILE_KEYS = ("output_dir",)
         prof_body = {k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS}
-        # Pin the trace output dir explicitly. The disagg workers may not
-        # carry SGLANG_TORCH_PROFILER_DIR (baseline-time launches never set
-        # it and per-round restarts can resume rather than relaunch), so
-        # without output_dir sglang writes nowhere the sandbox can read ->
-        # roofline profile_no_trace. ``round_trace_root`` is the same
-        # shared-FS dir the post-bench trace scan reads (wekafs, mounted on
-        # the worker pods; verified writable from the worker).
+        # Pin the trace output dir explicitly: the disagg workers may not carry
+        # SGLANG_TORCH_PROFILER_DIR, so without output_dir sglang writes nowhere
+        # the sandbox can read. ``round_trace_root`` is the shared-FS dir the
+        # post-bench trace scan reads.
         if round_trace_root:
             prof_body.setdefault("output_dir", round_trace_root)
         # Bounded profiling window. Open-ended profiling for the whole
@@ -912,8 +884,8 @@ class ProfileExecutor(BaselineExecutor):
         try:
             result = await super().__call__(ctx)
         finally:
-            # Magpie ended (or raised): wind the window task down and make
-            # sure profiling is never left running open-ended.
+            # Magpie ended (or raised): wind the window task down so profiling
+            # is never left running open-ended.
             if not prof_task.done():
                 prof_task.cancel()
                 try:
@@ -926,8 +898,7 @@ class ProfileExecutor(BaselineExecutor):
                 await trigger_infera_engine_profile("stop")
 
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
-        # wekafs dir we restarted with (not $HYPERLOOM_MN_PROFILE_TRACE_DIR,
-        # which the helper reset). Single-node uses workspace/torch_trace below.
+        # wekafs dir we restarted with. Single-node uses workspace/torch_trace.
         workspace_str = result.get("workspace")
         if round_trace_root:
             # Multi-node: traces land at the shared wekafs base dir (not the
@@ -940,17 +911,10 @@ class ProfileExecutor(BaselineExecutor):
                 result["trace_dir"] = str(trace_dir)
                 result["trace_files"] = [str(p) for p in trace_files]
                 if trace_files:
-                    # Multi-node only: the shared round dir can hold more
-                    # than one profiling batch (e.g. a tiny warmup-window
-                    # capture that recorded CPU-only activity PLUS the real
-                    # GPU-rich capture). Handing TraceLens the CPU-only one
-                    # fails with "Trace contains zero GPU kernel events".
-                    # GPU-rich traces are orders of magnitude larger
-                    # (hundreds of MB vs ~250 KB CPU-only), so select the
-                    # LARGEST file as the main trace rather than the
-                    # earliest-by-name. Single-node (elif below) is
-                    # untouched — it never produces a competing CPU-only
-                    # batch.
+                    # Multi-node only: the shared round dir can hold more than
+                    # one profiling batch (a CPU-only warmup capture plus the
+                    # real GPU-rich one). GPU-rich traces are far larger, so
+                    # select the LARGEST file as the main trace.
                     def _safe_size(p: Path) -> int:
                         """Return ``p``'s size in bytes, or 0 on stat() failure.
 
@@ -1019,9 +983,8 @@ class ProfileExecutor(BaselineExecutor):
                     break
                 existing_empty_dirs.append(trace_dir)
 
-            # #575: SGLang can emit only capture sidecars
-            # (capture_traces/bs_*_rank*.json.gz) without a top-level
-            # *.trace.json.gz. Fall back to those so roofline analyzes the
+            # SGLang can emit only capture sidecars without a top-level
+            # *.trace.json.gz; fall back to those so roofline analyzes the
             # available trace instead of failing with no_trace_files.
             if selected_trace_dir is None:
                 for trace_dir in _candidate_trace_dirs(workspace):
@@ -1057,8 +1020,8 @@ class ProfileExecutor(BaselineExecutor):
                         "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
                     )
                 result["main_trace_path"] = str(main_trace)
-                # #210: warn if the trace shape suggests PROFILE_EXTRA_BODY
-                # leaked / shape-discovery missing. Read-only; never blocks.
+                # Warn if the trace shape suggests PROFILE_EXTRA_BODY leaked /
+                # shape-discovery missing. Read-only; never blocks.
                 try:
                     framework = str(
                         getattr(ctx, "framework", "")

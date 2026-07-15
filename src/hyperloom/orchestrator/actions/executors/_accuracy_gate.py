@@ -2,10 +2,10 @@
 
 """Accuracy gate — GSM8K eval integration for hyperloom.inference_optimizer.
 
-Protocol: baseline always runs GSM8K; high-risk variants too. Threshold is
+Baseline always runs GSM8K; high-risk variants too. Threshold is
 ``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT otherwise.
-High-risk = precision/compute-path changes (fp8/fp4/quant, aiter/triton rope,
-enforce-eager/compilation-config); kernel patches handled by kernel-agent.
+High-risk = precision/compute-path changes; kernel patches handled by
+kernel-agent.
 """
 
 from __future__ import annotations
@@ -20,14 +20,13 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-ACCURACY_THRESHOLD = 0.05  # 5% allowed deviation
+ACCURACY_THRESHOLD = 0.05  # allowed deviation
 
 
 def require_framework_accuracy_default() -> bool:
-    """Default for the framework source-patch accuracy-KEEP gate (Step 4 / Q5).
+    """Default for the framework source-patch accuracy-KEEP gate.
 
-    Source patches (framework raw-diff + framework-authored integrate_patch)
-    require the accuracy gate by default; opt out with
+    Source patches require the accuracy gate by default; opt out with
     ``INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY=0``.
 
     Returns:
@@ -45,11 +44,10 @@ def accuracy_keep_block(
 ) -> tuple[bool, str, bool]:
     """Decide whether the accuracy gate blocks a KEEP.
 
-    Semantics (Step 4): a measured regression always blocks. When the gate is
-    ``required`` but produced no verdict (``None``): block iff a positive
-    baseline accuracy was available (eval should have run but didn't);
-    otherwise *degrade* (allow throughput-only KEEP) so eval-less runs are not
-    universally blocked.
+    A measured regression always blocks. When the gate is ``required`` but
+    produced no verdict (``None``): block iff a positive baseline accuracy was
+    available (eval should have run but didn't); otherwise *degrade* (allow
+    throughput-only KEEP) so eval-less runs are not universally blocked.
 
     Args:
         accuracy_pass: The gate verdict (``True`` pass / ``False`` regression /
@@ -65,7 +63,7 @@ def accuracy_keep_block(
         return True, "accuracy regression detected", False
     if accuracy_pass is True:
         return False, "", False
-    # accuracy_pass is None — the gate did not produce a verdict.
+    # accuracy_pass is None: no verdict.
     if not required:
         return False, "", False
     try:
@@ -80,8 +78,7 @@ def accuracy_keep_block(
         )
     return False, "", True
 
-# Flags / env vars that indicate accuracy risk > 0; matching variants must
-# pass the accuracy gate before promotion.
+# Flags indicating accuracy risk; matching variants must pass the gate.
 _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
     "--kv-cache-dtype",
     "--enforce-eager",
@@ -136,7 +133,7 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
 
     Scriptable workloads (e.g. xDiT diffusion) cannot run a GSM8K eval; their
     bench script computes an image-quality gate (LPIPS/SSIM/MSE vs a fixed
-    reference) and embeds it in ``benchmark_report.json`` as a ``quality_gate``
+    reference) embedded in ``benchmark_report.json`` as a ``quality_gate``
     block. This reads the most recent such block in ``workspace``.
 
     Args:
@@ -189,32 +186,14 @@ def quality_gate_passed(
         return not require
     # A SKIPPED gate carries no correctness signal. For scriptable workloads
     # (require=True) the image-quality gate is the ONLY correctness signal, so a
-    # skip must not silently pass (the original fail-open closed "missing gate"
-    # but left "present-but-skipped" open). Distinguish the two legitimate skips
-    # from a real miss:
-    #   * ``reference_established`` — the baseline writing the reference on its
-    #     first run; there is nothing to compare against yet -> pass.
-    #   * any other skip (``no_reference_or_image`` / ``reference_missing`` /
-    #     ``image_libs_unavailable`` / ...) -> pass ONLY when no reference was
-    #     configured (gate intentionally disabled); when a reference IS
-    #     configured the comparison was expected but did not happen -> fail
-    #     closed. ``XDIT_QUALITY_REF`` is read from the process env shared by
-    #     every executor task, mirroring what the bench wrapper was handed.
+    # skip must not silently pass.
     if require and quality_gate.get("skipped"):
-        # The baseline establishing the reference on its first run has nothing
-        # to compare against yet -> pass.
+        # Baseline establishing the reference on its first run has nothing to
+        # compare against yet -> pass.
         if str(quality_gate.get("reason") or "") == "reference_established":
             return True
-        # Any other skip on a scriptable workload means the ONLY correctness
-        # signal never ran. ``_workload_envs`` now auto-defaults a per-session
-        # reference for every scriptable variant, so a comparison is ALWAYS
-        # expected; a skipped one (missing reference, unreadable image, image
-        # libs unavailable, ...) is an unverifiable result -> fail closed
-        # rather than trusting an unchecked speedup. (The former env-gated
-        # branch fail-opened: it probed ``XDIT_QUALITY_REF`` in the
-        # orchestrator process env, but the reference is injected via
-        # ``benchmark.envs`` for the wrapper subprocess, not the process env,
-        # so the probe was empty and every skip passed.)
+        # Any other skip means the only correctness signal never ran -> fail
+        # closed rather than trusting an unchecked speedup.
         return False
     if "passed" in quality_gate:
         return bool(quality_gate["passed"])
@@ -232,7 +211,7 @@ def quality_gate_passed(
             if not ok(float(val), float(lim)):
                 return False
     # A required gate with neither ``passed`` nor any usable threshold pair is
-    # ambiguous; treat it as a failure (fail-closed) for scriptable workloads.
+    # ambiguous; treat it as a failure (fail-closed).
     if require and evaluated == 0:
         return False
     return True
@@ -246,15 +225,11 @@ def parse_eval_results(
 
     Scriptable (server-less) workloads take precedence: when a
     ``benchmark_report.json`` carries a ``quality_gate`` block, that gate is
-    mapped onto the accuracy contract (``1.0`` pass / ``0.0`` fail) so the
-    shared ``accuracy_passed`` gate works unchanged. Otherwise this searches
-    ``results*.json`` recursively for the GSM8K-primary
-    ``exact_match,strict-match`` metric.
-
-    For scriptable frameworks (e.g. xDiT diffusion) the image-quality gate is
-    the only correctness signal, so a missing/invalid gate fails the gate
-    (``accuracy=0.0``, fail-closed) instead of falling back to a GSM8K search
-    that can never match a diffusion workload.
+    mapped onto the accuracy contract (``1.0`` pass / ``0.0`` fail). Otherwise
+    this searches ``results*.json`` recursively for the GSM8K-primary
+    ``exact_match,strict-match`` metric. For scriptable frameworks the
+    image-quality gate is the only correctness signal, so a missing/invalid
+    gate fails closed (``accuracy=0.0``).
 
     Args:
         workspace (Path | str): The benchmark workspace to search recursively
@@ -273,7 +248,7 @@ def parse_eval_results(
 
     scriptable = framework_registry.is_scriptable(framework)
 
-    # Scriptable quality gate first (xDiT diffusion): map passed→1.0 / fail→0.0.
+    # Scriptable quality gate first: map passed->1.0 / fail->0.0.
     qg_out = parse_quality_gate(workspace)
     if qg_out.get("quality_gate") is not None:
         passed = quality_gate_passed(qg_out["quality_gate"], require=scriptable)
@@ -290,8 +265,7 @@ def parse_eval_results(
             "source_file": qg_out.get("source_file"),
         }
 
-    # Scriptable workloads require the gate: a missing/invalid one fails closed
-    # rather than falling through to a GSM8K search that cannot apply.
+    # Scriptable workloads require the gate: a missing/invalid one fails closed.
     if scriptable:
         log.warning(
             "accuracy_gate: scriptable framework=%s but no quality_gate found: %s",
@@ -358,7 +332,7 @@ def accuracy_passed(
         bool: True when the drop is within ``threshold`` (or no baseline).
     """
     if baseline_accuracy <= 0:
-        # No baseline accuracy recorded; skip gate (can't compare).
+        # No baseline recorded; skip gate.
         return True
     drop = baseline_accuracy - new_accuracy
     return drop <= threshold

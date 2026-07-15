@@ -15,9 +15,6 @@ import requests
 
 log = logging.getLogger("optimize-submit")
 
-# ── Per-model record ────────────────────────────────────────────────────────────
-
-
 @dataclass
 class SubmissionRecord:
     """Per-model record tracking submission, completion, and CI delivery.
@@ -56,8 +53,7 @@ class SubmissionRecord:
     model: str
     status: str = "pending"  # local stage: submitted/dry-run/skipped/failed
     task_id: str | None = None
-    # Claw session UUID SaFE creates at submit; used to correlate ci_metrics.json
-    # under /wekafs/users/<uid>/<session>/ with the task (set in wait_and_collect_one).
+    # Claw session UUID SaFE creates at submit; correlates ci_metrics.json with the task.
     claw_session_id: str | None = None
     display_name: str | None = None
     model_path: str | None = None
@@ -74,8 +70,7 @@ class SubmissionRecord:
     final_status: str | None = None  # SaFE: Succeeded/Failed/Interrupted/Timeout
     final_phase: int | None = None  # currentPhase at terminal moment
     final_message: str | None = None  # task.Message
-    # CI delivery status is separate from SaFE final_status: a SaFE timeout may
-    # still have written a useful session_breakdown worth publishing.
+    # CI delivery status is separate from SaFE final_status.
     ci_status: str | None = None  # Delivered / Missing artifacts / ...
     ci_success: bool = False
     delivery_reason: str | None = None

@@ -28,12 +28,8 @@ def _default_status_emitter(line: str) -> None:
     log.info("%s", line)
 
 
-# ---------------------------------------------------------------------------
-# Warm-start helpers (prefer rerank / seed-only detection / WarmStartContext)
-# ---------------------------------------------------------------------------
 # Numeric workload knobs threaded into the KB ``prefer`` block so a
-# closer-workload recipe is reranked first (the dispatcher does the actual
-# rerank; the 5-tuple ``required`` filter is unchanged).
+# closer-workload recipe is reranked first.
 _PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
     "tp",
     "ep",
@@ -76,73 +72,19 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
 
 
 def _row_best_config_source(row: Mapping[str, Any] | None) -> str:
-    """Per-path tag for the backend that supplied ``best_config`` on a row.
-
-    Reads the composite remote's ``_field_sources`` / ``_sources`` provenance
-    markers. Returns ``""`` when the row carries no provenance (single-source
-    backend / local-only row), letting the caller fall back to the remote type.
-
-    Args:
-        row (Mapping[str, Any] | None): A merged recipe row (may be empty).
-
-    Returns:
-        str: A short source tag (e.g. ``gbrain`` / ``cortex``), or ``""``.
-    """
-    if not isinstance(row, Mapping):
-        return ""
-    field_sources = row.get("_field_sources")
-    if isinstance(field_sources, Mapping):
-        best_config_src = field_sources.get("best_config")
-        if isinstance(best_config_src, str) and best_config_src:
-            return best_config_src
-        if isinstance(best_config_src, list) and best_config_src:
-            return str(best_config_src[0])
-    sources = row.get("_sources")
-    if isinstance(sources, list) and sources:
-        return str(sources[0])
     return ""
 
 
-def _warm_recipe_source(
-    row: Mapping[str, Any] | None,
-    kb: Any,
-    *,
-    config_donor: Mapping[str, Any] | None = None,
-    config_donor_tier: str = "",
-) -> str:
+def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
     """Resolve which KB path actually supplied the applied warm recipe.
-
-    Under the composite remote, a merged row carries ``_field_sources`` /
-    ``_sources`` recording which backend supplied each field. When the
-    replayable champion is borrowed from a same-architecture sibling, the
-    FINAL applied config comes from the donor's path — so prefer
-    the donor's ``best_config`` source whenever a separate donor (tier other
-    than ``self``) supplied it. Otherwise attribute to the identity match's
-    ``best_config`` backend, then its first contributing source, and finally
-    fall back to the dispatcher's remote type. This makes the WarmStartContext
-    attribute the FINAL applied recipe to the correct path (gbrain vs cortex)
-    instead of guessing.
 
     Args:
         row (Mapping[str, Any] | None): The identity-match warm recipe row.
         kb (Any): The RecipeKB dispatcher (for the remote-type fallback).
-        config_donor (Mapping[str, Any] | None): The recipe that supplied the
-            replayable ``best_config``, when borrowed from a sibling.
-        config_donor_tier (str): The donor tier; ``self`` means the identity
-            match supplied its own config (no borrow).
 
     Returns:
-        str: A short source tag, e.g. ``gbrain`` / ``cortex`` / ``cortex-kb``.
+        str: A short source tag, e.g. ``gbrain`` / ``cortex-kb``.
     """
-    # A borrowed config (donor != identity match) is the FINAL replayed config;
-    # attribute it to the donor's path when provenance is available.
-    if config_donor is not None and config_donor_tier and config_donor_tier != "self":
-        donor_src = _row_best_config_source(config_donor)
-        if donor_src:
-            return donor_src
-    own_src = _row_best_config_source(row)
-    if own_src:
-        return own_src
     return "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
 
 
@@ -184,7 +126,7 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     best_config = row.get("best_config")
     if isinstance(best_config, Mapping) and best_config:
         # An env-only or args-only config is still actionable.
-        args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
+        args = str(best_config.get("extra_server_args") or "").strip()
         envs = best_config.get("extra_envs") or best_config.get("envs") or {}
         if args or (isinstance(envs, Mapping) and envs):
             return True
@@ -192,7 +134,6 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
         if float(row.get("best_throughput") or 0.0) > 0.0:
             return True
     except (TypeError, ValueError):
-        # Malformed row value; fall through to the text checks below.
         pass
     for key in ("what_worked", "what_failed", "pitfalls", "lessons"):
         if row.get(key):
@@ -208,8 +149,8 @@ def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str
     replayable is present.
     """
     best_config = row.get("best_config") if isinstance(row.get("best_config"), Mapping) else {}
-    args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
-    envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+    args = str(best_config.get("extra_server_args") or "").strip()
+    envs = best_config.get("extra_envs") or {}
     if not isinstance(envs, Mapping):
         envs = {}
     return args, {str(k): str(v) for k, v in envs.items()}
@@ -240,7 +181,7 @@ def _max_session_gain(row: Mapping[str, Any]) -> float:
         try:
             best = max(best, float(row.get("validated_gain_pct") or row.get("gain_pct") or 0.0))
         except (TypeError, ValueError):
-            pass  # non-numeric gain field; fall through with best=0.0
+            pass
     return best
 
 
@@ -283,10 +224,10 @@ def _donor_is_trustworthy(
         return False
     if not _has_replayable_config(donor):
         return False
-    # RC1: require evidence of a real positive gain (no zero-gain borrows).
+    # Require evidence of a real positive gain.
     if _max_session_gain(donor) <= 0:
         return False
-    # RC2: require a concrete architecture matching the target (no cross-arch / unknown).
+    # Require a concrete architecture matching the target.
     from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     donor_arch = _architectures_slug(donor.get("architectures") or [])
@@ -300,13 +241,13 @@ def _donor_is_trustworthy(
     if tgt_mt and donor_mt and donor_mt != tgt_mt:
         return False
 
-    # RC3: reject an explicit workload-shape mismatch (only when both are known).
+    # Reject an explicit workload-shape mismatch (only when both are known).
     def _shape_conflict(target_val: Any, donor_key: str) -> bool:
         try:
             tv = int(target_val)
             dv = int(donor.get(donor_key))
         except (TypeError, ValueError):
-            return False  # unknown on either side → not a conflict
+            return False
         if tv <= 0 or dv <= 0:
             return False
         return tv != dv
@@ -471,18 +412,14 @@ def _build_warm_start_context(
     """Build the model-facing WarmStartContext from a KB recipe row.
 
     ``status`` is one of ``hit`` / ``seed_only`` / ``miss`` / ``error``.
-    Decouples model consumption from the KB row layout: it surfaces a
-    ready-to-replay champion plus the experiential lists, so consumers
-    (warm-replay / specialist prompt / ledger) never parse the raw
-    recipe shape.
+    Surfaces a ready-to-replay champion plus the experiential lists so consumers
+    never parse the raw recipe shape.
 
-    Config-donor decoupling: the experiential lists (priors) always come
-    from the identity match ``recipe`` (even when its own best_config is
-    empty), while ``recommended_replay`` is sourced from ``config_donor`` —
-    which may be the identity row itself (``config_tier="self"``) or a
-    borrowed same-architecture sibling. The donor's transfer confidence
-    (``config_confidence``) governs the downstream replay gate, NOT the
-    identity-match confidence.
+    Config-donor decoupling: the experiential lists (priors) always come from the
+    identity match ``recipe``, while ``recommended_replay`` is sourced from
+    ``config_donor`` (the identity row itself when ``config_tier="self"``, or a
+    borrowed same-architecture sibling). The donor's transfer confidence governs
+    the downstream replay gate, not the identity-match confidence.
     """
     ctx: dict[str, Any] = {
         "status": status,
@@ -498,18 +435,14 @@ def _build_warm_start_context(
         "lessons": [],
         "pitfalls": [],
     }
-    # Priors ride the identity match regardless of whether it carries a
-    # replayable config (seed-only / empty-config anchors still anchor priors).
+    # Priors ride the identity match even when it carries no replayable config.
     if isinstance(recipe, Mapping):
         ctx["proven_prior"] = list(recipe.get("what_worked") or [])
         ctx["do_not_repeat"] = list(recipe.get("what_failed") or [])
         ctx["lessons"] = list(recipe.get("lessons") or [])
         ctx["pitfalls"] = list(recipe.get("pitfalls") or [])
-    # Replay config comes from the donor (self or borrowed sibling). When no
-    # explicit donor is supplied (legacy callers / direct unit use), fall back
-    # to the identity recipe itself as a self-donor if it owns a replayable
-    # config — preserving the original "hit recipe replays its own config"
-    # contract.
+    # Replay config comes from the donor; fall back to the identity recipe as a
+    # self-donor when it owns a replayable config.
     donor = config_donor if isinstance(config_donor, Mapping) else None
     if donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
         donor = recipe
@@ -539,9 +472,7 @@ def _build_warm_start_context(
             }
     # Extract replayable code patches from prs_tested (positive + negative).
     _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
-    # KG enhancement: cross-recipe revert aggregation + arch-graph advisory
-    # blocks + graph-recommended knobs + validity. Best-effort and fully
-    # degradable — never lose the local prs_tested patches on KG failure.
+    # KG enhancement (best-effort, degradable).
     _enhance_warm_start_with_kg(
         ctx,
         model_architectures=model_architectures,
@@ -626,7 +557,7 @@ def _enhance_warm_start_with_kg(
 
     try:
         own_arch = {_arch_norm(a) for a in archs}
-        # 1. Architecture-family graph: reach related architectures.
+        # Architecture-family graph: reach related architectures.
         related: set[str] = set(own_arch)
         for arch in archs:
             for node in kg.graph_traverse_safe(
@@ -638,7 +569,7 @@ def _enhance_warm_start_with_kg(
                 if node.entity:
                     related.add(node.entity)
 
-        # 2. Cross-recipe negatives → hard (own arch) vs advisory (related).
+        # Cross-recipe negatives → hard (own arch) vs advisory (related).
         already_blocked = {
             _arch_norm(b.get("patch_file"))
             for b in (ctx.get("blocked_patches") or [])
@@ -682,7 +613,7 @@ def _enhance_warm_start_with_kg(
         if advisory:
             ctx["advisory_blocked_patches"] = advisory
 
-        # 3. Positive candidates for current arch+hw+fw, minus blocked.
+        # Positive candidates for current arch+hw+fw, minus blocked.
         conditions: dict[str, Any] = {}
         if hardware:
             conditions["hw"] = hardware
@@ -711,10 +642,8 @@ def _enhance_warm_start_with_kg(
             recommended.sort(key=lambda r: -(r.get("expected_gain") or 0.0))
             ctx["recommended_knobs"] = recommended
 
-        # 3b. Journal-derived config knobs (KNOB_IMPROVES), behind a flag.
-        # These carry runnable args/envs and use the fingerprint vocabulary,
-        # so they ride a separate ctx key and never mix with the patch-keyed
-        # ``recommended_knobs`` above.
+        # Journal-derived config knobs (KNOB_IMPROVES), behind a flag; ride a
+        # separate ctx key from ``recommended_knobs`` above.
         if _kg_guided_enabled():
             from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import generate_knob_candidates_graph_guided
 
@@ -729,7 +658,7 @@ def _enhance_warm_start_with_kg(
             if knobs:
                 ctx["graph_guided_knobs"] = knobs
 
-        # 4. Validity check: flag replay patches whose VALID_FOR has lapsed.
+        # Validity check: flag replay patches whose VALID_FOR has lapsed.
         replay = ctx.get("recommended_replay")
         if isinstance(replay, Mapping):
             for patch in replay.get("patches") or []:
@@ -797,7 +726,7 @@ def _extract_patches_from_prs_tested(
         outcome = str(pr.get("outcome", "")).upper()
         applicable_arch = pr.get("applicable_arch") or []
 
-        # Architecture match: if applicable_arch specified, at least one must match
+        # Architecture match: at least one of applicable_arch must match.
         if applicable_arch and arch_set:
             if not any(a in arch_set for a in applicable_arch):
                 continue
@@ -808,7 +737,7 @@ def _extract_patches_from_prs_tested(
             except (TypeError, ValueError):
                 gain = 0.0
             if gain > 0:
-                # Limit patch_content to 50KB to avoid state.json bloat.
+                # Cap patch_content at 50KB to avoid state.json bloat.
                 pc = patch_content if len(patch_content) <= 50_000 else ""
                 patches.append({
                     "patch_file": str(pr.get("patch_file") or ""),
@@ -818,8 +747,8 @@ def _extract_patches_from_prs_tested(
                     "repo": str(pr.get("repo") or ""),
                 })
         elif outcome in ("REVERT", "FAILED"):
-            # Only block when applicable_arch is specified; a REVERT with
-            # no arch constraint is too broad to block all models.
+            # Only block when applicable_arch is specified (an unconstrained
+            # REVERT is too broad to block all models).
             if not applicable_arch:
                 continue
             blocked.append({
@@ -881,7 +810,6 @@ def run_t0_anchor(
         raise ValueError("run_t0_anchor requires an explicit session_dir")
     sd = Path(session_dir)
 
-    # Hyperloom-local session id (Cortex KB session protocol retired).
     sid = (getattr(shared_state, "cortex_session_id", "") or "").strip()
     if not sid and sd is not None:
         sid = Path(sd).name
@@ -898,7 +826,7 @@ def run_t0_anchor(
 
     hw = kb_hardware_slug(hw, **resolve_kb_topology())
 
-    # Short-circuit when already anchored (via ``warm_start_ts``); resume=True bypasses.
+    # Short-circuit when already anchored; resume=True bypasses.
     if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
         shared_state.cortex_session_id = sid
         emit(f"Cortex KB        : already anchored session_id={sid}")
@@ -914,7 +842,8 @@ def run_t0_anchor(
             timespec="seconds",
         )
 
-    # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
+    # Backfill operator-tracing metadata; T0 only stamps metadata (best_config
+    # preserved, rewritten at CLOSE).
     _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
     _framework = str(
@@ -939,7 +868,6 @@ def run_t0_anchor(
     _extras: dict[str, Any] = {}
     if _model_class:
         _extras["model_class"] = _model_class
-    # Architecture-identity tags from config.json (records base architecture for fine-tunes).
     _architectures = getattr(shared_state, "model_architectures", None) or []
     if isinstance(_architectures, list):
         _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
@@ -1000,13 +928,13 @@ def run_t0_anchor(
         architectures=_architectures_val,
     )
 
-    # Persist framework + framework_version onto SharedState so CLOSE/KEEP derives an identical cid.
+    # Persist framework + framework_version so CLOSE/KEEP derives the same cid.
     if _framework:
         shared_state.framework = _framework
     if _fw_version:
         shared_state.framework_version = _fw_version
 
-    # Read-modify-write the LOCAL store so the stamp doesn't clobber best_config / sessions / what_worked.
+    # Read-modify-write the local store so the stamp doesn't clobber fields.
     try:
         live = kb.local.get_recipe(canonical_id=cid) or {}
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -1044,6 +972,8 @@ def run_t0_anchor(
             "confidence",
             "evidence_refs",
             "provenance",
+            "_field_sources",
+            "_sources",
         }
     }
     merged_extras.update(prior_extras)
@@ -1090,18 +1020,16 @@ def run_t0_anchor(
         log.exception("T0 anchor put_recipe raised unexpectedly")
 
     # warm_start_recipe — 4-level cascading fallback:
-    #   L1: 7-tuple exact (model+hw+fw+model_type+arch+fwv+prec) → conf=1.0, replay
-    #   L2: drop model → (hw+fw+model_type+arch+fwv+prec) → conf=0.95, replay
-    #       "same architecture class, cross-model" — empirically +21~37%
-    #   L3: drop model+fwv → (hw+fw+model_type+arch+prec) → conf=0.5, advisory_only
-    #       "same arch class, any fw version" — cross-version risk, lessons only
-    #   L4: existing tier fallback (relative) → conf=0.3, advisory_only
+    #   L1: 7-tuple exact → conf=1.0
+    #   L2: drop model → conf=0.95
+    #   L3: drop model+fwv → conf=0.5
+    #   L4: relative tier fallback → conf=0.3
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
     warm_prefer = _build_warm_prefer(shared_state, _fw_version)
 
-    # Pre-compute architectures slug once for L2/L3 reuse.
+    # Architectures slug reused by L2/L3.
     from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     _arch_slug = _architectures_slug(_architectures_val)
@@ -1170,17 +1098,13 @@ def run_t0_anchor(
             warm_tier = "relative"
             warm_conf = 0.3
 
-    # Bare T0 anchor (identity + tracing tags, no best_config) demotes to seed_only.
+    # A bare T0 anchor (no best_config) demotes to seed_only.
     if warm_point and not _recipe_is_actionable(warm_point):
         warm_tier = "seed_only"
         warm_conf = 0.0
 
-    # Config-donor decoupling: the identity match (warm_point) supplies priors
-    # and the 7-tuple anchor; if it carries no replayable champion config,
-    # borrow one from the
-    # nearest same-architecture sibling so the active warm-replay can still
-    # fire. The donor's cross-model transfer confidence — not the identity
-    # match's confidence — governs the downstream replay gate.
+    # Config-donor decoupling: the identity match supplies priors; borrow a
+    # champion config from the nearest same-arch sibling when it has none.
     config_donor: Mapping[str, Any] | None = None
     config_donor_tier = ""
     config_donor_conf = 0.0
@@ -1188,8 +1112,7 @@ def run_t0_anchor(
     _tgt_isl = getattr(shared_state, "isl", None)
     _tgt_osl = getattr(shared_state, "osl", None)
     # A true-self (identity ``exact``) champion always replays; a cross-model
-    # warm_point that happens to carry a config is a BORROW and must clear the
-    # trustworthiness gate before it is adopted as the replay donor.
+    # borrow must clear the trustworthiness gate before it becomes the donor.
     if warm_point and _has_replayable_config(warm_point) and (
         warm_tier == "exact"
         or _donor_is_trustworthy(
@@ -1204,9 +1127,8 @@ def run_t0_anchor(
         config_donor = warm_point
         config_donor_tier = "self"
         config_donor_conf = warm_conf
-    # KG-native cross-model donor (single_top, gated by GBRAIN_KG_NATIVE): when
-    # a borrow is needed, prefer the strongest cross-model KNOB_IMPROVES edge
-    # over the recipe-KB sibling search. Degradation-safe → recipe-KB fallback.
+    # KG-native cross-model donor (gated by GBRAIN_KG_NATIVE): prefer the
+    # strongest cross-model KNOB_IMPROVES edge; degrade to recipe-KB search.
     if config_donor is None and warm_point:
         kg_donor = _kg_native_config_donor(
             architectures=_architectures_val if isinstance(_architectures_val, list) else None,
@@ -1238,7 +1160,8 @@ def run_t0_anchor(
             config_donor_tier = dtier
             config_donor_conf = dconf
 
-    # Keep warm.json envelope shape stable for existing readers (kb_explorer, breakdown); new readers prefer shared_state.warm_start_recipe.
+    # Keep warm.json envelope shape stable; new readers prefer
+    # shared_state.warm_start_recipe.
     warm_text = json.dumps(
         {"points": [warm_point] if warm_point else []},
         sort_keys=True,
@@ -1260,9 +1183,8 @@ def run_t0_anchor(
             ),
             encoding="utf-8",
         )
-        # ``raw`` is intentionally omitted here: it duplicates ``recipe`` and is
-        # injected into specialist prompts. The disk snapshot above keeps it for
-        # envelope-shape compatibility.
+        # ``raw`` is omitted here (duplicates ``recipe``); the disk snapshot
+        # keeps it for envelope-shape compatibility.
         shared_state.warm_start_recipe = {
             "workload": workload,
             "hw": hw,
@@ -1273,19 +1195,15 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
 
-    # WarmStartContext: model-facing projection of the KB result (parallel to warm_start_recipe/.kb_warm.json, not a replacement); explicit status so consumers branch on hit/seed_only/miss.
+    # WarmStartContext: model-facing projection of the KB result, with an
+    # explicit hit/seed_only/miss status.
     if not warm_point:
         wsc_status = "miss"
     elif warm_tier == "seed_only":
         wsc_status = "seed_only"
     else:
         wsc_status = "hit"
-    warm_source = _warm_recipe_source(
-        warm_point,
-        kb,
-        config_donor=config_donor,
-        config_donor_tier=config_donor_tier,
-    )
+    warm_source = _warm_recipe_source(warm_point, kb)
     try:
         shared_state.warm_start_context = _build_warm_start_context(
             config_donor=config_donor,
@@ -1305,7 +1223,7 @@ def run_t0_anchor(
     except Exception:  # noqa: BLE001 — defensive; context is advisory
         log.exception("warm_start_context build failed")
 
-    # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields (exact-5-tuple-only); read from warm_point.
+    # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
     lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
@@ -1357,7 +1275,7 @@ def run_t0_anchor(
                 workload,
             )
 
-    # warm_present = usable record (tier != "miss" and confidence > 0).
+    # warm_present = usable record (confidence > 0).
     warm_present = bool(warm_point) and warm_conf > 0.0
     if began_now:
         warm_label = f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else "seed_only" if warm_point else "empty"

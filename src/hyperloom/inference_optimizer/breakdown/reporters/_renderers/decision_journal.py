@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Decision journal renderer (v1.1).
+"""Decision journal renderer.
 
 One markdown block per params/backends round: round-level promotion
 verdict plus a variant table (gain, outcome, reject reason).

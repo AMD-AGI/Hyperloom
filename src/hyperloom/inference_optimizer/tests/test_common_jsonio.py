@@ -141,5 +141,5 @@ class TestExtractFirstJson:
 
     def test_no_bare_re_only_fenced(self):
         text = 'bare {"k": 1} no fence'
-        # bare_re defaults to None -> only fenced blocks considered
+        # bare_re None -> only fenced blocks considered
         assert extract_first_json_with_key(text, "k") is None

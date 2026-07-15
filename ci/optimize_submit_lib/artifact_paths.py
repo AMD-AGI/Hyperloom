@@ -21,8 +21,8 @@ DEFAULT_ARTIFACT_PATTERNS = (
     "ci_report.md",
 )
 
-# Files required for a run to count as "delivered". The NFS fallback scans
-# these suffixes; a miss triggers the wekafs rescue path.
+# Files required for a run to count as "delivered"; a miss triggers the wekafs
+# rescue path.
 _KEY_RESULT_SUFFIXES: tuple[str, ...] = (
     "optimization_report.md",
     "ci_metrics.json",

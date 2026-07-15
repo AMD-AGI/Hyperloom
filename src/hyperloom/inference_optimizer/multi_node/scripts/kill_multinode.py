@@ -75,7 +75,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             continue
 
         pid = int(text)
-        # Sentinel 0 = "no real process"; treat as stale (os.kill(0,...) would hit our own pg).
+        # Sentinel 0 = "no real process"; treat as stale.
         if pid <= 0:
             summary["stale"].append(f"{pid_file.name}:{pid}")
             try:
@@ -95,7 +95,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
                 pass
             continue
 
-        # SIGTERM the whole process group (each launcher is its own pg leader via setsid).
+        # SIGTERM the whole process group (each launcher is a pg leader via setsid).
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -128,7 +128,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             # PID file already gone; nothing to clean up.
             pass
 
-    # Clean up legacy rayjoin pid files (current launch no longer creates these).
+    # Clean up legacy rayjoin pid files.
     for pid_file in sorted(p.glob("rank_*_rayjoin.pid")):
         try:
             text = pid_file.read_text(encoding="utf-8").strip()

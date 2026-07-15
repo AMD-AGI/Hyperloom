@@ -40,13 +40,11 @@ def _silent_backends() -> dict[str, object]:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    # This file exercises legacy/native KERNEL entry behavior; default GEAK is
-    # covered separately.
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers resolve from disk even when the host env is unset.
+    # Pin the kernel-agent root so request handlers resolve from disk.
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    # Stub the interpreter resolver so the unit test never spawns a real Magpie import probe.
+    # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from hyperloom.orchestrator.actions.executors import _grid_runner
 
@@ -523,7 +521,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_and_selects_bes
     assert by_kernel["k006"] == ["forge"]
 
 
-# E — record_kernel_opt retires kernels stuck in PARTIAL (regression for the r24 custom_allreduce GEAK retry-loop that only retired on REVERT).
+# E — record_kernel_opt retires kernels stuck in PARTIAL.
 def _partial_kernel_opt_result(kernel_id: str, decision: str = "PARTIAL") -> dict[str, Any]:
     return {
         "status": "ok",
@@ -652,8 +650,8 @@ def test_record_kernel_opt_persists_test_command():
 
 
 def test_record_kernel_opt_test_command_missing_does_not_error():
-    """When no attempt has a test_command, the entry must still be written
-    without raising and without setting test_command."""
+    """When no attempt has a test_command, the entry is still written without
+    raising and without setting test_command."""
     state = SharedState()
     state.record_kernel_opt(_partial_kernel_opt_result("k_notc"))
     entry = state.kernel_opt_attempts.get("k_notc") or {}

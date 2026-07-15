@@ -8,7 +8,7 @@
 
 Builds a tiny hand-authored Kineto trace so the streaming parser, correlation
 attribution, timeline union math, and annotation-window extraction are all
-covered deterministically without any large fixture.
+covered deterministically.
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ def test_missing_trace_returns_failed(tmp_path):
     assert "error" in out
 
 
-# ── multi-rank trace selection (P0-1) ────────────────────────────────────────
+# ── multi-rank trace selection ───────────────────────────────────────────────
 
 
 def _write_ranked(d: Path, rank: int, extra_events: int = 0) -> Path:
@@ -173,13 +173,12 @@ def test_single_file_rank_provenance_is_none(tmp_path):
     assert out["rank_count"] == 1
 
 
-# ── sglang CUDA-graph capture fragments (capture_dir selection fix) ───────────
+# ── sglang CUDA-graph capture fragments ──────────────────────────────────────
 
 
 def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -> Path:
-    # A sparse sglang CUDA-graph capture shard: a rank-tagged filename but only
-    # a couple of device kernels (the real workload is NOT captured here). These
-    # are large on disk (cpu_op/metadata heavy) yet device-kernel poor.
+    # A sparse sglang CUDA-graph capture shard: rank-tagged filename but only a
+    # couple of device kernels (the real workload is not captured here).
     capture_dir.mkdir(parents=True, exist_ok=True)
     events = [
         {"cat": "kernel", "ph": "X", "name": "graph_capture_marker",
@@ -192,8 +191,8 @@ def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -
 
 
 def _write_main_tp_trace(d: Path, name: str = "1783387979.6664605-TP-0.trace.json.gz") -> Path:
-    # The content-rich main sglang profiler trace at the top of torch_trace/.
-    # It is NOT rank-tagged (``-TP-0`` does not match the rank regex).
+    # The content-rich main sglang profiler trace; not rank-tagged (``-TP-0``
+    # does not match the rank regex).
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     with gzip.open(p, "wb") as f:
@@ -202,11 +201,8 @@ def _write_main_tp_trace(d: Path, name: str = "1783387979.6664605-TP-0.trace.jso
 
 
 def test_resolve_trace_file_ignores_sglang_capture_fragments(tmp_path):
-    # Real sglang layout: the content-rich main trace sits at the top of
-    # torch_trace/ as ``*-TP-0.trace.json.gz`` (NOT rank-tagged), while dozens of
-    # sparse CUDA-graph capture shards live under capture_traces/ named
-    # ``bs_<n>_rank0.json.gz`` (rank-tagged). The rank-tagged shards must NOT
-    # hijack selection away from the main trace (the P0 bypass defect).
+    # The rank-tagged capture shards must not hijack selection away from the
+    # non-rank-tagged content-rich main trace.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     cap = d / "capture_traces"
@@ -217,9 +213,8 @@ def test_resolve_trace_file_ignores_sglang_capture_fragments(tmp_path):
 
 
 def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
-    # End-to-end via analyze_trace: the selected trace must yield the main
-    # trace's real kernels, not the 1-kernel capture shard, and the many
-    # bs_*_rank0 shards must not be mistaken for real per-rank workload traces.
+    # End-to-end via analyze_trace: the selected trace yields the main trace's
+    # real kernels, not the 1-kernel capture shard.
     d = tmp_path / "torch_trace"
     _write_main_tp_trace(d)
     cap = d / "capture_traces"
@@ -233,7 +228,7 @@ def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
 
 
 def test_resolve_trace_file_falls_back_when_only_capture_fragments(tmp_path):
-    # Degenerate: if ONLY capture shards exist, still resolve one (never None).
+    # If only capture shards exist, still resolve one (never None).
     d = tmp_path / "torch_trace"
     cap = d / "capture_traces"
     _write_capture_fragment(cap, 512)
@@ -243,7 +238,7 @@ def test_resolve_trace_file_falls_back_when_only_capture_fragments(tmp_path):
 
 def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
     # Even without the capture_traces/ subdir, the ``bs_<n>_rank<n>`` filename
-    # pattern marks a capture shard; a top-level main trace still wins.
+    # marks a capture shard; a top-level main trace still wins.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     _write_capture_fragment(d, 256)  # writes bs_256_rank0.json.gz at top level
@@ -252,10 +247,9 @@ def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
 
 
 def test_capture_traces_detection_is_relative_to_trace_root(tmp_path):
-    # F1: an unrelated ancestor dir named ``capture_traces`` ABOVE the trace root
-    # must not flag the real main trace. Detection is relative to the root, so
-    # only a genuine capture_traces/ subdir *within* the root marks shards.
-    root = tmp_path / "capture_traces" / "torch_trace"  # ancestor coincidentally named
+    # An unrelated ancestor dir named ``capture_traces`` above the trace root must
+    # not flag the main trace; only a genuine subdir within the root marks shards.
+    root = tmp_path / "capture_traces" / "torch_trace"
     main = _write_main_tp_trace(root, name="rank_0.trace.json.gz")
     _write_capture_fragment(root / "capture_traces", 512)  # genuine sub-shard
     resolved = reader.resolve_trace_file(root)
@@ -263,9 +257,8 @@ def test_capture_traces_detection_is_relative_to_trace_root(tmp_path):
 
 
 def test_uppercase_capture_dir_with_generic_shard_name(tmp_path):
-    # F4 + dir-based detection independent of the bs_ filename: a generic-named,
-    # LARGER shard under an uppercase ``Capture_Traces/`` dir is still excluded,
-    # so a smaller top-level main trace wins over the larger shard.
+    # A generic-named larger shard under an uppercase ``Capture_Traces/`` dir is
+    # excluded, so a smaller top-level main trace wins.
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     cap = d / "Capture_Traces"
@@ -278,8 +271,8 @@ def test_uppercase_capture_dir_with_generic_shard_name(tmp_path):
 
 
 def test_rank_count_ignores_multi_rank_capture_shards(tmp_path):
-    # F3: multi-GPU capture emits bs_*_rank0 AND bs_*_rank1 shards; their rank
-    # tags must not be counted as real per-rank workload traces.
+    # Multi-GPU capture emits bs_*_rank0 and bs_*_rank1 shards; their rank tags
+    # must not be counted as real per-rank workload traces.
     d = tmp_path / "torch_trace"
     _write_main_tp_trace(d)
     cap = d / "capture_traces"
@@ -291,8 +284,8 @@ def test_rank_count_ignores_multi_rank_capture_shards(tmp_path):
 
 
 def test_selected_capture_fragment_flag(tmp_path):
-    # F2: only capture shards -> analyze marks selected_capture_fragment so the
-    # tool layer can surface a health warning; a normal main trace does not.
+    # Only capture shards -> analyze marks selected_capture_fragment; a normal
+    # main trace does not.
     only_shards = tmp_path / "torch_trace_shards"
     _write_capture_fragment(only_shards / "capture_traces", 512)
     out = reader.analyze_trace(only_shards, top_k=0)
@@ -305,11 +298,8 @@ def test_selected_capture_fragment_flag(tmp_path):
 
 
 def test_multi_rank_main_traces_survive_capture_shard_filter(tmp_path):
-    # The "don't break xDiT TP>1" invariant under the capture-shard filter:
-    # genuine top-level per-rank main traces (rank_0..N) coexisting with sglang
-    # capture shards must still resolve to rank_0 (shards are filtered out, then
-    # the lowest-rank policy applies to the real per-rank traces). Pre-fix this
-    # picked the alphabetically-first rank0 shard (bs_496_rank0) instead.
+    # Genuine top-level per-rank main traces coexisting with sglang capture shards
+    # must still resolve to rank_0 (shards filtered out, then lowest-rank policy).
     d = tmp_path / "torch_trace"
     _write_ranked(d, 0)
     _write_ranked(d, 1, extra_events=20)
@@ -338,7 +328,7 @@ def test_full_trace_scope_is_default(tmp_path):
     assert "steady_window" not in out
 
 
-# ── steady-state windowing (M2.5) ────────────────────────────────────────────
+# ── steady-state windowing ───────────────────────────────────────────────────
 
 # Three ProfilerStep windows: #1 is warm-up (dropped); a warm-up GEMM sits in
 # #1, the steady attention kernel sits in #3 (the selected representative step).
@@ -372,8 +362,8 @@ def test_select_steady_window_drops_warmup_and_picks_representative():
 
 
 def test_select_steady_window_high_count_loop_not_masked_by_spurious_step():
-    # A single spurious "step"-named annotation must NOT mask a real high-count
-    # loop (regression: rank picked the 1-count step then rejected on threshold).
+    # A single spurious "step"-named annotation must not mask a real high-count
+    # loop.
     windows = [{"name": "optimizer_step", "ts": 0.0, "dur": 5.0}] + [
         {"name": "graph_call", "ts": float(100 + i * 100), "dur": 100.0} for i in range(5)
     ]
@@ -463,7 +453,7 @@ def test_steady_state_falls_back_to_full_when_no_windows(tmp_path):
     assert len(out["kernels"]) == 2
 
 
-# ── boundary / malformed inputs (P0-3) ───────────────────────────────────────
+# ── boundary / malformed inputs ──────────────────────────────────────────────
 
 
 def test_non_kineto_json_yields_no_kernels(tmp_path):

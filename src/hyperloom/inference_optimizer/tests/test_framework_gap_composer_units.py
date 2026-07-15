@@ -116,7 +116,6 @@ class TestExtractBottleneck:
 class TestComposeGap:
     def test_minimal_inputs(self):
         gap, kw = compose_gap()
-        # No tokens → gap is just "improve throughput".
         assert gap == "improve throughput"
         assert kw == []
 
@@ -130,7 +129,6 @@ class TestComposeGap:
             precision="BF16",
             profile_kernel_breakdown_path=breakdown,
         )
-        # Phrase ordering: improve <fw> <prec> <arch> <bottleneck> throughput on <gpu>.
         assert gap == "improve sglang bf16 moe attention throughput on mi300x"
         assert kw == sorted({"sglang", "mi300x", "moe", "bf16", "attention"})
 
@@ -141,11 +139,10 @@ class TestComposeGap:
             model_class="dense",
         )
         assert "throughput" in gap and "vllm" in gap and "dense" in gap
-        assert "on " not in gap  # no gpu_type → no trailing 'on ...'
+        assert "on " not in gap
         assert sorted(kw) == sorted({"vllm", "dense"})
 
     def test_bottleneck_dedup_with_existing_token(self, tmp_path):
-        # A bottleneck duplicating an existing token must not be appended again.
         breakdown = tmp_path / "br.json"
         breakdown.write_text(json.dumps([{"name": "moe_ck_tile_fused"}]))
         gap, kw = compose_gap(
@@ -156,5 +153,4 @@ class TestComposeGap:
             profile_kernel_breakdown_path=breakdown,
         )
         assert gap == "improve vllm moe throughput"
-        # `moe` appears once in keywords.
         assert kw.count("moe") == 1

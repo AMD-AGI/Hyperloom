@@ -92,8 +92,8 @@ def test_context_manager_releases(tmp_path):
 def test_pid_fallback_rejects_live_owner(tmp_path, monkeypatch):
     """Without fcntl, a lock owned by a *different* live pid is still refused.
 
-    Exercises the non-POSIX fallback path explicitly (the CI host is POSIX, so
-    fcntl is force-disabled here) using a separate live child process as owner.
+    Exercises the non-POSIX fallback path using a separate live child process
+    as owner.
     """
     monkeypatch.setattr(session_lock, "fcntl", None)
     live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])

@@ -77,8 +77,7 @@ def _shape_ledger(
         args = str(e.get("extra_server_args") or "")
         envs = dict(e.get("extra_envs") or {})
         provenance = str(e.get("provenance") or "")
-        # Classify the variant into a stable operation_kind (backend/param/env)
-        # so the ledger can be filtered the same way as the timeline / trace.
+        # Classify the variant into a stable operation_kind (backend/param/env).
         change_kind = classify_change_kind(
             "explore",
             {"extra_server_args": args, "extra_envs": envs},
@@ -123,7 +122,7 @@ def _patch_winners_history(
     rows: list[Any],
     baseline_tput: float | None,
 ) -> list[dict[str, Any]]:
-    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput``, and compute missing per-winner ``gain_pct``.
+    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput`` and compute missing per-winner ``gain_pct``.
 
     Args:
         rows (list[Any]): Raw ``backend_winners_history`` rows.
@@ -158,7 +157,6 @@ def _patch_winners_history(
                     try:
                         w2["gain_pct"] = (float(w2["tput"]) - bt) / bt * 100.0
                     except (TypeError, ValueError, ZeroDivisionError):
-                        # Leave gain unset when persisted throughput is not numeric.
                         pass
                 new_winners.append(w2)
             row["winners"] = new_winners
@@ -169,7 +167,6 @@ def _patch_winners_history(
                     best["gain_pct"] = (float(best["tput"]) - bt) / bt * 100.0
                     row["best"] = best
                 except (TypeError, ValueError, ZeroDivisionError):
-                    # Leave best.gain_pct unset when persisted throughput is not numeric.
                     pass
         out.append(row)
     return out
@@ -180,9 +177,8 @@ def _shape_winners_history(
 ) -> list[dict[str, Any]]:
     """Persist ``explore_search.winners_history`` rows with their join key + source.
 
-    ``_shape_ledger`` drops this history, so without re-emitting it the exported
-    ``explore_search`` carries no ``fingerprint``→``provenance`` map and downstream
-    consumers can't reconstruct ``phase_breakdown.explore.by_domain`` offline.
+    Re-emits the fingerprint→provenance map (dropped by ``_shape_ledger``) so
+    downstream can reconstruct ``phase_breakdown.explore.by_domain`` offline.
 
     Args:
         explore_search (dict[str, Any] | None): The ``explore_search`` ledger
@@ -231,11 +227,10 @@ def collect_explore_search(
     Returns:
         A dict summarizing the explore-phase search activity and outcomes.
     """
-    # Emit all three ledgers (unified explore + legacy params/backends) so
-    # breakdown reprocesses both vintages; unused ones shape to empty shells.
+    # Emit all three ledgers (unified explore + legacy params/backends);
+    # unused ones shape to empty shells.
     explore_ledger = _shape_ledger(state.get("explore_search"))
-    # Persist provenance+fingerprint winners_history so offline recompute /
-    # downstream can recover the explore specialist attribution.
+    # Persist provenance+fingerprint winners_history for offline recompute.
     explore_ledger["winners_history"] = _shape_winners_history(state.get("explore_search"))
     explore_ledger["winner_history"] = list(state.get("params_winner_history") or [])
     explore_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
@@ -319,7 +314,6 @@ def _shape_sweep_point(
             isl_ = int(m.group(3))
             osl_ = int(m.group(4))
         except ValueError:
-            # Keep parsed knobs as None for non-canonical variant names.
             pass
     report = _find_benchmark_report(variant_dir)
     report_data = _load_json_safe(report, warnings) if report else None

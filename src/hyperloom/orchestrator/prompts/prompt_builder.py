@@ -252,19 +252,18 @@ def _filter_actions(
 
     Args:
         registry (ActionRegistry): The loaded action registry to look up.
-        enabled (Iterable[str]): Enabled action names; unknown names are
-            silently skipped (the caller has already validated them).
+        enabled (Iterable[str]): Enabled action names, drawn from the closed
+            :data:`FULL_ENABLED_ACTIONS` set.
 
     Returns:
-        list[ActionMetadata]: Metadata for each resolvable enabled action, in
-        the input order.
+        list[ActionMetadata]: Metadata for each enabled action, in the input
+        order.
     """
     enabled_set: list[str] = list(enabled)
     out: list[ActionMetadata] = []
     for name in enabled_set:
         meta = registry.get(name)
-        if meta is None:  # silently skip; caller already validated
-            continue
+        assert meta is not None
         out.append(meta)
     return out
 

@@ -3,10 +3,8 @@
 
 """Multi-node TraceLens SGLang patch fan-out.
 
-The single-node patcher can't reach SGLang across pods, so this fans out
-one NodeAffinity-pinned actor per alive pod to apply the TraceLens
-roofline patches where SGLang lives (else the trace splitter sees no
-steady-state and the agent hangs at proposals=0). Each actor resolves the
+Fans out one NodeAffinity-pinned actor per alive pod to apply the
+TraceLens roofline patches where SGLang lives. Each actor resolves the
 sglang version + apply root, skips if the sentinel markers are already
 present (idempotent), ``git apply --check``s then applies every
 ``$TRACELENS_ROOT/.../sglang_<X_Y_Z>/*.patch`` (rolling back on mid-set
@@ -33,14 +31,13 @@ from typing import Any
 
 
 # Sentinel markers (keep in sync with _server_patcher._discover_sglang_plan).
-# A pod counts as patched iff ALL markers are present; this avoids false
-# positives when upstream merges one identifier but not the whole patch).
+# A pod counts as patched iff ALL markers are present.
 _SENTINEL_RELPATH = "python/sglang/srt/managers/scheduler_profiler_mixin.py"
 _SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
     "roofline_annotations",
 )
-# Extra check: io_struct must also be patched, else the request body fails to deserialise.
+# io_struct must also be patched, else the request body fails to deserialise.
 _EXTRA_SENTINEL_RELPATH = "python/sglang/srt/managers/io_struct.py"
 _EXTRA_SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
@@ -55,7 +52,7 @@ _PATCH_TREE_REL = (
     "sglang_roofline_patches",
 )
 
-# Per ``git apply`` timeout (a single patch is <1s; headroom for I/O hiccups).
+# Per ``git apply`` timeout.
 _GIT_TIMEOUT_SEC = 30
 
 
@@ -206,8 +203,7 @@ def _apply_on_pod(
             result["error"] = f"sglang not importable: {e}"
             return result
 
-        # Version resolution chain (namespace-packaged sglang has __version__
-        # = None): sglang.version, then pip metadata, then top-level attr.
+        # Version resolution: sglang.version, then pip metadata, then attr.
         version = ""
         try:
             from sglang.version import __version__ as _sv  # type: ignore[import-not-found]
@@ -228,10 +224,10 @@ def _apply_on_pod(
         if sglang_version_pin and version and version != sglang_version_pin:
             _log(f"version pin {sglang_version_pin!r} != installed {version!r} — proceeding (pin is advisory)")
 
-        # Install-root anchor: sglang.__file__ (editable), else the
-        # scheduler_profiler_mixin submodule file, else sglang.__path__[0].
+        # Install-root anchor: sglang.__file__, else the
+        # scheduler_profiler_mixin file, else sglang.__path__[0].
         anchor_path: Path | None = None
-        if sglang.__file__:  # legacy editable layout
+        if sglang.__file__:  # editable layout
             anchor_path = Path(sglang.__file__)
         else:
             try:
@@ -262,8 +258,7 @@ def _apply_on_pod(
             )
             return result
         apply_root, strip = layout
-        # strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir
-        # (drop the leading "python/sglang/" segments for the sentinel path).
+        # strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir.
         if strip == 1:
             sentinel_path = apply_root / _SENTINEL_RELPATH
             extra_sentinel = apply_root / _EXTRA_SENTINEL_RELPATH
@@ -338,9 +333,7 @@ def _apply_on_pod(
         result["elapsed_sec"] = round(time.time() - started, 3)
 
 
-# ---------------------------------------------------------------------------
-# Ray actor scaffolding (mirrors kernel_patch_multinode.py's per-node fan-out)
-# ---------------------------------------------------------------------------
+# Ray actor scaffolding (per-node fan-out).
 def _fanout_to_all_nodes(
     *,
     tracelens_root: str,
@@ -481,8 +474,7 @@ def main() -> int:
         )
         return 3
 
-    # Aggregate: overall is ``applied`` only if every pod succeeded
-    # (``applied`` or ``skipped``); otherwise ``failed``.
+    # Aggregate: ``applied`` only if every pod applied or skipped.
     overall = "applied"
     any_fresh = False
     for r in per_pod:

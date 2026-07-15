@@ -159,7 +159,7 @@ def test_policy_gate_rejects_when_both_present(gate):
             ),
         )
     assert exc.value.rule == "payload"
-    # PolicyGate says "exactly one ..."; intent_parser says "mutually exclusive". Either is valid.
+    # Either "exactly one" (PolicyGate) or "mutually exclusive" (intent_parser) is valid.
     msg = str(exc.value) + " " + (exc.value.hint or "")
     assert "exactly one" in msg or "mutually exclusive" in msg
 
@@ -184,7 +184,7 @@ def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
                 target_proposal_msg_id="msg-1",
                 verdict_map={
                     "v_a": {"verdict": "approve"},
-                    "v_b": {"verdict": "obliterate"},  # not in REVIEW_VERDICTS
+                    "v_b": {"verdict": "obliterate"},  # not a valid verdict
                 },
             ),
         )
@@ -205,7 +205,7 @@ class _BareSharedState:
 
     cortex_session_id: str = "sid-test"
     save_count: int = 0
-    # Empty string means "nothing in flight" and the auto-roofline dispatch gate is a no-op.
+    # Empty string means "nothing in flight"; the auto-roofline dispatch gate is a no-op.
     auto_roofline_pending_task_id: str = ""
 
     def save(self, _session_dir: Path | None) -> None:
@@ -387,7 +387,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 
 @pytest.mark.asyncio
 async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
-    """advise_fix_plan 2b: the rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
+    """The rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
     from hyperloom.orchestrator.loop.coordinator import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
 
@@ -782,7 +782,7 @@ class TestCriticRobustnessRenderer:
 
 # per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
 class TestN38ActionVerdictClass:
-    """N38 (May 2026): per-action ``verdict_class`` metadata so new actions don't reintroduce N33/N35/N37 deadlocks."""
+    """Per-action ``verdict_class`` metadata so new actions don't reintroduce prior deadlocks."""
 
     def test_action_metadata_has_verdict_class_field(self):
         from hyperloom.orchestrator.actions.registry import (

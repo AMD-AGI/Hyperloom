@@ -85,8 +85,7 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     Explicit ``OPENAI_BASE_URL`` always wins in callers. This fallback handles
     AMD's split gateway convention, where Anthropic traffic uses
     ``/anthropic`` and OpenAI-compatible chat completions use ``/Unified/v1``.
-    Unknown Anthropic URLs fall back to their original value to preserve the
-    previous single-gateway behavior.
+    Unknown Anthropic URLs fall back to their original value.
     """
     if not anthropic_base_url:
         return None
@@ -141,9 +140,7 @@ def resolve_openai_client_config(
     )
     base_url = base_url or None
 
-    # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS. Gateway-specific
-    # headers (e.g. an AMD ``Ocp-Apim-Subscription-Key``) are operator-supplied
-    # via that env var — no host-specific auto-injection.
+    # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS; gateway headers are operator-supplied.
     headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"))
     return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
 
@@ -190,14 +187,8 @@ def claude_sdk_env_options(
     if fallback_key:
         source.setdefault("ANTHROPIC_API_KEY", fallback_key)
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
-    # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS (already carried
-    # in ``source``); gateway-specific headers (e.g. an AMD subscription key)
-    # are operator-supplied via that env var — no host-specific auto-injection
-    # and no cross-copy from OPENAI_CUSTOM_HEADERS.
-    # Claude Code >= 2.1.x injects ``anthropic-beta: advisor-tool-*``, which
-    # strict gateways reject with HTTP 400 — stalling orchestration (is_error
-    # every tick, 0 intents). Disable it by default; an operator can re-enable
-    # by presetting CLAUDE_CODE_DISABLE_ADVISOR_TOOL in the environment.
+    # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS; gateway headers are operator-supplied.
+    # Disable the advisor-tool beta header by default since strict gateways reject it.
     source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:
         source.setdefault("ANTHROPIC_MODEL", model)

@@ -46,8 +46,7 @@ _mn_cli = _MnCliProxy()
 
 EXIT_CONFIG_ERROR = 3
 EXIT_TRANSIENT = 1
-# rayjob.py is imported by cli.py first (see the re-export site), so its
-# symbols are already resolvable by the time this module loads.
+# rayjob.py is imported by cli.py first, so its symbols are already resolvable.
 from .rayjob import (
     _TERMINAL_FAIL_PHASES,
     _TERMINAL_OK_PHASES,
@@ -238,7 +237,7 @@ def cmd_create_infera(args: argparse.Namespace) -> int:
             wid = safe.create_workload(body)
             info(f"workload created: {wid}")
 
-        # Checkpoint id immediately (idempotency: overlapping retries reuse).
+        # Checkpoint id immediately for idempotent retries.
         st = dict(_mn_cli._load_state())
         st.update(
             {
@@ -417,12 +416,9 @@ def _infera_require_state() -> dict[str, Any]:
         raise RuntimeError("no ssh_key_path in state; re-run create-infera")
     return state
 
-# Env-var prefixes forwarded from the controller (prompt -> setup_env.sh ->
-# os.environ) to the SSH-launched framework child. These are sandbox-side tuning
-# vars that are NOT in the pod container env and are NOT recovered from pid1, so
-# without explicit forwarding the child sees framework defaults (e.g. mori
-# SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK defaults to 4096 and prefill
-# aborts when chunked_prefill_size exceeds it).
+# Env-var prefixes forwarded from the controller's os.environ to the
+# SSH-launched framework child (sandbox-side tuning vars not present in the pod
+# container env and not recovered from pid1).
 _FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
 
 def _collect_forward_env() -> dict[str, str]:
@@ -445,12 +441,9 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    # Explicit per-variant env overrides (e.g. specialist-proposed MoE
-    # tuning) come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object set
-    # by restart_server_for_round. Unlike _FORWARD_ENV_PREFIXES these are
-    # forwarded verbatim regardless of key prefix, so an explore variant's
-    # ``extra_envs`` reach the SSH-launched sglang. They take precedence
-    # over prefix-matched values for the same key (explicit > ambient).
+    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV
+    # as a JSON object; forwarded verbatim regardless of prefix and take
+    # precedence over prefix-matched values for the same key.
     extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
     if extra_fwd:
         try:
@@ -687,9 +680,8 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
-    # The deployment topology is fixed at create time, so state.pd_mode is
-    # authoritative: a PD deployment must restart in PD mode even if the
-    # caller's --pd-mode defaulted to colocated/aggregated.
+    # Topology is fixed at create time, so state.pd_mode is authoritative: a PD
+    # deployment must restart in PD mode even if --pd-mode defaulted otherwise.
     pd_mode = (
         "disaggregated"
         if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated" or state.get("pd_mode") == "disaggregated"
@@ -752,12 +744,9 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         dn = int(getattr(args, "pd_decode_nodes", 0) or 0) or len(decode_targets)
         ptp = int(getattr(args, "pd_prefill_tp", 0) or 0) or int(args.tp)
         dtp = int(getattr(args, "pd_decode_tp", 0) or 0) or int(args.tp)
-        # Per-role EP / extra-args (InferenceX disagg recipes differ between
-        # prefill and decode). 0 / "" => fall back to the shared --ep /
-        # --extra-args so legacy single-flag callers are unchanged. The
-        # shared --extra-args is the common base; the per-role string is
-        # appended after it (role-specific flags win on duplicate keys via
-        # sglang's own last-wins argparse).
+        # Per-role EP / extra-args; 0 / "" falls back to the shared --ep /
+        # --extra-args. The shared --extra-args is the base and the per-role
+        # string is appended after it (role-specific flags win, last-wins).
         shared_ep = int(getattr(args, "ep", 1) or 1)
         shared_extra = getattr(args, "extra_args", "") or ""
         pep = int(getattr(args, "pd_prefill_ep", 0) or 0) or shared_ep
@@ -833,8 +822,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     if pd_mode == "disaggregated":
-        # Persist per-role knobs so a state-only resume (env lost on sandbox
-        # recreate) reproduces the same prefill/decode topology.
+        # Persist per-role knobs so a state-only resume reproduces the topology.
         state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
         state["last_restart_pd_decode_nodes"] = int(getattr(args, "pd_decode_nodes", 0) or 0)
         state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
@@ -1080,7 +1068,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
         info(f"apply-patch (infera): ssh -> {ip}:{port}")
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) == "ok":
-            # Override host with the pod IP so revert targets the same pod.
+            # Key host by pod IP so revert targets the same pod.
             parsed["host"] = ip
             per_node.append(parsed)
         else:

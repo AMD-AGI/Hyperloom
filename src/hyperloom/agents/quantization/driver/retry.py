@@ -1,28 +1,11 @@
 """Multi-attempt orchestration: ``quantize_via_prompt`` public entry.
 
 Wraps :func:`_runner.run_one_attempt` with the diagnose-fix-retry protocol
-(the per-attempt contract lives in ``SKILL.md``):
-
-  * Each attempt → classifier → outcome.
-  * ``None`` / ``eval_gap_accepted``                → done, build assessment.
-  * ``AUTO_FAIL`` (including ``upstream_change_required``) → done, failed.
-  * ``AUTO_RECOVER`` outcomes that surfaced to the final attempt → done,
-    partial (per §5.4 — SKILL.md should have auto-recovered in-session;
-    if we see one here it means the auto-recovery itself ran out of
-    budget and Python should not loop on it).
-  * ``ASK_RETRYABLE`` (#3 / #6 / #16 / #26) + ``unclassified_failure`` (#30)
-    → require ``fix_hypothesis_attempt_N.md`` from SKILL.md as the precondition
-    for incrementing ``requantize_attempts.txt`` and trying again. Hard cap
-    by ``max_requantize_attempts`` (default 1).
-  * ``checkpoint_aborted`` (#2) and ``eval_gap_exceeded`` (#21) — Ask-class
-    decision points that retrying won't help. In ``interactive=True`` we
-    relay to stdin (y/n on stderr). In CI we stop and let the assessment
-    surface the call.
-
-The counter file persists across interpreter restarts so a CI re-invocation
-of ``quantize_via_prompt`` on the same workspace continues counting from
-where the prior run left off (matters when the caller wraps us in its own
-retry budget).
+(the per-attempt contract lives in ``SKILL.md``). Each attempt is classified
+into an outcome that decides done/failed/partial/retry; retryable outcomes
+require a ``fix_hypothesis_attempt_N.md`` and are capped by
+``max_requantize_attempts``. The counter file persists across interpreter
+restarts so a re-invocation on the same workspace continues counting.
 """
 
 from __future__ import annotations
@@ -49,13 +32,10 @@ from .runner import RunOneAttemptFn, run_one_attempt
 
 _COUNTER_FILE = "requantize_attempts.txt"
 
-# Canonical Quark checkout used when neither the ``quark_root`` kwarg nor the
-# ``$QUARK_ROOT`` env var is set. Agents resolve the repo from this local
-# checkout when nothing more specific is provided.
+# Canonical Quark checkout used when neither the kwarg nor $QUARK_ROOT is set.
 DEFAULT_QUARK_ROOT = "/primus/hyperloom/Quark"
 
-# Upstream git URL for the Quark repo. Installers clone it here when the
-# default checkout is absent.
+# Upstream git URL for the Quark repo; installers clone it when default absent.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
 
 
@@ -63,10 +43,8 @@ DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
 class QuantSkillRunResult:
     """Public return shape of :func:`quantize_via_prompt`.
 
-    Exactly three fields by design;
-    legacy ``intent_digest`` / ``artifact_paths`` / ``sdk_error`` are folded
-    into ``assessment`` (`final` / `attempts` / `recovered` / `eval_gap` +
-    `notes`) so caller code never has to negotiate a sprawling result dict.
+    Exactly three fields; details are folded into ``assessment`` (`final` /
+    `attempts` / `recovered` / `eval_gap` + `notes`).
     """
 
     status: str  # "success" | "partial" | "failed"
@@ -74,9 +52,7 @@ class QuantSkillRunResult:
     assessment: Assessment
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # counter file
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _read_counter(workspace: Path) -> int:
@@ -112,9 +88,7 @@ def _bump_counter(workspace: Path) -> int:
     return n
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # interactive prompt
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _resolve_interactive(interactive: bool | None) -> bool:
@@ -129,9 +103,7 @@ def _resolve_interactive(interactive: bool | None) -> bool:
     """
     if interactive is not None:
         return interactive
-    # Auto: only enable if stdin is a tty AND stderr is a tty (we use stderr
-    # for the question to avoid clobbering structured stdout). Matches the
-    # convention in the existing CLI prelude.
+    # Auto: enable only if both stdin and stderr are ttys.
     try:
         return sys.stdin.isatty() and sys.stderr.isatty()
     except (AttributeError, OSError):
@@ -156,17 +128,13 @@ def _ask_operator(message: str) -> bool:
     return line.strip().lower() in ("y", "yes")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # retry decision
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
     """Look for the hypothesis written by SKILL.md for the NEXT attempt.
 
-    Per §A.10, before re-running quark-torch-ptq SKILL.md must drop a concrete fix
-    plan at ``fix_hypothesis_attempt_<next>.md``. Absence is the gate that
-    prevents blind retries.
+    Absence is the gate that prevents blind retries.
 
     Args:
         workspace: Workspace directory to inspect.
@@ -186,12 +154,11 @@ class _RetryDecision:
 
     Exactly one of ``retry`` / ``promote_to`` is meaningful at a time:
     * ``retry=True`` → run another attempt; loop bumps counter.
-    * ``retry=False`` and ``promote_to`` set → operator overrode the outcome
-      (currently only ``eval_gap_exceeded → eval_gap_accepted``); loop stops
-      and rewrites the last attempt's outcome.
+    * ``retry=False`` and ``promote_to`` set → operator overrode the outcome;
+      loop stops and rewrites the last attempt's outcome.
     * ``retry=False`` and ``promote_to`` unset → terminal, assemble assessment.
 
-    ``note`` is appended to ``Assessment.notes`` either way for caller debugging.
+    ``note`` is appended to ``Assessment.notes`` for caller debugging.
     """
 
     retry: bool
@@ -228,18 +195,16 @@ def _decide_next_step(
     if outcome in AUTO_FAIL:
         return _RetryDecision(retry=False, note=f"auto_fail:{outcome}")
     if outcome in AUTO_RECOVER:
-        # Auto-recover that surfaced here means SKILL.md couldn't self-heal
-        # inside the session; Python looping won't help. §5.4.
+        # Surfaced here means SKILL.md couldn't self-heal; looping won't help.
         return _RetryDecision(retry=False, note=f"auto_recover_unresolved:{outcome}")
 
     # Remaining: ASK + unclassified_failure.
     if outcome == OutcomeId.checkpoint_aborted:
-        # #2: missing prompt info — retry won't synthesize what the operator
-        # didn't say. Caller needs to amend prompt.
+        # Missing prompt info — retry won't synthesize it; caller amends prompt.
         return _RetryDecision(retry=False, note="checkpoint_aborted_needs_prompt_change")
 
     if outcome == OutcomeId.eval_gap_exceeded:
-        # #21: decision point, not a re-run candidate.
+        # Decision point, not a re-run candidate.
         if interactive and _ask_operator(
             f"[quantization-agent] Eval gap exceeded ({outcome}). Accept partial result? [y/N]: "
         ):
@@ -250,8 +215,7 @@ def _decide_next_step(
             )
         return _RetryDecision(retry=False, note="eval_gap_exceeded_rejected")
 
-    # ASK_RETRYABLE (#3 / #6 / #16 / #26) + UNCLASSIFIED_FAILURE (#30) — only
-    # these increment ``requantize_attempts.txt``.
+    # Only ASK_RETRYABLE + UNCLASSIFIED_FAILURE increment the counter.
     if outcome in ASK_RETRYABLE or outcome == UNCLASSIFIED_FAILURE:
         if counter >= max_requantize_attempts:
             return _RetryDecision(
@@ -268,12 +232,10 @@ def _decide_next_step(
         return _RetryDecision(retry=True, note="")
 
     # Other ASK rows (none currently — partition keeps them in the sets above).
-    return _RetryDecision(retry=False, note=f"non_retryable_ask:{outcome}")
+    raise AssertionError(f"_decide_next_step: unhandled outcome {outcome!r} fell through the partition")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # main entry
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def quantize_via_prompt(
@@ -310,14 +272,11 @@ async def quantize_via_prompt(
     Returns:
         The assembled :class:`QuantSkillRunResult`.
     """
-
     workspace_path = Path(workspace).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     if quark_root is None:
-        # Resolution order: $QUARK_ROOT env -> DEFAULT_QUARK_ROOT canonical
-        # checkout. So an agent that sets neither the kwarg nor the env var
-        # still finds the repo at the well-known location.
+        # Resolution order: $QUARK_ROOT env -> DEFAULT_QUARK_ROOT.
         quark_root = os.environ.get("QUARK_ROOT") or DEFAULT_QUARK_ROOT
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
@@ -326,8 +285,7 @@ async def quantize_via_prompt(
             OutcomeId.quark_root_missing,
             f"quark_root path does not exist or is not a directory: {quark_root_path} "
             f"(set $QUARK_ROOT or pass quark_root=; default is {DEFAULT_QUARK_ROOT}"
-            + (f", clone from {DEFAULT_QUARK_GIT_URL}" if DEFAULT_QUARK_GIT_URL else "")
-            + ")",
+            f", clone from {DEFAULT_QUARK_GIT_URL})",
         )
 
     interactive_resolved = _resolve_interactive(interactive)
@@ -375,8 +333,7 @@ async def quantize_via_prompt(
         if decision.note:
             notes.append(decision.note)
         if decision.promote_to is not None:
-            # Operator overrode the outcome — rewrite the final attempt so the
-            # assembled Assessment is self-consistent (no post-hoc patching).
+            # Rewrite the final attempt so the Assessment is self-consistent.
             attempts_list[-1] = decision.promote_to
             last_outcome = decision.promote_to
         if not decision.retry:
@@ -418,11 +375,9 @@ def _build_failed_bootstrap_result(
         note: Human-readable note attached to the assessment.
 
     Returns:
-        A well-formed failed :class:`QuantSkillRunResult`.
-
-    Produces a well-formed ``QuantSkillRunResult`` so callers can branch on
-    ``status`` / ``assessment.final`` without special-casing pre-flight
-    failures.
+        A well-formed failed :class:`QuantSkillRunResult` so callers can branch
+        on ``status`` / ``assessment.final`` without special-casing pre-flight
+        failures.
     """
 
     return QuantSkillRunResult(

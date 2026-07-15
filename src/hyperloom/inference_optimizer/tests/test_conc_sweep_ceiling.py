@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 # Imported first to break a circular dependency between conc_sweep and
-# action_executors.conc_sweep (else the module fails to collect in isolation).
+# action_executors.conc_sweep.
 from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
 from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -39,7 +39,7 @@ def _make_state(
 
 def _qwen3_30b_a3b_meta() -> ModelMeta:
     """ModelMeta shaped like Qwen3-30B-A3B (real config values)."""
-    # Geometry pinned to the Qwen3-MoE config.json to exercise real MoE branching.
+    # Geometry pinned to the Qwen3-MoE config.json.
     num_layers = 48
     num_kv_heads = 4
     head_dim = 128

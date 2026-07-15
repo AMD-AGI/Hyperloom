@@ -16,9 +16,6 @@ from hyperloom.orchestrator.source_snapshot import (
 )
 
 
-# ── _safe_rel ─────────────────────────────────────────────────────────────
-
-
 def test_safe_rel_normalizes_leading_slash() -> None:
     assert _safe_rel("/foo/bar.py") == "foo/bar.py"
 
@@ -40,16 +37,12 @@ def test_safe_rel_passthrough_for_plain_relative_path() -> None:
     )
 
 
-# ── snapshot_source_layer ────────────────────────────────────────────────
-
-
 def test_snapshot_source_layer_captures_upsert_and_delete(tmp_path: Path) -> None:
     fw = tmp_path / "framework"
     (fw / "pkg").mkdir(parents=True)
     kept = fw / "pkg" / "kept.py"
     kept.write_text("print('kept')\n", encoding="utf-8")
-    # "removed.py" is listed as a changed path but no longer exists post-apply
-    # (the KEEP deleted it) -> must be recorded as a "delete" op, not skipped.
+    # "removed.py" is a changed path that no longer exists -> recorded as "delete".
 
     dest = tmp_path / "snap"
     manifest = snapshot_source_layer(
@@ -69,7 +62,7 @@ def test_snapshot_source_layer_captures_upsert_and_delete(tmp_path: Path) -> Non
     ops = {f["rel"]: f["op"] for f in manifest["files"]}
     assert ops == {"pkg/kept.py": "upsert", "pkg/removed.py": "delete"}
 
-    # The manifest is durably persisted alongside a real copy of the file.
+    # Manifest is persisted alongside a real copy of the file.
     on_disk = json.loads((dest / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert on_disk["files"] == manifest["files"]
     assert (dest / "files" / "pkg" / "kept.py").read_text(encoding="utf-8") == (

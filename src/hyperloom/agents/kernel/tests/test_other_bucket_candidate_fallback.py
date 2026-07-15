@@ -1,13 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the high-GPU-time ``other``-bucket candidate recovery .
+"""Tests for the high-GPU-time ``other``-bucket candidate recovery.
 
 Hyperloom builds candidates only from analysis.md reasoning-candidate (P-item)
-blocks; TraceLens never emits such a block for a kernel it files under the
-un-roofline'd ``other`` category, so a dominant editable kernel (the Triton
-fused-MoE GEMM at ~67% GPU time) was silently dropped. The defense-in-depth
-fallback recovers it from the per-op ranking sidecar so it flows through
-classify_patchability and reaches GEAK.
+blocks; TraceLens never emits such a block for a kernel filed under the
+un-roofline'd ``other`` category. The fallback recovers it from the per-op
+ranking sidecar so it flows through classify_patchability and reaches GEAK.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-# tools/ is not a package — stick its dir on sys.path so we can import.
+# tools/ is not a package — put its dir on sys.path so we can import.
 _TOOL_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
@@ -143,9 +141,8 @@ def test_recover_skips_below_threshold(tmp_path):
 
 
 def test_recover_surfaces_high_time_non_other_category(tmp_path):
-    # Gate broadened : a high-time op in a *rooflined* category that is
-    # nonetheless missing from analysis.md candidates IS recovered (previously
-    # this was skipped because it was not an "other"-bucket op).
+    # A high-time op in a rooflined category missing from analysis.md
+    # candidates IS recovered.
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("big_gemm,GEMM,9000.0\nrmsnorm,elementwise,1000.0\n"),
@@ -192,7 +189,7 @@ def test_recover_from_priority_data_json(tmp_path):
     assert [c["name"] for c in recovered] == ["fused_moe_kernel"]
 
 
-# Headline #514 scenario: a synthetic analysis.md MISSING the high-time op.
+# A synthetic analysis.md MISSING the high-time op.
 _SYNTHETIC_ANALYSIS_MD = textwrap.dedent(
     """\
     # Synthetic Analysis
@@ -244,10 +241,9 @@ def test_synthetic_analysis_md_missing_high_time_op_is_recovered(tmp_path):
 
 
 def test_recovered_other_bucket_kernel_routes_to_geak(tmp_path, monkeypatch):
-    """End-to-end intent: a recovered raw candidate (source_file unset) flows
-    through _finalize_candidates -> classify_patchability and a Triton kernel
-    under /sgl-workspace/sglang/ is marked reusable_native_kernel=True (so it
-    is routable to GEAK) instead of being silently dropped."""
+    """A recovered raw candidate (source_file unset) flows through
+    _finalize_candidates -> classify_patchability and a Triton kernel under
+    /sgl-workspace/sglang/ is marked reusable_native_kernel=True (routable to GEAK)."""
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("fused_moe_kernel,other,6700.0\naten::mm,GEMM,3300.0\n"),
@@ -292,14 +288,8 @@ def test_classify_patchability_marks_triton_sglang_kernel_reusable(monkeypatch):
     assert reusable is True, reason
 
 
-# ---------------------------------------------------------------------------
-# REAL ops_summary.csv schema : the columns TraceLens actually emits.
-# The simplified `name,op category,gpu time (ms)` schema above does NOT exercise
-# the real `Categories` (list-repr) / `total_direct_kernel_time_ms` /
-# `Percentage (%)` columns, which is exactly the gap that left load_ops_ranking
-# returning pct=None and dropping the dominant MoE_fused row.
-# ---------------------------------------------------------------------------
-
+# REAL ops_summary.csv schema: the columns TraceLens actually emits
+# (Categories list-repr, total_direct_kernel_time_ms, Percentage (%)).
 _REAL_OPS_SUMMARY_HEADER = (
     "name,parent_module,total_direct_kernel_time_sum,"
     "total_subtree_kernel_time_sum,total_subtree_kernel_time_count,"
@@ -397,9 +387,8 @@ def _make_fake_sglang_tree(root: Path) -> Path:
 
 
 def test_locate_source_resolves_profiler_wrapped_name(tmp_path, monkeypatch):
-    """Fix 2(c): locate_source_via_grep resolves a profiler-wrapped op name to
-    its kernel source via trailing sub-window keywords (hermetic — uses a fake
-    source tree, not /sgl-workspace)."""
+    """locate_source_via_grep resolves a profiler-wrapped op name to its kernel
+    source via trailing sub-window keywords (hermetic — uses a fake source tree)."""
     src = _make_fake_sglang_tree(tmp_path / "src")
     monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "src"),))
     tla._GREP_CACHE.clear()

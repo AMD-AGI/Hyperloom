@@ -7,9 +7,8 @@ deterministic recovery paths (e.g. dead-letter, fall back to
 ``needs_review``, or surface ``required_context`` to the caller).
 
 ``RuntimeAdapterError`` itself is re-exported from
-``hyperloom.common.subprocess_bridge`` (tree-reform.MD §7 — shared with the
-robustness/framework runtime bridges); this module keeps ownership of the
-~12 granular subclasses below.
+``hyperloom.common.subprocess_bridge``; this module keeps ownership of the
+granular subclasses below.
 """
 
 from __future__ import annotations

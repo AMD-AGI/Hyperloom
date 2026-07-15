@@ -2,10 +2,8 @@
 
 """Tests for the diffusion workload-level roofline aggregator.
 
-``diffusion_roofline`` (under ``src/hyperloom/agents/kernel/tools``) aggregates
-a per-kernel TraceLens CSV dir into a single workload roofline (kernel
-efficiency, gpu busy ratio, per denoise-step timings) — the compute-bound dual
-of the LLM decode memory roofline.
+``diffusion_roofline`` aggregates a per-kernel TraceLens CSV dir into a single
+workload roofline (kernel efficiency, gpu busy ratio, per denoise-step timings).
 """
 
 from __future__ import annotations

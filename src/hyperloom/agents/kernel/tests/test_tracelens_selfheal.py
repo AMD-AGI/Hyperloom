@@ -2,11 +2,8 @@
 
 """TraceLens self-heal at the trace_analyze use-site.
 
-The optimizer's ``trace_analyze`` subprocess reads ``TRACELENS_ROOT`` long
-after install time. When the pod-local checkout vanishes mid-run (a
-concurrent install rm+re-clones it, or /tmp is reaped), the use-site must
-idempotently re-clone it under a shared flock instead of dying with
-``FileNotFoundError``.
+When ``TRACELENS_ROOT`` vanishes mid-run, the use-site must idempotently
+re-clone it under a shared flock instead of raising ``FileNotFoundError``.
 """
 from __future__ import annotations
 
@@ -28,8 +25,7 @@ def tl_module():
     mod_name = "tracelens_analysis_selfheal_under_test"
     spec = importlib.util.spec_from_file_location(mod_name, TL_PATH)
     mod = importlib.util.module_from_spec(spec)
-    # Register before exec so dataclass annotation resolution can find the
-    # module in sys.modules (cls.__module__ lookup) during import.
+    # Register before exec so dataclass annotation resolution finds it.
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     return mod
@@ -50,7 +46,7 @@ def _make_source_repo(path: Path) -> str:
 
 
 def test_selfheal_reclones_when_root_missing(tl_module, tmp_path, monkeypatch):
-    """RED: a missing TRACELENS_ROOT must be rebuilt, not raise."""
+    """A missing TRACELENS_ROOT must be rebuilt, not raise."""
     source = _make_source_repo(tmp_path / "src" / "TraceLens")
     tl_root = tmp_path / "open-source-repos" / "TraceLens"
     log_path = tmp_path / "run.log"
@@ -75,13 +71,12 @@ def test_selfheal_is_idempotent_when_present(tl_module, tmp_path, monkeypatch):
     tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
     (tl_root / "sentinel").write_text("keep", encoding="utf-8")
     tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
-    # Idempotent: existing tree (and our sentinel) preserved, not wiped.
+    # Idempotent: existing tree preserved, not wiped.
     assert (tl_root / "sentinel").exists()
 
 
 def test_selfheal_rebuilds_half_cloned_tree_without_git(tl_module, tmp_path, monkeypatch):
-    """A dir that exists but lacks .git (installer's in-progress clone) is
-    treated as incomplete and rebuilt."""
+    """A dir that exists but lacks .git is treated as incomplete and rebuilt."""
     source = _make_source_repo(tmp_path / "src" / "TraceLens")
     tl_root = tmp_path / "open-source-repos" / "TraceLens"
     tl_root.mkdir(parents=True)
@@ -97,7 +92,7 @@ def test_selfheal_rebuilds_half_cloned_tree_without_git(tl_module, tmp_path, mon
 
 def test_is_default_tracelens_root_distinguishes_override(tl_module, tmp_path, monkeypatch):
     """Only the installer-managed default path is self-healed; an operator
-    override path is not (mirrors handler / install.sh semantics)."""
+    override path is not."""
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
     default_root = tmp_path / "podlocal" / "TraceLens"
     override_root = tmp_path / "operator" / "TraceLens"
@@ -107,8 +102,7 @@ def test_is_default_tracelens_root_distinguishes_override(tl_module, tmp_path, m
 
 def test_incomplete_non_default_override_is_unusable_and_not_default(tl_module, tmp_path, monkeypatch):
     """A non-default override dir that exists but lacks .git is both
-    'not default' (so main won't self-heal it) and 'not complete' (so main's
-    post-check fails fast)."""
+    'not default' and 'not complete'."""
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
     override = tmp_path / "operator" / "TraceLens"
     override.mkdir(parents=True)
@@ -118,8 +112,8 @@ def test_incomplete_non_default_override_is_unusable_and_not_default(tl_module, 
 
 
 def test_selfheal_raises_and_cleans_up_when_ref_unpinnable(tl_module, tmp_path, monkeypatch):
-    """A non-HEAD ref that cannot be fetched must raise (never ship an
-    unpinned default HEAD) and leave no target or temp dir behind."""
+    """A non-HEAD ref that cannot be fetched must raise and leave no target
+    or temp dir behind."""
     source = _make_source_repo(tmp_path / "src" / "TraceLens")
     tl_root = tmp_path / "open-source-repos" / "TraceLens"
     log_path = tmp_path / "run.log"
@@ -129,6 +123,5 @@ def test_selfheal_raises_and_cleans_up_when_ref_unpinnable(tl_module, tmp_path, 
     with pytest.raises(FileNotFoundError):
         tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
     assert not tl_root.exists()
-    # No leftover temp/heal dirs in the parent.
     leftovers = [p.name for p in (tl_root.parent).glob(".TraceLens.*")]
     assert leftovers == [], leftovers

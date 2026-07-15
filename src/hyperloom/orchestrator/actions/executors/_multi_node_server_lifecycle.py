@@ -2,17 +2,15 @@
 
 """Multi-node-only: per-round sglang/vllm restart helper.
 
-Single-node Magpie restarts the server on every benchmark invocation, baking
-that round's flags + profiler env into a fresh process. Multi-node used to run
-the whole grid against one long-lived server, silently dropping later variants'
-flags. This helper closes the gap: every executor calls
-:func:`restart_server_for_round` before spawning Magpie, invoking
-``multi_node restart-server`` with the round's framework/model/tp + extra-args
-(and a per-round profiler trace dir).
+Every executor calls :func:`restart_server_for_round` before spawning Magpie so
+the round's flags + profiler env are baked into a fresh server process (matching
+single-node Magpie's per-invocation restart). Invokes ``multi_node
+restart-server`` with the round's framework/model/tp + extra-args and a per-round
+profiler trace dir.
 
-No-op in single-node mode (``is_multi_node()`` False). Fail-fast: any failure
-raises :class:`ServerRestartFailed`, which callers let bubble so the round is
-marked failed rather than benchmarking a stale/half-dead server.
+No-op in single-node mode. Fail-fast: any failure raises
+:class:`ServerRestartFailed`, which callers let bubble so the round is marked
+failed rather than benchmarking a stale/half-dead server.
 """
 
 from __future__ import annotations
@@ -84,15 +82,12 @@ def _strip_dp_parallel_flags(extra_args: str) -> str:
 log = logging.getLogger(__name__)
 
 
-# Default /health poll timeout (15 min, ~2x MoE cold-start headroom) so an
-# incompatible-config variant aborts promptly; override per-run via
-# HYPERLOOM_MN_HEALTH_WAIT_S.
+# Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
 
-# Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput numbers
-# stay comparable to single-node. We diverge on --mem-fraction-static (0.75 vs
-# single-node 0.8) because cross-node RDMA buffers eat headroom (0.8 OOMs on
-# DSr1 671B FP8 when the second node joins). ``_merge_sglang_defaults`` skips a
+# Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput stays
+# comparable to single-node. --mem-fraction-static is 0.75 (vs 0.8) because
+# cross-node RDMA buffers eat headroom. ``_merge_sglang_defaults`` skips a
 # default when the user already set ``flag_name``.
 _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
     ("--mem-fraction-static", "--mem-fraction-static=0.75"),
@@ -176,8 +171,7 @@ def _resolve_pd_args(
     if mode == "aggregated":
         return out
 
-    # PD disaggregation requires >=2 nodes; defend against a mangled state.json
-    # so we surface a recoverable round failure, not a confusing launcher error.
+    # PD disaggregation requires >=2 nodes; defend against a mangled state.json.
     state_nodes = int(state.get("nodes") or 0)
     if state_nodes < 2:
         raise ServerRestartFailed(
@@ -224,12 +218,8 @@ def _resolve_pd_args(
         or ""
     ).strip()
     ib = (pd_ib_device or state.get("last_restart_pd_ib_device") or os.environ.get("PD_IB_DEVICE", "") or "").strip()
-    # Per-role EP / extra server args (InferenceX disagg recipes give
-    # prefill and decode different MoE topologies). Resolved from state +
-    # $PD_PREFILL_EP / $PD_DECODE_EP / $PD_PREFILL_EXTRA_ARGS /
-    # $PD_DECODE_EXTRA_ARGS only (no explicit kwarg — the prompt exports
-    # them). 0 / "" means "fall back to the shared --ep / --extra-args",
-    # so colocated and single-flag PD callers are unchanged.
+    # Per-role EP / extra server args, resolved from state + env only (no
+    # kwarg). 0 / "" falls back to the shared --ep / --extra-args.
     pep = _intf(None, "last_restart_pd_prefill_ep", "PD_PREFILL_EP")
     dep = _intf(None, "last_restart_pd_decode_ep", "PD_DECODE_EP")
     prefill_extra = (
@@ -460,7 +450,7 @@ async def restart_server_for_round(
         tp_int=tp_int,
     )
 
-    # PD-disaggregated × EP cross-check: ep must not exceed either group's TP.
+    # PD-disaggregated x EP cross-check: ep must not exceed either group's TP.
     if pd["pd_mode"] == "disaggregated" and ep_int > 1:
         min_grp_tp = min(pd["pd_prefill_tp"], pd["pd_decode_tp"])
         if ep_int > min_grp_tp:
@@ -1336,7 +1326,7 @@ async def _wait_for_server_health_async(
                                         len(models),
                                         health_ok_at,
                                     )
-                                # Worker-readiness probe: tiny completion
+                                # Worker-readiness probe: tiny completion.
                                 model_id = ""
                                 try:
                                     model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""

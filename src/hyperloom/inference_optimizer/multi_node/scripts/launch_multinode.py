@@ -27,22 +27,19 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-# Hard-coded inference port (single source of truth; matches SaFE
-# Service.targetPort). Bound by rank 0 in colocated mode, by the router in
+# Inference port. Bound by rank 0 in colocated mode, by the router in
 # disaggregated mode (which proxies to the internal prefill/decode ports).
 _INFERENCE_PORT = 8888
 # Loopback-only internal ports for disaggregated PD server groups (router
 # fronts them at _INFERENCE_PORT so the external URL is mode-independent).
 _PD_PREFILL_PORT = 30000
 _PD_DECODE_PORT = 30001
-# Default collective port ($RAYJOB_DIST_INIT_PORT else 29500). 29500 (PyTorch
-# convention) avoids the EADDRINUSE cascade a stale TCPStore LISTEN socket
-# caused under the head pod's hostNetwork. Decode port = prefill + 1.
+# Default collective port ($RAYJOB_DIST_INIT_PORT else 29500).
 _DEFAULT_DIST_INIT_PORT = 29500
 
 
 def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
-    """Derive the decode rendezvous port as ``prefill + 1`` so an override shifts both endpoints in lock-step.
+    """Derive the decode rendezvous port as ``prefill + 1``.
 
     Args:
         prefill_dist_init_port: The prefill group's rendezvous port.
@@ -123,7 +120,7 @@ def _denied_extra_args(raw: str) -> list[str]:
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point).
+    """Write a timestamped launcher log line to stderr.
 
     Args:
         msg: The message text to emit.
@@ -162,7 +159,7 @@ def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
 
 
 def _pick_head_first(nodes: list[dict]) -> list[dict]:
-    """Reorder so the local (driver) node is rank 0 and the rest follow in NodeManagerAddress order.
+    """Reorder so the local (driver) node is rank 0, rest by NodeManagerAddress.
 
     Args:
         nodes: The alive GPU node rows from ``ray.nodes()``.
@@ -202,9 +199,8 @@ def _build_sglang_cmd(
     """Compose the sglang multi-node launch command.
 
     Only rank 0 gets ``--host``/``--port`` (workers serve no HTTP).
-    ``--trust-remote-code`` is default-on (custom modeling.py models need
-    it).     ``ep > 1`` emits ``--expert-parallel-size N`` for true expert
-    parallelism (the older ``--enable-ep-moe`` pair was removed upstream).
+    ``--trust-remote-code`` is default-on. ``ep > 1`` emits
+    ``--expert-parallel-size N`` for expert parallelism.
 
     Args:
         model: Model path passed to the launcher.
@@ -240,13 +236,12 @@ def _build_sglang_cmd(
         dist_init_addr,
     ]
     if node_rank == 0:
-        # rank-0 HTTP port = internal prefill/decode port in PD mode, public port in colocated.
+        # rank-0 HTTP port = internal prefill/decode port in PD mode, else public.
         cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])
     if ep > 1:
         cmd.extend(["--expert-parallel-size", str(ep)])
     role = pd_role.strip().lower()
     if role in ("prefill", "decode"):
-        # PD disaggregated: split side + bootstrap port + KV-transfer IB device.
         cmd.extend(["--disaggregation-mode", role])
         cmd.extend(["--disaggregation-bootstrap-port", str(pd_bootstrap_port)])
         if pd_transfer_backend:
@@ -270,10 +265,10 @@ def _build_vllm_cmd(
     pd_kv_rank: int = 0,
     pd_kv_parallel_size: int = 1,
 ) -> list[str]:
-    """vLLM multi-node command for rank 0 (workers are KubeRay-joined; vLLM auto-discovers them via the GCS).
+    """vLLM multi-node command for rank 0 (workers are KubeRay-joined and vLLM auto-discovers them via the GCS).
 
     ``--tensor-parallel-size`` = total cluster GPUs; ``ep > 1`` adds
-    ``--enable-expert-parallel`` (vllm infers ep_size = tp_size).
+    ``--enable-expert-parallel``.
 
     Args:
         model: Model path passed to ``vllm serve``.
@@ -306,7 +301,7 @@ def _build_vllm_cmd(
         cmd.append("--enable-expert-parallel")
     role = pd_role.strip().lower()
     if role in ("prefill", "decode"):
-        # vllm PD: kv-transfer-config JSON with connector + role + kv slot (default NixlConnector, cuda buffer).
+        # vllm PD: kv-transfer-config JSON with connector + role + kv slot.
         kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
         connector = pd_transfer_backend or "NixlConnector"
         kv_cfg = (
@@ -325,7 +320,7 @@ def _build_vllm_cmd(
 
 
 def _probe_mec_firmware_lt_177() -> bool:
-    """Return True iff rocm-smi reports MEC firmware < 177 (gate for the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure.
+    """Return True iff rocm-smi reports MEC firmware < 177 (gates the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure.
 
     Returns:
         bool: ``True`` if MEC firmware is below 177; ``False`` on any probe
@@ -366,12 +361,12 @@ def _subprocess_env() -> dict[str, str]:
         dict[str, str]: The environment mapping for the launcher subprocess.
     """
     env = dict(os.environ)
-    # Strip Ray's empty *_VISIBLE_DEVICES mask (num_gpus=0 actors) so the
-    # detached framework child re-discovers all GPUs; honour non-empty overrides.
+    # Strip Ray's empty *_VISIBLE_DEVICES mask so the detached framework child
+    # re-discovers all GPUs; honour non-empty overrides.
     for _vis in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
         if _vis in env and env[_vis].strip() == "":
             env.pop(_vis, None)
-    # Prevent the MI300X fused-decode-MLA crash (aiter ForwardMetadata mismatch).
+    # Prevent the MI300X fused-decode-MLA crash.
     env["SGLANG_ROCM_FUSED_DECODE_MLA"] = "0"
     env.setdefault("SGLANG_USE_AITER", "1")
     env.setdefault("SGLANG_AITER_MLA_PERSIST", "1")
@@ -392,7 +387,7 @@ def _detach_framework_launch(
     sub_env: dict[str, str],
     node_rank: int,
 ) -> int:
-    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init, PYTHONUNBUFFERED logs, fails fast with log tail).
+    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init; fails fast with a log tail).
 
     Args:
         cmd: The framework launcher argv.
@@ -413,7 +408,7 @@ def _detach_framework_launch(
     log_q = shlex.quote(str(log_file))
     pid_q = shlex.quote(str(pid_file))
     inner = " ".join(shlex.quote(c) for c in cmd)
-    # ``setsid`` gives a fresh session group for kill_multinode to SIGTERM (falls back to plain nohup).
+    # ``setsid`` gives a fresh session group for kill_multinode to SIGTERM.
     launches = (
         f"if command -v setsid >/dev/null 2>&1; then "
         f"nohup setsid {inner} >>{log_q} 2>&1 & "
@@ -482,7 +477,7 @@ def _spawn_remote(
     pd_kv_parallel_size: int = 1,
     pid_file_name: str = "",
 ) -> int:
-    """Spawn the framework launcher detached on the local actor's pod, recording the PID; ``@ray.remote``-friendly.
+    """Spawn the framework launcher detached on the local actor's pod, recording the PID.
 
     ``torch_profiler_dir`` (if set) is exported as
     ``SGLANG_TORCH_PROFILER_DIR`` for shared-path traces.
@@ -527,8 +522,8 @@ def _spawn_remote(
     log_file = Path(log_dir) / log_fname
 
     sub_env = _subprocess_env()
-    # Resume-aware fallback to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still
-    # reach a shared dir when a reused server skips this launch.
+    # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared
+    # dir when a reused server skips this launch.
     tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
@@ -611,7 +606,7 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
 
 
 # Fatal patterns scanned in rank_0.log (catches crashes the lingering nohup
-# wrapper PID hides, which would otherwise burn the full 1800s /health budget).
+# wrapper PID hides).
 _FATAL_LOG_PATTERNS: tuple[str, ...] = (
     "Traceback (most recent call last):",
     "KeyError:",
@@ -639,7 +634,7 @@ _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
-    """Scan rank_0.log tail for a fatal traceback / framework error; returns the matched line or ``None``.
+    """Scan rank_0.log tail for a fatal traceback / framework error.
 
     Args:
         log_dir: Directory containing ``rank_0.log``.
@@ -677,7 +672,7 @@ def _wait_health(
     rank0_pid: int | None = None,
     log_dir: str | None = None,
 ) -> bool:
-    """Poll rank-0 ``/health``; True on first 200, False on timeout / rank-0 death / fatal ``rank_0.log`` error.
+    """Poll rank-0 ``/health``; True on first 200, else False on timeout, rank-0 death, or a fatal ``rank_0.log`` error.
 
     Args:
         timeout_s: Maximum seconds to poll before giving up.
@@ -702,9 +697,8 @@ def _wait_health(
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):
-            # Server not ready yet; retry after the sleep below.
             pass
-        # Bail early if rank 0 died, else we wait the full 1800s on a corpse.
+        # Bail early if rank 0 died, else we wait the full timeout on a corpse.
         if rank0_pid is not None and rank0_pid > 0:
             try:
                 os.kill(rank0_pid, 0)
@@ -712,8 +706,8 @@ def _wait_health(
                 _log(f"ERROR rank 0 pid={rank0_pid} died while waiting for /health; aborting health wait")
                 return False
             except OSError:
-                pass  # permission etc; don't kill the wait
-        # Bail on a fatal traceback the lingering wrapper PID hides from os.kill above.
+                pass
+        # Bail on a fatal traceback the lingering wrapper PID hides from os.kill.
         if log_dir:
             fatal_line = _scan_rank0_log_for_fatal(log_dir)
             if fatal_line:
@@ -743,7 +737,7 @@ def _emit_rank0_log_tail(log_dir: Path) -> None:
 
 
 def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
-    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail for early weight-load exits).
+    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail).
 
     Args:
         log_dir: Directory containing ``rank_0.log``.
@@ -809,8 +803,8 @@ def main() -> int:
         "`--enable-expert-parallel`. Caller (orchestrator "
         "helper) is responsible for ensuring ep <= tp.",
     )
-    # PD disaggregation args: `colocated` (default) is one TP group;
-    # `disaggregated` splits into prefill/decode groups fronted by the router.
+    # PD disaggregation args: `colocated` is one TP group; `disaggregated` splits
+    # into prefill/decode groups fronted by the router.
     p.add_argument(
         "--pd-mode",
         choices=("colocated", "disaggregated"),
@@ -879,7 +873,6 @@ def main() -> int:
         if ptp <= 0 or dtp <= 0:
             _log(f"PD invalid TP: pd_prefill_tp={ptp} pd_decode_tp={dtp}")
             return 2
-        # IB device default: pod's $NCCL_IB_HCA.
         ib_dev = args.pd_ib_device or os.environ.get("NCCL_IB_HCA", "")
         ib_dev = ib_dev.strip()
     else:
@@ -916,7 +909,7 @@ def main() -> int:
     refs: list[tuple[str, Any]] = []  # noqa: F821  Any imported below
 
     if pd_mode == "disaggregated":
-        # Group A: prefill — nodes[0:pn], TP=ptp; rank-0 binds the internal prefill port.
+        # Group A: prefill — nodes[0:pn], TP=ptp; rank-0 binds the prefill port.
         prefill_head_ip = nodes[0].get("NodeManagerAddress", head_ip)
         for grp_rank in range(pn):
             node = nodes[grp_rank]
@@ -949,7 +942,7 @@ def main() -> int:
             )
             refs.append((f"prefill_{grp_rank}", actor_ref))
 
-        # Group B: decode — nodes[pn:pn+dn]; dist-init port = prefill + 1 to avoid rendezvous clashes.
+        # Group B: decode — nodes[pn:pn+dn]; dist-init port = prefill + 1.
         decode_head_ip = nodes[pn].get("NodeManagerAddress", head_ip)
         for grp_rank in range(dn):
             node = nodes[pn + grp_rank]
@@ -982,7 +975,7 @@ def main() -> int:
             )
             refs.append((f"decode_{grp_rank}", actor_ref))
     else:
-        # Colocated (legacy): single server group spans all nodes.
+        # Colocated: single server group spans all nodes.
         for rank, node in enumerate(nodes):
             actor_ref = SpawnActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
@@ -1018,7 +1011,6 @@ def main() -> int:
                 try:
                     os.killpg(os.getpgid(p2), 15)
                 except (ProcessLookupError, PermissionError):
-                    # Process already exited; nothing to signal.
                     pass
             return 1
 
@@ -1041,8 +1033,8 @@ def main() -> int:
         "pd_mode": pd_mode,
     }
     if pd_mode == "disaggregated":
-        # Emit the internal endpoints + bootstrap port so the CLI can submit
-        # the router without re-discovering nodes.
+        # Emit internal endpoints + bootstrap port so the CLI can submit the
+        # router without re-discovering nodes.
         summary["pd_prefill_nodes"] = pn
         summary["pd_decode_nodes"] = dn
         summary["pd_prefill_tp"] = ptp
@@ -1077,9 +1069,8 @@ def main() -> int:
         return 0
     # Tail the log (timeout or early rank-0 death) for the framework's last words.
     _emit_rank0_log_tail(Path(args.log_dir))
-    # Distinguish failure modes for the caller. Tri-state: True=alive,
-    # False=confirmed dead, None=unknown. Only confirmed death flips to
-    # FAILED (return 2); alive/unknown stay on the legacy return-0 + WARN path.
+    # Tri-state liveness: True=alive, False=confirmed dead, None=unknown. Only
+    # confirmed death flips to FAILED (return 2); alive/unknown return 0 + WARN.
     _r0_alive: bool | None = None
     if _r0_pid is not None and _r0_pid > 0:
         try:
@@ -1112,7 +1103,7 @@ def main() -> int:
         )
         return 2
     # A fatal traceback in rank_0.log proves a crash even when the nohup
-    # wrapper PID lingers (else the 1800s wait silently reports SUCCEEDED).
+    # wrapper PID lingers.
     _fatal_line = _scan_rank0_log_for_fatal(args.log_dir)
     if _fatal_line:
         snap = {

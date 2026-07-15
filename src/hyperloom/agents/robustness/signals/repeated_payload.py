@@ -2,15 +2,11 @@
 
 """Detect same-fingerprint action retries (B1 / same_payload_loop).
 
-Generalises the upstream ``baseline_no_param_change`` guard to the whole
-action catalogue (motivated by the 2026-05 ``validate_stack`` 11-retry
-loop where each OOM looked fresh because ``idempotency_key`` differed but
-``params`` were identical). Hashes the action-defining subset of each
-``delegated_result`` payload (from coordinator_events + inbox) and fires
-``same_payload_loop`` when a family produces N consecutive same-hash
-results with no intervening success. Per-family hash dimensions live in
-``_FAMILY_PROJECTIONS``; unknown actions fall back to a generic ``params``
-projection.
+Hashes the action-defining subset of each ``delegated_result`` payload
+(from coordinator_events + inbox) and fires ``same_payload_loop`` when a
+family produces N consecutive same-hash results with no intervening
+success. Per-family hash dimensions live in ``_FAMILY_PROJECTIONS``;
+unknown actions fall back to a generic ``params`` projection.
 """
 
 from __future__ import annotations
@@ -26,8 +22,7 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-# Per-family payload projection: dotted keys (stable order) that define
-# the fingerprint; missing keys map to ``None`` so empties hash identically.
+# Per-family payload projection: dotted keys that define the fingerprint.
 _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
     "validate_stack": (
         "params.optimization_stack",
@@ -71,8 +66,7 @@ _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
 # Generic fallback for unknown families with a ``params`` dict.
 _GENERIC_PROJECTION: tuple[str, ...] = ("params",)
 
-# Per-attempt fields stripped before hashing; including them would make
-# the fingerprint always-unique and the signal a no-op.
+# Per-attempt fields stripped before hashing so the fingerprint is stable.
 _HASH_BLACKLIST: frozenset[str] = frozenset(
     {
         "idempotency_key",
@@ -93,9 +87,8 @@ _HASH_BLACKLIST: frozenset[str] = frozenset(
 class RepeatedPayloadConfig:
     """Tunables for :func:`evaluate_repeated_payload_signals`.
 
-    ``streak_threshold`` (consecutive same-hash failures before firing,
-    default 3) gives one tick of warning before the deadline.
-    ``lookback_events`` (default 80) caps the event walk at ~30 min.
+    ``streak_threshold`` is the consecutive same-hash failures before
+    firing; ``lookback_events`` caps the event walk.
     """
 
     streak_threshold: int = 3

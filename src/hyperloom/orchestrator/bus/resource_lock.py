@@ -35,16 +35,12 @@ KNOWN_LANES = (
     "workspace_mutation",
     "benchmark_lane",
     "profile_lane",
-    # research_lane carries LLM specialist sub-agents; no LANE_CONFLICTS
-    # with the serving lanes and capacity may exceed 1.
+    # research_lane carries LLM specialist sub-agents; no serving-lane conflict
+    # and capacity may exceed 1.
     "research_lane",
-    # gpu_research_lane carries GPU-holding specialists; unlike research_lane it
-    # IS mutually exclusive with the serving lanes (a GPU specialist and a
-    # benchmark/profile/serving step must never share the physical cards).
-    # Capacity-1 / strictly serial: the co-acquisition model can't express a
-    # multi-holder lane that also mutexes the cap-1 serving lanes, so one GPU
-    # specialist holds the machine at a time (the GPU pool partitions cards
-    # within that single lease).
+    # gpu_research_lane carries GPU-holding specialists; mutually exclusive with
+    # the serving lanes and capacity-1 / strictly serial (one GPU specialist
+    # holds the machine at a time; the GPU pool partitions cards within it).
     "gpu_research_lane",
 )
 
@@ -64,18 +60,14 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
     ),
     "workspace_mutation": frozenset(),
     # research_lane does not conflict with any serving-side lane.
-    # (Capacity caps come from a separate table.)
     "research_lane": frozenset(),
-    # gpu_research_lane ⊥ serving lanes. Capacity-1 (see KNOWN_LANES), so GPU
-    # specialists also serialize against each other under the co-acquisition
-    # model.
+    # gpu_research_lane ⊥ serving lanes; capacity-1 so GPU specialists serialize.
     "gpu_research_lane": frozenset(
         {"benchmark_lane", "profile_lane", "server_lifecycle"}
     ),
 }
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
 
 
@@ -196,7 +188,7 @@ class SqliteLeaseBackend:
         expires_iso = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
 
         async with self.db.transaction() as cur:
-            # Resolve capacity per lane (defensive fallback for unseeded legacy DBs).
+            # Resolve capacity per lane (fallback for unseeded DBs).
             capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
             cur.execute(
@@ -211,7 +203,7 @@ class SqliteLeaseBackend:
                     int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
                 )
 
-            # Pull holders to reap expired rows and count surviving distinct holders per lane.
+            # Pull holders to reap expired rows and count live holders per lane.
             cur.execute(
                 f"SELECT lane, holder_id, expires_at FROM leases WHERE lane IN ({placeholders})",
                 expanded,
@@ -267,8 +259,7 @@ class SqliteLeaseBackend:
                     full.append(lane)
                     continue
                 if len(live) >= cap:
-                    # cap>1 full → LaneFull; cap==1 full → LaneBusy
-                    # (back-compat for callers pattern-matching LaneBusy).
+                    # cap>1 full → LaneFull; cap==1 full → LaneBusy.
                     if cap > 1:
                         full.append(lane)
                     else:
@@ -280,8 +271,7 @@ class SqliteLeaseBackend:
                 raise LaneFull(full)
 
             for lane in expanded:
-                # INSERT OR REPLACE lets the same holder refresh its row
-                # without violating the (lane, holder_id) PK.
+                # INSERT OR REPLACE lets the same holder refresh its row.
                 cur.execute(
                     "INSERT OR REPLACE INTO leases(lane, holder_id, "
                     "task_id, action, pid, acquired_at, expires_at, "
@@ -419,17 +409,11 @@ class SqliteLeaseBackend:
     async def reap_dead_holders(self) -> list[dict]:
         """Release leases whose holder process is no longer alive.
 
-        A worker that crashes (segfault, OOM-kill, hipcc abort mid-build, a
-        killed subprocess) leaves its ``(lane, holder_id)`` rows behind until the
-        TTL fires — which for serving lanes is hours. That strands every
-        capacity-1 serving lane and blocks all queued GPU work behind a dead
-        task. This sweep checks each not-yet-expired lease's recorded ``pid`` and
-        deletes the rows whose PID is provably gone, emitting one
-        ``lease_dead_holder_reaped`` event per deleted row so the dispatcher
-        re-evaluates the freed lane immediately instead of waiting out the TTL.
-
-        Rows with a null / non-positive pid are left untouched (we cannot prove
-        them dead). Returns the reaped rows as dicts.
+        Checks each not-yet-expired lease's recorded ``pid`` and deletes rows
+        whose PID is provably gone, emitting one ``lease_dead_holder_reaped``
+        event per deleted row so the dispatcher re-evaluates the freed lane
+        immediately. Rows with a null / non-positive pid are left untouched.
+        Returns the reaped rows as dicts.
         """
         now_iso_str = _now_iso()
         reaped: list[dict] = []
@@ -534,8 +518,7 @@ class ResourceLockManager:
                 lease reads / writes.
         """
         self.backend = backend
-        # Per-process cumulative acquire / lane-full / lane-busy counters
-        # so the breakdown can surface totals without re-reading SQLite.
+        # Per-process cumulative acquire / lane-full / lane-busy counters.
         self._counters: dict[str, dict[str, int]] = {}
 
     async def acquire_many(self, lanes: list[str], **kwargs) -> Lease:

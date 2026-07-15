@@ -2,10 +2,9 @@
 
 """Session bootstrap + summary helpers for the CLI.
 
-Extracted from ``cli.py`` (phase 4). Seeds SharedState, snapshots system
-prompts, prints the session skeleton / final summary, and resolves
-reference-recipe / target-summary inputs. Imports stdlib + orchestrator +
-cli_model_gate only; must not import ``cli`` (one-way dependency).
+Seeds SharedState, snapshots system prompts, prints the session skeleton /
+final summary, and resolves reference-recipe / target-summary inputs. Must not
+import ``cli`` (one-way dependency).
 """
 
 from __future__ import annotations
@@ -30,13 +29,10 @@ log = logging.getLogger(__name__)
 def resolve_model_display_name(args: argparse.Namespace) -> str:
     """Resolve the canonical model identity used for session naming / display.
 
-    The quantization prelude rewrites ``args.model`` to its generic export dir
-    (``<workspace>/quantization/<model>/quantized``), whose basename is always
-    ``quantized``. Deriving the model name from that path basename would collapse
-    every quantized run to ``quantized`` — losing the real model name and
-    colliding all quantized runs under ``<root>/quantized/<ts>``. To avoid that,
-    the prelude pins the source identity on ``args.model_display_name``; this
-    helper prefers it and otherwise falls back to the model-path basename.
+    The quantization prelude rewrites ``args.model`` to an export dir whose
+    basename is always ``quantized``, so it pins the source identity on
+    ``args.model_display_name``; this helper prefers that and otherwise falls
+    back to the model-path basename.
 
     Args:
         args: Parsed CLI arguments.
@@ -69,7 +65,7 @@ def _seed_shared_state(
     Returns:
         The seeded :class:`SharedState` instance.
     """
-    # research_lane capacity is locked for the session; clamp to [0, ceiling] (2×GPU) to protect quota/PR-Monitor.
+    # research_lane capacity is locked for the session; clamp to [0, ceiling].
     from hyperloom.orchestrator.policy.gate import (
         detect_gpu_count,
         research_lane_ceiling,
@@ -91,7 +87,7 @@ def _seed_shared_state(
         )
     except (TypeError, ValueError):
         gpu_specialist_capacity = detect_gpu_count()
-    # Collect plateau threshold overrides; absent keys fall through to DEFAULT_PLATEAU_* at compute time.
+    # Collect plateau threshold overrides; absent keys use defaults at compute time.
     plateau_overrides: dict[str, Any] = {}
     if getattr(args, "plateau_explore_keep_gain", None) is not None:
         plateau_overrides["explore_keep_gain_pct"] = float(args.plateau_explore_keep_gain)
@@ -105,7 +101,7 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE HARD force-exit thresholds; either fires an explore_force_exit_low_budget exit (overrides all).
+    # EXPLORE hard force-exit thresholds.
     if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
         plateau_overrides["force_exit_hours_remaining"] = float(
             args.explore_force_exit_hours_remaining
@@ -114,7 +110,7 @@ def _seed_shared_state(
         plateau_overrides["force_exit_budget_pct"] = float(
             args.explore_force_exit_budget_pct
         )
-    # Resolve workload metadata from CLI flags then env; parse duplicated here to avoid re-reading manifest.json.
+    # Resolve workload metadata from CLI flags then env.
     def _int_env_or_arg(arg_name: str, env_name: str) -> int:
         """Resolve an int workload knob from a CLI arg, falling back to env.
 
@@ -137,8 +133,8 @@ def _seed_shared_state(
     def _resolve_framework_version(args_in: Any) -> str:
         """Resolve ``framework_version`` for the recipe-snapshot canonical id.
 
-        Ladder: explicit CLI/$FRAMEWORK_VERSION → auto-detect package __version__ → "" (canonical_id
-        substitutes unknown_version). Auto-detect runs only when both CLI and env are empty.
+        Ladder: explicit CLI/$FRAMEWORK_VERSION -> auto-detect package version
+        -> "". Auto-detect runs only when both CLI and env are empty.
         """
         explicit = (
             (getattr(args_in, "framework_version", None) or "").strip()
@@ -158,10 +154,10 @@ def _seed_shared_state(
         )
 
         detected = detect_framework_version(framework)
-        # Treat the failure-slug as "no info"; canonical_id redoes the fallback at use time.
+        # Treat the failure-slug as "no info".
         return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
-    # --explore-overtime-kill-ratio: mirror into fresh SharedState for ExploreExecutor; <=0 disables the gate.
+    # --explore-overtime-kill-ratio mirror; <=0 disables the gate.
     explore_overtime_kill_ratio_raw = getattr(
         args, "explore_overtime_kill_ratio", None,
     )
@@ -199,15 +195,12 @@ def _seed_shared_state(
     except (TypeError, ValueError):
         explore_variant_timeout_safety_margin = 0.5
 
-    # KB architecture tags from config.json (architectures + model_type); fresh-launch only (resume rehydrates).
+    # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Single control plane for the KERNEL_AGENT phase: the kernel backend order env
-    # (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``), set by the
-    # launcher / CI submit layer. The per-kernel ladder and the phase-level
-    # GEAK e2e check read it directly; here we derive the persisted
-    # ``kernel_optimizer`` record from the resolved order so resume/breakdown
-    # stay correct even if the env var is not re-exported in a fresh shell.
+    # Derive the persisted ``kernel_optimizer`` record from the resolved kernel
+    # backend order env (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``)
+    # so resume/breakdown stay correct in a fresh shell.
     _resolved_kernel_order = [
         t.strip().lower()
         for t in str(
@@ -219,13 +212,11 @@ def _seed_shared_state(
     ]
     _kernel_optimizer_record = "geak" if "geak" in _resolved_kernel_order else "native"
 
-    # Reference launch recipe (fresh-launch only): explicit --reference-script
-    # wins; else auto-discover an exact-match InferenceX single-node recipe.
-    # Lowest-priority base for the baseline server args; fully fail-soft.
+    # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
+    # base for the baseline server args.
     _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
 
-    # Canonical model identity: prefers the quantize prelude's pinned source name
-    # over the (possibly collapsed "quantized") model-path basename.
+    # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     state = SharedState(
         session_id=session_id,
@@ -234,20 +225,19 @@ def _seed_shared_state(
         model_name=_model_identity,
         model_path=str(args.model),
         model_class=args.model_class or "",
-        # Advisory architecture profile; fresh-launch only (resume rehydrates, must not clobber). Soft-degrade to {}.
+        # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
         model_arch=_load_model_arch(
             _workspace_root_resolve(), _model_identity
         ),
-        # Architecture-identity tags from config.json stamped into recipe-snapshot extras (fine-tune carries base identity).
+        # Architecture-identity tags from config.json.
         model_architectures=_cfg_tags.get("architectures", []),
         model_type=_cfg_tags.get("model_type", ""),
-        # config.json structural summary (attention_type / heads / MoE / quant); persisted for downstream collectors.
+        # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
-        # Workload metadata mirrored from CLI/env so downstream prompts see real values (else TP defaults to 1).
+        # Workload metadata mirrored from CLI/env.
         tp=_int_env_or_arg("tp", "TP"),
-        # ``ep`` mirrors EP env so fresh-shell resume recovers it for the KB warm-start same-shape filter.
         ep=_int_env_or_arg("ep", "EP"),
         precision=(
             str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
@@ -256,7 +246,6 @@ def _seed_shared_state(
         conc=_int_env_or_arg("conc", "CONC"),
         isl=_int_env_or_arg("isl", "ISL"),
         osl=_int_env_or_arg("osl", "OSL"),
-        # Persist the explicit profile OSL so a fresh-shell resume keeps it.
         profile_osl=_int_env_or_arg("profile_osl", "PROFILE_OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
@@ -279,9 +268,8 @@ def _seed_shared_state(
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
-        # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it (mirrors --no-kernel/kernel_enabled).
+        # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it.
         framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
-        # --no-explore skips the EXPLORE phase entirely.
         explore_enabled=not bool(getattr(args, "no_explore", False)),
         # FRAMEWORK config-exploration lane toggle (default OFF).
         framework_config_exploration_enabled=bool(
@@ -296,7 +284,7 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase post-sweep concurrency sweep flags (on by default); see orchestrator/conc_sweep.py.
+        # SWEEP-phase post-sweep concurrency sweep flags (on by default).
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
         conc_sweep_concs=_parse_conc_sweep_concs(args),
         conc_sweep_total_budget_sec=int(
@@ -345,7 +333,7 @@ def _print_final_summary(
     (with a staleness warning when the optimization stack grew after the last
     validation), the current best config, pruned families, and crash count.
     On ``baseline_failed`` it also surfaces the real terminal root cause from
-    ``reports/final.json`` instead of a benign upstream WARN (#465).
+    ``reports/final.json``.
 
     Args:
         state (SharedState): The final shared state after the run completes.
@@ -412,7 +400,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     """
     live = int(getattr(state, "crash_count", 0) or 0)
 
-    # 1) state.json — reload, bump if stale, atomic re-save.
+    # state.json: reload, bump if stale, atomic re-save.
     try:
         disk_state = SharedState.load_or_init(session_dir)
         if int(disk_state.crash_count or 0) < live:
@@ -421,7 +409,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     except Exception:  # noqa: BLE001
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
-    # 2) reports/final.json — patch the single field in place if present.
+    # reports/final.json: patch the single field in place if present.
     try:
         from ..session.session_paths import reports_dir
         final_json = reports_dir(session_dir) / "final.json"
@@ -525,7 +513,7 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
     Best-effort: returns ``None`` when the file is missing/unreadable or the
     block is absent (e.g. non-failure runs). Used to surface the real terminal
-    root cause in the end-of-run summary on ``baseline_failed`` (#465).
+    root cause in the end-of-run summary on ``baseline_failed``.
     """
     try:
         from ..session.session_paths import reports_dir
@@ -544,17 +532,14 @@ def _resolve_reference_recipe(
     Returns ``(server_args, envs, model, source)``. Discovery is gated on the
     operator opting in via ``--reference-script``:
 
-    - **No ``--reference-script``** → return empty and do NOT auto-discover. The
-      run is byte-for-byte identical to a build without this feature (0 degrade);
-      this preserves the original behavior.
-    - **``--reference-script`` resolves to a usable recipe** → use it.
-    - **``--reference-script`` given but unreadable / yields no flags** → fall
+    - **No ``--reference-script``** -> return empty and do NOT auto-discover.
+    - **``--reference-script`` resolves to a usable recipe** -> use it.
+    - **``--reference-script`` given but unreadable / yields no flags** -> fall
       back to auto-discovering an ``exact`` InferenceX single-node match (a
-      ``fuzzy`` match is logged as a candidate but NOT applied — a near-name
-      model mismatch could break a working baseline).
+      ``fuzzy`` match is logged as a candidate but NOT applied).
     """
     source = (getattr(args, "reference_script", None) or "").strip()
-    # No flag → original behavior; never auto-discover.
+    # No flag: never auto-discover.
     if not source:
         return ("", {}, "", "")
 
@@ -572,7 +557,7 @@ def _resolve_reference_recipe(
         )
         return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
 
-    # Explicit source unreadable / yielded nothing → auto-discover instead.
+    # Explicit source unreadable / yielded nothing: auto-discover instead.
     print(
         f"Reference script: {source} not usable (unreadable or no flags "
         f"lifted); falling back to auto-discovery",

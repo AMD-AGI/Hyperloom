@@ -1,9 +1,9 @@
 """Pure helpers for the Infera multi-node backend.
 
-No I/O / no env reads (mirrors ``workload_spec.py``): the CLI feeds in the
-SaFE GetWorkloadResponse / service info and these functions extract worker pod
-IPs, the frontend service URL, and the pod-side launcher argv. Kept pure so the
-SSH fan-out logic stays unit-testable without a live cluster.
+No I/O / no env reads: the CLI feeds in the SaFE GetWorkloadResponse / service
+info and these functions extract worker pod IPs, the frontend service URL, and
+the pod-side launcher argv. Kept pure so the SSH fan-out logic stays
+unit-testable without a live cluster.
 """
 
 from __future__ import annotations
@@ -330,13 +330,12 @@ def frontend_service_url(
         The resolved frontend base URL.
     """
     if service_info:
-        # Prefer the ready-made internalDomain ("<wid>.<ns>.svc.cluster.local:8000").
+        # Prefer the ready-made internalDomain.
         internal = str(service_info.get("internalDomain") or "").strip()
         if internal:
             internal = internal.split("://", 1)[-1].rstrip("/")
             return f"http://{internal}"
-        # SaFE returns ``port`` as a nested object {protocol, port, targetPort};
-        # extract the integer (older shapes may return a bare int).
+        # ``port`` may be a nested object {protocol, port, targetPort} or a bare int.
         raw_port = service_info.get("port")
         if isinstance(raw_port, dict):
             svc_port = raw_port.get("port") or raw_port.get("targetPort") or port
@@ -403,10 +402,9 @@ def build_node_launch_args(
 ) -> str:
     """Build the argv string for launch_infera_node.py (shipped over SSH).
 
-    The SAME string is sent to every pod IN A GROUP — each pod self-determines
-    its node-rank from ``$LWS_WORKER_INDEX`` pod-side, so the controller does
-    not encode the rank here. ``disagg_mode`` (prefill/decode) folds the sglang
-    PD flags into the launched command for that group.
+    The same string is sent to every pod in a group; each pod self-determines
+    its node-rank from ``$LWS_WORKER_INDEX`` pod-side. ``disagg_mode``
+    (prefill/decode) folds the sglang PD flags into the launched command.
 
     Args:
         framework: Framework name (``"sglang"`` or ``"vllm"``).
@@ -430,8 +428,7 @@ def build_node_launch_args(
     parts = ["--framework", framework]
     if kill_only:
         parts.append("--kill-only")
-        # kill-only still needs framework (vllm tears down its ray node) and
-        # the pid-file path so it kills the right server.
+        # kill-only still needs framework and the pid-file path.
         parts.extend(["--pid-file", pid_file])
         return " ".join(shlex.quote(x) for x in parts)
     parts.extend(
@@ -457,8 +454,7 @@ def build_node_launch_args(
     if ep and int(ep) > 1:
         parts.extend(["--ep", str(ep)])
     quoted = " ".join(shlex.quote(x) for x in parts)
-    # Fold the PD disaggregation flags into extra_args (the pod-side script
-    # re-splits --extra-args with shlex and appends them to the sglang cmd).
+    # Fold the PD disaggregation flags into extra_args.
     merged_extra = (extra_args or "").strip()
     df = disagg_flags(disagg_mode, kv_transfer_backend)
     if df:

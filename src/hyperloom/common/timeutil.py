@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Canonical UTC ISO-8601 timestamp helpers (``_time``).
-
-Relocated from ``hyperloom.orchestrator._time`` (P2.1); that re-export shim
-was removed in P2.7 once all callers were updated to import directly from
-here. Replaces the ~14 ``_now_iso`` copies plus the ``_utc_now_compact`` /
-``_iso_z`` / ISO-parse variants. Stdlib-only.
-"""
+"""Canonical UTC ISO-8601 timestamp helpers (``_time``). Stdlib-only."""
 
 from __future__ import annotations
 
@@ -24,9 +18,6 @@ def now_iso(timespec: str = "microseconds", *, z_suffix: bool = False) -> str:
 
 def utc_now_compact() -> str:
     """Current UTC time as a compact ``YYYYMMDDTHHMMSSZ`` id timestamp.
-
-    Byte-identical to the legacy ``session/manifest._utc_now_compact`` used to
-    build session ids.
 
     Returns:
         The current UTC time formatted as ``%Y%m%dT%H%M%SZ``.

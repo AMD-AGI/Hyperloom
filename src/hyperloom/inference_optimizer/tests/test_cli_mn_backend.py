@@ -37,7 +37,6 @@ def test_mn_backend_flag_parses_rayjob():
 
 
 def test_mn_backend_default_none_falls_back_to_rayjob(monkeypatch):
-    # No flag, no env -> rayjob (legacy default), and the attr still exists.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_BACKEND", raising=False)
     parser = _build_parser()
     ns = parser.parse_args(_args())
@@ -46,7 +45,6 @@ def test_mn_backend_default_none_falls_back_to_rayjob(monkeypatch):
 
 
 def test_mn_backend_flag_overrides_env(monkeypatch):
-    # Flag wins over env (precedence: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND).
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     parser = _build_parser()
     ns = parser.parse_args(_args("--mn-backend", "infera"))

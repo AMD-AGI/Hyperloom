@@ -72,9 +72,8 @@ async def test_robustness_agent_real_runtime_heartbeat(
     backend = RobustnessAgentBackend(
         robustness_agent_root=robustness_agent_root,
         session_dir=session_dir,
-        # IMPORTANT: do NOT pass runtime_caller_factory — we want the real subprocess path.
-        # Disable LocalProbe / ray / external_deps probes so an inert CI host doesn't fire
-        # HIGH alerts that would mask the expected heartbeat send_message.
+        # No runtime_caller_factory: use the real subprocess path. Disable probes
+        # so an inert CI host doesn't fire HIGH alerts that mask the heartbeat.
         options={
             "robustness_server_url": "",
             "auto_probe_inference_server": False,

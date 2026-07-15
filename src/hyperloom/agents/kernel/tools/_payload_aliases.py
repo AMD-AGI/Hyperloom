@@ -2,20 +2,8 @@
 
 """Stdlib-only payload-args helper for standalone kernel-agent tools.
 
-Kept as an independent, stdlib-only module because ``tools/`` scripts must run
-standalone on remote nodes
-without a ``hyperloom`` import: they are invoked as bare
-``python3 <root>/tools/<tool>.py --args`` subprocesses (see
-``HYPERLOOM_KERNEL_AGENT_ROOT`` in
-``hyperloom.orchestrator.kernel.request_handlers``), imported via the bare
-module name ``from _payload_aliases import read_extra_server_args`` (not a
-package-relative ``from ._payload_aliases import``) by
-``kernel_optimization.py``, and some of their code paths execute inside Ray
-workers (``tools/backends/``) that do not inherit the driver's ``sys.path``.
-This mirrors the same, deliberate exception already made for ``_paths.py``
-(see tree-reform-lessons.MD §13) — do not "finish" this extraction by
-importing ``hyperloom.common`` here. Behaviour is pinned by
-``test_payload_aliases_shim.py``.
+Kept independent so ``tools/`` scripts run standalone on remote nodes without a
+``hyperloom`` import. Do not import ``hyperloom.common`` here.
 """
 
 from __future__ import annotations
@@ -38,11 +26,9 @@ _DEPRECATION_MESSAGE: str = (
 
 
 def _coerce_str(value: Any) -> str:
-    """Coerce a payload value into a string the same way every reader
-    site previously did inline (``str(payload.get(...) or "")``).
+    """Coerce a payload value into a string.
 
-    ``None`` collapses to the empty string so callers that immediately
-    ``.strip()`` get the same result. Non-string, non-None values fall
+    ``None`` collapses to the empty string; non-string, non-None values fall
     through ``str()``.
 
     Args:
@@ -56,29 +42,24 @@ def _coerce_str(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
-    # The LLM occasionally emits server flags as a JSON list
-    # (``["--flag", "value"]``); space-join into shell tokens rather than
-    # emitting a Python repr that the Magpie wrapper would splice verbatim
-    # into ``vllm/sglang serve`` (rejected as "unrecognized arguments").
+    # Server flags emitted as a JSON list are space-joined into shell tokens.
     if isinstance(value, (list, tuple)):
         return " ".join(str(v).strip() for v in value if str(v).strip())
     return str(value)
 
 
 def read_extra_server_args(payload: dict, *, default: str = "") -> str:
-    """Read ``extra_server_args`` from a payload dict, with a one-release
-    read-only fallback to the legacy ``extra_sglang_args`` key.
+    """Read ``extra_server_args`` from a payload dict, with a read-only
+    fallback to the legacy ``extra_sglang_args`` key.
 
-    Resolution order:
+    Resolution order (checks use ``in``, so an empty string value is distinct
+    from a missing key):
 
     1. If ``payload[CANONICAL_KEY]`` is present (any value, including empty
        string), return it coerced via :func:`_coerce_str`; no warning.
     2. Else if ``payload[LEGACY_KEY]`` is present, emit a single
        ``DeprecationWarning`` (``stacklevel=3``) and return the coerced value.
     3. Else return ``default``.
-
-    The check is ``in``, not truthiness, so a deliberately empty string value
-    is distinguished from a missing key.
 
     Args:
         payload (dict): Dict-like payload (``Intent.payload`` / ``Task.params`` /

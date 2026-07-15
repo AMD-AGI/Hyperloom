@@ -3,7 +3,7 @@
 """Tests for the shared aiter JIT lock-cleanup helpers (``_aiter_jit``).
 
 Covers the liveness-gated sweep that reaps orphaned JIT locks before a cold
-start: compiler-process detection, the live/dead/unknown branching, and the
+start: compiler-process detection, live/dead/unknown branching, and the
 ``_resolve_timeout`` integration that only sweeps on the COLD path.
 """
 
@@ -14,17 +14,15 @@ import pytest
 
 try:
     import psutil
-except ModuleNotFoundError:  # psutil is an optional runtime dependency
+except ModuleNotFoundError:  # optional runtime dependency
     psutil = None
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors import baseline
 
 
-# The ``_any_live_compiler`` probe degrades to ``None`` when psutil is absent
-# (see _aiter_jit), so only the tests that drive psutil directly require it; the
-# sweep / _resolve_timeout tests monkeypatch ``_any_live_compiler`` and run
-# regardless.
+# Only tests that drive psutil directly require it; sweep / _resolve_timeout
+# tests monkeypatch ``_any_live_compiler`` and run regardless.
 requires_psutil = pytest.mark.skipif(
     psutil is None, reason="psutil not installed (optional runtime dependency)"
 )
@@ -35,7 +33,7 @@ requires_psutil = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 def _make_aiter_tree(root):
     """Build a jit/build/ layout with a stale + a fresh lock."""
-    stale_mtime = time.time() - 30 * 60  # 30 min ago
+    stale_mtime = time.time() - 30 * 60
     (root / "module_moe" / "build").mkdir(parents=True)
 
     stale_lock = root / "lock_module_moe"
@@ -52,7 +50,6 @@ def _make_aiter_tree(root):
         p.write_text(content)
     for p in (stale_lock, ninja_lock):
         os.utime(p, (stale_mtime, stale_mtime))
-    # fresh_lock keeps its just-now mtime.
     return {
         "stale_lock": stale_lock,
         "fresh_lock": fresh_lock,
@@ -98,8 +95,7 @@ def test_any_live_compiler_false_when_no_compiler(monkeypatch):
 
 @requires_psutil
 def test_any_live_compiler_matches_cmdline_when_name_is_wrapper(monkeypatch):
-    # hipcc is a perl/bash wrapper, so ``name`` may surface as perl while the
-    # cmdline's first token is the real hipcc path.
+    # ``name`` may surface as the wrapper (perl) while cmdline's first token is hipcc.
     _patch_process_iter(monkeypatch, [
         _FakeProc(name="perl", cmdline=["/opt/rocm/bin/hipcc", "-c", "x.cu"]),
     ])
@@ -135,7 +131,6 @@ def test_sweep_skips_when_compiler_alive(monkeypatch, tmp_path):
     stats = _aiter_jit.sweep_stale_aiter_locks_if_dead(aiter_jit_dir=tmp_path)
     assert stats["skipped_live"] is True
     assert stats["deleted"] == 0
-    # Nothing touched.
     assert layout["stale_lock"].exists()
     assert layout["fresh_lock"].exists()
 
@@ -145,7 +140,7 @@ def test_sweep_deletes_all_locks_when_dead(monkeypatch, tmp_path):
     monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda: False)
     stats = _aiter_jit.sweep_stale_aiter_locks_if_dead(aiter_jit_dir=tmp_path)
     assert stats["compiler_alive"] is False
-    # stale_minutes=0 ⇒ even the fresh lock is reaped (liveness proves orphan).
+    # stale_minutes=0 ⇒ even the fresh lock is reaped.
     assert stats["deleted"] == 3
     assert stats["skipped_fresh"] == 0
     assert not layout["stale_lock"].exists()
@@ -159,7 +154,7 @@ def test_sweep_unknown_falls_back_to_mtime_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda: None)
     stats = _aiter_jit.sweep_stale_aiter_locks_if_dead(aiter_jit_dir=tmp_path)
     assert stats["compiler_alive"] is None
-    # mtime gate (5 min) ⇒ only the >30-min-old locks go; fresh lock survives.
+    # mtime gate (5 min) ⇒ only >30-min-old locks go; fresh lock survives.
     assert stats["deleted"] == 2
     assert stats["skipped_fresh"] == 1
     assert not layout["stale_lock"].exists()
@@ -243,5 +238,5 @@ def test_resolve_timeout_skips_reprobe_when_sweep_live(monkeypatch):
     exe = baseline.BaselineExecutor()
     timeout = exe._resolve_timeout({})
     assert timeout == baseline.BASELINE_COLD_START_TIMEOUT_SEC
-    # skipped_live ⇒ no re-probe ⇒ probe called once only.
+    # skipped_live ⇒ no re-probe.
     assert calls["probe"] == 1

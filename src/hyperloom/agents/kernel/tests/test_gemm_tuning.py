@@ -152,7 +152,6 @@ def test_apply_input_json_rejects_non_object(tmp_path):
 
 
 def test_main_requires_cwd(capsys):
-    # Non-empty argv (without --cwd) avoids the ``argv or sys.argv`` fallback.
     rc = gt.main(["--framework", "sglang"])
     assert rc == 2
     assert json.loads(capsys.readouterr().out)["error_class"] == "cwd_missing"
@@ -241,7 +240,6 @@ def test_main_success_keep(tmp_path, capsys, monkeypatch):
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    # report's own status ("complete") is spread last and wins the merge.
     assert out["status"] == "complete"
     assert out["decision"] == "KEEP"
 

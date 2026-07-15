@@ -39,7 +39,7 @@ def test_kill_already_exited():
 
 
 def test_kill_sigterm_then_exits(monkeypatch):
-    # alive on entry, SIGTERM via killpg succeeds, then exits within grace
+    # SIGTERM via killpg succeeds, then exits within grace
     proc = _FakeProc([None, None, 0])
     monkeypatch.setattr(ss.os, "getpgid", lambda pid: pid)
     sent = []
@@ -50,8 +50,7 @@ def test_kill_sigterm_then_exits(monkeypatch):
 
 
 def test_kill_killpg_fails_then_terminate_then_sigkill(monkeypatch):
-    # alive throughout -> killpg raises -> proc.terminate(); never exits ->
-    # SIGKILL path also raises -> proc.kill()
+    # killpg raises -> proc.terminate(); SIGKILL path also raises -> proc.kill()
     proc = _FakeProc([None])  # poll always None
 
     def _getpgid(pid):
@@ -65,7 +64,7 @@ def test_kill_killpg_fails_then_terminate_then_sigkill(monkeypatch):
 
 
 def test_kill_sigkill_via_killpg(monkeypatch):
-    # alive throughout, getpgid+killpg work -> reaches SIGKILL killpg branch
+    # getpgid+killpg work -> reaches SIGKILL killpg branch
     proc = _FakeProc([None])
     monkeypatch.setattr(ss.os, "getpgid", lambda pid: pid)
     sent = []
@@ -76,8 +75,7 @@ def test_kill_sigkill_via_killpg(monkeypatch):
 
 
 def test_kill_terminate_and_kill_raise(monkeypatch):
-    # getpgid raises -> proc.terminate() also raises (swallowed); SIGKILL
-    # getpgid raises -> proc.kill() also raises (swallowed)
+    # terminate() and kill() both raise; must be swallowed
     class _RaisingProc(_FakeProc):
         def terminate(self):
             raise RuntimeError("term boom")
