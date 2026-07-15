@@ -14,11 +14,12 @@ Two path concepts:
 
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import re
 from pathlib import Path
+
+from hyperloom.common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +73,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime",  # pod-local env files (kernel-agent.env.sh, etc.)
-    "runtime/geak-config",  # generated litellm config consumed by GEAK CLI
     # Cortex KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
     # created up-front so the KB client never mkdir's on the hot path.
     "runtime/cortex",
@@ -224,7 +224,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
     if _layout_mode() == "per_model_ts" and model_name:
         basename = _sanitize_model_basename(model_name)
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ts = utc_now_compact()
         sd = ws / basename / ts
     else:
         sd = ws
@@ -272,21 +272,6 @@ def asset_root() -> Path:
     return PACKAGE_ROOT
 
 
-def asset_scripts_dir() -> Path:
-    """Return the directory of shipped release-contract shell scripts
-    (installers + baseline/profile configs).
-
-    ``scripts/`` was split three ways (``assets/`` for
-    installers/configs, ``tools/`` for operator CLIs, ``experiments/`` for
-    A/B scripts); this helper follows the ``assets/`` successor since that is
-    the shell-installer counterpart of the former single ``scripts/`` dir.
-
-    Returns:
-        Path: ``<asset_root>/assets``.
-    """
-    return asset_root() / "assets"
-
-
 def asset_actions_dir() -> Path:
     """Return the directory of shipped action-metadata files.
 
@@ -321,39 +306,12 @@ def asset_system_prompts_dir() -> Path:
     return Path(_prompts_pkg.__file__).resolve().parent
 
 
-def asset_kernel_opt_dir() -> Path:
-    """Return the directory of shipped kernel-optimization prompt templates.
-
-    Returns:
-        Path: ``<asset_root>/kernel_opt``.
-    """
-    return asset_root() / "kernel_opt"
-
-
-def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
-    """Per-agent inbox/outbox dir under the session (created by
-    make_session_dir; this only computes the path).
-
-    Args:
-        session_dir: The session directory root.
-        agent_name: The agent name subdirectory.
-
-    Returns:
-        ``<session_dir>/agents/<agent_name>``.
-    """
-    return Path(session_dir) / "agents" / agent_name
-
-
 # Workspace-/session-scoped artefact helpers. Single source of truth so
-# callers go through e.g. magpie_dir(session_dir()) instead of concatenating
+# callers go through e.g. magpie_dir() / runtime_dir() instead of concatenating
 # paths by hand.
-def runtime_dir(session_dir: Path | None = None) -> Path:
+def runtime_dir() -> Path:
     """``<workspace_root>/runtime/`` — workspace-shared writable runtime
-    (kernel-agent env file, GEAK litellm config). Survives across sessions;
-    the ``session_dir`` param is ignored (back-compat).
-
-    Args:
-        session_dir: Ignored; accepted for back-compat.
+    (kernel-agent env file, GEAK litellm config). Survives across sessions.
 
     Returns:
         ``<workspace_root>/runtime``.
@@ -378,13 +336,10 @@ def open_source_root() -> Path:
     return Path("/opt/hyperloom/open-source-repos")
 
 
-def magpie_dir(session_dir: Path | None = None) -> Path:
+def magpie_dir() -> Path:
     """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_PATH``
     overrides). Aligned with install.sh so script and runtime resolve the same
-    checkout. ``session_dir`` param ignored (back-compat).
-
-    Args:
-        session_dir: Ignored; accepted for back-compat.
+    checkout.
 
     Returns:
         The Magpie checkout path.
@@ -411,25 +366,6 @@ def tracelens_root() -> Path:
     return open_source_root() / "TraceLens"
 
 
-def kernel_agent_root(session_dir: Path) -> Path:
-    """``<sd>/kernel-agent/`` — kernel-agent CLI tool output root (one
-    ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
-    ``<sd>/kernel-agent-workspace/``.
-
-    Renamed from ``kernel_agent_runs_root`` (which
-    collided with the unrelated ``session_paths.kernel_agent_runs_root`` —
-    that one returns the ``runs/`` subdirectory *one level below* this
-    root) to remove the same-name-different-meaning ambiguity.
-
-    Args:
-        session_dir: The session directory root.
-
-    Returns:
-        ``<session_dir>/kernel-agent``.
-    """
-    return Path(session_dir) / "kernel-agent"
-
-
 def mn_profile_trace_root() -> Path:
     """``<workspace_root>/profile-traces/`` — multi-node torch profile shared
     root (``<rayjob_id>/torch_trace/`` per provision). Multi-node operators
@@ -450,14 +386,10 @@ __all__ = [
     "ENV_SESSION_LAYOUT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
-    "agent_session_dir",
     "asset_actions_dir",
-    "asset_kernel_opt_dir",
     "asset_root",
-    "asset_scripts_dir",
     "asset_system_prompts_dir",
     "db_path_for",
-    "kernel_agent_root",
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",

@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -18,19 +17,6 @@ from hyperloom.inference_optimizer.session.session_paths import cortex_lessons_j
 
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class T0Result:
-    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_already}."""
-
-    status: str
-    session_id: str = ""
-    workload: str = ""
-    hw: str = ""
-    warm_present: bool = False
-    pitfalls_present: bool = False
-    lessons_present: bool = False
 
 
 def _default_status_emitter(line: str) -> None:
@@ -217,15 +203,12 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
 def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
     """Extract a replayable ``(args, envs)`` pair from a row's best_config.
 
-    Reads the canonical ``extra_server_args`` first, then the legacy
-    ``extra_sglang_args`` / ``args`` aliases, and the nested env map under
-    ``extra_envs`` / ``envs``. Returns empty values when nothing replayable
-    is present.
+    Reads the canonical ``extra_server_args`` field and the nested env map
+    under ``extra_envs`` / ``envs``. Returns empty values when nothing
+    replayable is present.
     """
     best_config = row.get("best_config") if isinstance(row.get("best_config"), Mapping) else {}
-    args = str(
-        best_config.get("extra_server_args") or best_config.get("extra_sglang_args") or best_config.get("args") or ""
-    ).strip()
+    args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
     envs = best_config.get("extra_envs") or best_config.get("envs") or {}
     if not isinstance(envs, Mapping):
         envs = {}
@@ -869,11 +852,11 @@ def run_t0_anchor(
     on_status: Callable[[str], None] | None = None,
     session_dir: Path | None = None,
     save_state: bool = True,
-) -> T0Result:
+) -> None:
     """Run the T0 recipe-snapshot anchor.
 
     Mutates ``shared_state`` in place (warm_start_* fields) and persists when
-    ``save_state=True``. ``session_dir`` is required. Returns a :class:`T0Result`.
+    ``save_state=True``. ``session_dir`` is required.
 
     Args:
         kb: The recipe-KB dispatcher used for the read-modify-write anchor.
@@ -889,9 +872,6 @@ def run_t0_anchor(
         on_status: Optional status-line callback; defaults to INFO logging.
         session_dir: The session directory (required).
         save_state: When ``True``, persist the mutated SharedState.
-
-    Returns:
-        A :class:`T0Result` describing the anchor outcome.
 
     Raises:
         ValueError: If ``session_dir`` is ``None``.
@@ -913,15 +893,7 @@ def run_t0_anchor(
     if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
         shared_state.cortex_session_id = sid
         emit(f"Cortex KB        : already anchored session_id={sid}")
-        return T0Result(
-            status="skipped_already",
-            session_id=sid,
-            workload=workload,
-            hw=hw,
-            warm_present=bool(getattr(shared_state, "warm_start_recipe", {})),
-            pitfalls_present=bool(getattr(shared_state, "warm_start_pitfalls", [])),
-            lessons_present=bool(getattr(shared_state, "warm_start_lessons", [])),
-        )
+        return
 
     if sid:
         shared_state.cortex_session_id = sid
@@ -1279,13 +1251,15 @@ def run_t0_anchor(
             ),
             encoding="utf-8",
         )
+        # ``raw`` is intentionally omitted here: it duplicates ``recipe`` and is
+        # injected into specialist prompts. The disk snapshot above keeps it for
+        # envelope-shape compatibility.
         shared_state.warm_start_recipe = {
             "workload": workload,
             "hw": hw,
             "tier": warm_tier,
             "confidence": warm_conf,
             "recipe": warm_point,
-            "raw": warm_text,
         }
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
@@ -1376,8 +1350,6 @@ def run_t0_anchor(
 
     # warm_present = usable record (tier != "miss" and confidence > 0).
     warm_present = bool(warm_point) and warm_conf > 0.0
-    pitfalls_present = bool(pitfalls_list)
-    lessons_present = bool(lessons_list)
     if began_now:
         warm_label = f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else "seed_only" if warm_point else "empty"
         emit(
@@ -1387,18 +1359,9 @@ def run_t0_anchor(
             f"pitfalls={len(pitfalls_list)}, "
             f"lessons={len(lessons_list)})"
         )
-    return T0Result(
-        status="ok" if began_now else "skipped_already" if not resume else "resumed",
-        session_id=sid,
-        workload=workload,
-        hw=hw,
-        warm_present=warm_present,
-        pitfalls_present=pitfalls_present,
-        lessons_present=lessons_present,
-    )
+    return
 
 
 __all__ = [
-    "T0Result",
     "run_t0_anchor",
 ]

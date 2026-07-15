@@ -823,24 +823,6 @@ class PolicyGate:
             tools.append("Read")
         return tools
 
-    def allowed_tools_for_action(self, action_name: str) -> list[str]:
-        """Per-action tool intersection; action's declared ``allowed_tools`` or the default ``["emit_intent"]``.
-
-        Args:
-            action_name (str): the action whose allowed tools are requested.
-
-        Returns:
-            list[str]: the action's declared ``allowed_tools``, or
-                ``["emit_intent"]`` when no registry is wired or the action is
-                unknown.
-        """
-        if self.action_registry is None:
-            return ["emit_intent"]
-        meta = self.action_registry.get(action_name)
-        if meta is None:
-            return ["emit_intent"]
-        return list(meta.allowed_tools)
-
     # Per-intent validators
     def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``DELEGATE`` intent against the full delegate rule set.
@@ -1466,54 +1448,6 @@ class PolicyGate:
             ),
         )
 
-    # R4 / R5 public helper — pure validator for the SpecialistRunner tool-list builder.
-    def validate_tool_invocation(
-        self,
-        tool_name: str,
-        *,
-        source_role: str,
-        phase: str | None = None,
-    ) -> None:
-        """Raise :class:`PolicyDenied` if ``tool_name`` is not allowed for ``source_role`` (pure, Inv-11.1; ``phase`` no longer gates).
-
-        Args:
-            tool_name (str): the canonical tool name to validate.
-            source_role (str): the role attempting to invoke the tool.
-            phase (str | None): the current phase; retained for signature
-                compatibility but no longer used to gate.
-
-        Raises:
-            PolicyDenied: when ``tool_name`` is empty, a KB write surface, or a
-                known external tool not whitelisted for ``source_role``.
-        """
-        tool_name = (tool_name or "").strip()
-        if not tool_name:
-            raise PolicyDenied(
-                "validate_tool_invocation: tool_name is empty",
-                rule="payload",
-                hint="caller must pass the canonical tool name",
-            )
-        # R4 — KB writes are categorically off-limits.
-        if tool_name in KB_WRITE_TOOL_NAMES:
-            raise PolicyDenied(
-                f"KB write tool {tool_name!r} cannot be invoked by role={source_role!r}",
-                rule="kb_write_unauthorized",
-                hint=("Direct KB writes are not allowed (KB_design §3.11 R4). The Coordinator owns all KB writes."),
-            )
-        # R5 — role whitelist for the known external tools.
-        if tool_name in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
-            allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(
-                source_role,
-                frozenset(),
-            )
-            if tool_name not in allowed_for_role:
-                raise PolicyDenied(
-                    f"role={source_role!r} cannot invoke tool {tool_name!r}",
-                    rule="tool_whitelist_role",
-                    hint=(f"{tool_name} is restricted to specialist sub-agents. KB_design §3.11 §4.5."),
-                )
-        # Anything else is implicitly allowed; internal tools are filtered by the SpecialistRunner's own denylist.
-
     # ``sweep_phase_singleton``
     def _validate_sweep_singleton(
         self,
@@ -1521,7 +1455,11 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Enforce one sweep per SWEEP phase (Inv-9.4): deny agent sweeps once the auto-enqueued sweep landed (concurrent sweeps crash both vllm engines). Escape: ``params.bypass_sweep_singleton=True``.
+        """Deny agent workload sweeps once SWEEP auto-dispatched conc_sweep.
+
+        The automatic phase path now runs ``conc_sweep`` directly, so a later
+        LLM-proposed full ``sweep`` would only burn extra GPU time. Escape:
+        ``params.bypass_sweep_singleton=True``.
 
         Args:
             payload (dict[str, Any]): the intent payload;
@@ -1532,25 +1470,22 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
-                sweep task and no bypass flag is set.
+                conc_sweep task and no bypass flag is set.
         """
         self._validate_sweep_family_singleton(
             payload,
             bypass_key="bypass_sweep_singleton",
-            evidence_key="auto_sweep_task_id",
+            evidence_key="auto_conc_sweep_task_id",
             rule="sweep_phase_singleton",
             message_fn=lambda auto_id: (
-                f"sweep: SWEEP phase already has an auto-enqueued sweep "
-                f"task (auto_sweep_task_id={auto_id!r}); concurrent "
-                f"sweep proposals would race for the same GPUs and "
-                f"port and crash both vllm engines on init."
+                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
+                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
+                f"sweep is no longer part of the automatic closeout path."
             ),
             hint=(
-                "The Coordinator's SWEEP-entry hook already covers "
-                "the SKILL.md default grid plus the Cortex "
-                "recipe.sweep_grid field — no further sweep "
-                "proposal is needed. Wait for the auto-sweep to "
-                "finish (SWEEP→CLOSE transitions automatically). "
+                "The Coordinator's SWEEP-entry hook already dispatches "
+                "conc_sweep directly; no full workload sweep proposal is "
+                "needed. Wait for SWEEP→CLOSE. "
                 "If you genuinely need a second grid for debug, "
                 f"set params.bypass_sweep_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
@@ -1591,7 +1526,7 @@ class PolicyGate:
                 f"of GPU time."
             ),
             hint=(
-                "Coordinator's post-sweep hook already dispatched "
+                "Coordinator's SWEEP-entry hook already dispatched "
                 "conc_sweep — wait for SWEEP→CLOSE. If you need a "
                 "second run for debug, set "
                 f"params.bypass_conc_sweep_singleton=True on the "

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+
 from .base import RenderedSection
 
 __all__ = ["GlobalFacts", "build_global_facts"]
@@ -40,42 +42,6 @@ class GlobalFacts:
                 mapping (via ``dataclasses.asdict``).
         """
         return asdict(self)
-
-
-def _safe_pct(num: Any, denom: Any) -> float | None:
-    """Compute a signed percentage change, tolerating bad inputs.
-
-    Args:
-        num (Any): The new value (numerator); coerced to float.
-        denom (Any): The baseline value (denominator); coerced to float.
-
-    Returns:
-        float | None: ``(num - denom) / denom * 100`` as a percent, or
-            ``None`` if either value is non-numeric or the denominator is 0.
-    """
-    try:
-        n, d = float(num), float(denom)
-    except (TypeError, ValueError):
-        return None
-    if d == 0:
-        return None
-    return (n - d) / d * 100.0
-
-
-def _to_float(v: Any) -> float | None:
-    """Coerce a value to float, returning ``None`` instead of raising.
-
-    Args:
-        v (Any): The value to coerce.
-
-    Returns:
-        float | None: The float value, or ``None`` if ``v`` is ``None`` or
-            cannot be converted.
-    """
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _workload_summary(workload: dict[str, Any]) -> str:
@@ -117,15 +83,14 @@ def _gain_attribution_lines(
     """
     attribution = breakdown.get("attribution") or {}
     sb = attribution.get("source_breakdown") or {}
-    total = _to_float(sb.get("validated_total_pct"))
+    total = to_float(sb.get("validated_total_pct"))
     sources = {
-        "backends": _to_float(sb.get("backends_pct_of_total")),
-        "params": _to_float(sb.get("params_pct_of_total")),
-        "explore": _to_float(sb.get("explore_pct_of_total")),
-        "replay_warm_recipe": _to_float(sb.get("replay_warm_recipe_pct_of_total")),
-        "geak": _to_float(sb.get("geak_pct_of_total")),
-        "oob": _to_float(sb.get("oob_pct_of_total")),
-        "sweep": _to_float(sb.get("sweep_pct_of_total")),
+        "backends": to_float(sb.get("backends_pct_of_total")),
+        "params": to_float(sb.get("params_pct_of_total")),
+        "explore": to_float(sb.get("explore_pct_of_total")),
+        "replay_warm_recipe": to_float(sb.get("replay_warm_recipe_pct_of_total")),
+        "geak": to_float(sb.get("geak_pct_of_total")),
+        "sweep": to_float(sb.get("sweep_pct_of_total")),
     }
     nonzero = {k: v for k, v in sources.items() if v and v != 0}
     if nonzero and total:
@@ -137,7 +102,7 @@ def _gain_attribution_lines(
 
     final = breakdown.get("final") or {}
     path = final.get("action_path") or []
-    gain_v = _to_float(final.get("cumulative_gain_pct_validated"))
+    gain_v = to_float(final.get("cumulative_gain_pct_validated"))
     if len(path) == 1 and gain_v is not None and gain_v > 0:
         entry = str(path[0])
         action = entry.split(":")[0]
@@ -309,7 +274,7 @@ def build_global_facts(
     return GlobalFacts(
         headline=_headline(breakdown),
         stop_reason=str(session.get("stop_reason") or ""),
-        elapsed_minutes=_to_float(session.get("elapsed_minutes")),
+        elapsed_minutes=to_float(session.get("elapsed_minutes")),
         objective=dict(workload.get("objective") or {}),
         workload_summary=_workload_summary(workload),
         gain_attribution_lines=attribution_lines,

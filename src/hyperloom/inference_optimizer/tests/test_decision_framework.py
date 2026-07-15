@@ -40,6 +40,9 @@ def _silent_backends() -> dict[str, object]:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # This file exercises legacy/native KERNEL entry behavior; default GEAK is
+    # covered separately.
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers resolve from disk even when the host env is unset.
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
@@ -61,6 +64,7 @@ async def test_run_optimization_response_records_to_shared_state(
     session_dir,
     monkeypatch,
 ):
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.baseline_tput = 800.0
@@ -146,8 +150,10 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
     session_dir,
     monkeypatch,
 ):
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -194,6 +200,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
     """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -215,6 +222,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -266,6 +274,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        c.shared_state.kernel_optimizer = "native"
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
@@ -431,14 +440,14 @@ async def test_run_optimization_handler_forwards_verification_evidence(
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fallback(
+async def test_run_optimization_handler_batches_reusable_kernels_and_selects_best(
     session_dir,
     tmp_path,
     monkeypatch,
 ):
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
-    # Disable the default min_gpu_pct gate so the test focuses on the backend-fallback ladder.
+    # Disable the default min_gpu_pct gate so the test focuses on the batch best-selection.
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
@@ -469,8 +478,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
         kernel_id = payload["kernel_id"]
         backend = payload["backends"]
         calls.append((kernel_id, backend))
-        # k006 wins on geak_v3 (short-circuit-after-KEEP); k003 stays PARTIAL to exhaust the ladder.
-        keep = kernel_id == "k006" and backend == "geak_v3"
+        # k006 wins on forge (KEEP); k003 stays PARTIAL so batch best-selection picks k006.
+        keep = kernel_id == "k006" and backend == "forge"
         speedup = 1.31 if keep else 1.0
         return {
             "status": "ok",
@@ -493,7 +502,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     result = await krh.run_optimization_handler(
         {
             "candidates_path": str(candidates),
-            "backend_order": "forge,geak_v3",
+            "backend_order": "forge",
             "budget_minutes": 60,
             "max_parallel": 2,
         },
@@ -502,7 +511,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
     assert result["batch_mode"] is True
     assert result["batch_kernel_ids"] == ["k003", "k006"]
-    assert result["backend_order"] == ["forge", "geak_v3"]
+    assert result["backend_order"] == ["forge"]
     assert result["kernel_id"] == "k006"
     assert result["proposal"]["decision"] == "KEEP"
     assert result["verification"]["micro_speedup"] == pytest.approx(1.31)
@@ -510,8 +519,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     by_kernel: dict[str, list[str]] = {}
     for kernel_id, backend in calls:
         by_kernel.setdefault(kernel_id, []).append(backend)
-    assert by_kernel["k003"] == ["forge", "geak_v3"]
-    assert by_kernel["k006"] == ["forge", "geak_v3"]
+    assert by_kernel["k003"] == ["forge"]
+    assert by_kernel["k006"] == ["forge"]
 
 
 # E — record_kernel_opt retires kernels stuck in PARTIAL (regression for the r24 custom_allreduce GEAK retry-loop that only retired on REVERT).
@@ -612,8 +621,7 @@ def test_record_kernel_opt_prompt_summary_surfaces_history():
 
 
 def test_record_kernel_opt_persists_test_command():
-    """test_command from backend_paths must survive into kernel_opt_attempts
-    so that after_kernel_opt rocprof can retrieve it without re-deriving."""
+    """test_command from backend_paths must survive into kernel_opt_attempts."""
     state = SharedState()
     state.record_kernel_opt(
         {
@@ -629,11 +637,11 @@ def test_record_kernel_opt_persists_test_command():
             },
             "attempts": [
                 {
-                    "backend": "geak_v3",
+                    "backend": "forge",
                     "status": "ok",
                     "backend_paths": {
                         "test_command": "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py",
-                        "output_dir": "/tmp/geak_v3_out",
+                        "output_dir": "/tmp/forge_out",
                     },
                 }
             ],

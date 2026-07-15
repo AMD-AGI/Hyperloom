@@ -66,14 +66,16 @@ def test_merge_context_lists_missing_critical_keys(tmp_session_root):
     assert "framework" in res.missing_keys
 
 
-def test_append_and_list_decisions(tmp_session_root):
+def test_append_decisions_writes_jsonl(tmp_session_root):
     sm = SessionMemory(root=tmp_session_root)
     sm.append_decision("sess_1", {"verdict": "approve"})
     sm.append_decision("sess_1", {"verdict": "reject"})
-    out = sm.list_decisions("sess_1")
-    assert len(out) == 2
-    assert out[0]["decision_review"]["verdict"] == "approve"
-    assert out[1]["decision_review"]["verdict"] == "reject"
+    out = [
+        json.loads(line)
+        for line in (sm.session_dir("sess_1") / "decisions.jsonl").read_text("utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["decision_review"]["verdict"] for row in out] == ["approve", "reject"]
 
 
 def test_append_decision_rejects_non_dict(tmp_session_root):
@@ -86,7 +88,11 @@ def test_events_jsonl_roundtrip(tmp_session_root):
     sm = SessionMemory(root=tmp_session_root)
     sm.append_event("sess_1", {"kind": "kb_cache_miss"})
     sm.append_event("sess_1", {"kind": "kb_write_ok", "id": "kb_xxx"})
-    events = sm.list_events("sess_1")
+    events = [
+        json.loads(line)
+        for line in (sm.session_dir("sess_1") / "events.jsonl").read_text("utf-8").splitlines()
+        if line.strip()
+    ]
     assert [e["kind"] for e in events] == ["kb_cache_miss", "kb_write_ok"]
 
 
@@ -117,9 +123,8 @@ def test_default_ttl_constant_exposed():
 def test_mark_reviewed_dedup(tmp_session_root):
     sm = SessionMemory(root=tmp_session_root)
     sm.mark_reviewed("sess_1", "msg_a", "approve", decision_id="dec_1")
-    assert sm.is_msg_already_reviewed("sess_1", "msg_a") is True
-    assert sm.is_msg_already_reviewed("sess_1", "msg_b") is False
-    assert sm.reviewed_verdict_for("sess_1", "msg_a") == "approve"
+    reviewed = json.loads((sm.session_dir("sess_1") / "reviewed_msg_ids.json").read_text("utf-8"))
+    assert reviewed["msg_a"]["verdict"] == "approve"
 
 
 def test_filter_unreviewed_returns_only_new(tmp_session_root):

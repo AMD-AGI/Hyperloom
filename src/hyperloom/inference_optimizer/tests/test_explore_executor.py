@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
-    variant_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
@@ -128,13 +127,6 @@ def test_canonical_fingerprint_distinguishes_envs():
         {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
-
-
-def test_canonical_fingerprint_matches_variant_fingerprint():
-    """Identity with legacy ``variant_fingerprint`` is preserved during migration."""
-    args = "--attention-backend aiter"
-    envs = {"VLLM_ROCM_USE_AITER": "1"}
-    assert canonical_fingerprint(args, envs) == variant_fingerprint(args, envs)
 
 
 # SharedState — record_explore_accepted / apply_explore_search_update
@@ -784,13 +776,13 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_warm_decision_runs_three_rounds_on_keep(
+async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
 ):
-    """Q4-a: warm-decision KEEP path runs warmup + decision + stack_rebench (3 Magpie runs)."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
+    """Default EXPLORE measures hot decisions, matching default hot baseline."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

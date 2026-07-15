@@ -104,7 +104,7 @@ def test_revalidation_fallback_on_bad_measurement(measured, baseline) -> None:
     )
 
 
-# ── #5: provisional promote gain is consistent + not validated ───────────────
+# ── Shared Coordinator fixture ───────────────────────────────────────────────
 
 
 def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
@@ -120,69 +120,6 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
         conc=64,
     )
     return coord
-
-
-def test_promote_provisional_gain_matches_current_best_over_baseline(tmp_path: Path) -> None:
-    """Provisional gain == (promoted final / baseline) − 1, i.e. cold-to-cold.
-
-    It must NOT use the HOT final (which would overstate and contradict the
-    persisted current_best.tput a reader divides by baseline).
-    """
-    base = 2844.209
-    cold_final = 3236.489       # promoted (cold) — becomes current_best.tput
-    hot_final = 3299.149        # steady-state; must NOT drive the provisional gain
-    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
-    result = {
-        "status": "ok",
-        "final_throughput_tok_s": cold_final,
-        "final_throughput_basis": "cold",
-        "throughput_speedup": 1.088,
-        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=0"},
-        "alignment_metrics": {
-            "geak_hot_final_tok_s": hot_final,
-            "hot_geak_speedup": 1.1329,
-            "cold_geak_speedup": 1.088,
-            "hot_speedup": 1.0978,
-            "cold_speedup": 1.1379,
-            "final_basis": "cold",
-        },
-        "baseline_basis": {"measurement_divergence_pct": 0.5},
-    }
-
-    coord._promote_geak_result(result)
-    ss = coord.shared_state
-
-    # current_best.tput is the promoted (cold) final.
-    assert ss.current_best["tput"] == pytest.approx(cold_final)
-    # Provisional gain is EXACTLY consistent with the two persisted anchors.
-    expected_pct = (cold_final - base) / base * 100.0
-    assert ss.cumulative_gain == pytest.approx(expected_pct, abs=1e-6)
-    # It equals cold_speedup, and is BELOW the discarded hot-over-cold ratio.
-    assert ss.cumulative_gain == pytest.approx((1.1379 - 1.0) * 100.0, abs=0.05)
-    assert ss.cumulative_gain < (hot_final - base) / base * 100.0
-    # Provenance marks it provisional; validated is NOT stamped here.
-    assert ss.cumulative_gain_provenance == "geak_cross_harness_provisional"
-    assert ss.resume_pending_revalidation is True
-    assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    # GEAK's own within-harness speedups are stashed for audit cross-check.
-    audit = ss.current_best.get("geak_alignment") or {}
-    assert audit.get("cold_geak_speedup") == pytest.approx(1.088)
-    assert audit.get("geak_throughput_speedup") == pytest.approx(1.088)
-
-
-def test_promote_falls_back_to_final_when_alignment_absent(tmp_path: Path) -> None:
-    """Standalone runs (no alignment_metrics) still get a consistent gain."""
-    base, final = 100.0, 116.0
-    coord = _coord(tmp_path, baseline=base, best_tput=100.0)
-    coord._promote_geak_result(
-        {
-            "status": "ok",
-            "final_throughput_tok_s": final,
-            "accepted_config": {"flags": "", "env": ""},
-        }
-    )
-    assert coord.shared_state.cumulative_gain == pytest.approx(16.0)
-    assert coord.shared_state.cumulative_gain_validated == pytest.approx(0.0)
 
 
 # ── 2a: GEAK-harness fallback validates on GEAK's OWN promoted-basis speedup ──

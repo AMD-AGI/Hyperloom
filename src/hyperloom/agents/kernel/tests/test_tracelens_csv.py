@@ -18,6 +18,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import _idle_gate as idle_gate  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
@@ -400,34 +401,34 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         is False
     )
     assert tla.is_reusable_native_kernel(candidate) is True
-    # Ladder converged to forge then GEAK; OOB backends (claude/codex/cursor) removed.
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    # Ladder converged to forge-only.
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_includes_geak_for_python_source():
-    """GEAK must be in the ladder for ``python`` source_type too (pre-fix it was dropped)."""
+def test_recommend_backends_for_python_source():
+    """forge must be recommended for ``python`` source_type too."""
     candidate = {
         "name": "some_python_dispatcher",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_includes_geak_for_unknown_source():
-    """Unknown source_type: GEAK must still be in the ladder (let GEAK decide, don't pre-filter by extension)."""
+def test_recommend_backends_for_unknown_source():
+    """Unknown source_type: forge is still recommended (don't pre-filter by extension)."""
     candidate = {
         "name": "some_unrecognised_kernel",
         "source_file": "/some/path/kernel.xyz",
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_geak_precedes_llm_backends():
-    """Invariant: forge leads, then the per-kernel GEAK backend."""
+def test_recommend_backends_is_forge_only():
+    """Invariant: forge is the sole per-kernel backend in the ladder."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -435,7 +436,7 @@ def test_recommend_backends_geak_precedes_llm_backends():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder[:2] == ["forge", "geak_v3"], f"forge then GEAK must lead the ladder, got {ladder}"
+    assert ladder == ["forge"], f"forge must be the sole per-kernel backend, got {ladder}"
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -808,56 +809,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["runtime_flags"]["target_platform"] == "MI300X"
     assert enriched["runtime_flags"]["is_multigpu"] is False
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
-
-
-def test_write_reports_does_not_run_rocprof_enrich_by_default(tmp_path, monkeypatch):
-    """Trace analysis must not synchronously profile every hot kernel by default."""
-    import json as _json
-    from argparse import Namespace
-    import rocprof_roofline as rr
-
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
-    analysis_md.parent.mkdir(parents=True, exist_ok=True)
-    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
-    candidate = {
-        "kernel_id": "k001",
-        "name": "paged_attention",
-        "duration_us": 100.0,
-        "call_count": 2,
-        "reusable_native_kernel": True,
-    }
-    args = Namespace(
-        trace_input=str(trace),
-        model_name="llama",
-        framework="sglang",
-        target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
-        dry_run=False,
-    )
-    called = {"value": False}
-
-    def _boom(*_args, **_kwargs):
-        called["value"] = True
-        raise AssertionError("batch enrich should be opt-in")
-
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
-    monkeypatch.setattr(rr, "enrich_kernel_roofline_sidecar", _boom)
-
-    artifacts = tla.write_reports(
-        tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
-        candidates=[candidate],
-        args=args,
-        existing_report_path=analysis_md,
-    )
-
-    assert called["value"] is False
-    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
-    assert payload["hot_kernels"][0]["kernel_id"] == "k001"
 
 
 def test_load_model_kernel_params_reads_head_dim(tmp_path):
@@ -1355,6 +1306,223 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
+
+
+def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
+    """TraceLens SDK runner must not inherit stale global Claude settings.
+
+    The production failure this guards against: ``~/.claude/settings.json`` can
+    contain a stale gateway token, while the active Hyperloom run is correctly
+    configured via process env. Passing ``env`` and ``setting_sources=[]`` keeps
+    the SDK child tied to the active run contract.
+    """
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token-active")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="claude-sonnet-4-5-20250929",
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    opts = captured["options"]
+    assert opts["setting_sources"] == []
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-token-active"
+    assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "anthropic-token-active"
+    assert child_env["ANTHROPIC_MODEL"] == "claude-sonnet-4-5-20250929"
+    assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-sonnet-4-5-20250929"
+
+
+def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
+    """OpenAI-only deployments must run TraceLens without Claude SDK."""
+    import asyncio
+    from types import SimpleNamespace
+
+    output_dir = tmp_path / "out"
+    calls: list[dict] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            tool_calls = [
+                SimpleNamespace(
+                    id="call_write",
+                    function=SimpleNamespace(
+                        name="write_file",
+                        arguments=json.dumps(
+                            {
+                                "path": str(output_dir / "analysis.md"),
+                                "content": "# Codex TraceLens report\n",
+                            }
+                        ),
+                    ),
+                )
+            ]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="", tool_calls=tool_calls),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=5),
+            )
+
+    class _Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    def _no_claude_query(**_kwargs):
+        raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
+
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="gpt-5.5",
+            sdk_query_factory=_no_claude_query,
+            sdk_options_cls=object,
+            openai_client_factory=_Client,
+        )
+    )
+
+    assert res.report_path == output_dir / "analysis.md"
+    assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
+    assert calls
+    assert calls[0]["model"] == "gpt-5.5"
+    assert calls[0]["tools"]
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_agent_transcript" in res.artifact_paths
+
+
+def test_openai_tool_runner_rejects_out_of_scope_files_and_shell_strings(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+
+    read_out = json.loads(
+        tlr._execute_openai_tool(
+            "read_file",
+            json.dumps({"path": "/etc/passwd"}),
+            scope=scope,
+        )
+    )
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": str(tmp_path / "escape.md"), "content": "bad"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"command": "rm -rf /"}),
+            scope=scope,
+        )
+    )
+
+    assert read_out["ok"] is False
+    assert "outside allowed roots" in read_out["error"]
+    assert write_out["ok"] is False
+    assert "outside allowed roots" in write_out["error"]
+    assert shell_out["ok"] is False
+    assert "argv" in shell_out["error"]
+    assert not (tmp_path / "escape.md").exists()
+
+
+def test_openai_tool_runner_allows_output_write_and_tracelens_python(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+    script = scope.tracelens_root / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": "analysis.md", "content": "# ok\n"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"argv": ["python3", str(script)]}),
+            scope=scope,
+        )
+    )
+
+    assert write_out["ok"] is True
+    assert (scope.output_dir / "analysis.md").read_text(encoding="utf-8") == "# ok\n"
+    assert shell_out["ok"] is True
+    assert "ok" in shell_out["stdout"]
 
 
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
@@ -2626,7 +2794,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
             "skip_reason": "",
             "gpu_pct": 12.5,
             "tracelens_pitem_rank": 1,
-            "recommended_backends": ["forge", "geak_v3"],
+            "recommended_backends": ["forge"],
         },
         {
             "kernel_id": "k002",
@@ -2669,7 +2837,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
     assert "source file" in aten_entry["skip_reason"]
     # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
-    assert summary["tasks"][0]["recommended_backends"] == ["forge", "geak_v3"]
+    assert summary["tasks"][0]["recommended_backends"] == ["forge"]
 
 
 def test_build_audit_summary_handles_empty_input():
@@ -3597,23 +3765,23 @@ def test_extract_idle_pct_against_llama70b_fixture():
 
 
 def test_resolve_idle_pct_threshold_uses_default_when_env_unset(monkeypatch):
-    monkeypatch.delenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
 
 
 def test_resolve_idle_pct_threshold_honours_env_override(monkeypatch):
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
-    assert tla._resolve_idle_pct_threshold() == pytest.approx(35.5)
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
+    assert idle_gate.resolve_idle_pct_threshold() == pytest.approx(35.5)
 
 
 def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
     """Garbage / negative / empty env values fall back to the default, not a crash."""
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
 
 
 def test_build_high_idle_warning_shape(tmp_path):

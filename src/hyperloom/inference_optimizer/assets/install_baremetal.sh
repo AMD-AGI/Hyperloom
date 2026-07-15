@@ -7,19 +7,17 @@
 # base (ROCm runtime + a ROCm-built torch + a serving framework). For bare-metal
 # installs, the script can optionally install SGLang or vLLM ROCm framework layers.
 #
-# Phase 0  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
-# Phase 1  framework       — optional bare-metal SGLang/vLLM install
-# Phase 1b ROCm hotfix    — install ROCclr HIP runtime + roctracer profiler fix
-# Phase 2  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
+# Phase 1  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
+# Phase 2  framework       — optional bare-metal SGLang/vLLM install
+# Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
+# Phase 4  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
-# Phase 3  dependencies + runtime install
-#                          — if KERNEL_OPT_BACKEND_ORDER explicitly includes
-#                            forge: local_setup.sh clones private KernelForge
+# Phase 5  dependencies + runtime install
 #                          — install.sh installs open-source deps/runtime:
-#                            io pkg, Magpie, InferenceX deps, forge-gemm-tune,
+#                            io pkg, Magpie, InferenceX deps,
 #                            chained kernel-agent Ray/GEAK/TraceLens, and fa
-# Phase 4  combined env  — write runtime/hyperloom.env.sh
-# Phase 5  verify + print launch prompt
+# Phase 6  combined env  — write runtime/hyperloom.env.sh
+# Phase 7  verify + print launch prompt
 #
 # Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
 # and gbrain KB are NOT installed here. It STOPS before launching.
@@ -27,39 +25,15 @@
 set -euo pipefail
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_REPO_ROOT_WAS_SET="${REPO_ROOT+x}"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 
-LOCAL_SETUP_SH="${_script_dir}/local_setup.sh"
 INSTALL_SH="${_script_dir}/install.sh"
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
 DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
-# Install source: "checkout" (default, use in-tree scripts + editable install)
-# or "wheel" (fetch the released hyperloom wheel and drive the packaged
-# assets — the standalone/customer path where this script is the only file on
-# disk). Auto-detected as "wheel" when the sibling scripts are absent.
-HYPERLOOM_INSTALL_SOURCE="${HYPERLOOM_INSTALL_SOURCE:-}"
-if [ -z "$HYPERLOOM_INSTALL_SOURCE" ]; then
-  if [ -f "$LOCAL_SETUP_SH" ] && [ -f "$INSTALL_SH" ]; then
-    HYPERLOOM_INSTALL_SOURCE="checkout"
-  else
-    HYPERLOOM_INSTALL_SOURCE="wheel"
-  fi
-fi
-if [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ] && [ -z "$_REPO_ROOT_WAS_SET" ]; then
-  REPO_ROOT="$(pwd)"
-  ENV_TEMPLATE="${REPO_ROOT}/.env.template"
-  DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
-fi
-# Released wheel source. HYPERLOOM_WHEEL takes a local .whl path or a reachable
-# URL and skips gh; otherwise the wheel is pulled from a private GitHub release
-# via gh (reuses the host's auth). Repo/tag/pattern are overridable.
-HYPERLOOM_WHEEL="${HYPERLOOM_WHEEL:-}"
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
 HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
-HYPERLOOM_WHEEL_PATTERN="${HYPERLOOM_WHEEL_PATTERN:-hyperloom_inference_optimizer-*.whl}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
@@ -109,14 +83,14 @@ Usage: src/hyperloom/inference_optimizer/assets/install_baremetal.sh [options]
 
 Install Hyperloom dependencies on a bare-metal host with ROCm + ROCm torch. Verifies
 the base, optionally installs SGLang/vLLM, resolves credentials, then chains
-local_setup.sh + install.sh. Stops BEFORE launching.
+ install.sh. Stops BEFORE launching.
 
 Options:
   --safe-api-key KEY     LLM gateway key (ak-...); overrides env / .env
   --openai-base-url URL  LLM gateway endpoint; overrides env / .env
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
   --deps-root PATH       Directory for auto-cloned dependency checkouts
-  --frameworks LIST      Comma list to verify in Phase 0 (default: sglang,vllm)
+  --frameworks LIST      Comma list to verify in Phase 1 (default: sglang,vllm)
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
@@ -125,7 +99,7 @@ Options:
   --vllm-venv-root PATH  Isolated vLLM venv path (default:
                          /opt/hyperloom/vllm-venv).
   --require-frameworks   Treat a missing requested framework as fatal
-  --skip-base-check      Skip Phase 0 base preflight
+  --skip-base-check      Skip Phase 1 base preflight
   --check-only           Verify only; do not clone/install/mutate
   --dry-run              Print planned actions without cloning/installing/writing
   --yes, -y              Non-interactive; fail fast on missing credentials
@@ -141,8 +115,7 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT, HYPERLOOM_INSTALL_SOURCE, HYPERLOOM_WHEEL,
-HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG, HYPERLOOM_WHEEL_PATTERN,
+VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG,
 HYPERLOOM_ENV_FILE.
 EOF
 }
@@ -210,80 +183,21 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
-bootstrap_wheel_install() {
-  [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ] || return 0
-  local py wheel_ref="" wheel_dir="" wheel_file=""
-  py="$(resolve_python)" || die "no usable Python found to install the hyperloom wheel (set PYTHON)."
-  log "install source: wheel (standalone mode)"
-
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would install hyperloom wheel from ${HYPERLOOM_WHEEL:-gh ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} (${HYPERLOOM_WHEEL_PATTERN})}"
-  elif [ "$CHECK_ONLY" -eq 1 ]; then
-    # Standalone check-only: if the wheel is not installed yet, report it and
-    # stop here. Do NOT try to locate site-packages assets (they do not exist
-    # on a first run), which would otherwise die with a non-zero exit.
-    if _py_has "$py" hyperloom.inference_optimizer; then
-      log "hyperloom.inference_optimizer import OK"
-    else
-      warn "hyperloom.inference_optimizer missing (check-only; would install the released wheel)"
-      export REPO_ROOT HYPERLOOM_INSTALL_SOURCE
-      return 0
-    fi
-  else
-    if [ -n "$HYPERLOOM_WHEEL" ]; then
-      if [ -f "$HYPERLOOM_WHEEL" ]; then
-        wheel_ref="file://$(cd "$(dirname "$HYPERLOOM_WHEEL")" && pwd)/$(basename "$HYPERLOOM_WHEEL")"
-      else
-        wheel_ref="$HYPERLOOM_WHEEL"
-      fi
-      log "using operator-supplied wheel: ${HYPERLOOM_WHEEL}"
-    else
-      command -v gh >/dev/null 2>&1 \
-        || die "gh CLI not found; needed to download the ${HYPERLOOM_WHEEL_REPO} release wheel. Install gh + 'gh auth login', or set HYPERLOOM_WHEEL to a local .whl / reachable URL."
-      gh auth status >/dev/null 2>&1 \
-        || die "gh is not authenticated; run 'gh auth login' (needs read access to ${HYPERLOOM_WHEEL_REPO}), or set HYPERLOOM_WHEEL to a local .whl / reachable URL."
-      wheel_dir="$(mktemp -d)"
-      log "downloading ${HYPERLOOM_WHEEL_PATTERN} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} via gh"
-      gh release download "$HYPERLOOM_WHEEL_TAG" -R "$HYPERLOOM_WHEEL_REPO" \
-        -p "$HYPERLOOM_WHEEL_PATTERN" -D "$wheel_dir" \
-        || { rm -rf "$wheel_dir"; die "gh release download failed for ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG} (${HYPERLOOM_WHEEL_PATTERN})"; }
-      wheel_file="$(ls -1 "$wheel_dir"/*.whl 2>/dev/null | head -1)"
-      [ -n "$wheel_file" ] || { rm -rf "$wheel_dir"; die "no wheel matching ${HYPERLOOM_WHEEL_PATTERN} in the ${HYPERLOOM_WHEEL_TAG} release"; }
-      wheel_ref="file://${wheel_file}"
-    fi
-    log "installing hyperloom wheel into ${py}"
-    "$py" -m pip install --quiet "$wheel_ref" \
-      || { [ -n "$wheel_dir" ] && rm -rf "$wheel_dir"; die "pip install of the hyperloom wheel failed"; }
-    [ -n "$wheel_dir" ] && rm -rf "$wheel_dir"
+# Print the serving framework (sglang|vllm), or nothing when none is importable.
+resolve_installed_framework() {
+  if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
+    printf '%s' "$INSTALL_FRAMEWORK"; return 0
   fi
-
-  # Re-point installer paths at the packaged assets. In dry-run we may not have
-  # installed the wheel yet, so keep the planned path check informational.
-  if [ "$DRY_RUN" -eq 0 ]; then
-    local assets_dir
-    assets_dir="$("$py" - <<'PY' 2>/dev/null || true
-import pathlib
-try:
-    import hyperloom.inference_optimizer as m
-    print(pathlib.Path(m.__file__).resolve().parent / "assets")
-except Exception:
-    pass
-PY
-)"
-    [ -n "$assets_dir" ] && [ -d "$assets_dir" ] \
-      || die "cannot locate packaged assets after wheel install (hyperloom.inference_optimizer not importable)."
-    LOCAL_SETUP_SH="${assets_dir}/local_setup.sh"
-    INSTALL_SH="${assets_dir}/install.sh"
-    HYPERLOOM_SKILL_PATH="$(cd "${assets_dir}/.." && pwd)/SKILL.md"
-    [ -f "${assets_dir}/.env.template" ] && ENV_TEMPLATE="${assets_dir}/.env.template"
-    if ! grep -q 'HYPERLOOM_INSTALL_SOURCE' "$INSTALL_SH" 2>/dev/null; then
-      die "installed wheel does not contain standalone-aware install.sh; use a Hyperloom wheel built with bare-metal wheel-mode support."
-    fi
-    log "packaged assets dir: ${assets_dir}"
-    log "Hyperloom SKILL.md: ${HYPERLOOM_SKILL_PATH}"
+  local py; py="$(resolve_python)" || return 0
+  if _py_has "$py" sglang; then printf 'sglang'; return 0; fi
+  local vllm_py="$py"
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    vllm_py="${VLLM_VENV_ROOT}/bin/python"
   fi
-  export REPO_ROOT HYPERLOOM_INSTALL_SOURCE
+  if _py_has "$vllm_py" vllm; then printf 'vllm'; return 0; fi
+  return 0
 }
+
 
 python_venv_root() {
   local py="$1" bin_dir venv_dir
@@ -376,7 +290,7 @@ DETECTED_GPU="MI300X"
 
 base_preflight() {
   local rc=0
-  log "Phase 0: base preflight"
+  log "Phase 1: base preflight"
 
   local os_name=""
   [ -r /etc/os-release ] && os_name="$(. /etc/os-release 2>/dev/null; echo "${NAME:-} ${VERSION_ID:-}")"
@@ -461,7 +375,7 @@ PY
   done
 
   [ "$rc" -ne 0 ] && die "base preflight failed. Fix the items above, or pass --skip-base-check to override."
-  log "Phase 0: base preflight OK"
+  log "Phase 1: base preflight OK"
 }
 
 # Return the shared dependency root used for bare-metal framework sources.
@@ -654,7 +568,7 @@ print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )"
 
-  log "Phase 1: installing SGLang ROCm framework layer"
+  log "Phase 2: installing SGLang ROCm framework layer"
   log "framework python: ${py}"
   log "AITER_ROOT=${aiter_root}"
   if [ -n "$AITER_REF" ]; then
@@ -804,7 +718,7 @@ PY
     *) package_spec="vllm==${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" ;;
   esac
 
-  log "Phase 1: installing vLLM ROCm framework layer"
+  log "Phase 2: installing vLLM ROCm framework layer"
   log "framework env: ${FRAMEWORK_ENV}"
   log "framework python: ${py}"
   [ "$FRAMEWORK_ENV" = "isolated" ] && log "VLLM_VENV_ROOT=${VLLM_VENV_ROOT}"
@@ -906,7 +820,7 @@ PY
 # Dispatch the optional bare-metal framework installer.
 install_requested_framework() {
   case "$INSTALL_FRAMEWORK" in
-    none) log "Phase 1: framework install skipped (--install-framework none)" ;;
+    none) log "Phase 2: framework install skipped (--install-framework none)" ;;
     sglang) install_sglang_framework ;;
     vllm) install_vllm_framework ;;
   esac
@@ -1062,7 +976,7 @@ apply_rocm_profiler_hotfix() {
   local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
   local extract_dir backup_dir hip_lib tracer_lib
 
-  log "Phase 1b: applying ROCm profiler hotfix"
+  log "Phase 3: applying ROCm profiler hotfix"
   log "ROCM_PROFILER_HOTFIX_ASSET=${ROCM_PROFILER_HOTFIX_ASSET}"
 
   [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
@@ -1137,15 +1051,31 @@ upsert_dotenv_var() {
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
 
+remove_dotenv_var() {
+  local key="$1" tmp line stripped
+  [ -f "$DOTENV" ] || return 0
+  tmp="$(mktemp)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    case "$stripped" in
+      "${key}="*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" ;;
+    esac
+  done < "$DOTENV"
+  mv "$tmp" "$DOTENV"
+  chmod 600 "$DOTENV" 2>/dev/null || true
+}
+
 # Resolve LLM gateway credentials, accepting either the AMD single-gateway pair
 # (SAFE_API_KEY + OPENAI_BASE_URL) or split Anthropic/OpenAI entrypoints. Mirrors
 # inference_optimizer/cli.py::_validate_credentials: a usable endpoint needs at
 # least one base URL and at least one key, so SAFE_API_KEY is no longer mandatory.
 resolve_credentials() {
-  log "Phase 2: credentials"
+  log "Phase 4: credentials"
   local safe_key openai_key anthropic_key anthropic_token openai_url anthropic_url
   local dv_safe dv_openai_key dv_anthropic_key dv_anthropic_token dv_openai_url dv_anthropic_url
-  local has_url=0 has_key=0
+  local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
   if [ ! -f "$DOTENV" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if [ -f "$ENV_TEMPLATE" ]; then
@@ -1164,6 +1094,23 @@ resolve_credentials() {
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
   dv_openai_url="$(read_dotenv_var OPENAI_BASE_URL || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
+  setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
+  setup_llm_mode="$(echo "$setup_llm_mode" | tr '[:upper:]' '[:lower:]')"
+  if [ "${HYPERLOOM_SETUP_ENV_AUTHORITATIVE:-}" = "1" ]; then
+    setup_env_authoritative=1
+  fi
+  if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
+    if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_anthropic_url" ]; then
+      setup_llm_mode="anthropic"
+    elif [ -n "$(read_dotenv_var DEEPSEEK_API_KEY || true)" ] || [ -n "$(read_dotenv_var DEEPSEEK_BASE_URL || true)" ]; then
+      setup_llm_mode="deepseek"
+    elif [ -n "$dv_openai_key" ] || [ -n "$dv_safe" ] || [ -n "$dv_openai_url" ]; then
+      setup_llm_mode="openai"
+    fi
+  fi
+  if [ "$setup_env_authoritative" -eq 1 ] && [ -n "$setup_llm_mode" ]; then
+    export HYPERLOOM_SETUP_LLM_MODE="$setup_llm_mode"
+  fi
 
   # Precedence: flags > process env > .env (flags exist only for the single-gateway pair).
   safe_key="${SAFE_API_KEY_ARG:-${SAFE_API_KEY:-$dv_safe}}"
@@ -1172,6 +1119,28 @@ resolve_credentials() {
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
   openai_url="${OPENAI_BASE_URL_ARG:-${OPENAI_BASE_URL:-$dv_openai_url}}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
+
+  # In the interactive setup flow, .env is the source of truth the user just
+  # confirmed. Do not let stale OpenAI/SaFE values leak into the chained
+  # installers, because those scripts source env with "env wins" and may persist
+  # or propagate the wrong provider back into runtime env files.
+  if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
+    safe_key=""
+    openai_key=""
+    openai_url=""
+    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+  elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
+    safe_key=""
+    openai_key=""
+    openai_url=""
+    anthropic_key=""
+    anthropic_token=""
+    anthropic_url=""
+    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+  fi
 
   # Prompt for the single-gateway key only when no key of any kind is available.
   if [ -z "$safe_key" ] && [ -z "$openai_key" ] && [ -z "$anthropic_key" ] \
@@ -1196,7 +1165,7 @@ resolve_credentials() {
     fi
   fi
 
-  # Export resolved credentials for the chained local_setup.sh / install.sh.
+  # Export resolved credentials for the chained install.sh.
   [ -n "$safe_key" ] && export SAFE_API_KEY="$safe_key"
   [ -n "$openai_key" ] && export OPENAI_API_KEY="$openai_key"
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
@@ -1206,20 +1175,63 @@ resolve_credentials() {
 
   # Persist resolved values to .env (skip on check-only / dry-run).
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    [ -n "$safe_key" ] && upsert_dotenv_var SAFE_API_KEY "$safe_key"
-    [ -n "$openai_key" ] && upsert_dotenv_var OPENAI_API_KEY "$openai_key"
-    [ -n "$anthropic_key" ] && upsert_dotenv_var ANTHROPIC_API_KEY "$anthropic_key"
-    [ -n "$anthropic_token" ] && upsert_dotenv_var ANTHROPIC_AUTH_TOKEN "$anthropic_token"
-    [ -n "$openai_url" ] && upsert_dotenv_var OPENAI_BASE_URL "$openai_url"
-    [ -n "$anthropic_url" ] && upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
+    if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
+      [ -n "$(read_dotenv_var DEEPSEEK_API_KEY || true)" ] && upsert_dotenv_var DEEPSEEK_API_KEY "$(read_dotenv_var DEEPSEEK_API_KEY || true)"
+      [ -n "$(read_dotenv_var DEEPSEEK_BASE_URL || true)" ] && upsert_dotenv_var DEEPSEEK_BASE_URL "$(read_dotenv_var DEEPSEEK_BASE_URL || true)"
+      remove_dotenv_var OPENAI_API_KEY
+      remove_dotenv_var OPENAI_BASE_URL
+      remove_dotenv_var ANTHROPIC_API_KEY
+      remove_dotenv_var ANTHROPIC_BASE_URL
+    else
+      local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
+      local persist_openai_key="${openai_key:-$safe_key}"
+      if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
+        persist_openai_key=""
+        openai_url=""
+      elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "openai" ]; then
+        persist_anthropic_key=""
+        anthropic_url=""
+      fi
+      if [ -n "$persist_anthropic_key" ]; then
+        upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
+      else
+        remove_dotenv_var ANTHROPIC_API_KEY
+      fi
+      if [ -n "$anthropic_url" ]; then
+        upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
+      else
+        remove_dotenv_var ANTHROPIC_BASE_URL
+      fi
+      if [ -n "$persist_openai_key" ]; then
+        upsert_dotenv_var OPENAI_API_KEY "$persist_openai_key"
+      else
+        remove_dotenv_var OPENAI_API_KEY
+      fi
+      if [ -n "$openai_url" ]; then
+        upsert_dotenv_var OPENAI_BASE_URL "$openai_url"
+      else
+        remove_dotenv_var OPENAI_BASE_URL
+      fi
+    fi
+    remove_dotenv_var SAFE_API_KEY
+    remove_dotenv_var LLM_GATEWAY_KEY
+    remove_dotenv_var ANTHROPIC_AUTH_TOKEN
+    remove_dotenv_var OPENAI_CUSTOM_HEADERS
     log "credentials written to ${DOTENV}"
   fi
 }
 
 write_combined_env() {
-  local combined="$1" local_env="$2" ka_env="$3"
+  local combined="$1" ka_env="$2"
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would write combined env: ${combined}"; return 0; fi
   mkdir -p "$(dirname "$combined")"
+  # FRAMEWORK for downstream demo skills; empty when none is importable.
+  local detected_framework; detected_framework="$(resolve_installed_framework)"
+  if [ -n "$detected_framework" ]; then
+    log "detected serving framework: ${detected_framework}"
+  else
+    warn "no serving framework detected; leaving FRAMEWORK unset in ${DOTENV}"
+  fi
   {
     echo '#!/bin/sh'
     echo '# Generated by src/hyperloom/inference_optimizer/assets/install_baremetal.sh'
@@ -1233,17 +1245,11 @@ write_combined_env() {
     [ -n "${SGLANG_ROCM_EXTRA:-}" ] && printf 'export SGLANG_ROCM_EXTRA=%q\n' "$SGLANG_ROCM_EXTRA"
     [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && printf 'export SGLANG_ROCM_PYPI_VERSION=%q\n' "$SGLANG_ROCM_PYPI_VERSION"
     [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
-    [ -n "${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-}" ] && printf 'export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=%q\n' "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX"
-    [ -n "${KERNEL_AGENT_RAG_INDEX_STRICT:-}" ] && printf 'export KERNEL_AGENT_RAG_INDEX_STRICT=%q\n' "$KERNEL_AGENT_RAG_INDEX_STRICT"
     [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && printf 'export KERNEL_OPT_BACKEND_ORDER=%q\n' "$KERNEL_OPT_BACKEND_ORDER"
-    [ -n "${HYPERLOOM_INSTALL_SOURCE:-}" ] && printf 'export HYPERLOOM_INSTALL_SOURCE=%q\n' "$HYPERLOOM_INSTALL_SOURCE"
-    [ -n "${HYPERLOOM_WHEEL:-}" ] && printf 'export HYPERLOOM_WHEEL=%q\n' "$HYPERLOOM_WHEEL"
     [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && printf 'export HYPERLOOM_WHEEL_REPO=%q\n' "$HYPERLOOM_WHEEL_REPO"
     [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && printf 'export HYPERLOOM_WHEEL_TAG=%q\n' "$HYPERLOOM_WHEEL_TAG"
-    [ -n "${HYPERLOOM_WHEEL_PATTERN:-}" ] && printf 'export HYPERLOOM_WHEEL_PATTERN=%q\n' "$HYPERLOOM_WHEEL_PATTERN"
     [ -n "${HYPERLOOM_ENV_FILE:-}" ] && printf 'export HYPERLOOM_ENV_FILE=%q\n' "$HYPERLOOM_ENV_FILE"
     [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && printf 'export HYPERLOOM_SKILL_PATH=%q\n' "$HYPERLOOM_SKILL_PATH"
-    printf '[ -f %q ] && . %q\n' "$local_env" "$local_env"
     printf '[ -f %q ] && . %q\n' "$ka_env" "$ka_env"
     if [ -n "${VIRTUAL_ENV:-}" ]; then
       printf 'export PATH=%q:"$PATH"\n' "${VIRTUAL_ENV}/bin"
@@ -1253,6 +1259,7 @@ write_combined_env() {
       printf 'export LD_LIBRARY_PATH=%q:"${LD_LIBRARY_PATH:-}"\n' "${ROCM_PATH}/lib"
     fi
     [ -n "${SGLANG_USE_AITER:-}" ] && printf 'export SGLANG_USE_AITER=%q\n' "$SGLANG_USE_AITER"
+    [ -n "${detected_framework}" ] && printf 'export FRAMEWORK=%q\n' "$detected_framework"
     printf 'export HYPERLOOM_FRAMEWORK_ENV=%q\n' "$FRAMEWORK_ENV"
     if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
       printf 'export VLLM_VENV_ROOT=%q\n' "$VLLM_VENV_ROOT"
@@ -1262,24 +1269,33 @@ write_combined_env() {
   } > "$combined"
   chmod 600 "$combined"
   log "wrote ${combined}"
-}
 
-kernel_backend_order_includes_forge() {
-  local raw="${KERNEL_OPT_BACKEND_ORDER:-}" token
-  [ -z "$raw" ] && return 1
-  IFS=',' read -ra _kernel_backend_tokens <<< "$raw"
-  for token in "${_kernel_backend_tokens[@]}"; do
-    token="${token#"${token%%[![:space:]]*}"}"
-    token="${token%"${token##*[![:space:]]}"}"
-    if [ "${token,,}" = "forge" ]; then
-      return 0
-    fi
-  done
-  return 1
+  upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
+  [ -n "${PYTHON:-}" ] && upsert_dotenv_var PYTHON "$PYTHON"
+  [ -n "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ] && upsert_dotenv_var INFERENCE_OPTIMIZER_FORCE_PYTHON "$INFERENCE_OPTIMIZER_FORCE_PYTHON"
+  [ -n "${VIRTUAL_ENV:-}" ] && upsert_dotenv_var VIRTUAL_ENV "$VIRTUAL_ENV"
+  [ -n "${ROCM_PATH:-}" ] && upsert_dotenv_var ROCM_PATH "$ROCM_PATH"
+  [ -n "${HIP_PATH:-}" ] && upsert_dotenv_var HIP_PATH "$HIP_PATH"
+  [ -n "${SGLANG_ROCM_EXTRA:-}" ] && upsert_dotenv_var SGLANG_ROCM_EXTRA "$SGLANG_ROCM_EXTRA"
+  [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && upsert_dotenv_var SGLANG_ROCM_PYPI_VERSION "$SGLANG_ROCM_PYPI_VERSION"
+  [ -n "${AITER_REF:-}" ] && upsert_dotenv_var AITER_REF "$AITER_REF"
+  [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && upsert_dotenv_var KERNEL_OPT_BACKEND_ORDER "$KERNEL_OPT_BACKEND_ORDER"
+  [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_REPO "$HYPERLOOM_WHEEL_REPO"
+  [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
+  [ -n "${HYPERLOOM_ENV_FILE:-}" ] && upsert_dotenv_var HYPERLOOM_ENV_FILE "$HYPERLOOM_ENV_FILE"
+  [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
+  [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
+  [ -n "${detected_framework}" ] && upsert_dotenv_var FRAMEWORK "$detected_framework"
+  upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
+    upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
+    upsert_dotenv_var VLLM_PYTHON "${VLLM_VENV_ROOT}/bin/python"
+  fi
+  log "updated ${DOTENV} with bare-metal runtime env"
 }
 
 print_next_steps() {
-  local combined_env="$1" framework_hint
+  local framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
   [ "$framework_hint" = "none" ] && framework_hint="sglang"
   cat <<EOF
@@ -1288,9 +1304,6 @@ print_next_steps() {
 
 Open this folder in Cursor as the workspace:
   ${REPO_ROOT}
-
-Before launching, source the single combined env file:
-  source '${combined_env}'
 
 Then paste this into Cursor Chat and fill in your workload:
 
@@ -1307,11 +1320,6 @@ Optimize inference for this workload:
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
-Before launch, run exactly:
-\`\`\`bash
-source '${combined_env}'
-\`\`\`
-
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
 2. Monitor the process every 300s until the optimization is complete or failed.
@@ -1319,12 +1327,7 @@ EOF
 }
 
 main() {
-  bootstrap_wheel_install
-  if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
-    [ -f "$INSTALL_SH" ] || warn "install.sh not present locally (dry-run; wheel assets would be used after install)"
-  else
-    [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
-  fi
+  [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
@@ -1333,14 +1336,13 @@ main() {
     die "--framework-env isolated is currently supported for vLLM only"
   fi
 
-  local user_data runtime_dir local_env ka_env combined_env
+  local user_data runtime_dir ka_env combined_env
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-/workspace/hyperloom}}"
   export USER_DATA_PATH="$user_data"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
-  # Honor the same override chain local_setup.sh / install.sh use so the
+  # Honor the same override chain install.sh uses so the
   # generated env files are located where those scripts actually write them.
   runtime_dir="${HYPERLOOM_RUNTIME_DIR:-${user_data}/runtime}"
-  local_env="${LOCAL_SETUP_ENV:-${runtime_dir}/local-setup.env.sh}"
   ka_env="${KERNEL_AGENT_ENV:-${runtime_dir}/kernel-agent.env.sh}"
   combined_env="${runtime_dir}/hyperloom.env.sh"
 
@@ -1360,7 +1362,7 @@ main() {
   fi
 
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then
-    warn "skipping Phase 0 base preflight (--skip-base-check)"
+    warn "skipping Phase 1 base preflight (--skip-base-check)"
     DETECTED_GPU="$(detect_gpu_label "$(command -v rocminfo >/dev/null 2>&1 && rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)")"
   else
     base_preflight
@@ -1374,47 +1376,13 @@ main() {
 
   resolve_credentials
 
-  # Phase 3: dependency and runtime install. KernelForge is private and only
-  # needed when forge is explicitly requested; open-source deps are handled by
-  # install.sh and the chained kernel-agent installer below.
-  if kernel_backend_order_includes_forge; then
-    if [ "$DRY_RUN" -eq 1 ] && [ "$HYPERLOOM_INSTALL_SOURCE" = "wheel" ]; then
-      [ -f "$LOCAL_SETUP_SH" ] || warn "local_setup.sh not present locally (dry-run; wheel assets would be used after install)"
-    else
-      [ -f "$LOCAL_SETUP_SH" ] || die "local_setup.sh not found at ${LOCAL_SETUP_SH}"
-    fi
-    local ls_args=()
-    ls_args+=(--no-next-steps)
-    [ "$DRY_RUN" -eq 1 ] && ls_args+=(--dry-run)
-    [ "$CHECK_ONLY" -eq 1 ] && ls_args+=(--check-only)
-    [ -n "$DEPS_ROOT_ARG" ] && ls_args+=(--deps-root "$DEPS_ROOT_ARG")
-    log "Phase 3: local_setup.sh ${ls_args[*]} (forge backend requested)"
-    # In preview modes (check-only / dry-run) a sub-script probe failure must not
-    # abort the preview; only a real install aborts on local_setup.sh failure.
-    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-      bash "$LOCAL_SETUP_SH" "${ls_args[@]}" || warn "local_setup.sh (preview) reported issues"
-    else
-      bash "$LOCAL_SETUP_SH" "${ls_args[@]}"
-    fi
-
-    if [ -f "$local_env" ]; then
-      log "sourcing ${local_env}"
-      # shellcheck disable=SC1090
-      . "$local_env"
-    elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-      die "expected ${local_env} after local_setup.sh but it is missing"
-    fi
-  else
-    log "Phase 3: skipping local_setup.sh (KERNEL_OPT_BACKEND_ORDER=${KERNEL_OPT_BACKEND_ORDER}; forge not requested)"
-  fi
-
   # Runtime install. The GEAK e2e optimizer is always installed (whether it runs
   # is chosen per-session via KERNEL_OPT_BACKEND_ORDER); Langfuse stays off
   # unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env.
   local in_args=()
   [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
   [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)
-  log "Phase 3: install.sh ${in_args[*]}"
+  log "Phase 5: install.sh ${in_args[*]}"
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     bash "$INSTALL_SH" "${in_args[@]}" || warn "install.sh (preview) reported issues"
   else
@@ -1428,22 +1396,19 @@ main() {
     warn "expected ${ka_env} after install.sh but it is missing"
   fi
 
-  # Phase 4: combined env.
-  write_combined_env "$combined_env" "$local_env" "$ka_env"
+  # Phase 6: combined env.
+  write_combined_env "$combined_env" "$ka_env"
 
-  # Phase 5: verification pass.
+  # Phase 7: verification pass.
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    log "Phase 5: verifying (--check-only)"
-    if kernel_backend_order_includes_forge; then
-      bash "$LOCAL_SETUP_SH" --check-only || warn "local_setup.sh --check-only reported issues"
-    fi
+    log "Phase 7: verifying (--check-only)"
     bash "$INSTALL_SH" --check-only || warn "install.sh --check-only reported issues"
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then log "done (dry-run: no changes made)"; return 0; fi
   if [ "$CHECK_ONLY" -eq 1 ]; then log "done (check-only: verification pass complete)"; return 0; fi
 
-  print_next_steps "$combined_env"
+  print_next_steps
 }
 
 main "$@"

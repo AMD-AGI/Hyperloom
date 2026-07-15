@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
@@ -46,87 +47,6 @@ _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 # ones. 1s absorbs clock-vs-mtime / FS-granularity skew (NFS ~1s) while
 # staying below the multi-second gap that separates genuinely stale leaks.
 _MTIME_GATE_SLACK_SEC: float = 1.0
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a value to ``float``, rejecting bools and ``None``.
-
-    Args:
-        value (Any): The value to coerce.
-
-    Returns:
-        float | None: The parsed float, or ``None`` when the value is a
-        bool, ``None``, or not convertible.
-    """
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_int(value: Any) -> int | None:
-    """Coerce a value to ``int``, rejecting bools and ``None``.
-
-    Args:
-        value (Any): The value to coerce.
-
-    Returns:
-        int | None: The parsed int, or ``None`` when the value is a
-        bool, ``None``, or not convertible.
-    """
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _first_float(*values: Any) -> float | None:
-    """Return the first value that parses as a float.
-
-    Args:
-        *values (Any): Candidate values, tried in order.
-
-    Returns:
-        float | None: The first successfully parsed float, or ``None``.
-    """
-    for value in values:
-        parsed = _to_float(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _first_int(*values: Any) -> int | None:
-    """Return the first value that parses as an int.
-
-    Args:
-        *values (Any): Candidate values, tried in order.
-
-    Returns:
-        int | None: The first successfully parsed int, or ``None``.
-    """
-    for value in values:
-        parsed = _to_int(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _load_json(path: Path) -> dict[str, Any] | None:
-    """Load a JSON object from ``path``, tolerating read/parse errors.
-
-    Args:
-        path (Path): The JSON file to read.
-
-    Returns:
-        dict[str, Any] | None: The parsed mapping, or ``None`` on IO /
-        decode error or when the top-level JSON is not an object.
-    """
-    return read_json(path, default=None, require_dict=True)
 
 
 def _candidate_raw_jsons(workspace: Path) -> list[Path]:
@@ -420,34 +340,34 @@ def _merge_raw_result(
         None: ``measurement`` is mutated in place.
     """
     if measurement.get("output_throughput") is None:
-        measurement["output_throughput"] = _to_float(raw.get("output_throughput"))
+        measurement["output_throughput"] = to_float(raw.get("output_throughput"))
     if measurement.get("request_throughput") is None:
-        measurement["request_throughput"] = _to_float(raw.get("request_throughput"))
+        measurement["request_throughput"] = to_float(raw.get("request_throughput"))
     if measurement.get("total_token_throughput") is None:
-        measurement["total_token_throughput"] = _to_float(raw.get("total_token_throughput"))
+        measurement["total_token_throughput"] = to_float(raw.get("total_token_throughput"))
     if measurement.get("completed_requests") is None:
-        measurement["completed_requests"] = _first_int(
+        measurement["completed_requests"] = first_int(
             raw.get("completed_requests"),
             raw.get("completed"),
         )
     if measurement.get("duration_seconds") is None:
-        measurement["duration_seconds"] = _first_float(
+        measurement["duration_seconds"] = first_float(
             raw.get("duration_seconds"),
             raw.get("duration"),
         )
     if measurement.get("ttft_mean_ms") is None:
-        measurement["ttft_mean_ms"] = _to_float(raw.get("mean_ttft_ms"))
+        measurement["ttft_mean_ms"] = to_float(raw.get("mean_ttft_ms"))
     if measurement.get("ttft_p99_ms") is None:
-        measurement["ttft_p99_ms"] = _to_float(raw.get("p99_ttft_ms"))
+        measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
     if measurement.get("tpot_mean_ms") is None:
-        measurement["tpot_mean_ms"] = _to_float(raw.get("mean_tpot_ms"))
+        measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
     if measurement.get("e2el_mean_ms") is None:
-        measurement["e2el_mean_ms"] = _first_float(
+        measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
             raw.get("mean_latency_ms"),
         )
     if measurement.get("e2el_p99_ms") is None:
-        measurement["e2el_p99_ms"] = _first_float(
+        measurement["e2el_p99_ms"] = first_float(
             raw.get("p99_e2el_ms"),
             raw.get("p99_latency_ms"),
         )
@@ -496,31 +416,31 @@ def extract_benchmark_measurement(
         "workload_kind": report.get("workload_kind"),
         "throughput_unit": report.get("throughput_unit") or throughput.get("unit"),
         "quality_gate": report.get("quality_gate"),
-        "latency_s": _first_float(report.get("latency_s"), throughput.get("latency_s")),
-        "request_throughput": _to_float(throughput.get("request_throughput")),
-        "output_throughput": _to_float(throughput.get("output_throughput")),
-        "total_token_throughput": _to_float(throughput.get("total_token_throughput")),
-        "completed_requests": _first_int(
+        "latency_s": first_float(report.get("latency_s"), throughput.get("latency_s")),
+        "request_throughput": to_float(throughput.get("request_throughput")),
+        "output_throughput": to_float(throughput.get("output_throughput")),
+        "total_token_throughput": to_float(throughput.get("total_token_throughput")),
+        "completed_requests": first_int(
             throughput.get("completed_requests"),
             throughput.get("completed"),
             # Diffusion scripts report images produced under either key.
             throughput.get("images_generated"),
             throughput.get("num_images"),
         ),
-        "duration_seconds": _to_float(throughput.get("duration_seconds")),
-        "ttft_mean_ms": _to_float(ttft.get("mean_ms")),
-        "ttft_p99_ms": _to_float(ttft.get("p99_ms")),
-        "tpot_mean_ms": _to_float(tpot.get("mean_ms")),
-        "e2el_mean_ms": _to_float(e2el.get("mean_ms")),
-        "e2el_p99_ms": _to_float(e2el.get("p99_ms")),
+        "duration_seconds": to_float(throughput.get("duration_seconds")),
+        "ttft_mean_ms": to_float(ttft.get("mean_ms")),
+        "ttft_p99_ms": to_float(ttft.get("p99_ms")),
+        "tpot_mean_ms": to_float(tpot.get("mean_ms")),
+        "e2el_mean_ms": to_float(e2el.get("mean_ms")),
+        "e2el_p99_ms": to_float(e2el.get("p99_ms")),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
 
     if workspace is not None:
         for raw_path in _candidate_raw_jsons(workspace):
-            raw = _load_json(raw_path)
-            if not raw or _to_float(raw.get("output_throughput")) is None:
+            raw = read_json(raw_path, default=None, require_dict=True)
+            if not raw or to_float(raw.get("output_throughput")) is None:
                 continue
             _merge_raw_result(measurement, raw, source_path=raw_path)
             if is_valid_measurement(measurement):
@@ -542,8 +462,8 @@ def extract_benchmark_measurement(
             workspace,
             subprocess_started_unix=subprocess_started_unix,
         ):
-            raw = _load_json(rescue_path)
-            if not raw or _to_float(raw.get("output_throughput")) is None:
+            raw = read_json(rescue_path, default=None, require_dict=True)
+            if not raw or to_float(raw.get("output_throughput")) is None:
                 continue
             # Copy the leak into the workspace BEFORE merging so
             # ``raw_result_path`` advertises the in-workspace copy and the
@@ -582,8 +502,8 @@ def _derive_tpot_if_missing(
     """
     if measurement.get("tpot_mean_ms") is not None:
         return
-    e2el = _to_float(measurement.get("e2el_mean_ms"))
-    ttft = _to_float(measurement.get("ttft_mean_ms"))
+    e2el = to_float(measurement.get("e2el_mean_ms"))
+    ttft = to_float(measurement.get("ttft_mean_ms"))
     if e2el is None or ttft is None or e2el <= ttft:
         return
     osl = _resolve_osl(report)
@@ -609,7 +529,7 @@ def _resolve_osl(report: dict[str, Any] | None) -> int | None:
         if isinstance(section, dict):
             candidates.extend(section.get(k) for k in ("osl", "output_len", "max_tokens"))
     for value in candidates:
-        n = _to_int(value)
+        n = to_int(value)
         if n is not None and n > 0:
             return n
     return None
@@ -652,7 +572,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     """
     if not isinstance(result, dict):
         return False
-    output_tput = _to_float(result.get("output_throughput"))
+    output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
     if _is_scriptable_measurement(result):
@@ -669,7 +589,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         if not quality_gate_passed(qg, require=False):
             return False
         return True
-    completed = _to_int(result.get("completed_requests"))
+    completed = to_int(result.get("completed_requests"))
     return completed is not None and completed > 0
 
 
@@ -719,7 +639,7 @@ def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:
                 match = _SGLANG_GEN_TPUT_RE.search(line) or _VLLM_GEN_TPUT_RE.search(line)
                 if match is None:
                     continue
-                value = _to_float(match.group(1))
+                value = to_float(match.group(1))
                 if value is not None:
                     samples.append(value)
     except OSError:

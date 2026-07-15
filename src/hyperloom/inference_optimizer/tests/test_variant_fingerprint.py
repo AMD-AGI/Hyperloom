@@ -11,13 +11,13 @@ from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
-    variant_fingerprint,
 )
+from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
 
 
 def test_fingerprint_ignores_name() -> None:
-    a = variant_fingerprint("--block-size 128", {"NCCL_ALGO": "Ring"})
-    b = variant_fingerprint("--block-size 128", {"NCCL_ALGO": "Ring"})
+    a = canonical_fingerprint("--block-size 128", {"NCCL_ALGO": "Ring"})
+    b = canonical_fingerprint("--block-size 128", {"NCCL_ALGO": "Ring"})
     assert a == b
     va = GridVariant("A", "--block-size 128", {"NCCL_ALGO": "Ring"})
     vb = GridVariant("totally_different_name", "--block-size 128", {"NCCL_ALGO": "Ring"})
@@ -25,39 +25,39 @@ def test_fingerprint_ignores_name() -> None:
 
 
 def test_fingerprint_args_order_independent() -> None:
-    fp1 = variant_fingerprint("--block-size 128 --foo bar", {})
-    fp2 = variant_fingerprint("--foo bar --block-size 128", {})
+    fp1 = canonical_fingerprint("--block-size 128 --foo bar", {})
+    fp2 = canonical_fingerprint("--foo bar --block-size 128", {})
     assert fp1 == fp2
 
 
 def test_fingerprint_envs_order_independent() -> None:
-    fp1 = variant_fingerprint("", {"A": "1", "B": "2"})
-    fp2 = variant_fingerprint("", {"B": "2", "A": "1"})
+    fp1 = canonical_fingerprint("", {"A": "1", "B": "2"})
+    fp2 = canonical_fingerprint("", {"B": "2", "A": "1"})
     assert fp1 == fp2
 
 
 def test_fingerprint_env_value_string_coerced() -> None:
     """``"1"`` and ``1`` collide — both end up as the shell string ``"1"``."""
-    fp_int = variant_fingerprint("", {"TP": 1})
-    fp_str = variant_fingerprint("", {"TP": "1"})
+    fp_int = canonical_fingerprint("", {"TP": 1})
+    fp_str = canonical_fingerprint("", {"TP": "1"})
     assert fp_int == fp_str
 
 
 def test_fingerprint_differs_on_args_change() -> None:
-    fp_a = variant_fingerprint("--block-size 128", {})
-    fp_b = variant_fingerprint("--block-size 256", {})
+    fp_a = canonical_fingerprint("--block-size 128", {})
+    fp_b = canonical_fingerprint("--block-size 256", {})
     assert fp_a != fp_b
 
 
 def test_fingerprint_differs_on_env_change() -> None:
-    fp_a = variant_fingerprint("", {"NCCL_ALGO": "Ring"})
-    fp_b = variant_fingerprint("", {"NCCL_ALGO": "Tree"})
+    fp_a = canonical_fingerprint("", {"NCCL_ALGO": "Ring"})
+    fp_b = canonical_fingerprint("", {"NCCL_ALGO": "Tree"})
     assert fp_a != fp_b
 
 
 def test_fingerprint_empty_inputs_stable() -> None:
-    fp1 = variant_fingerprint("", {})
-    fp2 = variant_fingerprint(None, None)
+    fp1 = canonical_fingerprint("", {})
+    fp2 = canonical_fingerprint(None, None)
     assert fp1 == fp2
     assert isinstance(fp1, str)
     assert len(fp1) == 16
@@ -88,8 +88,8 @@ def test_grid_variant_fingerprint_carries_removal_controls() -> None:
 
 def test_fingerprint_unbalanced_quotes_does_not_crash() -> None:
     """Unbalanced quotes fall back to whitespace split — still deterministic."""
-    fp1 = variant_fingerprint("--flag 'unterminated", {})
-    fp2 = variant_fingerprint("--flag 'unterminated", {})
+    fp1 = canonical_fingerprint("--flag 'unterminated", {})
+    fp2 = canonical_fingerprint("--flag 'unterminated", {})
     assert fp1 == fp2
 
 
@@ -104,7 +104,7 @@ def test_variant_result_fingerprint_matches_grid_variant() -> None:
         status="succeeded",
     )
     assert gv.fingerprint == vr.fingerprint
-    assert gv.fingerprint == variant_fingerprint(args, envs)
+    assert gv.fingerprint == canonical_fingerprint(args, envs)
 
 
 def test_variant_result_to_dict_carries_fingerprint() -> None:
@@ -124,7 +124,7 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
     defensive defaults and preserves fingerprint-keyed ``tested``."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    fp_a = variant_fingerprint("--A", {})
+    fp_a = canonical_fingerprint("--A", {})
     raw = {
         "explore_search": {
             "schema_version": 1,

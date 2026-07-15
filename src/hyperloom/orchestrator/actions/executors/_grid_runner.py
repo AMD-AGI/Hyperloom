@@ -22,6 +22,8 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env import is_truthy
+
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
@@ -38,7 +40,6 @@ from .benchmark_result import (
 # Cohesive clusters live in sibling modules; re-exported here so the module
 # namespace + monkeypatch surface is intact.
 from ._grid_base import (
-    variant_fingerprint as variant_fingerprint,
     _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
     _VARIANT_TIMEOUT_SEC_DEFAULT as _VARIANT_TIMEOUT_SEC_DEFAULT,
     GridVariant as GridVariant,
@@ -72,7 +73,6 @@ from ._grid_server_args import (
     _SGLANG_ATTN_BACKEND_RE as _SGLANG_ATTN_BACKEND_RE,
     _SGLANG_DUAL_CHUNK_BACKEND as _SGLANG_DUAL_CHUNK_BACKEND,
     _resolve_nonneg_int_env as _resolve_nonneg_int_env,
-    _coerce_optional_positive_int as _coerce_optional_positive_int,
     resolve_sglang_context_cap as resolve_sglang_context_cap,
     inject_sglang_context_length as inject_sglang_context_length,
     _resolve_dual_chunk_backend as _resolve_dual_chunk_backend,
@@ -96,12 +96,10 @@ from ._grid_variant_filter import (
     _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
     _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
     _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
-    _is_truthy_env as _is_truthy_env,
     xdit_blacklist_reason as xdit_blacklist_reason,
     _HELP_TEXT_CACHE as _HELP_TEXT_CACHE,
     _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
     _probe_server_help_text as _probe_server_help_text,
-    _probe_sglang_help_text as _probe_sglang_help_text,
     _detect_model_class as _detect_model_class,
     apply_compatibility_filter as apply_compatibility_filter,
     apply_user_skip_list as apply_user_skip_list,
@@ -118,14 +116,14 @@ def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
     Order: $MAGPIE_PYTHON (only when it can ``import Magpie``) > first PATH
-    ``python3`` that can ``import Magpie`` > /opt/venv/bin/python (canonical
-    Magpie venv) as unconditional last resort. A stale ``$MAGPIE_PYTHON``
+    ``python3`` that can ``import Magpie`` > /opt/venv/bin/python when present
+    > first PATH ``python3``. A stale ``$MAGPIE_PYTHON``
     resolved before Magpie was pip-installed (e.g. ``/usr/bin/python3``) is
     validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
 
     Returns:
         str: Path to a Python interpreter that can import Magpie, falling back
-        to ``/opt/venv/bin/python``.
+        to an existing interpreter that preflight can install Magpie into.
     """
 
     def _can_import_magpie(py: str) -> bool:
@@ -175,7 +173,12 @@ def _resolve_magpie_python() -> str:
     if candidate and _can_import_magpie(candidate):
         return candidate
 
-    return "/opt/venv/bin/python"
+    opt_venv = "/opt/venv/bin/python"
+    if Path(opt_venv).is_file():
+        return opt_venv
+    if candidate:
+        return candidate
+    return "python3"
 
 
 def _resolve_probe_python() -> str:
@@ -389,7 +392,7 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
         return None
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
     val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
-    if val is None or not _is_truthy_env(val):
+    if val is None or not is_truthy(val, default=True):
         return None
     return _probe_vllm_aiter_shared_expert_unsupported()
 
@@ -891,58 +894,7 @@ async def run_grid(
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
 ) -> list[VariantResult]:
-    """Execute every variant in ``grid`` once, in order.
-
-    Returns the per-variant :class:`VariantResult` list (all attempts); the
-    caller picks winners. Subprocess calls run in ``asyncio.to_thread`` so the
-    Coordinator reactor isn't blocked.
-
-    ``model_path`` / ``gpu_type`` are forwarded to every variant's YAML render.
-    ``benchmark_script`` / ``result_dir`` (pre-sanitized) route around scripts
-    that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
-    salvage"). ``soft_deadline_sec``: reap a variant once wall-clock
-    exceeds it, marking it ``killed_overtime=True``; None/0 disables.
-    ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
-    persistent-server reuse so a paired warm round can re-attach to a hot
-    server; None keeps the legacy boot-per-variant behaviour.
-    ``warmup_before_measure`` defaults on via
-    ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``: when no explicit
-    ``server_lifecycle`` is supplied and the YAML supports lifecycle reuse,
-    each variant gets a discarded warmup round followed by the returned hot
-    measurement round.
-
-    Args:
-        base_yaml_path (Path): Base Magpie YAML templated per variant.
-        base_extra_args (str): Server args merged ahead of each variant's args.
-        grid (list[GridVariant]): Variants to run, in order.
-        output_root (Path): Root directory for per-variant slots.
-        magpie_python (str | None): Python interpreter; auto-resolved when None.
-        cwd (str): Working directory for Magpie subprocesses.
-        variant_timeout_sec (int): Per-variant hard timeout in seconds.
-        keep_going_on_failure (bool): Continue the grid after a variant failure.
-        model_path (str | None): Forwarded to each variant's YAML render.
-        gpu_type (str | None): Forwarded to each variant's YAML render.
-        benchmark_script (str | None): Pre-sanitized Magpie script override.
-        result_dir (str | None): Pre-sanitized ``$RESULT_DIR`` override.
-        soft_deadline_sec (float | None): Overtime soft deadline per variant;
-            None/0 disables.
-        server_lifecycle (dict[str, Any] | None): ``{cleanup, pid_dir, port}``
-            enabling persistent-server reuse.
-        warmup_before_measure (bool | None): Whether to auto-run a discarded
-            warmup before returning a measured result. ``None`` resolves from
-            ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``.
-        preclean_before_run (bool): Whether to pre-clean stale servers before
-            the measured Magpie launch. Reattach rounds must pass ``False``.
-        server_already_ready (bool): Pass ``True`` when the measured round
-            re-attaches to a server booted by a prior subprocess (warm reuse /
-            auto-warmup measure round). This bypasses the from-ready soft-deadline
-            anchor so the overtime soft-kill fires from spawn instead of waiting
-            for a ready marker that will never appear in the reuse round's own
-            server.log.
-
-    Returns:
-        list[VariantResult]: Per-variant results for every attempt, in order.
-    """
+    """Execute each grid variant and return all per-variant results."""
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
     if warmup_before_measure is None:
@@ -1759,44 +1711,6 @@ SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
 
 
-def pick_winners(
-    results: list[VariantResult],
-    baseline_tput: float,
-    *,
-    keep_threshold_pct: float | None = None,
-) -> list[VariantResult]:
-    """Filter variants whose throughput beats ``baseline_tput`` by more than
-    the resolved ``keep_threshold_pct`` percent.
-
-    Resolution of ``keep_threshold_pct``: an explicit caller value wins; ``None``
-    falls back to ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%, the empirical
-    cross-node noise floor) in multi-node mode, else
-    ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (1.0%).
-
-    Args:
-        results (list[VariantResult]): All variant results to filter.
-        baseline_tput (float): Baseline throughput the winners must beat.
-        keep_threshold_pct (float | None): Required percent improvement over
-            baseline; ``None`` resolves to the multi/single-node default.
-
-    Returns:
-        list[VariantResult]: Succeeded variants whose output throughput exceeds
-        the baseline-plus-threshold cutoff.
-    """
-    if keep_threshold_pct is None:
-        from ._multi_node_env import is_multi_node
-
-        keep_threshold_pct = (
-            MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT if is_multi_node() else SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT
-        )
-    cutoff = baseline_tput * (1.0 + keep_threshold_pct / 100.0)
-    return [
-        r
-        for r in results
-        if r.status == "succeeded" and isinstance(r.output_throughput, (int, float)) and r.output_throughput > cutoff
-    ]
-
-
 def _safe(name: str) -> str:
     """Filesystem-safe slug for variant directory names.
 
@@ -1878,7 +1792,6 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
-    "variant_fingerprint",
     # Re-exported from the extracted sibling modules (_grid_base /
     # _grid_server_args / _grid_variant_filter) to keep the module namespace
     # and test monkeypatch surface intact. Declared so the re-exports are
@@ -1901,7 +1814,6 @@ __all__ = [
     "_SGLANG_ATTN_BACKEND_RE",
     "_SGLANG_DUAL_CHUNK_BACKEND",
     "_resolve_nonneg_int_env",
-    "_coerce_optional_positive_int",
     "resolve_sglang_context_cap",
     "_resolve_dual_chunk_backend",
     "HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV",
@@ -1922,7 +1834,6 @@ __all__ = [
     "_HELP_TEXT_CACHE",
     "_HELP_PROBE_COMMANDS",
     "_probe_server_help_text",
-    "_probe_sglang_help_text",
     "_detect_model_class",
     "apply_compatibility_filter",
     "apply_user_skip_list",

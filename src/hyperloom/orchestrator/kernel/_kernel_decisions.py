@@ -2,9 +2,8 @@
 
 """Kernel-decision write-owner functions.
 
-Extracted from :mod:`.kernel_request_handlers` (which re-exports every name
-here so its module namespace / monkeypatch surface is unchanged). SharedState
-is a passive persisted record; the functions that *own kernel decisions*
+Extracted from :mod:`.request_handlers`. SharedState is a passive persisted
+record; the functions that *own kernel decisions*
 (recording kernel-opt / integrate / gemm-tuning outcomes, kernel-patch
 identity, pending-keep bookkeeping, hot-kernel reuse) live here. They take
 ``state`` as their first argument and read/mutate it; SharedState keeps thin
@@ -13,7 +12,7 @@ keep working.
 
 Also carries the "honest E2E" hardening-flag helper (``_honest_flag`` + its
 constants), shared by both this cluster and the request handlers that stayed
-in the origin module (which re-exports it back for its own call sites).
+in the origin module.
 
 Dependencies on ``shared_state`` constants are imported lazily inside the
 functions that need them (cycle-free, one-way dependency), matching the
@@ -25,6 +24,10 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+
+from hyperloom.common.env import env_bool
+
+from ..trace.trace_env import env_flag
 
 
 log = logging.getLogger(__name__)
@@ -38,10 +41,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
-_TRUEY = {"1", "true", "yes", "on"}
-
-_FALSEY = {"0", "false", "no", "off"}
-
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag.
 
@@ -53,18 +52,19 @@ def _honest_flag(specific_env: str) -> bool:
     by real serving throughput, not a stored-scalar gain. Opt the whole cohort
     back out with ``HL_HONEST_E2E=0`` (or a single fix via its per-fix env).
 
+    The per-fix layer uses :func:`trace_env.env_flag` (the canonical superset
+    vocabulary that recognizes ``0/false/no/off`` as an *explicit* False and
+    falls back to its ``default`` for unset/unrecognized values), so an
+    unrecognized per-fix value defers to the umbrella exactly as before. The
+    umbrella layer is :func:`common.env.env_bool` (default ON).
+
     Args:
         specific_env: The per-fix environment variable name.
 
     Returns:
         bool: Whether the gated behavior should be enabled.
     """
-    raw = os.environ.get(specific_env, "").strip().lower()
-    if raw in _TRUEY:
-        return True
-    if raw in _FALSEY:
-        return False
-    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "1").strip().lower() in _TRUEY
+    return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
 
 # ===========================================================================
 # Kernel-decision write-owner functions. SharedState is a passive
@@ -117,8 +117,8 @@ def _resolve_kernel_patch_identity(
     Pulls ``kernel_id`` / patch path / target file / extra server args
     from the envelope, back-filling the patch path from
     :attr:`last_kernel_opt` when the payload omits it but names a
-    matching kernel. The legacy ``extra_sglang_args`` alias is resolved
-    through the compat helper.
+    matching kernel. Extra launch args are read from the canonical
+    ``extra_server_args`` field.
 
     Args:
         payload (dict[str, Any] | None): The kernel_opt result or LLM
@@ -151,9 +151,7 @@ def _resolve_kernel_patch_identity(
         or payload.get("source_file")
         or ""
     )
-    # External envelope; route through compat helper so legacy ``extra_sglang_args`` still resolves.
-    from hyperloom.common.payload_aliases import read_extra_server_args
-    extra_args = read_extra_server_args(payload).strip()
+    extra_args = str(payload.get("extra_server_args") or "").strip()
     return kernel_id, patch_path, target_file, extra_args
 
 def kernel_patch_key(state, payload: dict[str, Any] | None) -> str:
@@ -406,15 +404,15 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         }
     elif str(result.get("kernel_id") or ""):
         state.last_kernel_opt_dispatch_skip = {}
-    # Author-time breakdown capture: record geak/oob invocations (incl.
+    # Author-time breakdown capture: record geak/forge invocations (incl.
     # backend + pre-dispatch failures) before the metadata-less early
-    # return so no failed attempt becomes invisible in the geak/oob view.
+    # return so no failed attempt becomes invisible in the geak/forge view.
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
         instrument.record_kernel_invocations(sdir, result)
         # Record dispatch and per-backend attempts. Distinct from the
-        # geak/oob view above and never overlaps it.
+        # geak/forge view above and never overlaps it.
         _kid = str(result.get("kernel_id") or "")
         if sdir and _kid:
             _attempts = result.get("attempts")

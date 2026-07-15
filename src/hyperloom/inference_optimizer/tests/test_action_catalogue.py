@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS as SURFACE_KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS as SURFACE_NO_KERNEL_AGENT_ENABLED_ACTIONS,
-    PHASE_ALLOWLIST_BYPASS_ACTIONS as SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS,
 )
 
 
@@ -82,7 +81,7 @@ def test_kernel_owned_actions_all_in_registry(registry):
 
 def test_action_surface_constants_are_shared():
     """Policy, prompt rendering, and CLI must not carry divergent action lists."""
-    from hyperloom.inference_optimizer.cli import _NOOP_KINDS_KERNEL_ONLY
+    from hyperloom.inference_optimizer.cli.executors import _NOOP_KINDS_KERNEL_ONLY
     from hyperloom.orchestrator.policy import gate as policy
     from hyperloom.orchestrator.prompts import prompt_builder
 
@@ -138,9 +137,9 @@ def test_action_surface_sets_are_phase_aligned():
 
     all_phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
     assert SURFACE_KERNEL_AGENT_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]
-    assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS) <= all_phase_actions
-    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
-    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
+    assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - {"replay_warm_recipe"}) <= all_phase_actions
+    assert "replay_warm_recipe" in SURFACE_INTERNAL_ONLY_ACTION_NAMES
+    assert "replay_warm_recipe" not in all_phase_actions
     assert SURFACE_FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_AGENT]
     assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
 
@@ -260,7 +259,7 @@ def test_runs_actions_fallback_matches_registry(registry):
 def test_cli_real_executors_consistent_with_runs_actions():
     """Every real-executor action must be in ``_runs_actions()`` or be a
     special session-root writer (``report``, ``session_breakdown``)."""
-    from hyperloom.inference_optimizer.cli import _REAL_EXECUTORS_FULL
+    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
     from hyperloom.inference_optimizer.session.session_paths import _runs_actions
 
     SESSION_ROOT_WRITERS = {"report", "session_breakdown"}

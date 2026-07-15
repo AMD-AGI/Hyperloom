@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
@@ -298,6 +299,31 @@ def _build_comparison(
     return rows, summary
 
 
+def _budget_limited_without_valid_pair(
+    *,
+    budget_exhausted: bool,
+    summary: dict[str, Any],
+    baseline_points: list[dict[str, Any]],
+    optimized_points: list[dict[str, Any]],
+) -> bool:
+    """Return true when budget gating, not benchmark failure, prevented all pairs."""
+    if not budget_exhausted or int(summary.get("successful_pairs") or 0) > 0:
+        return False
+    points = baseline_points + optimized_points
+    if not points:
+        return False
+    saw_budget_skip = False
+    for point in points:
+        status = str(point.get("status") or "").lower()
+        error_class = str(point.get("error_class") or "")
+        if error_class == "budget_exhausted":
+            saw_budget_skip = True
+            continue
+        if status not in ("succeeded", "skipped"):
+            return False
+    return saw_budget_skip
+
+
 def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
     """One row per (arm, conc) — flat columns for spreadsheet pivots.
 
@@ -513,7 +539,7 @@ async def run_conc_sweep(
     if not base_yaml_path.exists():
         return _skip("baseline_config_missing", config_path=base_yaml_raw)
 
-    task_id = time.strftime("conc_sweep_%Y%m%dT%H%M%SZ", time.gmtime())
+    task_id = f"conc_sweep_{utc_now_compact()}"
     workspace = runs_root(session_dir) / "conc_sweep" / task_id
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -569,10 +595,14 @@ async def run_conc_sweep(
     )
     results: list[VariantResult] = []
     budget_exhausted = False
+    budget_skip_reason = ""
+    budget_remaining_sec: float | None = None
     for idx, variant in enumerate(grid):
         remaining = (deadline - time.time()) if has_budget else None
         if has_budget and remaining is not None and remaining <= 0:
             budget_exhausted = True
+            budget_skip_reason = "total_budget_exhausted"
+            budget_remaining_sec = max(0.0, float(remaining))
             log.warning(
                 "conc_sweep: total budget exhausted (%ds); marking %d remaining variants as skipped",
                 total_budget_sec,
@@ -581,11 +611,23 @@ async def run_conc_sweep(
             for v in grid[idx:]:
                 results.append(_budget_skip_result(v))
             break
+        if has_budget and remaining is not None and remaining < float(variant_timeout_sec):
+            budget_exhausted = True
+            budget_skip_reason = "insufficient_remaining_for_variant"
+            budget_remaining_sec = max(0.0, float(remaining))
+            log.warning(
+                "conc_sweep: remaining budget %.1fs is below per-variant timeout %ds; "
+                "marking %d remaining variants as skipped",
+                remaining,
+                variant_timeout_sec,
+                len(grid) - idx,
+            )
+            for v in grid[idx:]:
+                results.append(_budget_skip_result(v))
+            break
 
-        # Per-variant cap = min(timeout, remaining budget) so the last variant doesn't blow the wall-clock.
+        # At this point enough budget remains for a full variant timeout.
         effective_timeout = variant_timeout_sec
-        if has_budget and remaining is not None:
-            effective_timeout = max(1, min(variant_timeout_sec, int(remaining)))
 
         sub_results = await run_grid(
             base_yaml_path=base_yaml_path,
@@ -611,6 +653,13 @@ async def run_conc_sweep(
     optimized_points.sort(key=lambda p: p["conc"])
 
     comparison, summary = _build_comparison(baseline_points, optimized_points)
+    budget_limited_no_pair = _budget_limited_without_valid_pair(
+        budget_exhausted=budget_exhausted,
+        summary=summary,
+        baseline_points=baseline_points,
+        optimized_points=optimized_points,
+    )
+    status = "succeeded" if summary["successful_pairs"] else ("skipped" if budget_limited_no_pair else "failed")
 
     ceiling = _build_roofline_ceiling(
         state,
@@ -623,7 +672,7 @@ async def run_conc_sweep(
 
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "status": "succeeded" if summary["successful_pairs"] else "failed",
+        "status": status,
         "session_id": str(getattr(state, "session_id", "") or session_dir.name),
         "isl": isl,
         "osl": osl,
@@ -646,6 +695,12 @@ async def run_conc_sweep(
         "total_budget_sec": total_budget_sec if has_budget else None,
         "budget_exhausted": budget_exhausted,
     }
+    if budget_limited_no_pair:
+        payload["was_skipped"] = True
+        payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
+    if budget_exhausted:
+        payload["budget_skip_reason"] = budget_skip_reason
+        payload["budget_remaining_sec"] = round(float(budget_remaining_sec or 0.0), 2)
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
 
