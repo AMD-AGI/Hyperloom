@@ -206,12 +206,12 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics.
-        # kb-extract recipes store optimized args directly in body.extra_sglang_args
+        # kb-extract recipes store optimized args directly in body.extra_server_args
         # rather than body.best_config; synthesize best_config when absent.
         "best_config": dict(body.get("best_config") or {})
         or (
-            {"extra_server_args": str(body.get("extra_sglang_args") or body.get("extra_server_args") or "").strip()}
-            if (body.get("extra_sglang_args") or body.get("extra_server_args"))
+            {"extra_server_args": str(body.get("extra_server_args") or "").strip()}
+            if body.get("extra_server_args")
             else {}
         ),
         "best_throughput": float(body.get("best_throughput") or metrics.get("throughput") or 0.0),
@@ -792,33 +792,6 @@ class RecipeKB:
         )
         return local_row
 
-    def get_history(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Read version history — LOCAL only.
-
-        The central kb-service is reached through the single
-        ``/recipes/search`` route only (see :meth:`get_recipe`);
-        ``/history`` is not used. The local archive is authoritative
-        for writes anyway, so the on-disk ``history/v{N}.json`` files
-        are the source of truth here.
-
-        Args:
-            canonical_id (str): Canonical recipe identity.
-            limit (int): Maximum number of archived rows to return.
-
-        Returns:
-            list[dict[str, Any]]: Archived prior versions ascending by
-                version.
-        """
-        return self.local.get_history(
-            canonical_id=canonical_id,
-            limit=limit,
-        )
-
     def search(
         self,
         *,
@@ -912,48 +885,6 @@ class RecipeKB:
             )
         )
         return ranked_local
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Attempts for one recipe — LOCAL only (remote =
-        ``/recipes/search`` route only).
-
-        Args:
-            canonical_id (str): Parent recipe identity.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempt rows newest-first.
-        """
-        return self.local.list_attempts(
-            canonical_id=canonical_id,
-            limit=limit,
-        )
-
-    def list_session_attempts(
-        self,
-        *,
-        session_id: str,
-        limit: int = 500,
-    ) -> list[dict[str, Any]]:
-        """Session attempts — LOCAL only (remote = ``/recipes/search``
-        route only).
-
-        Args:
-            session_id (str): Session whose attempts to collect.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempts for the session oldest-first.
-        """
-        return self.local.list_session_attempts(
-            session_id=session_id,
-            limit=limit,
-        )
 
     # ==================================================================
     # Lifecycle

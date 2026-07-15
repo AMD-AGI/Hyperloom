@@ -30,11 +30,10 @@ from .mock_backend import (
 from .robustness_agent import RobustnessAgentBackend
 from .robustness_mock import MockRobustnessBackend
 
-# Public names for the two row-scan role mocks (formerly the standalone
-# ``MockCriticBackend`` / ``MockKernelBackend`` classes). Kept importable so
-# out-of-scope callers (e.g. ``cli/backends.py``) and tests keep working.
+# Public name for the row-scan critic mock (formerly the standalone
+# ``MockCriticBackend`` class). Kept importable so out-of-scope callers
+# (e.g. ``cli/backends.py``) and tests keep working.
 MockCriticBackend = auto_approve_critic
-MockKernelBackend = auto_respond_kernel
 
 __all__ = [
     "Backend",
@@ -51,7 +50,6 @@ __all__ = [
     "MCP_SERVER_NAME",
     "MockBackend",
     "MockCriticBackend",
-    "MockKernelBackend",
     "MockRobustnessBackend",
     "MockRowScanBackend",
     "MockTurn",

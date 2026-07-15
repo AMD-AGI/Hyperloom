@@ -33,7 +33,6 @@ from __future__ import annotations
 import json as _json
 import os
 import tempfile
-from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -199,58 +198,6 @@ def append_jsonl(
             _best_effort_fsync(fh)
 
 
-def read_jsonl(path: Path, *, default: Any = None) -> list[Any]:
-    """Read a JSONL file into a list, skipping blank lines.
-
-    Malformed lines raise ``json.JSONDecodeError`` (callers that want tolerance
-    should catch it); a missing file returns *default* coerced to ``[]`` when
-    *default* is ``None``.
-
-    Args:
-        path: Source JSONL file.
-        default: Value returned when the file does not exist. ``None`` (the
-            default) is normalised to an empty list.
-
-    Returns:
-        The parsed rows in file order.
-    """
-    path = Path(path)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return [] if default is None else default
-    rows: list[Any] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            rows.append(_json.loads(stripped))
-    return rows
-
-
-def tail_lines(path: Path, n: int) -> list[str]:
-    """Return the last *n* lines of a text file (memory-bounded).
-
-    Uses a bounded ``deque`` so only *n* lines are held in memory regardless of
-    file size. Trailing newlines are stripped from each returned line.
-
-    Args:
-        path: Source text file.
-        n: Number of trailing lines to return. ``<= 0`` returns ``[]``.
-
-    Returns:
-        Up to *n* trailing lines, or ``[]`` when the file does not exist.
-    """
-    if n <= 0:
-        return []
-    path = Path(path)
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            tail: deque[str] = deque(fh, maxlen=n)
-    except OSError:
-        return []
-    return [line.rstrip("\n") for line in tail]
-
-
 def safe_mtime(path: Path) -> float:
     """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails.
 
@@ -275,7 +222,5 @@ __all__ = [
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
-    "read_jsonl",
-    "tail_lines",
     "safe_mtime",
 ]

@@ -122,14 +122,8 @@ class _ReadOnlyRemoteSpy:
             "remote read method invoked during a write — writes must be local-only",
         )
 
-    health = _boom
     get_recipe = _boom
-    get_history = _boom
-    list_recent = _boom
     search = _boom
-    list_attempts = _boom
-    list_session_attempts = _boom
-    session_summary = _boom
 
     def close(self) -> None:
         pass
@@ -148,13 +142,6 @@ def test_append_attempt_never_touches_remote(local_store: LocalRecipeStore) -> N
     cid = _cid()
     out = kb.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
     assert out["id"] == 1
-
-
-def test_delete_recipe_never_touches_remote(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid)
-    assert kb.local.delete_recipe(canonical_id=cid) is True
 
 
 # Reads — remote-first, local fallback (fake remote)
@@ -360,17 +347,6 @@ def test_get_recipe_remote_exact_search_hit_skips_version_fallback(
     assert len(remote.search_calls) == 1
 
 
-def test_get_history_is_local_only(local_store: LocalRecipeStore) -> None:
-    """get_history is LOCAL only; the dispatcher must not touch the remote."""
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid)
-    local_store.put_recipe(canonical_id=cid)
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.get_history(canonical_id=cid)
-    assert len(rows) == 1
-    assert rows[0]["version"] == 1
-
-
 def test_search_falls_through_to_local_on_remote_failure(local_store: LocalRecipeStore) -> None:
     cid = _cid()
     local_store.put_recipe(
@@ -383,35 +359,6 @@ def test_search_falls_through_to_local_on_remote_failure(local_store: LocalRecip
     rows = kb.search(label_match={"task": "pretrain"})
     assert len(rows) == 1
     assert rows[0]["canonical_id"] == cid
-
-
-def test_list_recent_is_local_only(local_store: LocalRecipeStore) -> None:
-    """list_recent is LOCAL only."""
-    cid_local = _cid(model="local-only")
-    local_store.put_recipe(canonical_id=cid_local)
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.local.list_recent()
-    assert [r["canonical_id"] for r in rows] == [cid_local]
-
-
-def test_list_attempts_is_local_only(local_store: LocalRecipeStore) -> None:
-    """list_attempts is LOCAL only."""
-    cid = _cid()
-    local_store.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.list_attempts(canonical_id=cid)
-    assert len(rows) == 1
-    assert rows[0]["outcome"] == "kept"
-
-
-def test_list_session_attempts_is_local_only(local_store: LocalRecipeStore) -> None:
-    """list_session_attempts is LOCAL only."""
-    cid = _cid()
-    local_store.append_attempt(canonical_id=cid, session_id="sess-7", outcome="kept")
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.list_session_attempts(session_id="sess-7")
-    assert len(rows) == 1
-    assert rows[0]["session_id"] == "sess-7"
 
 
 # remote=None / remote disabled — local-only mode

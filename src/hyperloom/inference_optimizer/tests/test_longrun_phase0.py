@@ -77,7 +77,7 @@ def test_seen_pr_ids_capped():
     st.register_seen_pr_ids([f"pr{i}" for i in range(cap + 500)])
     assert len(st.research_scout_seen_pr_ids) == cap
     # Newest kept (FIFO eviction of oldest).
-    assert st.has_seen_pr_id(f"pr{cap + 500 - 1}")
+    assert f"pr{cap + 500 - 1}" in st.research_scout_seen_pr_ids
 
 
 def test_winners_history_capped_via_explore_update():
@@ -360,9 +360,9 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
+        auto_respond_kernel,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -370,7 +370,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": auto_respond_kernel(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

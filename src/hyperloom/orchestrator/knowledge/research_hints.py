@@ -529,7 +529,7 @@ def match_variants_to_priors(
             continue
         text = " ".join(
             str(variant.get(k) or "")
-            for k in ("name", "extra_server_args", "extra_sglang_args", "candidate_extra_server_args", "description")
+            for k in ("name", "extra_server_args", "candidate_extra_server_args", "description")
         )
         text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
         vtoks = _tokens(text)

@@ -10,9 +10,6 @@ import pytest
 
 from hyperloom.agents.robustness.role.envelope import (
     ALERT_SEVERITIES,
-    BackendTurnResult,
-    INTENT_SPEC,
-    IntentSpec,
     IntentType,
     KILL_TASK_ALLOWED_SCOPES,
     PAYLOAD_REQUIRED,
@@ -231,13 +228,6 @@ def test_intent_to_envelope_item_makes_a_copy_of_payload():
     assert intent.payload["detail"]["k"] == 1
 
 
-def test_backend_turn_result_default_fields():
-    res = BackendTurnResult()
-    assert res.intents == []
-    assert res.raw_text == ""
-    assert res.metadata == {}
-
-
 # ---------------------------------------------------------------------------
 # Static tables — invariants
 # ---------------------------------------------------------------------------
@@ -246,48 +236,6 @@ def test_backend_turn_result_default_fields():
 def test_payload_required_covers_every_intent_type():
     for intent_type in IntentType.__members__.values():
         assert intent_type in PAYLOAD_REQUIRED, intent_type
-
-
-def test_payload_required_is_derived_from_intent_spec():
-    """The required-field map must be a faithful projection of INTENT_SPEC.
-
-    Guards the whole point of the single table: adding a field to a spec
-    entry cannot silently disagree with ``PAYLOAD_REQUIRED``.
-    """
-    for intent_type, spec in INTENT_SPEC.items():
-        assert isinstance(spec, IntentSpec)
-        assert PAYLOAD_REQUIRED[intent_type] == spec.required
-
-
-def test_intent_spec_covers_the_seven_emittable_intents():
-    assert set(INTENT_SPEC) == {
-        IntentType.SEND_MESSAGE,
-        IntentType.DELEGATE,
-        IntentType.UPDATE_STATE,
-        IntentType.ALERT,
-        IntentType.KILL_TASK,
-        IntentType.PRUNE_BRANCH,
-        IntentType.ESCALATE_STRATEGY_CHANGE,
-    }
-
-
-def test_intent_spec_entries_expose_callable_builder_and_validator():
-    for spec in INTENT_SPEC.values():
-        assert callable(spec.builder)
-        assert callable(spec.validator)
-
-
-def test_specialist_done_kept_for_upstream_contract():
-    """Robustness never emits SPECIALIST_DONE, but the 5-field requirement
-    stays in PAYLOAD_REQUIRED for the upstream contract test."""
-    assert IntentType.SPECIALIST_DONE not in INTENT_SPEC
-    assert PAYLOAD_REQUIRED[IntentType.SPECIALIST_DONE] == (
-        "gap_canonical_id",
-        "domain",
-        "proposal_set",
-        "empty",
-        "summary",
-    )
 
 
 def test_robustness_only_subset_of_allowed():

@@ -22,6 +22,7 @@ from hyperloom.common.timeutil import iso_z
 
 from . import collectors
 from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
+from ..session.session_paths import manifest_path, state_path
 
 log = logging.getLogger(__name__)
 
@@ -93,36 +94,25 @@ def _merge_phase_timeline(
     return base
 
 
-def _load_json(session_dir: Path, filename: str, warnings: list[str]) -> dict[str, Any]:
-    """Read ``<filename>`` from the session dir as a dict; ``{}`` + warning on failure.
+def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str, Any]:
+    """Read a session JSON file as a dict; ``{}`` + warning on failure.
 
     Args:
-        session_dir: The hyperloom session directory.
-        filename: File to read (e.g. ``state.json`` / ``manifest.json``).
+        path: File to read.
+        label: Human-readable file label for warning messages.
         warnings: Accumulator appended to when the file is missing or unparseable.
 
     Returns:
         The parsed JSON contents, or an empty dict on any failure.
     """
-    path = session_dir / filename
     if not path.exists():
-        warnings.append(f"{filename} missing at {path}")
+        warnings.append(f"{label} missing at {path}")
         return {}
-    return read_json(
-        path,
-        default={},
-        on_error=lambda exc: warnings.append(f"failed to parse {filename}: {exc!r}"),
-    )
-
-
-def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
-    return _load_json(session_dir, "state.json", warnings)
-
-
-def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``manifest.json`` as a plain dict; empty dict + warning when missing."""
-    return _load_json(session_dir, "manifest.json", warnings)
+    try:
+        return read_json(path, require_dict=True, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"failed to parse {label}: {exc!r}")
+        return {}
 
 
 _ROOFLINE_NUMERIC_FIELDS = (
@@ -222,8 +212,8 @@ def build(
             "",
         ).strip().lower() in ("1", "true", "yes")
 
-    state = _load_state(sd, warnings)
-    manifest = _load_manifest(sd, warnings)
+    state = _load_session_json(state_path(sd), "state.json", warnings)
+    manifest = _load_session_json(manifest_path(sd), "manifest.json", warnings)
 
     # Author-time recorder fragments (write-side spool). When present they are
     # the source of truth for their section (they capture facts the collectors

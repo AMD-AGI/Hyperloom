@@ -10,12 +10,12 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json, read_jsonl
-from hyperloom.common.timeutil import parse_iso_unix
 
 
 
@@ -299,10 +299,6 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 def _parse_iso_unix(ts: Any) -> float | None:
     """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure.
 
-    Delegates ISO-string parsing to :func:`hyperloom.common.timeutil.parse_iso_unix`
-    while retaining this collector's extra tolerance for already-numeric epoch
-    inputs (``common`` returns the default for non-string values).
-
     Args:
         ts (Any): An ISO-8601 string or already-numeric timestamp.
 
@@ -310,9 +306,19 @@ def _parse_iso_unix(ts: Any) -> float | None:
         float | None: The timestamp in Unix seconds, or ``None`` when ``ts`` is
         empty or unparseable.
     """
+    if ts is None:
+        return None
     if isinstance(ts, (int, float)):
         return float(ts)
-    return parse_iso_unix(ts)
+    s = str(ts).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
 
 
 def _load_optimization_journal(

@@ -12,10 +12,9 @@ import json
 import logging
 import os
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from hyperloom.common.timeutil import parse_iso_unix
 
 log = logging.getLogger(__name__)
 
@@ -203,14 +202,24 @@ def effective_closing_grace_sec(
 def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds; ``0.0`` on failure.
 
+    Naive timestamps are treated as UTC. Never raises.
+
     Args:
         ts: ISO 8601 timestamp string (``Z`` suffix accepted).
 
     Returns:
         The timestamp in unix seconds, or ``0.0`` when empty/unparseable.
     """
-    parsed = parse_iso_unix(ts)
-    return parsed if parsed is not None else 0.0
+    s = (ts or "").strip()
+    if not s:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:

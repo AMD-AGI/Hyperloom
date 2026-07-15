@@ -926,7 +926,7 @@ class WritebackCollaborator:
         # Ensure the change summary is variant-specific (else every explore variant writes an identical row).
         change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
         if not (
-            change_attrs.get("extra_sglang_args")
+            change_attrs.get("extra_server_args")
             or change_attrs.get("extra_envs")
             or change_attrs.get("name")
         ) and variant_name:
@@ -1263,16 +1263,12 @@ class WritebackCollaborator:
         opt_stack = getattr(ss, "optimization_stack", []) or []
         gain_per_stack = getattr(ss, "gain_per_stack_entry", []) or []
         last_failures = getattr(ss, "last_action_failures", []) or []
-        # Read canonical extra_server_args first, but WRITE the legacy extra_sglang_args key (RecipeKB schema +
-        # warm-replay reader still key on it; reading the stale name would break warm-replay reproduction).
+        # RecipeKB best_config keys on the canonical extra_server_args field.
         best_config: dict[str, Any] = {}
         if isinstance(current_best, dict):
-            cb_args = (
-                current_best.get("extra_server_args")
-                or current_best.get("extra_sglang_args")
-            )
+            cb_args = current_best.get("extra_server_args")
             if cb_args:
-                best_config["extra_sglang_args"] = str(cb_args)
+                best_config["extra_server_args"] = str(cb_args)
             for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
@@ -1280,16 +1276,13 @@ class WritebackCollaborator:
         if opt_stack:
             last_entry = opt_stack[-1]
             if isinstance(last_entry, dict):
-                # Read canonical keys first, legacy *_sglang_args as fallback.
                 stack_args = str(
                     last_entry.get("candidate_extra_server_args")
                     or last_entry.get("extra_server_args")
-                    or last_entry.get("candidate_extra_sglang_args")
-                    or last_entry.get("extra_sglang_args")
                     or "",
                 ).strip()
                 if stack_args:
-                    best_config["extra_sglang_args"] = stack_args
+                    best_config["extra_server_args"] = stack_args
         sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
         kept_sources, kept_by_gap, reverted_rows = (
             self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
@@ -1309,11 +1302,7 @@ class WritebackCollaborator:
             )
             row: dict[str, Any] = {
                 "name":              name,
-                "extra_sglang_args": str(
-                    entry.get("extra_server_args")
-                    or entry.get("extra_sglang_args")
-                    or ""
-                ),
+                "extra_server_args": str(entry.get("extra_server_args") or ""),
                 "extra_envs":        dict(entry.get("extra_envs") or {}),
                 "gain_pct":          gain_per,
             }
@@ -1476,7 +1465,7 @@ class WritebackCollaborator:
             my_tput = float(attrs.get("best_throughput") or 0.0)
             cb_now = getattr(ss, "current_best", {}) or {}
             cb_args_now = (
-                str(cb_now.get("extra_sglang_args") or "").strip()
+                str(cb_now.get("extra_server_args") or "").strip()
                 if isinstance(cb_now, dict) else ""
             )
             validated_gain = float(
@@ -2752,7 +2741,7 @@ class WritebackCollaborator:
         workspace = None
         for entry in stack:
             candidate = str(entry.get("candidate_extra_server_args") or "").strip()
-            full = str(entry.get("extra_server_args") or entry.get("extra_sglang_args") or "").strip()
+            full = str(entry.get("extra_server_args") or "").strip()
             args = _merge_cumulative_extra_server_args(args, candidate, full)
             raw_envs = entry.get("extra_envs") or {}
             if isinstance(raw_envs, Mapping):
