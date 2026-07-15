@@ -113,7 +113,7 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # the matching release/hyperloom_integration_v0.9.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="8139fa69362760436f83bb97317a0afcdce15647"
+TRACELENS_REF="4d6e0d9f03bab0541f04a68952dcf13988475708"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
