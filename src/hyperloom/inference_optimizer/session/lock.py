@@ -2,7 +2,7 @@
 
 """Single-optimizer session lock.
 
-A long ``inference_optimizer optimize`` run is guarded by a robustness monitor
+A long ``python -m hyperloom.inference_optimizer.cli optimize`` run is guarded by a robustness monitor
 that re-launches the optimizer via ``--resume`` if it judges the process dead.
 During the slow serving cold-start that liveness check can misfire and spawn a
 **second** optimizer on the same ``session_dir``; the two then contend for the

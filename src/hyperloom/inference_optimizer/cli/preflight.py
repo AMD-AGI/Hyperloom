@@ -540,7 +540,7 @@ def _check_tracelens_cli() -> None:
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `inference_optimizer optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
         file=sys.stderr,
     )
     sys.exit(2)

@@ -210,7 +210,7 @@ ingest it whole on session end.
    `ls "$SESSION_DIR/state.json"`.
 2. Relaunch with `--resume`:
    ```bash
-   inference_optimizer optimize --resume --resume-from "$SESSION_DIR"
+   python3 -m hyperloom.inference_optimizer.cli optimize --resume --resume-from "$SESSION_DIR"
    ```
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
@@ -222,7 +222,7 @@ ingest it whole on session end.
 > that exited abnormally — without re-running the optimization loop — use the
 > dedicated subcommand instead of `--resume`:
 > ```bash
-> inference_optimizer recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+> python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
 > ```
 > `--force` re-runs even when the session already looks complete;
 > `--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse

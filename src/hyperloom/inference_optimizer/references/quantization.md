@@ -7,7 +7,7 @@ AMD Quark PTQ prelude, then rewrites `--model` to the exported quantized model
 so the optimization loop runs on it.
 
 ```bash
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --max-hours 2 \

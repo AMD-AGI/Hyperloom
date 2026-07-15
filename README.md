@@ -32,8 +32,7 @@ Hyperloom combines:
 
 | Goal | Guide |
 |------|-------|
-| Run using a Docker container | [Docker quickstart](docs/install/local-mode.md) |
-| Run directly on a ROCm host | [Bare-metal quickstart](docs/install/setup.md) |
+| Run directly on a ROCm host | [Local setup quickstart](docs/install/setup.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
 
@@ -55,7 +54,7 @@ Hyperloom combines:
 
 - Runtime package: `src/hyperloom/`
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `inference_optimizer optimize`
+- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
 - Documentation source: `docs/`
 

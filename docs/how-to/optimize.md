@@ -8,9 +8,7 @@ myst:
 
 This topic assumes you have already completed installation. If you haven't:
 
-- **Docker Container** — see [Docker quickstart](../install/local-mode.md) to 
-  get Hyperloom running in a Docker container.
-- **Bare-metal** — see [Bare-metal quickstart](../install/setup.md), then
+- **Local setup** — see [Local setup quickstart](../install/setup.md), then
   return here to launch your first run.
 
 ## Launch from Cursor
@@ -79,7 +77,7 @@ Paste this prompt into Cursor Chat to resume an existing session:
 Resume the existing Hyperloom optimization session.
 
 Requirements:
-1. Launch `inference_optimizer optimize --resume`; do not start a new session.
+1. Launch `python -m hyperloom.inference_optimizer.cli optimize --resume`; do not start a new session.
 2. Do not pass `--model`; read the model and workload from the saved manifest.
 3. Before launching, verify `manifest.json` and `state.json` exist.
 4. Report the log path, PID, health check, current phase, cumulative gain, and best config.

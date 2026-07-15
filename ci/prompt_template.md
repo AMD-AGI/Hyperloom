@@ -2,7 +2,7 @@ Use the inference_optimizer skill at @/wekafs/HyperloomV2/src/hyperloom/inferenc
 
 The skill is the Python `inference_optimizer` package on WekaFS; this sandbox image mounts /wekafs read-only. Read SKILL.md first, then follow Step 1 ("Install") and Step 2 ("Launch a New Optimization"). Do NOT use any marketplace skill download or `download_skill` tool — the runtime IS on the mount.
 
-Run config — pass as CLI flags to `inference_optimizer optimize`:
+Run config — pass as CLI flags to `python -m hyperloom.inference_optimizer.cli optimize`:
   --model {model_path}
   --framework {framework}
   --gpu-type {gpu_type_lc}

@@ -592,7 +592,7 @@ Launch by following [`docs/how-to/optimize.md`](../docs/how-to/optimize.md).
 Inside the container, re-run `install.sh` (IR-2) **with a raised file-descriptor
 limit — run `ulimit -Sn 65536` first** (the install and the optimizer open many
 files; the default soft limit can cause "too many open files" errors), source
-`.env` plus `kernel-agent.env.sh`, then start `inference_optimizer optimize` in
+`.env` plus `kernel-agent.env.sh`, then start `python -m hyperloom.inference_optimizer.cli optimize` in
 the background (`setsid nohup` — the run is long). The default backend order is
 `KERNEL_OPT_BACKEND_ORDER=geak`, which delegates the whole KERNEL_AGENT phase to
 the open GEAK e2e optimizer. Both the Claude and Codex accounts were wired up in
@@ -636,7 +636,7 @@ docker exec -e USER_DATA_PATH="$USER_DATA_PATH" -e MODEL_PATH="$MODEL_PATH" hype
   MAX_HOURS=6
   # ---------------------------------------------------------------------------
 
-  setsid nohup inference_optimizer --verbose optimize \
+  setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
     --model "$MODEL_PATH" --framework sglang --gpu-type "$GPU_TYPE" \
     --tp "$TP" --conc "$CONC" --isl "$ISL" --osl "$OSL" \
     --target-gain "$TARGET_GAIN" --max-hours "$MAX_HOURS" --tick-interval-sec 30 \
