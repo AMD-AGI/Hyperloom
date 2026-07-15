@@ -3773,15 +3773,41 @@ class FrameworkPhase(PhaseHandler):
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and isinstance(es.get("tested"), dict):
             tested = es["tested"]
+        cb = getattr(self.shared_state, "current_best", None) or {}
+        base_remove_args: list[str] = []
+        base_unset_envs: list[str] = []
+        if isinstance(cb, dict):
+            raw_remove = cb.get("remove_args")
+            raw_unset = cb.get("unset_envs")
+            base_remove_args = [raw_remove] if isinstance(raw_remove, str) and raw_remove.strip() else [
+                str(v) for v in (raw_remove or []) if str(v).strip()
+            ]
+            base_unset_envs = [raw_unset] if isinstance(raw_unset, str) and raw_unset.strip() else [
+                str(v) for v in (raw_unset or []) if str(v).strip()
+            ]
         out: list[dict[str, Any]] = []
         for v in grid or []:
             if not isinstance(v, dict):
                 continue
+            v_remove = v.get("remove_args")
+            v_unset = v.get("unset_envs")
+            remove_args = list(
+                dict.fromkeys(
+                    base_remove_args
+                    + ([v_remove] if isinstance(v_remove, str) and v_remove.strip() else [str(x) for x in (v_remove or []) if str(x).strip()])
+                )
+            )
+            unset_envs = list(
+                dict.fromkeys(
+                    base_unset_envs
+                    + ([v_unset] if isinstance(v_unset, str) and v_unset.strip() else [str(x) for x in (v_unset or []) if str(x).strip()])
+                )
+            )
             fp = canonical_fingerprint(
                 str(v.get("extra_args") or v.get("extra_server_args") or ""),
                 dict(v.get("extra_envs") or {}),
-                remove_args=v.get("remove_args"),
-                unset_envs=v.get("unset_envs"),
+                remove_args=remove_args,
+                unset_envs=unset_envs,
                 args_mode=str(v.get("args_mode") or "append"),
             )
             if fp in tested:

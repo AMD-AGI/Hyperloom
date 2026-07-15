@@ -344,3 +344,22 @@ def test_shell_safe_dedupe_normalizes_equals_form() -> None:
 def test_shell_safe_dedupe_simple_last_wins() -> None:
     out = gr._shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
     assert out == "--tp 8 --mem-fraction-static 0.9"
+
+
+def test_compose_server_args_replace_still_applies_remove_args() -> None:
+    out = gr.compose_server_args(
+        inherited_args="--bad-base 1",
+        base_extra_args="--also-bad 2",
+        variant_extra_args="--bad-base 3 --keep 4",
+        remove_args=["--bad-base"],
+        args_mode="replace",
+    )
+    assert out == "--also-bad 2 --keep 4"
+
+
+def test_remove_server_args_accepts_multi_flag_string() -> None:
+    out = gr.remove_server_args(
+        "--flag-a --flag-b --flag-c 3 --keep 4",
+        "--flag-a --flag-b --flag-c",
+    )
+    assert out == "--keep 4"
