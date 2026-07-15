@@ -463,3 +463,54 @@ def test_emit_swallows_write_errors(tmp_path, monkeypatch, capsys):
 def test_new_session_kwargs_empty_on_windows(monkeypatch):
     monkeypatch.setattr(forge_fusion.os, "name", "nt")
     assert forge_fusion._new_session_kwargs() == {}
+
+
+def test_load_input_json_empty_path_returns_empty_dict():
+    assert forge_fusion._load_input_json("") == {}
+
+
+def test_git_toplevel_returns_empty_on_nonzero_exit(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    assert forge_fusion._git_toplevel(str(tmp_path / "foo.py")) == ""
+
+
+def test_emit_without_output_dir_only_prints(capsys):
+    forge_fusion._emit({"status": "ok"}, "")
+    assert forge_fusion.RESULT_BEGIN in capsys.readouterr().out
+
+
+def test_terminate_process_tree_handles_getpgid_oserror(monkeypatch):
+    terminated: list[bool] = []
+
+    class FakeProc:
+        pid = 1
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            terminated.append(True)
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(forge_fusion.os, "name", "posix")
+    monkeypatch.setattr(
+        forge_fusion.os,
+        "getpgid",
+        lambda _pid: (_ for _ in ()).throw(OSError("nope")),
+        raising=False,
+    )
+
+    forge_fusion._terminate_process_tree(FakeProc())
+    assert terminated == [True]
