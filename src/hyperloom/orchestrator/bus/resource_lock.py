@@ -482,21 +482,6 @@ class SqliteLeaseBackend:
             )
         return reaped
 
-    async def active_lanes(self) -> list[str]:
-        """Return the distinct lane names with at least one live holder.
-
-        Callers use this for capacity / breakdown observation;
-        :meth:`lane_holders` returns the multi-holder count shape.
-
-        Returns:
-            list[str]: Distinct lane names that currently have a live row.
-        """
-        rows = await self.db.fetchall(
-            "SELECT DISTINCT lane FROM leases WHERE expires_at > ?",
-            (_now_iso(),),
-        )
-        return [r["lane"] for r in rows]
-
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` for lanes with live rows.
 
@@ -646,14 +631,6 @@ class ResourceLockManager:
             return []
         return await fn()
 
-    async def active_lanes(self) -> list[str]:
-        """Return the distinct lanes with at least one live holder.
-
-        Returns:
-            list[str]: Distinct active lane names.
-        """
-        return await self.backend.active_lanes()
-
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` via the backend.
 
@@ -669,17 +646,6 @@ class ResourceLockManager:
             dict[str, int]: Capacity per lane.
         """
         return await self.backend.lane_capacities()
-
-    def counters_snapshot(self) -> dict[str, dict[str, int]]:
-        """Return per-lane lifetime counters (acquire / release / busy / full).
-
-        Cheap; returns an in-memory deep-ish copy so callers can't mutate
-        the live counters.
-
-        Returns:
-            dict[str, dict[str, int]]: Map of lane name to its counter dict.
-        """
-        return {lane: dict(d) for lane, d in self._counters.items()}
 
     def _bump_counter(self, lane: str, field: str) -> None:
         """Increment one per-lane lifetime counter by 1.

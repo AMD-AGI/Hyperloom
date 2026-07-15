@@ -67,47 +67,6 @@ class DispatcherCollaborator:
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         return f"-c{cycle}" if cycle > 0 else ""
 
-    async def _wait_for_task_terminal(
-        self,
-        task_id: str,
-        *,
-        timeout_sec: float,
-    ) -> str | None:
-        """Poll the TaskRegistry until ``task_id`` reaches a terminal
-        state, with a wall-clock timeout.
-
-        Returns the final ``task.state`` (``"succeeded"`` / ``"failed"``
-        / ``"cancelled"`` / ``"needs_manual_review"``) or ``None`` on
-        timeout (caller treats None as a soft "let's not block on this
-        forever" — the CLOSE sequencer records ``status='timeout'``).
-
-        Polling interval is 100ms — small relative to typical report /
-        session_breakdown wall time (5-30s); large enough to not
-        thrash sqlite under contention.
-
-        Args:
-            task_id (str): The task to wait on.
-            timeout_sec (float): Maximum wall-clock seconds to poll.
-
-        Returns:
-            str | None: The terminal task state, or ``None`` on timeout or if
-                the task is not found.
-        """
-        from ..state.task_registry import TaskNotFound
-
-        deadline = asyncio.get_event_loop().time() + max(0.0, float(timeout_sec))
-        poll_interval = 0.1
-        terminal = {"succeeded", "failed", "cancelled", "needs_manual_review"}
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                task = await self.tasks.get(task_id)
-            except TaskNotFound:
-                return None
-            if task.state in terminal:
-                return task.state
-            await asyncio.sleep(poll_interval)
-        return None
-
     async def _cursor_advance_to_latest(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the latest message addressed to it.
 
@@ -320,7 +279,7 @@ class DispatcherCollaborator:
                 )
                 # Explicit wall-clock budget: lane-tiered base ×
                 # ``macro_cycle`` amplification, hard-capped at 4h. macro_cycle
-                # is 0 for ≤24h bounded runs (``is_long_run`` gate), so those
+                # is 0 for <24h bounded runs (``is_long_run`` gate), so those
                 # always get the base value and never degrade.
                 extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
                     needs_gpu=needs_gpu,
@@ -480,8 +439,8 @@ class DispatcherCollaborator:
 
             budget_min = min(base × (macro_cycle + 1), 240)
 
-        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >24h
-        gate), so ≤24h bounded runs always get the base value (cpu 10 / gpu 60)
+        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >=24h
+        gate), so <24h bounded runs always get the base value (cpu 10 / gpu 60)
         and never degrade.
 
         Args:
@@ -691,14 +650,22 @@ class DispatcherCollaborator:
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
-                # A reverted enablement patch clears the in-flight guard so the
-                # next FRAMEWORK pump tick retries with the next bridging
-                # candidate; a kept patch is terminal.
+                # Unified rearm: handles enablement (delegates to _maybe_rearm_enablement)
+                # AND apply_failed results for perf lanes (schedules retry or stamps terminal).
+                res_dict = getattr(result, "result", None)
                 try:
-                    self._maybe_rearm_enablement(getattr(result, "result", None))
+                    self._maybe_rearm_authored_lane(res_dict)
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
-                        "ENABLEMENT rearm failed for task=%s",
+                        "AUTHORED_LANE rearm failed for task=%s",
+                        task.task_id,
+                    )
+                # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
+                try:
+                    await self._drain_apply_fail_retry_pending()
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "apply_fail retry drain failed for task=%s",
                         task.task_id,
                     )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.

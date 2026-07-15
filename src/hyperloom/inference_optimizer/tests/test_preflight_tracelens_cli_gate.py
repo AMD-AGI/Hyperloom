@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import preflight as cli
 
 
 def test_check_tracelens_cli_passes_when_cli_present(monkeypatch, capsys):

@@ -33,33 +33,29 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
+from hyperloom.common.subprocess_bridge import emit_json as _common_emit_json
+
+from ..pr_kb_slug import normalise_repo as _normalise_pr_kb_repo
 
 if TYPE_CHECKING:
     from ..models import ExploreRequest
 
 
-# _emit_json intentionally does NOT delegate to
-# hyperloom.common.subprocess_bridge.emit_json: this copy additionally
-# creates --out's parent directory before writing, which the shared
-# implementation does not do; see subprocess_bridge.py's module docstring
-# for the divergence rationale.
+# Framework's emit uses ``make_parents=True`` because its CLI is invoked with
+# ``--out`` paths under a fresh work dir that may not exist yet (Critic /
+# Robustness never create the parent). This thin wrapper keeps all call sites
+# using the bare ``_emit_json(obj, out)`` signature.
 def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path.
+    """Serialize obj as JSON to stdout or a file path, creating parent dirs.
 
-    Always writes to stdout; additionally writes to ``out`` when it names a
-    real path (not ``None`` or ``"-"``).
+    Delegates to :func:`hyperloom.common.subprocess_bridge.emit_json` with
+    ``make_parents=True``.
 
     Args:
         obj (Any): JSON-serialisable object to emit.
         out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
     """
-    text = json.dumps(obj, ensure_ascii=False, indent=2)
-    if out and out != "-":
-        path = Path(out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-    sys.stdout.write(text + "\n")
-    sys.stdout.flush()
+    _common_emit_json(obj, out, make_parents=True)
 
 
 def _load_request(path: str) -> "ExploreRequest":
@@ -481,14 +477,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             if str(entry.get("source") or "") == "explicit" and (
                 repo.startswith("http") or repo.endswith(".git")
             ):
-                try:
-                    from framework_agent.pr_kb_slug import normalise_repo as _norm_repo
-
-                    slug = _norm_repo(repo)
-                    if slug:
-                        repo_slug = slug  # used only for pr_url/diff_url below
-                except Exception:  # noqa: BLE001 — best-effort
-                    repo_slug = repo
+                slug = _normalise_pr_kb_repo(repo)
+                if slug:
+                    repo_slug = slug  # used only for pr_url/diff_url below
             ref = str(entry.get("ref") or "")
             key = (repo, ref)
             if not ref or key in seen_refs:

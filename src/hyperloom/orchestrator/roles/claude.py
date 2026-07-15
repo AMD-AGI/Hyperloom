@@ -18,6 +18,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentValidationError,
@@ -67,6 +68,10 @@ Tool input shape:
 
 If you have nothing to say, call once with intent_type=send_message and
 payload={{"topic":"heartbeat","body_md":"ok"}}.
+
+Keep payload bodies focused on NEW information. Do not restate context already
+in SharedState, your inbox, or analysis.md — reference it and summarize only
+what changed. Match length to substance.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -108,17 +113,15 @@ _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "SlashCommand",
 )
 
-_CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_CUSTOM_HEADERS",
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_CUSTOM_HEADERS",
-    "SAFE_API_KEY",
-    "LLM_GATEWAY_KEY",
-)
+# Env-driven reasoning effort / extended thinking (P0.2). Role is inferred from
+# ``conversational`` (True => orchestration). A per-role override wins over the
+# shared override; kernel defaults to ``low`` and orchestration to ``medium``.
+# Thinking defaults to adaptive; set the thinking env to ``off`` to omit it.
+_EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
+_EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
+_EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
+_THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
+_VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -203,6 +206,9 @@ class ClaudeBackend:
     # SDK session token captured last turn; replayed via ``resume`` in
     # conversational mode. ``reset_conversation()`` clears it.
     _session_id: str | None = field(default=None, init=False)
+    # Always False now (resume is supported by the pinned SDK floor); retained
+    # as a stable llm_calls.jsonl key for cache diagnostics / consumers.
+    _resume_downgraded: bool = field(default=False, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -271,16 +277,6 @@ class ClaudeBackend:
             if cfg is not None:
                 self.mcp_server_config = cfg
                 self.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
-
-    @property
-    def has_emit_intent_tool(self) -> bool:
-        """Whether the ``emit_intent`` MCP tool is wired up and usable.
-
-        Returns:
-            bool: ``True`` when both the MCP server config and qualified tool
-            name are present.
-        """
-        return self.mcp_server_config is not None and self.mcp_tool_name is not None
 
     # ------------------------------------------------------------------
     # Backend protocol
@@ -443,6 +439,7 @@ class ClaudeBackend:
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "resume_downgraded": self._resume_downgraded,
                 # Full conversation text so the caller (which holds the
                 # session_dir / component / tick context the stateless
                 # backend lacks) can persist it to conversations.jsonl.
@@ -510,31 +507,12 @@ class ClaudeBackend:
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
-    @property
-    def has_context_tools(self) -> bool:
-        """Whether the context-tools MCP server is configured.
-
-        Returns:
-            ``True`` if a context-server config was set up successfully.
-        """
-        return self._context_server_config is not None
-
     def reset_conversation(self) -> None:
         """Drop the captured session so the next ``run`` starts fresh.
 
         Used after a checkpoint/compaction or resume rebuild.
         """
         self._session_id = None
-
-    @property
-    def conversation_session_id(self) -> str | None:
-        """Current SDK session token (conversational mode), or None.
-
-        Returns:
-            The captured SDK session id in conversational mode, otherwise
-            ``None``.
-        """
-        return self._session_id if self.conversational else None
 
     def _build_options(
         self,
@@ -568,6 +546,7 @@ class ClaudeBackend:
             # Resume an existing session by id (claude-agent-sdk >= 0.2).
             kwargs["resume"] = resume_session_id
         self._apply_sdk_env_options(kwargs)
+        self._apply_effort_options(kwargs)
         if self.raw_completion:
             # Single text turn: no MCP tools, all built-ins disallowed.
             kwargs["allowed_tools"] = []
@@ -607,59 +586,37 @@ class ClaudeBackend:
         Anthropic/gateway env, pass that env to the SDK subprocess and disable
         settings sources so the run is hermetic.
         """
-        if not any((os.environ.get(key) or "").strip() for key in _CLAUDE_GATEWAY_SIGNAL_KEYS):
-            return
+        kwargs.update(claude_sdk_env_options(model=self.model))
 
-        child_env = dict(os.environ)
-        fallback_key = (
-            child_env.get("ANTHROPIC_AUTH_TOKEN")
-            or child_env.get("ANTHROPIC_API_KEY")
-            or child_env.get("OPENAI_API_KEY")
-            or child_env.get("SAFE_API_KEY")
-            or child_env.get("LLM_GATEWAY_KEY")
-            or ""
-        )
-        if fallback_key:
-            child_env.setdefault("ANTHROPIC_API_KEY", fallback_key)
-            child_env.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
-        if "ANTHROPIC_CUSTOM_HEADERS" not in child_env and child_env.get("OPENAI_CUSTOM_HEADERS"):
-            child_env["ANTHROPIC_CUSTOM_HEADERS"] = child_env["OPENAI_CUSTOM_HEADERS"]
-        if self.model:
-            child_env.setdefault("ANTHROPIC_MODEL", self.model)
-            child_env.setdefault("ANTHROPIC_SMALL_FAST_MODEL", self.model)
-        # Keep the subprocess environment compact enough for debugging while
-        # preserving PATH/HOME/PYTHONPATH and all non-secret run metadata.
-        kwargs["env"] = child_env
-        kwargs["setting_sources"] = []
+    def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
+        """Add env-driven reasoning effort + adaptive thinking to the options.
+
+        Role is inferred from ``conversational`` (True => orchestration). Unknown
+        SDK builds that reject these kwargs degrade via ``_instantiate_options``.
+        """
+        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
+        default = "medium" if self.conversational else "low"
+        effort = (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+        if effort in _VALID_EFFORT:
+            kwargs["effort"] = effort
+        thinking = (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()
+        if thinking and thinking != "off":
+            kwargs["thinking"] = {"type": thinking}
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
-        """Build options, dropping ``resume`` if the SDK can't accept it.
+        """Build the SDK options.
 
-        Older SDK builds lack ``resume``; fall back to a stateless turn
-        (with a one-time warning) rather than crashing the reactor.
+        The ``resume`` / ``effort`` / ``thinking`` kwargs are all supported by
+        the pinned ``claude-agent-sdk >= 0.2.110`` floor, so no compatibility
+        fallback is needed.
 
         Args:
             kwargs: Keyword arguments to pass to the SDK options constructor.
 
         Returns:
             A constructed SDK options instance.
-
-        Raises:
-            TypeError: If the constructor rejects a keyword other than
-                ``resume``.
         """
-        try:
-            return self.sdk_options_cls(**kwargs)
-        except TypeError as exc:
-            if "resume" in kwargs:
-                kwargs.pop("resume", None)
-                self.calls.append(
-                    {
-                        "warn": (f"SDK ClaudeAgentOptions rejected resume= ({exc!r}); falling back to stateless turn"),
-                    }
-                )
-                return self.sdk_options_cls(**kwargs)
-            raise
+        return self.sdk_options_cls(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
         """Default stderr handler — append to ``self.calls`` for postmortems.

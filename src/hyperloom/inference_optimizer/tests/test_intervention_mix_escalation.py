@@ -84,9 +84,9 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
         },
     )
 
-    mix = coord.shared_state.get_intervention_mix()
-    assert mix["total_code_patch"] == 0
-    assert mix["total_code_patch_attempt"] == 1
+    summary = coord.shared_state.to_intervention_mix_summary()
+    assert "code_patch_keeps=0" in summary
+    assert "code_patch_attempts=1" in summary
 
 
 def test_config_heavy_zero_patch_renders_counts_without_directive():

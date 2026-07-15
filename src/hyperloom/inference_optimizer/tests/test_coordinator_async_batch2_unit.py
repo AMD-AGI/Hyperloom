@@ -273,30 +273,6 @@ async def test_resume_consistency_discards_orphaned_integrate_keep_missing_works
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_reverify_best_env_queues_explore(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "1")
-    coord._resumed_from["is_resume"] = True
-    coord.shared_state.current_best = {
-        "variant_name": "best",
-        "extra_server_args": "--best 1",
-        "extra_envs": {"BEST": "1"},
-        "tput": 123.0,
-    }
-
-    report = await coord._resume_consistency_pass()
-
-    queued = await coord.tasks.queued()
-    assert any(t.kind == "explore" and t.params.get("source") == "resume_reverify_best" for t in queued)
-    assert any(
-        isinstance(f, dict) and f.get("kind") == "queued_resume_reverify_best"
-        for f in report["fixes"]
-    )
-
-
-@pytest.mark.asyncio
 async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
     # Gap B: an integrate_patch KEEP whose run workspace is gone is discarded +
     # surfaced (alert), never silently treated as applied.
@@ -1288,6 +1264,57 @@ async def test_promote_conc_sweep_records(coord: Coordinator) -> None:
         },
         task=task,
     )
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_conc_sweep_records_failed_terminal_state(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    task = _ptask("cs-failed", "conc_sweep")
+    await coord._handle_unpromotable_result(
+        task,
+        {
+            "status": "failed",
+            "budget_exhausted": False,
+            "summary": {"successful_pairs": 0},
+            "report_json_path": "/tmp/cs-failed.json",
+        },
+    )
+
+    assert coord.shared_state.last_conc_sweep["status"] == "failed"
+    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is False
+    result = exit_normal_sweep(coord.shared_state)
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_failed"
+    assert evidence["conc_sweep_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_budget_limited_conc_sweep_skip_records_done(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    task = _ptask("cs-budget-skip", "conc_sweep")
+    await coord._promote_to_shared_state(
+        "conc_sweep",
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "skip_reason": "budget_exhausted_no_successful_pairs",
+            "budget_exhausted": True,
+            "summary": {"successful_pairs": 0},
+            "report_json_path": "/tmp/cs-budget-skip.json",
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is True
+    result = exit_normal_sweep(coord.shared_state)
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_done"
+    assert evidence["conc_sweep_status"] == "skipped"
 
 
 # -- _scan_stale_specialists (running rows) ---------------------------------

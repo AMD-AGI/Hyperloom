@@ -232,10 +232,6 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
         values = [int(tok.strip()) for tok in text.split(",") if tok.strip()]
         if not values or any(v <= 0 for v in values):
             raise ValueError(f"{env_key}={raw!r} must contain positive integers")
-        os.environ.setdefault(
-            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
-            ",".join(str(v) for v in values),
-        )
         return values[0]
     value = int(text)
     if value <= 0:
@@ -1062,7 +1058,7 @@ def materialize_config_with_envs(
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
     # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
     # an operator-set value (YAML / extra_envs) always wins.
-    from hyperloom.inference_optimizer.cli import _resolve_amd_gpu_type
+    from hyperloom.inference_optimizer.cli.model_gate import _resolve_amd_gpu_type
 
     _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
     if (

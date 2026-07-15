@@ -226,8 +226,7 @@ def _section_phase_semantics(
         lines.extend(
             [
                 "",
-                "**Phase interleave mode is ON** (off by default; enabled via "
-                + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1`):",
+                "**Phase interleave mode is ON**:",
                 "- EXPLORE may also REQUEST kernel_agent-owned kinds "
                 + "(kernel_opt / integrate / deep_kernel_analysis / "
                 + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
@@ -787,10 +786,10 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
                    budget_minutes: 60}}
 
   Backend auto-pick: DO NOT add a `backends` field. The kernel-agent's
-  `choose_backends()` auto-picks the forge → geak_v3 ladder per kernel.
-  Pinning a backend forces every kernel through it even where GEAK is
-  the only one that can KEEP — the exact #144 last comment Layer 2
-  regression. Read `kernel_opt_attempts` + `pending_keep_kernels` to
+  `choose_backends()` auto-picks the forge backend per kernel.
+  Pinning a backend forces every kernel through it — the exact #144 last
+  comment Layer 2 regression. Read `kernel_opt_attempts` +
+  `pending_keep_kernels` to
   see what's still queueable; the batch handler filters
   rejected/in-flight/exhausted candidates.
 

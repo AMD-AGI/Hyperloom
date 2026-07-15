@@ -258,6 +258,25 @@ _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
 }
 
 
+def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
+    """Rewrite legacy launch-arg field names in-place; canonical keys win."""
+    migrated = 0
+    if isinstance(obj, dict):
+        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
+            if legacy_key in obj:
+                if canonical_key not in obj:
+                    obj[canonical_key] = obj.pop(legacy_key)
+                else:
+                    del obj[legacy_key]
+                migrated += 1
+        for value in obj.values():
+            migrated += _migrate_legacy_extra_sglang_args_keys(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            migrated += _migrate_legacy_extra_sglang_args_keys(item)
+    return migrated
+
+
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
     """Bound the explore_search negative ledger for multi-day runs.
 
@@ -349,34 +368,6 @@ def _stamp_cycle_on_rejected(
     return rejected
 
 
-def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
-    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place; returns count rewritten (canonical kept when both present).
-
-    Args:
-        obj (Any): An arbitrarily nested structure (dict / list / scalar);
-            dicts and lists are walked recursively and mutated in place.
-
-    Returns:
-        int: The number of legacy keys rewritten or dropped across the whole
-            structure.
-    """
-    migrated = 0
-    if isinstance(obj, dict):
-        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
-            if legacy_key in obj:
-                if canonical_key not in obj:
-                    obj[canonical_key] = obj.pop(legacy_key)
-                else:
-                    del obj[legacy_key]
-                migrated += 1
-        for v in obj.values():
-            migrated += _migrate_legacy_extra_sglang_args_keys(v)
-    elif isinstance(obj, list):
-        for item in obj:
-            migrated += _migrate_legacy_extra_sglang_args_keys(item)
-    return migrated
-
-
 from ._shared_state.render import _RenderMixin
 
 
@@ -427,10 +418,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "native" (geak_v3 per-kernel loop, default) or
-    # "geak" (one-shot whole-pipeline e2e optimizer cloned from upstream;
-    # see src/hyperloom/agents/kernel/tools/backends/geak_runner.py).
-    kernel_optimizer: str = "native"
+    # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e
+    # optimizer cloned from upstream; see
+    # src/hyperloom/agents/kernel/tools/backends/geak_runner.py) or "native"
+    # (legacy per-kernel loop when explicitly requested).
+    kernel_optimizer: str = "geak"
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
@@ -450,6 +442,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Internal-only baseline cold+hot double-run switch. Public CLI/env controls
+    # are intentionally unsupported; default-on keeps EXPLORE warm-decision
+    # apples-to-apples with the baseline measurement basis.
+    baseline_double_run: bool = True
     # Discarded first-round tput from the baseline cold-start double-run.
     # Kept only for audit/debugging; conclusion fields and gain math use the
     # hot measure-round value in ``baseline_tput``.
@@ -695,6 +691,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_sweep: dict[str, Any] = field(default_factory=dict)
     # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE exits on conc_sweep completion.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
+    # Durable watermark from the last real conc_sweep measurement. Macro-cycle
+    # reloop clears ``last_conc_sweep`` so SWEEP does not exit on stale terminal
+    # state; this marker remains to skip redundant closeout when no validated
+    # gain landed since the prior conc_sweep.
+    last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result. These
@@ -914,7 +915,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return Path(session_dir) / "state.json"
 
     @classmethod
-    def load_or_init(cls, session_dir: Path) -> "SharedState":
+    def load_or_init(
+        cls,
+        session_dir: Path,
+        *,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
+    ) -> "SharedState":
         """Load existing ``state.json`` or return a fresh blank instance.
 
         Reads and migrates the persisted state via :meth:`from_dict` when
@@ -935,20 +942,30 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         else:
             with path.open(encoding="utf-8") as f:
                 raw = json.load(f)
-            inst = cls.from_dict(raw)
+            inst = cls.from_dict(
+                raw,
+                legacy_action_scores=legacy_action_scores,
+                migration_mode=migration_mode,
+            )
         # Remember the session dir so breakdown instrumentation can record
         # fragments at author time (non-field attr; not serialized by asdict).
         inst._session_dir = Path(session_dir)
         return inst
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+    def from_dict(
+        cls,
+        raw: dict[str, Any],
+        *,
+        legacy_action_scores: str = "drop",
+        migration_mode: str = "strict",
+    ) -> "SharedState":
         """Construct a :class:`SharedState` from a raw mapping, migrating it.
 
         Acts as the unified migration entry point: an absent
-        ``schema_version`` is treated as 1, legacy keys are renamed to
-        their canonical form, and unknown keys are dropped. The operation
-        is idempotent and short-circuits when already at the latest schema.
+        ``schema_version`` is treated as 1 and unknown keys are dropped. The
+        operation is idempotent and short-circuits when already at the latest
+        schema.
 
         Args:
             raw: Decoded state mapping (e.g. from JSON on disk).
@@ -961,13 +978,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
-        # Migrate ``extra_sglang_args`` -> ``extra_server_args`` (+ candidate_) across all nested ledgers; next save emits canonical only.
         legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
         if legacy_migrations:
             migration_events.append(
                 f"extra_server_args rename: migrated {legacy_migrations} legacy "
-                f"extra_sglang_args / candidate_extra_sglang_args key(s) "
-                f"to extra_server_args / candidate_extra_server_args"
+                "extra_sglang_args / candidate_extra_sglang_args key(s)"
             )
 
         # Filter to known fields; unknown keys dropped, missing keys default.
@@ -994,14 +1009,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 legacy_seen.append((legacy, int(size)))
             filtered.pop(legacy, None)
         if legacy_seen:
-            mode = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES",
-                    "drop",
-                )
-                .strip()
-                .lower()
-            )
+            mode = str(legacy_action_scores or "drop").strip().lower()
             import logging as _logging
 
             log = _logging.getLogger(__name__)
@@ -1029,14 +1037,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         # fact-layer integrity check: strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
         if needs_migration and raw:
-            mode = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_MIGRATION_MODE",
-                    "strict",
-                )
-                .strip()
-                .lower()
-            )
+            mode = str(migration_mode or "strict").strip().lower()
             fact_layer_keys = (
                 "baseline_tput",
                 "baseline_cold_tput",
@@ -1119,7 +1120,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             dict[str, Any]: The normalized ``explore_search`` ledger with all
                 required keys defaulted and live history folded in.
         """
-        from ..actions.executors._grid_runner import variant_fingerprint as _fp
+        from ..actions.executors._canonical_fingerprint import canonical_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)
@@ -1727,21 +1728,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self,
         payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m._resolve_kernel_patch_identity(self, payload)
-
-    def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
-        return _m.kernel_patch_key(self, payload)
 
     def find_rejected_kernel_patch(
         self,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.find_rejected_kernel_patch(self, payload)
 
     @staticmethod
@@ -1780,8 +1776,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         keep_threshold_pct: float = 1.0,
         max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.record_kernel_integrate_result(
             self,
             result,
@@ -1791,49 +1787,49 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         )
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m._kernel_ids_in_optimization_stack(self)
 
     def _source_files_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m._source_files_in_optimization_stack(self)
 
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m._kernel_ids_with_integrate_attempts(self)
 
     def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.integrate_attempt_count_for_kernel(self, kernel_id)
 
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m._kernel_trace_impact_pct(self, kernel_id)
 
     def next_pending_keep_kernel_id(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.next_pending_keep_kernel_id(self)
 
     def pending_keep_kernel_ids(self) -> list[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.pending_keep_kernel_ids(self)
 
     @property
@@ -1843,13 +1839,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         This is separate from ``pending_integrate``, the integrate_patch
         crash-recovery sentinel.
         """
-        from ..kernel import request_handlers as _m
+        from ..kernel import _kernel_decisions as _m
         return _m.has_keep_pending_integrate(self)
 
     @property
     def kernel_opt_attempts_count(self) -> int:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.kernel_opt_attempts_count(self)
 
     # Hot-kernel report gate: report blocked until meaningful reusable hot kernels are attempted/rejected.
@@ -1859,8 +1855,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         min_gpu_pct: float | None = None,
         top_n: int | None = None,
     ) -> list[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ..kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
         return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
 
     # Per-action audit (kernel parity for non-kernel actions)
@@ -2592,9 +2588,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
-            # Watermark of validated gain at the moment this sweep ran, so a later
-            # SWEEP entry (cyclic reloop) can skip a redundant full sweep when no
-            # validated improvement landed since (see Coordinator._on_enter_sweep).
+            # Watermark of validated gain at the moment this manual/full sweep ran.
             "cumulative_gain_validated_at_record": float(
                 getattr(self, "cumulative_gain_validated", 0.0) or 0.0
             ),
@@ -2618,6 +2612,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "summary": dict(result.get("summary") or {}),
             "workspace": str(result.get("workspace") or ""),
         }
+        status = str(self.last_conc_sweep.get("status") or "").lower()
+        if status in ("succeeded", "partial", "completed") and not self.last_conc_sweep.get("was_skipped"):
+            self.last_conc_sweep_watermark = {
+                **self.last_conc_sweep,
+                "cumulative_gain_validated_at_record": float(
+                    getattr(self, "cumulative_gain_validated", 0.0) or 0.0
+                ),
+            }
 
 
 

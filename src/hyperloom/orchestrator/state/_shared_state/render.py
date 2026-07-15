@@ -58,8 +58,8 @@ class _RenderMixin:
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
     def _format_last_kernel_opt(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ...kernel import request_handlers as _m
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ...kernel import _kernel_decisions as _m
         return _m._format_last_kernel_opt(self)
 
     def to_intervention_mix_summary(self) -> str:
@@ -857,13 +857,14 @@ class _RenderMixin:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
-        # When inline injection is disabled, surface the structured digest above
-        # (profiler_digest=) and point at the show_analysis_md tool for the full
-        # report — saves context on long runs. Default keeps the verbatim md.
+        # Default surfaces the structured digest above (profiler_digest=) and
+        # points at the show_analysis_md tool for the full report — saves context
+        # on long runs. Set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to
+        # opt back into the verbatim md inline.
         if os.getenv(
             "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "1",
-        ).strip().lower() in ("0", "false", "off", "no"):
+            "0",
+        ).strip().lower() not in ("1", "true", "on", "yes"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
+from hyperloom.common.env import env_bool
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
@@ -27,6 +28,100 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 
 _KERNEL_AGENT_DEFAULT_MAX_TURNS = 5
+
+
+def _official_anthropic_only() -> bool:
+    """True when only the Anthropic-side endpoint is available."""
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_anthropic and not has_openai
+
+
+def _official_openai_only() -> bool:
+    """True when only the OpenAI-side endpoint is available."""
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
+def _deepseek_only() -> bool:
+    """True for a DeepSeek-keyed provider-only config with no Anthropic key.
+
+    DeepSeek is natively OpenAI-compatible, so its critic review runs over the
+    DeepSeek OpenAI endpoint rather than the native Anthropic Messages path.
+    An explicit Anthropic key takes precedence (official Anthropic wins).
+    """
+    has_deepseek = bool(
+        (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    has_anthropic_key = bool(
+        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+    )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_deepseek and not has_anthropic_key and not has_openai
+
+
+def _deepseek_openai_client_factory() -> Any:
+    """Build a factory that points the critic's OpenAI client at DeepSeek.
+
+    DeepSeek exposes an OpenAI-compatible ``/chat/completions`` API, so the
+    critic-agent's existing OpenAI review path works unchanged once the client
+    base URL / key are set to DeepSeek — without mutating the process env (which
+    would flip the provider-only routing decision for the other roles).
+
+    The OpenAI SDK appends the route to ``base_url`` verbatim (it does not
+    insert ``/v1``), so the default carries the conventional ``/v1`` suffix. An
+    explicit ``DEEPSEEK_BASE_URL`` is respected as-is (custom gateways may not
+    use ``/v1``).
+    """
+    base_url = (os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1").strip().rstrip("/")
+    api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+
+    def _factory() -> Any:
+        from openai import AsyncOpenAI  # local import: keep module import-light
+
+        return AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+    return _factory
+
+
+def _load_action_verdict_policy() -> dict[str, str]:
+    """Return the registry-derived per-action verdict policy (or empty on error).
+
+    Feeds ``review_constraints.action_verdict_policy[<action_name>]`` so the
+    critic-agent approves exploration / archival actions without demanding the
+    before/after evidence they themselves produce.
+    """
+    try:
+        from hyperloom.orchestrator.actions.registry import ActionRegistry
+
+        _reg = ActionRegistry().load()
+        return {a.name: a.verdict_class for a in _reg.all()}
+    except Exception:  # noqa: BLE001 — degrade to empty policy
+        return {}
 
 
 def _resolve_kernel_agent_max_turns() -> int:
@@ -63,6 +158,7 @@ def _build_backends(
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
     no_kernel: bool = False,
+    codex_follows_claude: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
@@ -99,32 +195,59 @@ def _build_backends(
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
+    provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
+    provider_openai_only = (not codex_follows_claude) and _official_openai_only()
+
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
+    elif provider_anthropic_only and critic_agent_root is not None:
+        # Provider-only (no OpenAI-compatible gateway): keep the FULL KB+tools
+        # critic-agent instead of degrading to plain Claude tool-use. The
+        # review inference is driven over the native provider endpoint:
+        #   - DeepSeek-only  -> DeepSeek's OpenAI-compatible /chat/completions
+        #   - Anthropic-only -> native Anthropic /v1/messages
+        # prepare-review / commit-review KB machinery is protocol-independent.
+        _policy = _load_action_verdict_policy()
+        if _deepseek_only():
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="openai",
+                codex_model=claude_model,
+                codex_client_factory=_deepseek_openai_client_factory(),
+                kb_mode=critic_kb_mode,
+                cortex_kb_url=cortex_kb_url,
+                action_verdict_policy=_policy,
+            )
+        else:
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="anthropic",
+                claude_model=claude_model,
+                codex_model=codex_model,
+                kb_mode=critic_kb_mode,
+                cortex_kb_url=cortex_kb_url,
+                action_verdict_policy=_policy,
+            )
+    elif provider_anthropic_only:
+        # Fallback only: the critic-agent runtime could not be resolved, so
+        # degrade to Claude tool-use. The critic system prompt still gates it to
+        # review_verdict / advice intents.
+        critic_backend = ClaudeBackend(
+            model=claude_model,
+            max_turns_default=4,
+        )
     else:  # "agent"
         if critic_agent_root is None:
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
-        # Feed the registry-derived per-action verdict policy so the
-        # critic-agent runtime sees
-        # ``review_constraints.action_verdict_policy[<action_name>]`` and
-        # approves exploration / archival actions without demanding the
-        # before/after evidence they themselves produce.
-        try:
-            from hyperloom.orchestrator.actions.registry import (
-                ActionRegistry,
-            )
-
-            _reg = ActionRegistry().load()
-            _policy = {a.name: a.verdict_class for a in _reg.all()}
-        except Exception:  # noqa: BLE001 — degrade to empty policy
-            _policy = {}
         critic_backend = CriticAgentBackend(
             critic_agent_root=critic_agent_root,
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
             cortex_kb_url=cortex_kb_url,
-            action_verdict_policy=_policy,
+            action_verdict_policy=_load_action_verdict_policy(),
         )
 
     if robustness_choice not in ("mock", "agent"):
@@ -140,29 +263,41 @@ def _build_backends(
             options=robustness_options,
         )
 
-    backends: dict[str, Any] = {
+    if provider_openai_only:
+        # Official OpenAI has no Anthropic/Claude-Code endpoint. Use the
+        # JSON-intent Codex backend for Orchestration so an OpenAI-only config
+        # can still drive the coordinator.
+        orchestration_backend: Any = CodexBackend(model=codex_model)
+    else:
         # Orchestration runs as a persistent ReAct conversation: the same
-        # Claude session is resumed across ticks so the
-        # model's plan / chain-of-thought persists instead of being
-        # re-derived from a full state dump each turn. The conversational
-        # floors (max_turns / call_timeout) are applied inside
-        # ClaudeBackend.__post_init__. kernel / critic / robustness keep
-        # the stateless per-tick reactor mode.
-        "orchestration": ClaudeBackend(
+        # Claude session is resumed across ticks so the model's plan persists.
+        orchestration_backend = ClaudeBackend(
             model=claude_model,
             max_turns_default=4,
             conversational=True,
-        ),
+        )
+
+    backends: dict[str, Any] = {
+        "orchestration": orchestration_backend,
         "critic": critic_backend,
         "robustness": robustness_backend,
     }
     if not no_kernel:
-        if kernel_codex:
-            backends["kernel_agent"] = CodexBackend(model=codex_model)
-        else:
+        if provider_anthropic_only:
             backends["kernel_agent"] = ClaudeBackend(
                 model=claude_model,
                 max_turns_default=_resolve_kernel_agent_max_turns(),
+            )
+        elif provider_openai_only or kernel_codex:
+            backends["kernel_agent"] = CodexBackend(model=codex_model)
+        else:
+            # Opt-in (default off): resume the kernel Claude session across LLM
+            # turns for prompt-cache continuity. Prompt composition is unchanged
+            # (still full state per turn) — this is resume-only, no delta.
+            backends["kernel_agent"] = ClaudeBackend(
+                model=claude_model,
+                max_turns_default=_resolve_kernel_agent_max_turns(),
+                conversational=env_bool("INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL", False),
             )
     return backends
 
@@ -173,16 +308,25 @@ def _build_proposal_scorer(
 ) -> ProposalScorer | None:
     """Construct the advisory specialist-proposal scorer, or ``None``.
 
-    Returns ``None`` when ``--no-proposal-scoring`` is set or the resolved
+    Disabled by default: returns ``None`` unless ``--proposal-scoring`` is
+    passed (``--no-proposal-scoring`` is the explicit off form and the
+    default). Even when enabled, still returns ``None`` in Anthropic-only
+    deployments (the scorer is OpenAI-compatible only) or when the resolved
     model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
     scorer is purely advisory and never gates anything.
+
+    The flag is not persisted across ``--resume``: a resumed session must
+    re-pass ``--proposal-scoring`` to keep scoring on. This is intentional --
+    scoring is advisory (it never gates or alters the search), so a resume
+    that omits it simply drops the reference signal without affecting
+    optimization correctness.
 
     ``session_dir`` is forwarded so the scorer can append its per-model
     token usage to the full-trace ledger (component=proposal_scorer); when
     omitted the scorer simply skips trace writes.
 
     Args:
-        args: Parsed CLI args (``no_proposal_scoring`` /
+        args: Parsed CLI args (``proposal_scoring`` /
             ``proposal_scorer_models``).
         session_dir: Optional session directory for token-usage trace writes.
 
@@ -190,7 +334,11 @@ def _build_proposal_scorer(
         A configured :class:`ProposalScorer`, or ``None`` when scoring is
         disabled or no models resolve.
     """
-    if getattr(args, "no_proposal_scoring", False):
+    if not getattr(args, "proposal_scoring", False):
+        return None
+    if _official_anthropic_only():
+        # ProposalScorer is OpenAI-compatible only; avoid calling official
+        # OpenAI with an Anthropic key in Anthropic-only deployments.
         return None
     raw = getattr(args, "proposal_scorer_models", None)
     if raw is None:

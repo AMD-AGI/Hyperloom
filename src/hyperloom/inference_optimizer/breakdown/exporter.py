@@ -17,8 +17,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json
+
 from . import collectors
 from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
+from ..session.session_paths import manifest_path, state_path
 
 log = logging.getLogger(__name__)
 
@@ -90,36 +93,25 @@ def _merge_phase_timeline(
     return base
 
 
-def _load_json(session_dir: Path, filename: str, warnings: list[str]) -> dict[str, Any]:
-    """Read ``<filename>`` from the session dir as a dict; ``{}`` + warning on failure.
+def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str, Any]:
+    """Read a session JSON file as a dict; ``{}`` + warning on failure.
 
     Args:
-        session_dir: The hyperloom session directory.
-        filename: File to read (e.g. ``state.json`` / ``manifest.json``).
+        path: File to read.
+        label: Human-readable file label for warning messages.
         warnings: Accumulator appended to when the file is missing or unparseable.
 
     Returns:
         The parsed JSON contents, or an empty dict on any failure.
     """
-    path = session_dir / filename
     if not path.exists():
-        warnings.append(f"{filename} missing at {path}")
+        warnings.append(f"{label} missing at {path}")
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return read_json(path, require_dict=True, strict=True)
     except Exception as exc:  # noqa: BLE001
-        warnings.append(f"failed to parse {filename}: {exc!r}")
+        warnings.append(f"failed to parse {label}: {exc!r}")
         return {}
-
-
-def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
-    return _load_json(session_dir, "state.json", warnings)
-
-
-def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``manifest.json`` as a plain dict; empty dict + warning when missing."""
-    return _load_json(session_dir, "manifest.json", warnings)
 
 
 _ROOFLINE_NUMERIC_FIELDS = (
@@ -194,6 +186,15 @@ def _attach_kernel_roofline(
                 disc[field] = rk.get(field)
 
 
+_DEFAULT_INCLUDE_TRANSCRIPTS = False
+
+
+def set_default_include_transcripts(value: bool) -> None:
+    """Set the process-local transcript inlining default for CLI runs."""
+    global _DEFAULT_INCLUDE_TRANSCRIPTS
+    _DEFAULT_INCLUDE_TRANSCRIPTS = bool(value)
+
+
 def build(
     session_dir: Path | str,
     *,
@@ -204,9 +205,8 @@ def build(
     Args:
         session_dir: hyperloom session directory (needs ``manifest.json``
             or ``state.json`` for usable output).
-        include_transcripts: inline specialist transcripts. ``None``
-            consults ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1``;
-            defaults to False since transcripts are large.
+        include_transcripts: inline specialist transcripts. ``None`` defaults
+            to False since transcripts are large.
 
     Returns:
         A dict matching :class:`schema.SessionBreakdown`.
@@ -214,13 +214,10 @@ def build(
     sd = Path(session_dir).resolve()
     warnings: list[str] = []
     if include_transcripts is None:
-        include_transcripts = os.environ.get(
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
-            "",
-        ).strip().lower() in ("1", "true", "yes")
+        include_transcripts = _DEFAULT_INCLUDE_TRANSCRIPTS
 
-    state = _load_state(sd, warnings)
-    manifest = _load_manifest(sd, warnings)
+    state = _load_session_json(state_path(sd), "state.json", warnings)
+    manifest = _load_session_json(manifest_path(sd), "manifest.json", warnings)
 
     # Author-time recorder fragments (write-side spool). When present they are
     # the source of truth for their section (they capture facts the collectors
@@ -305,21 +302,19 @@ def build(
         warnings,
         default=[],
     )
-    geak_c, oob_c, forge_c = _safe_collect(
+    geak_c, forge_c = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
         warnings,
-        default=([], [], []),
+        default=([], []),
     )
     geak_invocations = _pick("geak_invocations", geak_c)
-    oob_invocations = _pick("oob_invocations", oob_c)
     forge_invocations = _pick("forge_invocations", forge_c)
     capability_summary = _safe_collect(
         "capability_summary",
         lambda: collectors.collect_capability_summary(
             state,
             geak_invocations,
-            oob_invocations,
             warnings,
             forge_invocations,
         ),
@@ -331,7 +326,6 @@ def build(
             sd,
             state,
             geak_invocations,
-            oob_invocations,
             warnings,
             forge_invocations,
         ),
@@ -366,7 +360,6 @@ def build(
         lambda: collectors.collect_attribution(
             state,
             geak_invocations,
-            oob_invocations,
             kernel_lifecycle.get("adopted") or [],
             warnings,
             forge_invocations,
@@ -560,7 +553,6 @@ def build(
         "action_timeline": phase_timeline,
         "capability_summary": capability_summary,
         "geak_invocations": geak_invocations,
-        "oob_invocations": oob_invocations,
         "forge_invocations": forge_invocations,
         "kernel_lifecycle": kernel_lifecycle,
         "param_search": explore_search,

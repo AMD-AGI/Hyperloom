@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
-from hyperloom.common.payload_aliases import read_extra_server_args
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -21,6 +20,18 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 
+def _extra_server_args(payload: Mapping[str, Any]) -> str:
+    """Read canonical ``extra_server_args`` from a payload."""
+    value = payload.get("extra_server_args")
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
 class ProposalsCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
@@ -29,27 +40,6 @@ class ProposalsCollaborator:
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
-
-    def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
-        """Find the issue_node canonical_id this proposal addresses. Priority: payload gap_canonical_id → params gap_canonical_id → _gap_anchor_canonical_id.
-
-        Args:
-            pending: The pending proposal whose payload/params are searched for
-                a gap canonical id.
-
-        Returns:
-            The resolved gap canonical id, falling back to the workload anchor.
-        """
-        payload = pending.payload or {}
-        explicit_top = str(payload.get("gap_canonical_id") or "").strip()
-        if explicit_top:
-            return explicit_top
-        params = payload.get("params") or {}
-        if isinstance(params, dict):
-            explicit_params = str(params.get("gap_canonical_id") or "").strip()
-            if explicit_params:
-                return explicit_params
-        return self._gap_anchor_canonical_id()
 
     def _workload_canonical_id(self) -> str:
         """Canonical 5-tuple recipe id for the current workload. MUST match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
@@ -77,14 +67,6 @@ class ProposalsCollaborator:
             model_type=model_type,
             architectures=architectures,
         )
-
-    def _gap_anchor_canonical_id(self) -> str:
-        """Gap anchor: delegates to _workload_canonical_id so anchor and write target never diverge.
-
-        Returns:
-            The workload canonical recipe id used as the gap anchor.
-        """
-        return self._workload_canonical_id()
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
         """Load the authoritative local recipe row for amend/finalize writes.
@@ -120,11 +102,11 @@ class ProposalsCollaborator:
         params = task.params if isinstance(getattr(task, "params", None), dict) else {}
         attrs = variant_attrs if isinstance(variant_attrs, dict) else {}
 
-        args = read_extra_server_args(attrs)
+        args = _extra_server_args(attrs)
         if not args.strip():
-            args = read_extra_server_args(params)
+            args = _extra_server_args(params)
         if not args.strip() and isinstance(result_dict, dict):
-            args = read_extra_server_args(result_dict)
+            args = _extra_server_args(result_dict)
 
         envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
         if not envs_raw and isinstance(result_dict, dict):
@@ -154,7 +136,7 @@ class ProposalsCollaborator:
 
         live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
         live_has_config = bool(
-            read_extra_server_args(dict(live_bc)).strip()
+            _extra_server_args(live_bc).strip()
             or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
         )
         try:

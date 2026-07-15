@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+
 
 # Category vocabulary. Per-kernel outcome bucket; closed set (new categories
 # require a schema_version bump).
@@ -26,7 +28,7 @@ CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 CATEGORY_UNATTEMPTED = "UNATTEMPTED"
 
 #: Terminal kernel-outcome bucket. Closed 4-value set the dashboard reads
-#: directly (one uniform field across forge / geak / oob backends) instead of
+#: directly (one uniform field across forge / geak / forge backends) instead of
 #: re-deriving from decision/status strings. ``IN_FLIGHT`` (no terminal
 #: decision) folds into ``fail`` -- a completed session should never leave a
 #: kernel mid-flight.
@@ -179,8 +181,8 @@ FIELD_GLOSSARY: dict[str, str] = {
     "bound_type": ("Whether the kernel is limited by memory bandwidth (memory-bound) or compute (compute-bound)."),
     "compile_passed": (
         "True only if at least one backend in the ladder produced a "
-        "usable patch. False means the whole geak->claude->codex "
-        "ladder failed to produce any compiled artifact."
+        "usable patch. False means the whole backend ladder "
+        "failed to produce any compiled artifact."
     ),
     "backend_ladder": (
         "Per-backend outcome of the kernel-agent dispatch. "
@@ -948,7 +950,7 @@ def _build_top_takeaways(
     if ladder_all >= 1:
         out.append(
             f"Dominant failure mode: kernel-agent backend ladder "
-            f"(geak/claude/codex) failed completely for {ladder_all} "
+            f"(geak/forge) failed completely for {ladder_all} "
             "kernel(s) — no backend produced a usable patch. Inspect "
             "kernel-agent toolchain (build env, backend availability)."
         )
@@ -1011,18 +1013,17 @@ def _find_highest_impact_missed(
 def _to_float(v: Any) -> float | None:
     """Coerce a value to a 4-decimal float, or ``None`` on failure.
 
+    Wraps :func:`hyperloom.common.coerce.to_float` (rejects bool/None/dirty
+    input) and rounds the result to 4 decimals for the forensic report.
+
     Args:
         v: Arbitrary value to convert.
 
     Returns:
         The rounded float, or ``None`` if it cannot be parsed.
     """
-    if v is None:
-        return None
-    try:
-        return round(float(v), 4)
-    except (TypeError, ValueError):
-        return None
+    parsed = to_float(v)
+    return round(parsed, 4) if parsed is not None else None
 
 
 __all__ = [

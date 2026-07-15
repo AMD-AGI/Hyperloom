@@ -16,11 +16,15 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from hyperloom.common.llm_config import claude_sdk_env_options, openai_client_kwargs
+from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,6 +34,25 @@ sys.path.pop(0)
 
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
+_OPENAI_TOOL_TIMEOUT_SEC = 300.0
+_OPENAI_MAX_TOOL_TURNS = 50
+_OPENAI_ALLOWED_COMMANDS: frozenset[str] = frozenset(
+    {
+        "python",
+        "python3",
+        "TraceLens_generate_perf_report_pytorch",
+        "TraceLens_generate_perf_report_pytorch_inference",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _OpenAIToolScope:
+    """Filesystem and command scope for OpenAI/Codex TraceLens tools."""
+
+    tracelens_root: Path
+    output_dir: Path
+    read_roots: tuple[Path, ...]
 
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query
 # has no client-side read timeout, so a gateway that returns a partial response
@@ -306,7 +329,7 @@ Important requirements:
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
    - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
-6. Do not run GEAK, OOB kernel optimization, or modify model/framework source.
+6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
 """
@@ -332,6 +355,321 @@ def _import_sdk() -> tuple[Any, Any]:
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
+
+
+def _should_use_openai_tool_runner() -> bool:
+    """Return true when only an OpenAI-compatible provider is configured."""
+    has_openai = bool((os.environ.get("OPENAI_API_KEY") or "").strip() or (os.environ.get("OPENAI_BASE_URL") or "").strip())
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
+def _openai_tool_schemas() -> list[dict[str, Any]]:
+    """Tool palette for the OpenAI/Codex TraceLens runner."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a UTF-8 text file from disk.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write UTF-8 text to a file, creating parent directories.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "List entries in a directory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_shell",
+                "description": "Run an allowlisted TraceLens command as argv, without a shell.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "timeout_s": {"type": "number"},
+                    },
+                    "required": ["argv"],
+                },
+            },
+        },
+    ]
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    """Return whether ``path`` is contained by ``root`` after resolution."""
+    try:
+        resolved = path.resolve(strict=False)
+        resolved_root = root.resolve(strict=False)
+    except OSError:
+        return False
+    return resolved == resolved_root or resolved_root in resolved.parents
+
+
+def _resolve_tool_path(raw: str, *, cwd: Path, allowed_roots: tuple[Path, ...]) -> Path:
+    """Resolve a tool path and require it to live under an allowed root."""
+    if not str(raw or "").strip():
+        raise PermissionError("path is required")
+    path = Path(str(raw)).expanduser()
+    resolved = path if path.is_absolute() else cwd / path
+    if not any(_path_is_under(resolved, root) for root in allowed_roots):
+        raise PermissionError(f"path outside allowed roots: {resolved}")
+    return resolved
+
+
+def _validate_openai_command_argv(argv: Any, *, scope: _OpenAIToolScope) -> list[str]:
+    """Validate an OpenAI TraceLens command argv without permitting shell injection."""
+    if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
+        raise PermissionError("run_shell requires non-empty argv: list[str]")
+    exe = Path(argv[0]).name
+    if exe not in _OPENAI_ALLOWED_COMMANDS:
+        raise PermissionError(f"command not allowed: {exe}")
+    if exe in {"python", "python3"}:
+        if any(part in {"-c", "-m"} for part in argv[1:]):
+            raise PermissionError("python -c/-m is not allowed")
+        script_args = [part for part in argv[1:] if part.endswith(".py")]
+        if not script_args:
+            raise PermissionError("python command must name a .py script")
+        _resolve_tool_path(script_args[0], cwd=scope.tracelens_root, allowed_roots=(scope.tracelens_root,))
+    return argv
+
+
+def _execute_openai_tool(name: str, arguments_json: str, *, scope: _OpenAIToolScope) -> str:
+    """Execute one local tool call for the OpenAI/Codex TraceLens runner."""
+    try:
+        args = json.loads(arguments_json or "{}")
+    except json.JSONDecodeError as exc:
+        return json.dumps({"ok": False, "error": f"invalid JSON arguments: {exc}"})
+    try:
+        if name == "read_file":
+            path = _resolve_tool_path(str(args.get("path") or ""), cwd=scope.tracelens_root, allowed_roots=scope.read_roots)
+            return json.dumps({"ok": True, "path": str(path), "content": path.read_text(encoding="utf-8", errors="replace")})
+        if name == "write_file":
+            path = _resolve_tool_path(
+                str(args.get("path") or ""),
+                cwd=scope.output_dir,
+                allowed_roots=(scope.output_dir,),
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(args.get("content") or ""), encoding="utf-8")
+            return json.dumps({"ok": True, "path": str(path), "bytes": path.stat().st_size})
+        if name == "list_dir":
+            path = _resolve_tool_path(str(args.get("path") or "."), cwd=scope.tracelens_root, allowed_roots=scope.read_roots)
+            entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+            return json.dumps({"ok": True, "path": str(path), "entries": entries[:500]})
+        if name == "run_shell":
+            argv = _validate_openai_command_argv(args.get("argv"), scope=scope)
+            timeout_s = float(args.get("timeout_s") or _OPENAI_TOOL_TIMEOUT_SEC)
+            timeout_s = max(1.0, min(timeout_s, _OPENAI_TOOL_TIMEOUT_SEC))
+            proc = subprocess.run(
+                argv,
+                cwd=str(scope.tracelens_root),
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            return json.dumps(
+                {
+                    "ok": proc.returncode == 0,
+                    "returncode": proc.returncode,
+                    "stdout": proc.stdout[-8000:],
+                    "stderr": proc.stderr[-8000:],
+                }
+            )
+        return json.dumps({"ok": False, "error": f"unknown tool: {name}"})
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _openai_assistant_message(msg: Any) -> dict[str, Any]:
+    """Serialize an OpenAI assistant message with tool calls for replay."""
+    return {
+        "role": "assistant",
+        "content": getattr(msg, "content", None),
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in (getattr(msg, "tool_calls", None) or [])
+            if getattr(tc, "function", None) is not None
+        ],
+    }
+
+
+def _usage_value(usage: Any, name: str) -> int:
+    value = getattr(usage, name, None)
+    if value is None and isinstance(usage, dict):
+        value = usage.get(name)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _run_tracelens_skill_openai(
+    *,
+    prompt: str,
+    skill_path: Path,
+    trace_path: Path,
+    output_dir: Path,
+    prefix_path: Path,
+    tracelens_root: Path,
+    model: str,
+    openai_client_factory: Callable[[], Any] | None,
+    log: Callable[[str], None] | None,
+) -> TraceLensSkillRunResult:
+    """Run the TraceLens skill through OpenAI/Codex chat-completions tools."""
+    if openai_client_factory is not None:
+        client = openai_client_factory()
+    else:
+        try:
+            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("openai SDK not installed; run `pip install openai>=1.50`") from exc
+        client = AsyncOpenAI(**openai_client_kwargs())
+
+    system_prompt = (
+        "You are a TraceLens analysis runner inside Hyperloom. Use the provided "
+        "local tools to inspect files, run TraceLens commands, and write the "
+        "required analysis.md report. Do not modify model/framework source."
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    transcript_path = output_dir / "agent_transcript.jsonl"
+    transcript_written = False
+    chunks: list[str] = []
+    usage_in = 0
+    usage_out = 0
+    tools = _openai_tool_schemas()
+    scope = _OpenAIToolScope(
+        tracelens_root=tracelens_root,
+        output_dir=output_dir,
+        read_roots=tuple(
+            dict.fromkeys(
+                [
+                    tracelens_root,
+                    output_dir,
+                    skill_path.parent,
+                    trace_path.parent,
+                ]
+            )
+        ),
+    )
+
+    with transcript_path.open("w", encoding="utf-8") as transcript_fh:
+        for turn in range(_OPENAI_MAX_TOOL_TURNS):
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "max_completion_tokens": 2000,
+            }
+            resp = await client.chat.completions.create(**kwargs)
+            usage = getattr(resp, "usage", None)
+            usage_in += _usage_value(usage, "prompt_tokens")
+            usage_out += _usage_value(usage, "completion_tokens")
+            choice = resp.choices[0]
+            msg = choice.message
+            content = getattr(msg, "content", None) or ""
+            if content:
+                chunks.append(str(content))
+                if log:
+                    log(f"[codex-tracelens] {str(content)[:1000]}")
+            tool_calls = list(getattr(msg, "tool_calls", None) or [])
+            record = {
+                "seq": turn,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "type": "OpenAIChatCompletion",
+                "content": content,
+                "tool_calls": _openai_assistant_message(msg).get("tool_calls", []),
+                "usage": {"input_tokens": usage_in, "output_tokens": usage_out},
+            }
+            transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            transcript_fh.flush()
+            transcript_written = True
+            if not tool_calls:
+                break
+            messages.append(_openai_assistant_message(msg))
+            for tc in tool_calls:
+                result = _execute_openai_tool(tc.function.name, tc.function.arguments, scope=scope)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                transcript_fh.write(
+                    json.dumps(
+                        {
+                            "seq": f"{turn}:tool:{tc.id}",
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "type": "ToolResult",
+                            "tool": tc.function.name,
+                            "result": _cap_str(result),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        else:
+            if log:
+                log(f"[codex-tracelens] WARNING: reached max tool turns {_OPENAI_MAX_TOOL_TURNS}")
+
+    report_path = output_dir / "analysis.md"
+    if not report_path.exists():
+        raise RuntimeError(f"TraceLens OpenAI runner did not write {report_path}")
+    artifact_paths = {
+        "tracelens_agent_report": str(report_path),
+        "tracelens_cmd_prefix": str(prefix_path),
+    }
+    if transcript_written:
+        artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
+    else:
+        transcript_path.unlink(missing_ok=True)
+    return TraceLensSkillRunResult(
+        output_dir=output_dir,
+        report_path=report_path,
+        raw_text="\n".join(chunks),
+        artifact_paths=artifact_paths,
+    )
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
@@ -505,6 +843,7 @@ async def run_tracelens_skill(
     model: str | None = None,
     sdk_query_factory: Callable[..., Any] | None = None,
     sdk_options_cls: Any | None = None,
+    openai_client_factory: Callable[[], Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
     """Execute the standalone TraceLens skill with Claude SDK.
@@ -530,6 +869,8 @@ async def run_tracelens_skill(
             factory (used by tests); imported from the SDK when ``None``.
         sdk_options_cls (Any | None): Optional injected options class (used by
             tests); imported from the SDK when ``None``.
+        openai_client_factory (Callable[[], Any] | None): Optional injected
+            OpenAI-compatible client factory for OpenAI-only tests.
         log (Callable[[str], None] | None): Optional logging callback.
 
     Returns:
@@ -552,6 +893,21 @@ async def run_tracelens_skill(
         analysis_mode=analysis_mode,
         capture_folder=capture_folder,
     )
+
+    resolved_model = (model or "").strip()
+    if _should_use_openai_tool_runner():
+        openai_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+        return await _run_tracelens_skill_openai(
+            prompt=prompt,
+            skill_path=skill_path,
+            trace_path=trace_path,
+            output_dir=output_dir,
+            prefix_path=prefix_path,
+            tracelens_root=tracelens_root,
+            model=openai_model,
+            openai_client_factory=openai_client_factory,
+            log=log,
+        )
 
     if sdk_query_factory is None or sdk_options_cls is None:
         query, options_cls = _import_sdk()
@@ -580,10 +936,11 @@ async def run_tracelens_skill(
     }
     # Defensive fallback for full-suite/test-order runs where module globals can
     # be mutated; keep model resolution stable even if DEFAULT_MODEL is missing.
-    resolved_model = (model or "").strip() or str(globals().get("DEFAULT_MODEL", "claude-opus-4-7")).strip()
+    resolved_model = resolved_model or str(globals().get("DEFAULT_MODEL", "claude-opus-4-8")).strip()
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)
+    kwargs.update(claude_sdk_env_options(model=resolved_model))
 
     try:
         options = sdk_options_cls(**kwargs)

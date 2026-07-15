@@ -419,7 +419,6 @@ import json
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
@@ -451,7 +450,7 @@ def _silent_backends() -> dict[str, object]:
     )
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -719,7 +718,8 @@ def test_strip_reduces_real_r1_report_by_90pct_plus():
     assert "fmoe_fp8_blockscale_g1u1" in stripped or "MoE" in stripped
 
 
-def test_format_analysis_md_full_strips_base64_before_injection():
+def test_format_analysis_md_full_strips_base64_before_injection(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
     s = SharedState()
     s.last_trace_analyze = {
         "roofline_snapshot_id": 1,
@@ -742,7 +742,24 @@ def test_format_analysis_md_full_strips_base64_before_injection():
     assert "=== End TraceLens Analysis ===" in rendered
 
 
-def test_format_analysis_md_full_no_strip_when_no_image():
+def test_format_analysis_md_full_defaults_to_pointer_not_inline(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", raising=False)
+    s = SharedState()
+    s.last_trace_analyze = {
+        "roofline_snapshot_id": 7,
+        "roofline_baseline_gain_at_snapshot": 3.0,
+        "analysis_md_text": "# Report\nverbatim body text\n",
+        "analysis_md_path": "/p/analysis.md",
+    }
+    rendered = s._format_analysis_md_full()
+    # Default is now digest-only: a pointer, not the verbatim md body.
+    assert "verbatim body text" not in rendered
+    assert "show_analysis_md" in rendered
+    assert "snapshot #7" in rendered
+
+
+def test_format_analysis_md_full_no_strip_when_no_image(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
     s = SharedState()
     s.last_trace_analyze = {
         "roofline_snapshot_id": 1,

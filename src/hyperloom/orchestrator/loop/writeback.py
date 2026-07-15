@@ -7,7 +7,7 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any
-from hyperloom.common.payload_aliases import read_extra_server_args
+from hyperloom.common.coerce import to_float
 from ..state.optimization_journal import (
     Journal,
     classify_change_kind,
@@ -21,7 +21,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,
-    _merge_cumulative_extra_sglang_args,
+    _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
     _geak_revalidation_decision,
@@ -211,9 +211,9 @@ class WritebackCollaborator:
             self.shared_state.seed_stack_from_current_best()
 
         cb = self.shared_state.current_best or {}
-        # Read result via the compat helper (handles legacy extra_sglang_args); cb is migrated at load time.
         extra_args = (
-            read_extra_server_args(result) or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
+            str(result.get("extra_server_args") or "")
+            or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
         ).strip()
         apply_result = result.get("apply_result") or {}
         backup_manifest = apply_result.get("manifest_path") if isinstance(apply_result, dict) else None
@@ -332,7 +332,9 @@ class WritebackCollaborator:
             result: The task result payload; ``None`` is treated as an empty
                 result.
         """
-        result_payload = result or {}
+        result_payload = dict(result or {})
+        if task.kind == "conc_sweep" and not result_payload.get("status"):
+            result_payload["status"] = "failed"
         any_changed = False
         # Per-action audit (failed attempt) for the 6 in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
@@ -356,6 +358,26 @@ class WritebackCollaborator:
             result=result_payload,
         )
         any_changed = True
+        if task.kind == "conc_sweep":
+            self.shared_state.record_action_attempt(
+                action="conc_sweep",
+                task_id=task.task_id,
+                status=str(result_payload.get("status") or "failed"),
+                decision="discarded",
+                result=result_payload,
+                extras={
+                    "was_skipped": bool(result_payload.get("was_skipped", False)),
+                    "skip_reason": result_payload.get("skip_reason"),
+                    "budget_exhausted": bool(result_payload.get("budget_exhausted", False)),
+                    "total_budget_sec": result_payload.get("total_budget_sec"),
+                    "elapsed_sec": result_payload.get("elapsed_sec"),
+                    "best_speedup": ((result_payload.get("summary") or {}).get("best_speedup")),
+                    "best_conc": ((result_payload.get("summary") or {}).get("best_conc")),
+                    "successful_pairs": ((result_payload.get("summary") or {}).get("successful_pairs")),
+                    "report_path": result_payload.get("report_json_path"),
+                },
+            )
+            self.shared_state.record_conc_sweep(result_payload)
         # FRAMEWORK apply/bench silent failure: a
         # framework_agent task that settles ``status="failed"`` (or empty) never
         # reaches the promote branch that writes the terminal progress row, so
@@ -651,14 +673,8 @@ class WritebackCollaborator:
         for src in sources:
             if not isinstance(src, dict):
                 continue
-            raw = src.get("predicted_gain_pct")
-            if raw is None:
-                continue
-            try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if val != 0.0:
+            val = to_float(src.get("predicted_gain_pct"))
+            if val is not None and val != 0.0:
                 return val
         return None
 
@@ -761,9 +777,9 @@ class WritebackCollaborator:
             candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or bv.get("extra_sglang_args") or "").strip()
+            full_args = str(bv.get("extra_server_args") or "").strip()
         # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
-        full_args = _merge_cumulative_extra_sglang_args(
+        full_args = _merge_cumulative_extra_server_args(
             base_args,
             candidate_args,
             full_args,
@@ -929,6 +945,9 @@ class WritebackCollaborator:
             warm_runtime_raw = result.get("measure_round_runtime_sec")
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
+                changed = True
+            elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
+                self.shared_state.baseline_warm_runtime_sec = 0.0
                 changed = True
             # current_best.tput follows the same hot baseline contract.
             # run_grid/explore/integrate_patch measure optimization candidates
@@ -1212,36 +1231,22 @@ class WritebackCollaborator:
                         min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
                     if decision == "validated":
-                        if self._geak_legacy_promote():
-                            # Legacy: current_best/stack were written up front by
-                            # the provisional promote; here we only stamp the
-                            # same-harness validated watermark.
-                            self.shared_state.cumulative_gain_validated = (
-                                (float(measured) - self.shared_state.baseline_tput)
-                                / self.shared_state.baseline_tput
-                                * 100.0
+                        # Rebench-first: THIS is where the headline is first
+                        # written - from the measured orchestrator-harness
+                        # rebench. Lifts current_best + optimization_stack +
+                        # the validated gain and clears geak_pending.
+                        ps = (
+                            self.shared_state.geak_result
+                            if isinstance(
+                                getattr(self.shared_state, "geak_result", None), dict
                             )
-                            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                            self.shared_state.cumulative_gain_provenance = "geak_orch_harness_validated"
-                            self.shared_state.resume_pending_revalidation = False
-                        else:
-                            # Rebench-first: THIS is where the headline is first
-                            # written - from the measured orchestrator-harness
-                            # rebench. Lifts current_best + optimization_stack +
-                            # the validated gain and clears geak_pending.
-                            ps = (
-                                self.shared_state.geak_result
-                                if isinstance(
-                                    getattr(self.shared_state, "geak_result", None), dict
-                                )
-                                else {}
-                            )
-                            self._promote_geak_from_candidate(
-                                ps,
-                                measured_tput=float(measured),
-                                provenance="geak_orch_harness_validated",
-                            )
+                            else {}
+                        )
+                        self._promote_geak_from_candidate(
+                            ps,
+                            measured_tput=float(measured),
+                            provenance="geak_orch_harness_validated",
+                        )
                     else:
                         # 2b inconclusive (config-identity or engagement) -> GEAK
                         # harness replay (2a). Leaves pending flag set; 2a clears
@@ -1268,13 +1273,7 @@ class WritebackCollaborator:
                         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                         cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                         recorded = cb_rec.get("tput")
-                        try:
-                            floor = float(
-                                os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
-                                or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                            )
-                        except (TypeError, ValueError):
-                            floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                         if (
                             isinstance(recorded, (int, float))
                             and recorded > 0

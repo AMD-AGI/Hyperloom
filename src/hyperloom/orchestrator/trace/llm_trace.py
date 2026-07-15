@@ -59,8 +59,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "robustness",
         "proposal_scorer",
         "geak",
-        "geak_v3",
-        "oob",
         "forge",
         "tracelens",
         "breakdown",
@@ -88,6 +86,7 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "cache_read_input_tokens",
         "latency_ms",
         "reviewed_msg_ids",
+        "resume_downgraded",
     }
 )
 
@@ -155,6 +154,9 @@ class LLMCallRecord:
     # single materialized proposal can be attributed to that decision instead of
     # falling into the overhead bucket. ``None`` for every non-critic producer.
     reviewed_msg_ids: list[str] | None = None
+    # True when a conversational turn's ``resume=`` was rejected by the SDK and
+    # dropped to a stateless call (Claude only); ``None`` for every other case.
+    resume_downgraded: bool | None = None
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs).
@@ -183,6 +185,7 @@ class LLMCallRecord:
             "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
             "latency_ms": _coerce_optional_int(self.latency_ms),
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
+            "resume_downgraded": self.resume_downgraded,
         }
 
     @classmethod
@@ -239,6 +242,7 @@ class LLMCallRecord:
             cache_creation_input_tokens=md.get("cache_creation_input_tokens"),
             cache_read_input_tokens=md.get("cache_read_input_tokens"),
             latency_ms=latency_ms if latency_ms is not None else md.get("latency_ms"),
+            resume_downgraded=md.get("resume_downgraded"),
         )
 
 
@@ -260,17 +264,6 @@ def _coerce_optional_str_list(value: Any) -> list[str] | None:
             return None
     out = [s for s in (str(v).strip() for v in items) if s]
     return out or None
-
-
-def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the llm_calls closed schema."""
-    validate_closed_row(
-        row,
-        fields=_ROW_FIELDS,
-        valid_components=VALID_COMPONENTS,
-        error_cls=LLMTraceRowError,
-        label="llm_calls",
-    )
 
 
 def append_llm_call(
@@ -305,7 +298,13 @@ def append_llm_call(
         LLMTraceRowError: If the serialized row violates the closed schema.
     """
     row = record.to_row()
-    _validate_row(row)
+    validate_closed_row(
+        row,
+        fields=_ROW_FIELDS,
+        valid_components=VALID_COMPONENTS,
+        error_cls=LLMTraceRowError,
+        label="llm_calls",
+    )
     dest = llm_calls_path(session_dir)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)

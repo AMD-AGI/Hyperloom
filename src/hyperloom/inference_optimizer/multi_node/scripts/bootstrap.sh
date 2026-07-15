@@ -59,7 +59,7 @@ echo "bootstrap.sh: writing $ENV_FILE"
     for k in AMD_LLM_API_KEY LLM_API_KEY LLM_GATEWAY_KEY GEAK_API_KEY \
              ANTHROPIC_API_KEY OPENAI_API_KEY SAFE_API_KEY \
              LLM_API_BASE GEAK_BASE_URL ANTHROPIC_BASE_URL OPENAI_BASE_URL \
-             ANTHROPIC_CUSTOM_HEADERS; do
+             ANTHROPIC_CUSTOM_HEADERS OPENAI_CUSTOM_HEADERS; do
         v="${!k:-}"
         if [ -n "$v" ]; then
             # Single-quote the value verbatim so embedded `$`/`"` don't

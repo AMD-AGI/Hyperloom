@@ -388,7 +388,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
-    build_specialist_prompts_for_domain,
 )
 
 
@@ -763,10 +762,17 @@ def test_research_lane_has_no_conflicts():
 
 
 # 6. specialist_prompt_builder — 9-section assembly
+def _build_serving_prompt(**kwargs: Any) -> tuple[str, str]:
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    return build_specialist_prompts(
+        SpecialistPromptInputs(domain=domain, **kwargs)
+    )
+
+
 def test_prompt_builder_emits_nine_sections():
-    sys_p, usr_p = build_specialist_prompts_for_domain(
+    sys_p, usr_p = _build_serving_prompt(
         task_id="task-001",
-        domain_key="serving_specialist",
         gap_canonical_id="gap.scheduler.long_isl",
         gpu_type="MI300X",
         tp=8,
@@ -785,29 +791,19 @@ def test_prompt_builder_emits_nine_sections():
 
 
 def test_prompt_builder_uses_none_placeholder_for_empty_sections():
-    sys_p, usr_p = build_specialist_prompts_for_domain(
+    sys_p, usr_p = _build_serving_prompt(
         task_id="task-002",
-        domain_key="serving_specialist",
     )
     # Several user-side sections will be empty → "(none)" placeholder.
     assert "(none)" in usr_p
 
 
 def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
-    sys_p, usr_p = build_specialist_prompts_for_domain(
+    sys_p, usr_p = _build_serving_prompt(
         task_id="task-003",
-        domain_key="serving_specialist",
         pr_monitor_available=False,
     )
     assert "unavailable" in usr_p
-
-
-def test_prompt_builder_unknown_domain_raises():
-    with pytest.raises(ValueError, match="unknown specialist domain"):
-        build_specialist_prompts_for_domain(
-            task_id="t",
-            domain_key="nope_specialist",
-        )
 
 
 # 7. SpecialistRunner — happy path + failure synth

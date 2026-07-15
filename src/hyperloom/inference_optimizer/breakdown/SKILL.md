@@ -31,15 +31,15 @@ The JSON has 14 top-level sections plus envelope:
 | `baseline`           | Baseline throughput / accuracy / latency, config path, benchmark report path, failure streak.            |
 | `final`              | `current_best` throughput, validated cumulative gain, action path, extra args/envs.                      |
 | `phase_timeline`     | Chronological list of every action attempt + kernel_opt + integrate event.                               |
-| `capability_summary` | One row per live capability: geak / oob / explore / sweep / specialist, plus legacy rows kept for archived sessions. |
+| `capability_summary` | One row per live capability: geak / forge / explore / sweep / specialist, plus legacy rows kept for archived sessions. |
 | `geak_invocations`   | Per-attempt detail: prompt path, optimized files, verification, decision, micro_speedup.                 |
-| `oob_invocations`    | Same schema as `geak_invocations`, with `backend ∈ {claude, codex}`.                                     |
+| `forge_invocations`  | Per-attempt detail for the forge backend.                                                               |
 | `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
 | `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
 | `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
 | `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
 | `telemetry`          | Paths to `benchmark_report.json` / `torch_trace` / `system_profile` / server logs + aggregated GPU monitor. |
-| `attribution`        | Per-stack-entry gain ledger + family breakdown (geak / oob / explore / sweep / legacy aliases).          |
+| `attribution`        | Per-stack-entry gain ledger + family breakdown (geak / forge / explore / sweep / legacy aliases).        |
 | `warnings`           | Best-effort caveats (missing files, partial sections, reconstructed fields).                             |
 | `source_files`       | Mapping from logical section to relative path under `session_dir`.                                       |
 
@@ -133,7 +133,7 @@ another (each becomes a `warnings[]` entry instead).
 | `phase_timeline`     | `state.{<action>_attempts, kernel_opt_attempts.history, kernel_integrate_attempts.attempts}` sorted by `ts`           |
 | `capability_summary` | Reduces invocations + per-action attempts + search ledgers into 6 rows                                              |
 | `geak_invocations`   | `kernel-agent/runs/<sid>/{optimization_attempts.jsonl, prompts/, optimized/, results/, verification/}` filtered by `backend == "geak"` (also scans legacy `kernel-agent-workspace/.../kernel-agent/runs/...` for historical sessions). Per-attempt files under `optimized/` are discovered by `glob("<attempt_id>*")`, so both the historical `<attempt_id>_optimized.<suffix>` name and the post-2026-05 `<attempt_id>_stdout.log` name are picked up transparently — see `kernel-agent/SKILL.md` § *Per-attempt stdout file naming*. |
-| `oob_invocations`    | Same as GEAK, filtered by `backend ∈ {claude, codex}`                                                                |
+| `forge_invocations`  | Same as GEAK, filtered by `backend == "forge"`                                                                        |
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
 | `param_search`       | `state.{explore_search, params_winner_history, synergy_attempted, discovered_flags, backend_winners_history}`; `params` / `backends` ledgers are historical aliases only |
 | `sweep`              | `state.last_sweep` + `runs/sweep/<task>/variant_*/benchmark_*/benchmark_report.json`                                |
@@ -160,7 +160,7 @@ another (each becomes a `warnings[]` entry instead).
 | `warnings: ["state.json missing"]`                 | Session was created (manifest written) but `Coordinator.save()` never ran                        | Sections fall back to manifest-only data.                                                  |
 | `warnings: ["manifest.json missing"]`              | Session was created without the standard cli.py path (rare)                                      | `session.session_id` falls back to `state.session_id`.                                     |
 | `attribution.notes ≠ []`                            | `Coordinator` did not write `state.gain_per_stack_entry`                                         | Attribution is reconstructed from `optimization_stack`; consumer should treat as approximate. |
-| Empty `geak_invocations` & `oob_invocations`        | Kernel-agent never ran, or wrote to a non-standard workspace                                     | Verify `$SD/kernel-agent/runs/` exists (or, for pre-migration sessions, `$SD/kernel-agent-workspace/kernel-agent/runs/`). |
+| Empty `geak_invocations` & `forge_invocations`      | Kernel-agent never ran, or wrote to a non-standard workspace                                     | Verify `$SD/kernel-agent/runs/` exists (or, for pre-migration sessions, `$SD/kernel-agent-workspace/kernel-agent/runs/`). |
 | `kernel_lifecycle.detected = []`                    | `profile` action never ran or its `benchmark_report.json` had no `kernel_summary`                | Re-run profile, or fall back to `recommended` from `state.last_trace_analyze`.            |
 | Large `warnings[]`                                   | Multiple JSON parse failures on `optimization_attempts.jsonl`                                    | Inspect `kernel-agent-workspace/.../logs/` for the corresponding kernel-agent CLI logs.    |
 

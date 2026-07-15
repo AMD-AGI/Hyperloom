@@ -565,80 +565,7 @@ def run_with_session_kill(
     detok_stall_grace_sec: float | None = None,
     server_already_ready: bool = False,
 ) -> subprocess.CompletedProcess:
-    """``subprocess.run``-compatible call that ALSO tears down the entire
-    descendant tree on every exit path.
-
-    Unlike ``subprocess.run`` (which discards the Popen handle and can't reach
-    leaked grandchildren — the known server leak), this launches via
-    ``Popen(start_new_session=True)`` and reaps the tree in a ``finally:``.
-    Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
-    ``subprocess.run``.
-
-    ``soft_deadline_sec``: an optional deadline firing before the
-    ``timeout=`` hard cap; on elapse the tree is reaped and a
-    ``CompletedProcess`` with ``returncode = OVERTIME_KILL_RETURNCODE`` is
-    returned (does NOT raise). ``None`` / ≤ 0 keeps legacy behaviour. Tests
-    should patch this function instead of ``subprocess.run``.
-
-    ``server_log_path`` (server-liveness watchdog): when set, the spawned
-    server's ``server.log`` is scanned each poll slice for terminal engine /
-    worker init failures; once a marker persists past ``server_dead_grace_sec``
-    (default ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC`` or 120s) the tree is
-    reaped and a ``CompletedProcess`` with
-    ``returncode = SERVER_DEAD_RETURNCODE`` is returned (does NOT raise). This
-    turns a crashed-but-hung server (parent never exits, ``/health`` polled
-    forever) into a fast fail instead of a ~2h hard-timeout stall.
-
-    ``server_log_path`` (detokenizer-stall watchdog): when set, ``server.log``
-    is ALSO watched for the ready-then-silent pattern — the server logs a clean
-    startup (``/health`` 200) and then stops writing to the log entirely for
-    ``detok_stall_grace_sec`` (default
-    ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` or 1800s). The clock is
-    measured from the ready marker, so the cold start (weight load + CUDA-graph
-    capture, all before "ready") is never counted, and ANY new log line —
-    decode throughput or a slow first-request JIT/compile — resets it. On trip
-    the tree is reaped and a ``CompletedProcess`` with
-    ``returncode = DETOKENIZER_STALL_RETURNCODE`` is returned (does NOT raise),
-    so a variant whose engine hangs fails in minutes instead of burning the
-    full hard timeout.
-
-    Args:
-        cmd: The command and arguments to execute.
-        env: Optional environment mapping for the child process.
-        cwd: Optional working directory for the child process.
-        timeout: Hard timeout in seconds; ``TimeoutExpired`` is re-raised on
-            elapse, as with ``subprocess.run``.
-        text: Whether to capture stdout/stderr as ``str`` (vs ``bytes``).
-        soft_deadline_sec: Optional deadline firing before ``timeout``; on
-            elapse the tree is reaped and ``OVERTIME_KILL_RETURNCODE`` is
-            returned without raising.
-        server_log_path: Optional path to the spawned server's ``server.log``
-            to enable the server-liveness + detokenizer-stall watchdogs.
-        server_dead_grace_sec: Grace period a terminal init marker must persist
-            before the watchdog reaps the tree; defaults to the
-            ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC`` env value or 120s.
-        detok_stall_grace_sec: Grace period a ready server may produce no
-            generation progress before the stall watchdog reaps the tree;
-            defaults to the ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` env
-            value or ``_DETOK_STALL_GRACE_SEC_DEFAULT`` (1800s). ``≤ 0``
-            disables the stall gate.
-        server_already_ready: Set ``True`` for warm *reuse* rounds (client-only
-            runs that re-attach to a server booted by a prior subprocess). Such
-            a process never boots a server, so it never writes a ready marker to
-            its own ``server.log`` — the from-ready ``soft_deadline_sec`` clock
-            would never arm, leaving a pathological post-sample server drain
-            bounded only by the hard ``timeout``. When ``True`` the soft-deadline
-            clock measures from process spawn instead (the reused server is
-            already serving; there is no cold-boot phase to exclude).
-
-    Returns:
-        A ``CompletedProcess`` carrying the child's returncode (or one of the
-        sentinel returncodes when a soft deadline or the watchdog fired) plus
-        its captured stdout/stderr.
-
-    Raises:
-        subprocess.TimeoutExpired: When the hard ``timeout`` elapses.
-    """
+    """Run a subprocess in its own session and reap descendants on every exit path."""
     if server_dead_grace_sec is None:
         try:
             server_dead_grace_sec = float(
@@ -844,63 +771,7 @@ def _communicate_with_soft_deadline(
     capture: _StreamCapture | None = None,
     server_already_ready: bool = False,
 ) -> tuple[str | bytes, str | bytes]:
-    """``proc.communicate`` shim enforcing the soft deadline + server watchdog.
-
-    With no soft deadline and no server watchdog this delegates straight to
-    ``proc.communicate(timeout=hard_timeout)`` (legacy fast path). Otherwise it
-    polls in 0.5s slices, enforcing:
-
-    * ``soft_deadline_sec`` — raise :class:`_SoftDeadlineExceeded` once passed.
-      When a ``server_log_path`` is available (and
-      ``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY`` is not disabled) AND
-      ``server_already_ready`` is ``False`` the clock is measured from the
-      server-ready marker (the "pure hot client" phase) rather than process
-      spawn, so pre-ready boot / weight load / first-request recompile is
-      excluded; without a ``server.log`` (or when ``server_already_ready`` is
-      ``True``) it falls back to the legacy from-spawn elapsed.
-    * ``server_log_path`` death watchdog — once a terminal init marker
-      (:data:`_SERVER_DEAD_MARKERS`) is observed AND it persists for
-      ``server_dead_grace_sec`` without the child exiting on its own, raise
-      :class:`_ServerDeadDetected`.
-    * ``server_log_path`` detokenizer-stall watchdog — once a ready marker
-      (:data:`_SERVER_READY_MARKERS`) is observed, require the log to keep
-      growing; if NO new bytes are appended for ``detok_stall_grace_sec``
-      (a hung engine / detokenizer wedge), raise :class:`_ServerStalledDetected`.
-
-    The ``hard_timeout`` is always honoured so a stuck child can't dodge the
-    gates.
-
-    Args:
-        proc: The running child process to wait on.
-        hard_timeout: Hard timeout in seconds; always enforced.
-        soft_deadline_sec: Optional soft deadline that trips before the hard
-            timeout.
-        server_log_path: Optional path to the server's ``server.log`` enabling
-            the liveness + stall watchdogs.
-        server_dead_grace_sec: Grace period a terminal init marker must persist
-            before the death watchdog trips.
-        detok_stall_grace_sec: Grace period a ready server may emit no log
-            output at all before the stall watchdog trips. ``None`` / ≤ 0
-            disables the stall gate.
-        capture: Optional stream capture whose threads are joined to assemble
-            the returned output.
-        server_already_ready: When ``True`` the from-ready soft-deadline anchor
-            is bypassed and the clock runs from process spawn. Use for warm
-            reuse rounds (client-only) that never boot a server and therefore
-            never write a fresh ready marker to their ``server.log``.
-
-    Returns:
-        A ``(stdout, stderr)`` tuple (``str`` or ``bytes`` per the capture
-        mode).
-
-    Raises:
-        _SoftDeadlineExceeded: When the soft deadline elapses.
-        _ServerDeadDetected: When a terminal init marker persists past the
-            grace window.
-        _ServerStalledDetected: When a ready server produces no generation
-            progress past the stall grace window.
-        subprocess.TimeoutExpired: When the hard timeout elapses.
-    """
+    """Communicate with a child while enforcing soft and server-log watchdogs."""
     watchdog_active = bool(server_log_path) and (
         server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0
     )

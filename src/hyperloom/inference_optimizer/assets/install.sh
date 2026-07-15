@@ -29,8 +29,7 @@
 # drags kernel-agent in via this script.
 #
 # Open-source deps (Magpie / InferenceX / TraceLens) are cloned here or by the
-# chained kernel-agent installer. local_setup.sh is reserved for the private
-# KernelForge checkout used by the forge backend.
+# chained kernel-agent installer.
 
 set -euo pipefail
 
@@ -113,19 +112,17 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
-# tree-reform.MD P2.5: kernel-agent was promoted from a sibling
-# ``kernel-agent/`` checkout into the in-tree ``hyperloom`` src-layout
-# namespace (``src/hyperloom/agents/kernel``); the tools/scripts/skills
-# subdirectory layout underneath it is unchanged, so only this default
-# root needs to move (still overridable via $KERNEL_AGENT_ROOT).
-if [ "${HYPERLOOM_INSTALL_SOURCE:-}" = "wheel" ]; then
-  _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
-  KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
-  FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
-else
-  KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/kernel}"
-  FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/src/hyperloom/agents/framework}"
+# tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
+# package tree in both source and pip-installed layouts. A missing pyproject at
+# REPO_ROOT means setup is running from a pip --target workspace rather than a
+# source checkout, so the editable self-install step below is skipped.
+_hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
+HYPERLOOM_PACKAGED_INSTALL=0
+if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
+  HYPERLOOM_PACKAGED_INSTALL=1
 fi
+KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
+FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
 # tree-reform.MD P2.5: framework-agent was promoted from a sibling
 # ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
 # namespace (``src/hyperloom/agents/framework``); it no longer has its own
@@ -501,8 +498,8 @@ export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; install.sh of kernel-agent writes geak-config /
-# kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
+# under MAGPIE_PATH; kernel-agent install.sh writes kernel-agent.env.sh into
+# HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
@@ -537,15 +534,28 @@ fi
 
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
 ensure_inference_optimizer() {
-  if [ "${HYPERLOOM_INSTALL_SOURCE:-}" = "wheel" ]; then
-    log "ensuring inference_optimizer package + claude_agent_sdk extras (preinstalled wheel)"
+  if [ "$HYPERLOOM_PACKAGED_INSTALL" -eq 1 ]; then
+    log "ensuring inference_optimizer runtime deps (packaged install)"
+    # The bare wheel ships with empty base deps (pip --target stays clean), so
+    # the runtime deps are installed here. The parent package imports with no
+    # third-party dep, so this import check runs before the pip install below.
     "$PYTHON" - <<'PY' || die "hyperloom.inference_optimizer not importable from installed wheel"
 import hyperloom.inference_optimizer  # noqa: F401
 PY
+    if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+      # PyYAML: hard import-time dep of the CLI startup path. llm extra
+      # (claude-agent-sdk/openai/httpx): Coordinator backends.
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+        "PyYAML>=6.0" "claude-agent-sdk>=0.2.110" "openai>=1.50" "httpx>=0.27"
+      # web extra only when critic web tools are enabled (off by default).
+      if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
+        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "markdownify>=0.11" "cachetools>=5.3"
+      fi
+    fi
     if "$PYTHON" -c "import claude_agent_sdk" >/dev/null 2>&1; then
       log "claude_agent_sdk OK"
     else
-      warn "claude_agent_sdk not importable after wheel install (Coordinator will fail)"
+      warn "claude_agent_sdk not importable after runtime dep install (Coordinator will fail)"
       [ "$CHECK_ONLY" -eq 1 ] || die "claude_agent_sdk missing"
     fi
     return 0
@@ -573,12 +583,6 @@ _forge_gemm_tune_candidates() {
   [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
   [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
   [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
-  # Local sibling worktree / checkout fallbacks.
-  printf '%s\n' \
-    "${REPO_ROOT%/}/../KernelForge/src/forge_gemm_tune" \
-    "${REPO_ROOT%/}/../KernelForge/forge_gemm_tune" \
-    "${REPO_ROOT%/}/../wt-forge-gemm-tune/src/forge_gemm_tune" \
-    "${REPO_ROOT%/}/../wt-forge-gemm-tune/forge_gemm_tune"
 }
 
 _resolve_forge_gemm_tune_root() {
@@ -619,7 +623,11 @@ ensure_forge_gemm_tune() {
         ;;
     esac
   else
-    warn "forge-gemm-tune source not found; forge GEMM tuning will fail unless preinstalled. Set FORGE_PATH or FORGE_GEMM_TUNE_ROOT."
+    if "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1; then
+      log "forge-gemm-tune import OK"
+    else
+      log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
+    fi
   fi
 }
 
@@ -986,146 +994,6 @@ ensure_langfuse_when_enabled() {
   fi
 }
 
-# --- 4b. rocprof-compute (kernel roofline profiler) ---
-# kernel_optimization.py's before-GEAK roofline step shells out to
-# `rocprof-compute` (apt package rocprofiler-compute, ships under
-# /opt/rocm/bin). Without it every per-kernel roofline collection fails with
-# "rocprof-compute is not installed or not on PATH" and kernel_roofline.json
-# stays measurement-free. Detect first; install only when missing AND apt is
-# available. Fail-soft: a missing tool degrades roofline data, it does not
-# block optimization.
-# Command name + fallback path are overridable so tests can point them at
-# non-existent targets; production uses the canonical rocprof-compute / ROCm bin.
-ROCPROF_COMPUTE_BIN="${ROCPROF_COMPUTE_BIN:-rocprof-compute}"
-ROCPROF_COMPUTE_PATH="${HYPERLOOM_ROCPROF_COMPUTE_PATH:-${ROCPROF_COMPUTE_PATH:-/opt/rocm/bin/rocprof-compute}}"
-ROCPROF_APT_BIN="${ROCPROF_APT_BIN:-apt-get}"
-ROCPROF_REQUIREMENTS="${ROCPROF_REQUIREMENTS:-}"
-
-_rocprof_compute_present() {
-  command -v "$ROCPROF_COMPUTE_BIN" >/dev/null 2>&1 || [ -x "$ROCPROF_COMPUTE_PATH" ]
-}
-
-_rocprof_compute_runnable() {
-  local bin="$1"
-  "$bin" --version >/dev/null 2>&1
-}
-
-_rocprof_find_requirements() {
-  local bin="$1"
-  if [ -n "$ROCPROF_REQUIREMENTS" ] && [ -f "$ROCPROF_REQUIREMENTS" ]; then
-    echo "$ROCPROF_REQUIREMENTS"; return 0
-  fi
-  local hint
-  hint="$("$bin" --version 2>&1 | grep -oP '(?<=See: )\S+requirements\.txt' | head -1)" || true
-  if [ -n "$hint" ] && [ -f "$hint" ]; then
-    echo "$hint"; return 0
-  fi
-  local d
-  for d in /opt/rocm/libexec/rocprofiler-compute /opt/rocm-*/libexec/rocprofiler-compute; do
-    if [ -f "$d/requirements.txt" ]; then
-      echo "$d/requirements.txt"; return 0
-    fi
-  done
-  return 1
-}
-
-_rocprof_fix_python_deps() {
-  local bin="$1"
-  if _rocprof_compute_runnable "$bin"; then return 0; fi
-  log "rocprof-compute binary present but --version failed; checking Python deps"
-  local req
-  if ! req="$(_rocprof_find_requirements "$bin")"; then
-    warn "rocprof-compute --version failed and requirements.txt not found; roofline may be degraded"
-    return 1
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute deps missing (check-only; would pip install -r $req)"
-    return 1
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would pip install rocprof-compute Python deps from $req"
-    return 1
-  fi
-  # vllm images ship apt-installed python3-blinker 1.4 (distutils
-  # egg-info, no RECORD) which pip cannot uninstall.
-  if "$PYTHON" -c "import vllm" >/dev/null 2>&1; then
-    log "vllm detected; pre-installing blinker to work around distutils conflict"
-    "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
-      --ignore-installed "blinker>=1.9" >/dev/null 2>&1 || true
-  fi
-  log "installing rocprof-compute Python deps from $req"
-  if "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
-       -r "$req" >/dev/null 2>&1 \
-     && _rocprof_compute_runnable "$bin"; then
-    log "rocprof-compute Python deps installed OK"
-    return 0
-  fi
-  warn "rocprof-compute Python dep install failed; roofline may be degraded"
-  return 1
-}
-
-_rocprof_fix_pandas3() {
-  # rocprof-compute 3.4.0 is incompatible with pandas 3.0+ (Arrow
-  # string backend changes dtype, breaking Agent_Id conversion).
-  if "$PYTHON" -c "import pandas; v=tuple(int(x) for x in pandas.__version__.split('.')[:2]); exit(0 if v>=(3,0) else 1)" 2>/dev/null; then
-    log "pandas 3.x detected; downgrading to 2.x for rocprof-compute compat"
-    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-      log "would pip install 'pandas>=2.1,<3'"
-      return 0
-    fi
-    "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
-      "pandas>=2.1,<3" >/dev/null 2>&1 \
-      && log "pandas downgraded to $("$PYTHON" -c 'import pandas; print(pandas.__version__)')" \
-      || warn "pandas downgrade failed; rocprof-compute roofline may produce empty results"
-  fi
-}
-
-ensure_rocprof_compute() {
-  if _rocprof_compute_present; then
-    # Persist the resolved absolute path so Ray workers (trimmed PATH) can find it.
-    local resolved
-    resolved="$(command -v "$ROCPROF_COMPUTE_BIN" 2>/dev/null)" || resolved=""
-    [ -z "$resolved" ] && [ -x "$ROCPROF_COMPUTE_PATH" ] && resolved="$ROCPROF_COMPUTE_PATH"
-    if [ -n "$resolved" ]; then
-      export HYPERLOOM_ROCPROF_COMPUTE_PATH="$resolved"
-      _rocprof_fix_python_deps "$resolved" || true
-      _rocprof_fix_pandas3
-      log "rocprof-compute present at ${resolved}"
-    else
-      _rocprof_fix_pandas3
-      log "rocprof-compute present"
-    fi
-    return 0
-  fi
-  if ! command -v "$ROCPROF_APT_BIN" >/dev/null 2>&1; then
-    warn "rocprof-compute missing and apt-get unavailable; kernel roofline data will be skipped"
-    return 0
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute missing (check-only; would apt-get install rocprofiler-compute)"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would install rocprofiler-compute via apt-get"
-    return 0
-  fi
-  log "installing rocprofiler-compute (provides rocprof-compute)"
-  export DEBIAN_FRONTEND=noninteractive
-  if "$ROCPROF_APT_BIN" update -qq >/dev/null 2>&1 \
-      && "$ROCPROF_APT_BIN" install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1 \
-      && _rocprof_compute_present; then
-    local resolved
-    resolved="$(command -v "$ROCPROF_COMPUTE_BIN" 2>/dev/null)" || resolved=""
-    [ -z "$resolved" ] && [ -x "$ROCPROF_COMPUTE_PATH" ] && resolved="$ROCPROF_COMPUTE_PATH"
-    [ -n "$resolved" ] && export HYPERLOOM_ROCPROF_COMPUTE_PATH="$resolved"
-    [ -n "$resolved" ] && _rocprof_fix_python_deps "$resolved" || true
-    _rocprof_fix_pandas3
-    log "rocprofiler-compute installed OK${resolved:+ at ${resolved}}"
-  else
-    warn "rocprofiler-compute install failed; kernel roofline data will be skipped (preinstall it in the image to fix)"
-  fi
-}
-
 # --- 5. Chain to kernel-agent ---
 chain_kernel_agent() {
   if [ "$SKIP_KERNEL_AGENT" -eq 1 ]; then
@@ -1181,7 +1049,6 @@ fi
 ensure_inferencex
 ensure_bench_serving_deps
 ensure_xdit_quality_deps
-ensure_rocprof_compute
 chain_kernel_agent
 # tree-reform.MD P2.5: framework-agent was promoted into
 # src/hyperloom/agents/framework/ (single hyperloom distribution), so the

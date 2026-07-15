@@ -351,17 +351,6 @@ def _probe_server_help_text(framework: str) -> str:
         _HELP_TEXT_CACHE[fw] = out
     return out
 
-def _probe_sglang_help_text() -> str:
-    """Back-compat shim — defer to the framework-keyed probe.
-
-    Kept so tests that monkey-patch this exact name still work; new call
-    sites should use ``_probe_server_help_text("sglang")``.
-
-    Returns:
-        str: The sglang ``--help`` text, or ``""`` on failure.
-    """
-    return _probe_server_help_text("sglang")
-
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path.
 

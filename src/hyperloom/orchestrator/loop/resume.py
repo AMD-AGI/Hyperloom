@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from ..state.shared_state import SharedState
@@ -13,7 +12,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,
-    _merge_cumulative_extra_sglang_args,
+    _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
     _geak_sweep_measured_tput,
@@ -120,8 +119,8 @@ class ResumeCollaborator:
         workspace = None
         for entry in stack:
             candidate = str(entry.get("candidate_extra_server_args") or "").strip()
-            full = str(entry.get("extra_server_args") or entry.get("extra_sglang_args") or "").strip()
-            args = _merge_cumulative_extra_sglang_args(args, candidate, full)
+            full = str(entry.get("extra_server_args") or "").strip()
+            args = _merge_cumulative_extra_server_args(args, candidate, full)
             raw_envs = entry.get("extra_envs") or {}
             if isinstance(raw_envs, Mapping):
                 for k, v in raw_envs.items():
@@ -135,7 +134,7 @@ class ResumeCollaborator:
                     # keyed on the ``-`` prefix, never on a specific flag name.
                     if ks.startswith("-"):
                         tok = ks if v in ("", None) else f"{ks}={v}"
-                        args = _merge_cumulative_extra_sglang_args(args, "", tok)
+                        args = _merge_cumulative_extra_server_args(args, "", tok)
                     else:
                         envs[ks] = str(v)
             # Carry the authored-kernel overlay (PYTHONPATH prefix) so a native
@@ -341,52 +340,6 @@ class ResumeCollaborator:
                 log.exception("Coordinator: failed to enqueue resume stack rebench")
                 report["warnings"].append({"kind": "resume_stack_rebench_enqueue_failed"})
 
-        if os.environ.get("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            cb_now = state.current_best if isinstance(state.current_best, dict) else {}
-            cb_args = str(cb_now.get("extra_server_args") or "").strip()
-            cb_envs = cb_now.get("extra_envs") if isinstance(cb_now.get("extra_envs"), Mapping) else {}
-            if cb_args or cb_envs:
-                try:
-                    tput = cb_now.get("tput")
-                    params: dict[str, Any] = {
-                        "source": "resume_reverify_best",
-                        "reason": "resume_reverify_best",
-                        "grid": [
-                            {
-                                "name": "resume_current_best",
-                                "extra_args": cb_args,
-                                "extra_envs": dict(cb_envs),
-                                "provenance": "resume_reverify_best",
-                                "note": "env-requested post-resume current_best recheck",
-                            }
-                        ],
-                        "base_tput": float(tput) if isinstance(tput, (int, float)) and tput > 0 else 0.0,
-                        "enable_stack_rebench": False,
-                    }
-                    if state.baseline_config_path:
-                        params["config_path"] = state.baseline_config_path
-                    task, existing = await self.tasks.create_or_return_existing(
-                        kind="explore",
-                        params=params,
-                        idempotency_key="resume-reverify-current-best",
-                    )
-                    report["fixes"].append(
-                        {
-                            "kind": "queued_resume_reverify_best",
-                            "task_id": task.task_id,
-                            "existing": bool(existing),
-                        }
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("Coordinator: failed to queue resume current_best reverify")
-                    report["warnings"].append({"kind": "resume_reverify_best_enqueue_failed"})
-            else:
-                report["warnings"].append({"kind": "resume_reverify_best_no_config"})
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001
@@ -676,7 +629,7 @@ class ResumeCollaborator:
             if ps_flags or ps_envs or ps_overlay:
                 # Identity hash uses the SAME (args, envs) contract the grid
                 # executor fingerprints with (overlay is NOT part of the hash,
-                # matching _grid_runner.variant_fingerprint) so expected == the
+                # matching canonical_fingerprint) so expected == the
                 # ran variant's fingerprint by construction, and any executor-side
                 # drop/alter of config is caught downstream.
                 expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
@@ -808,34 +761,24 @@ class ResumeCollaborator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            if self._geak_legacy_promote():
-                # Legacy: current_best/stack were written up front; stamp the
-                # same-harness validated watermark from GEAK's OWN headline speedup.
-                self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
-                self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                self.shared_state.cumulative_gain_provenance = "geak_same_harness_geak"
-                self.shared_state.resume_pending_revalidation = False
-                gain_out = (geak_sp - 1.0) * 100.0
-            else:
-                # Rebench-first: write the headline from the GEAK-harness MEASURED
-                # throughput (engages by construction via the launch-script replay),
-                # keeping the leaderboard number a same-harness total rather than a
-                # self-reported speedup.
-                measured = _geak_sweep_measured_tput(res)
-                if measured is None:
-                    log.warning(
-                        "geak 2a: succeeded sweep but no measurable throughput; "
-                        "candidate stays pending"
-                    )
-                    return {"validated": False, "status": res.get("status"), "reason": reason}
-                self._promote_geak_from_candidate(
-                    ps,
-                    measured_tput=measured,
-                    provenance="geak_same_harness_geak",
+            # Rebench-first: write the headline from the GEAK-harness MEASURED
+            # throughput (engages by construction via the launch-script replay),
+            # keeping the leaderboard number a same-harness total rather than a
+            # self-reported speedup.
+            measured = _geak_sweep_measured_tput(res)
+            if measured is None:
+                log.warning(
+                    "geak 2a: succeeded sweep but no measurable throughput; "
+                    "candidate stays pending"
                 )
-                base = float(self.shared_state.baseline_tput or 0.0)
-                gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
+                return {"validated": False, "status": res.get("status"), "reason": reason}
+            self._promote_geak_from_candidate(
+                ps,
+                measured_tput=measured,
+                provenance="geak_same_harness_geak",
+            )
+            base = float(self.shared_state.baseline_tput or 0.0)
+            gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive

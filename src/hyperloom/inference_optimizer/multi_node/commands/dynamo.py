@@ -33,7 +33,6 @@ from .._internal import ssh_client, dynamo_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
-from ..state_paths import resolve_state_file
 
 import logging
 log = logging.getLogger(__name__)
@@ -50,66 +49,6 @@ class _MnCliProxy:
 _mn_cli = _MnCliProxy()
 
 
-def _state_file():
-    return _mn_cli._state_file()
-
-
-def _dynamo_ssh_dir():
-    return _mn_cli._dynamo_ssh_dir()
-
-
-def _dynamo_known_hosts_path(state: dict[str, Any] | None = None):
-    return _mn_cli._dynamo_known_hosts_path(state)
-
-
-def _refresh_dynamo_known_hosts(ips: list[str], port: int, *, state: dict[str, Any] | None = None):
-    return _mn_cli._refresh_dynamo_known_hosts(ips, port, state=state)
-
-
-def _dynamo_ssh_run_script(*args, **kwargs):
-    return _mn_cli._dynamo_ssh_run_script(*args, **kwargs)
-
-
-def _dynamo_ssh_bash_with_env(*args, **kwargs):
-    return _mn_cli._dynamo_ssh_bash_with_env(*args, **kwargs)
-
-
-def _load_state():
-    return _mn_cli._load_state()
-
-
-def _save_state(state: dict[str, Any]) -> None:
-    _mn_cli._save_state(state)
-
-
-def _short_poll(**kwargs):
-    return _mn_cli._short_poll(**kwargs)
-
-
-def _poll_timeout_from_args(args: argparse.Namespace) -> int:
-    return _mn_cli._poll_timeout_from_args(args)
-
-
-def _normalize_extra_args(s: str | None) -> str:
-    return _mn_cli._normalize_extra_args(s)
-
-
-def _read_pod_script(name: str) -> str:
-    return _mn_cli._read_pod_script(name)
-
-
-def _read_bundled_pod_python_script(name: str):
-    return _mn_cli._read_bundled_pod_python_script(name)
-
-
-def _extract_pod_json(logs: str) -> dict | None:
-    return _mn_cli._extract_pod_json(logs)
-
-
-def _DEFAULT_POLL_INTERVAL_S() -> int:
-    return _mn_cli._DEFAULT_POLL_INTERVAL_S
-
-
 EXIT_CONFIG_ERROR = 3
 EXIT_TRANSIENT = 1
 # rayjob.py is imported by cli.py first (see the re-export site), so its
@@ -118,29 +57,9 @@ from .rayjob import (
     _TERMINAL_FAIL_PHASES,
     _TERMINAL_OK_PHASES,
     _SAFE_GET_WORKLOAD_404_GRACE_S,
-    _parse_kv_list,
     _is_safe_get_workload_404,
     _summarize_workload_failure,
 )
-
-
-# Session-scoped SSH key dir (sandbox-local, next to the state file).
-# Computed once at import time for backward-compat callers of this symbol;
-# prefer :func:`_dynamo_ssh_dir` when the session may have changed since import.
-_DYNAMO_SSH_DIR = resolve_state_file().parent / "mn_ssh"
-
-
-def _validate_extra_server_args(raw: str, *, context: str) -> None:
-    """Validate server args before fan-out to Dynamo pods.
-
-    Args:
-        raw: Extra server CLI flags string.
-        context: Label for error messages.
-
-    Raises:
-        ServerArgsRejected: When a denied flag is present.
-    """
-    validate_server_args(raw, context=context)
 
 
 def cmd_create_dynamo(args: argparse.Namespace) -> int:
@@ -160,8 +79,8 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     Raises:
         RuntimeError: If no workspace can be resolved.
     """
-    extra_env = _parse_kv_list(args.extra_env)
-    extra_labels = _parse_kv_list(args.extra_label)
+    extra_env = _mn_cli._parse_kv_list(args.extra_env)
+    extra_labels = _mn_cli._parse_kv_list(args.extra_label)
     # Dynamo inference pods run sglang/vllm only; they never call an LLM/agent
     # endpoint, so no *_API_KEY / SAFE_API_KEY / *_BASE_URL is baked into their
     # container env. Kernel-opt agents (when used) receive credentials
@@ -178,7 +97,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
 
     # Session SSH keypair: public key authorises the controller on every pod.
-    priv_key, pub_key = ssh_client.generate_session_keypair(_dynamo_ssh_dir())
+    priv_key, pub_key = ssh_client.generate_session_keypair(_mn_cli._dynamo_ssh_dir())
 
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     body = workload_spec.build_dynamo_workload_body(
@@ -209,7 +128,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
 
     with safe_client.from_env() as safe:
         wid: str | None = None
-        existing = _load_state()
+        existing = _mn_cli._load_state()
         prior_wid = (existing.get("rayjob_id") or "").strip()
         prior_is_dynamo = existing.get("backend") == "dynamo"
         if prior_wid and prior_is_dynamo and not getattr(args, "recreate", False):
@@ -233,7 +152,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
             info(f"workload created: {wid}")
 
         # Checkpoint id immediately (idempotency: overlapping retries reuse).
-        st = dict(_load_state())
+        st = dict(_mn_cli._load_state())
         st.update(
             {
                 "backend": "dynamo",
@@ -249,7 +168,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
                 "service_url": dynamo_support.frontend_service_url(wid, workspace),
             }
         )
-        _save_state(st)
+        _mn_cli._save_state(st)
 
         workload: dict[str, Any] = {}
         if args.no_wait:
@@ -265,13 +184,13 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
                 wl = safe.get_workload(wid)
                 return wl, f"phase={wl.get('phase', '?')}"
 
-            workload = _short_poll(
+            workload = _mn_cli._short_poll(
                 label=f"dynamo workload {wid}",
                 fetch=_fetch,
                 is_ok=lambda w: w.get("phase") in _TERMINAL_OK_PHASES,
                 is_fail=lambda w: w.get("phase") in _TERMINAL_FAIL_PHASES,
                 interval_s=args.poll_interval,
-                timeout_s=_poll_timeout_from_args(args),
+                timeout_s=_mn_cli._poll_timeout_from_args(args),
                 failure_diag=_summarize_workload_failure,
                 quiet_fetch_error_grace_s=_SAFE_GET_WORKLOAD_404_GRACE_S,
                 is_quiet_fetch_error=_is_safe_get_workload_404,
@@ -302,7 +221,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
                 "be syncing DGD pods. Re-run create-dynamo to refresh."
             )
 
-    merged = dict(_load_state())
+    merged = dict(_mn_cli._load_state())
     merged.update(
         {
             "backend": "dynamo",
@@ -328,20 +247,20 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
             },
         }
     )
-    _save_state(merged)
+    _mn_cli._save_state(merged)
 
     # Record pod SSH host keys (Dynamo-only control plane).
     if gpu_ips:
         try:
-            kh = _refresh_dynamo_known_hosts(gpu_ips, args.ssh_port, state=merged)
+            kh = _mn_cli._refresh_dynamo_known_hosts(gpu_ips, args.ssh_port, state=merged)
             merged["ssh_known_hosts"] = str(kh)
-            _save_state(merged)
+            _mn_cli._save_state(merged)
         except RuntimeError as exc:
             warn(f"ssh-keyscan failed (non-fatal): {exc}")
 
     # Best-effort SSH reachability probe (non-fatal: pods may still be booting).
     if gpu_ips:
-        kh_path = _dynamo_known_hosts_path(merged)
+        kh_path = _mn_cli._dynamo_known_hosts_path(merged)
         reachable = sum(
             1
             for ip in gpu_ips
@@ -354,7 +273,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
         )
         info(f"ssh reachable GPU pods: {reachable}/{len(gpu_ips)}")
 
-    info(f"state written to {_state_file()}")
+    info(f"state written to {_mn_cli._state_file()}")
     print(json.dumps(merged, indent=2, sort_keys=True))
     return 0
 
@@ -368,7 +287,7 @@ def _dynamo_require_state() -> dict[str, Any]:
         RuntimeError: If the state backend is not ``dynamo``, no GPU pod IPs
             are recorded, or the ssh key path is missing.
     """
-    state = _load_state()
+    state = _mn_cli._load_state()
     if state.get("backend") != "dynamo":
         raise RuntimeError("state backend is not 'dynamo'; run create-dynamo first")
     has_gpu_pods = bool(state.get("worker_pod_ips") or state.get("prefill_pod_ips") or state.get("decode_pod_ips"))
@@ -452,7 +371,7 @@ def _dynamo_fanout_launch(
         tuple[int, list[dict]]: ``(rc, per_pod_results)`` where ``rc`` is
         non-zero if any pod's launcher failed.
     """
-    script = _read_pod_script("launch_dynamo_node.py")
+    script = _mn_cli._read_pod_script("launch_dynamo_node.py")
     forward_env = _collect_forward_env()
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
@@ -461,7 +380,7 @@ def _dynamo_fanout_launch(
     for ip in worker_ips:
         info(f"{label}: ssh -> {ip}:{int(state.get('ssh_port') or ssh_client.DEFAULT_SSH_PORT)}")
         try:
-            cp = _dynamo_ssh_run_script(
+            cp = _mn_cli._dynamo_ssh_run_script(
                 state,
                 ip,
                 script,
@@ -475,7 +394,7 @@ def _dynamo_fanout_launch(
             results.append({"podIP": ip, "rc": 124, "error": "timeout"})
             rc_total = 1
             continue
-        parsed = _extract_pod_json(cp.stdout or "")
+        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
         rec = {"podIP": ip, "rc": cp.returncode, "summary": parsed}
         if cp.returncode != 0:
             rec["stderr"] = (cp.stderr or "")[-1500:]
@@ -510,14 +429,14 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         raise RuntimeError(f"unsupported framework: {framework!r}")
     shared_extra = getattr(args, "extra_args", "") or ""
     try:
-        _validate_extra_server_args(shared_extra, context="dynamo restart-server --extra-args")
+        validate_server_args(shared_extra, context="dynamo restart-server --extra-args")
         if getattr(args, "pd_prefill_extra_args", ""):
-            _validate_extra_server_args(
+            validate_server_args(
                 getattr(args, "pd_prefill_extra_args", "") or "",
                 context="dynamo restart-server --pd-prefill-extra-args",
             )
         if getattr(args, "pd_decode_extra_args", ""):
-            _validate_extra_server_args(
+            validate_server_args(
                 getattr(args, "pd_decode_extra_args", "") or "",
                 context="dynamo restart-server --pd-decode-extra-args",
             )
@@ -533,7 +452,7 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         else "aggregated"
     )
     kv = getattr(args, "pd_transfer_backend", "") or state.get("kv_transfer_backend") or ""
-    poll_timeout = _poll_timeout_from_args(args)
+    poll_timeout = _mn_cli._poll_timeout_from_args(args)
     print_logs = getattr(args, "print_logs", False)
     rc_total = 0
     all_results: dict[str, Any] = {}
@@ -622,7 +541,7 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_tp"] = int(args.tp)
     state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
     state["last_restart_pd_mode"] = pd_mode
-    state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
+    state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     if pd_mode == "disaggregated":
         # Persist per-role knobs so a state-only resume (env lost on sandbox
         # recreate) reproduces the same prefill/decode topology.
@@ -635,7 +554,7 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
         state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
     state["last_restart_results"] = all_results
-    _save_state(state)
+    _mn_cli._save_state(state)
     print(
         json.dumps(
             {"backend": "dynamo", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
@@ -688,11 +607,11 @@ def _dynamo_kill_inference(args: argparse.Namespace) -> int:
         launch_args,
         gpu_ips,
         label="kill",
-        poll_timeout=_poll_timeout_from_args(args),
+        poll_timeout=_mn_cli._poll_timeout_from_args(args),
         print_logs=getattr(args, "print_logs", False),
     )
     state["last_kill_results"] = results
-    _save_state(state)
+    _mn_cli._save_state(state)
     print(
         json.dumps(
             {"backend": "dynamo", "action": "kill", "rc": rc, "results": results},
@@ -723,9 +642,9 @@ def _dynamo_ssh_node_op(
         tuple[dict | None, dict]: ``(parsed_json_or_None, transport)`` where
         ``transport`` carries the ssh rc / stderr.
     """
-    script = _read_bundled_pod_python_script("kernel_node_ops.py")
+    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py")
     try:
-        cp = _dynamo_ssh_run_script(
+        cp = _mn_cli._dynamo_ssh_run_script(
             state,
             ip,
             script,
@@ -735,7 +654,7 @@ def _dynamo_ssh_node_op(
         )
     except subprocess.TimeoutExpired:
         return None, {"rc": 124, "stderr": f"timeout after {timeout}s"}
-    return _extract_pod_json(cp.stdout or ""), {
+    return _mn_cli._extract_pod_json(cp.stdout or ""), {
         "rc": cp.returncode,
         "stderr": (cp.stderr or "")[-1500:],
     }
@@ -771,12 +690,12 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     if not gpu_ips:
         err("apply-tracelens-patch (dynamo): no GPU pod IPs in state")
         return EXIT_CONFIG_ERROR
-    script = _read_pod_script("apply_tracelens_patch_multinode.py")
+    script = _mn_cli._read_pod_script("apply_tracelens_patch_multinode.py")
     pin = getattr(args, "sglang_version_pin", None) or ""
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
     if pin:
         op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
-    timeout = _poll_timeout_from_args(args)
+    timeout = _mn_cli._poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []
     # Pod-side interpreter: sglang lives in /opt/venv on the canonical
@@ -787,7 +706,7 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     for ip in gpu_ips:
         info(f"apply-tracelens-patch (dynamo): ssh -> {ip}")
         try:
-            cp = _dynamo_ssh_run_script(
+            cp = _mn_cli._dynamo_ssh_run_script(
                 state,
                 ip,
                 script,
@@ -798,7 +717,7 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "error": f"timeout after {timeout}s"})
             continue
-        parsed = _extract_pod_json(cp.stdout or "")
+        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
         pods = (parsed or {}).get("per_pod") or []
         if parsed and str(parsed.get("status")) in ("applied", "skipped") and pods:
             for r in pods:
@@ -1013,7 +932,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     if not geak_src:
         err("install-geak: cannot resolve GEAK source dir; pass --geak-src or set $HYPERLOOM_ROOT / $USER_DATA_PATH")
         return EXIT_CONFIG_ERROR
-    script = _read_pod_script("install_geak_node.sh")
+    script = _mn_cli._read_pod_script("install_geak_node.sh")
     gpu_ips = _dynamo_all_gpu_ips(state)
     info(f"install-geak (dynamo): geak_src={geak_src} pods={len(gpu_ips)}")
     results: list[dict] = []
@@ -1021,19 +940,19 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     for ip in gpu_ips:
         info(f"install-geak: ssh -> {ip}")
         try:
-            cp = _dynamo_ssh_run_script(
+            cp = _mn_cli._dynamo_ssh_run_script(
                 state,
                 ip,
                 script,
                 "bash",
                 shlex.quote(str(geak_src)),
-                timeout=_poll_timeout_from_args(args),
+                timeout=_mn_cli._poll_timeout_from_args(args),
             )
         except subprocess.TimeoutExpired:
             results.append({"host": ip, "status": "failed", "reason": "timeout"})
             rc_total = 1
             continue
-        parsed = _extract_pod_json(cp.stdout or "") or {
+        parsed = _mn_cli._extract_pod_json(cp.stdout or "") or {
             "status": "failed",
             "reason": (cp.stderr or "")[-500:],
         }

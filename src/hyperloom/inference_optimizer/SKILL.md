@@ -51,11 +51,9 @@ The **workspace root** is ``$USER_DATA_PATH`` (default
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
 ├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
 │   ├── kernel-agent.env.sh
-│   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal],KernelForge?}/
-│       # Open-source deps are installed by install.sh; KernelForge is present
-│       # only when local_setup.sh was run for the forge backend.
+│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal]}/
+│       # Open-source deps are installed by install.sh.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -100,9 +98,7 @@ the session dir printed by the CLI.
 under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
 Those are workspace-shared assets owned by `install.sh`, including
 Magpie, InferenceX, GEAK, TraceLens mirrors, env files, and config.
-KernelForge is the only checkout prepared by `local_setup.sh`, and only
-when the forge backend is requested. Manual edits
-there can corrupt another run's checkout. If install state looks wrong,
+Manual edits there can corrupt another run's checkout. If install state looks wrong,
 rerun `install.sh` or follow the Recovery section; do not clone or clean
 the mirrors by hand.
 
@@ -130,7 +126,7 @@ internal
 extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
 it to their own existing checkout to opt in,
 otherwise open-source-only; rehydration module — Hyperloom keeps no internal
-URL/path). See README Local Mode step 1. The per-version
+URL/path). The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
 TraceLens is required by `_server_patcher`),
 `/sgl-workspace/{aiter,sglang,vllm}/`,
@@ -262,7 +258,7 @@ Critic-gated, then `git apply`d against the live framework_source_roots
 and benchmarked; KEEP commits to the live tree (next candidate stacks on
 top), REVERT does `git reset --hard`. Exits on low budget
 (<0.6 × max_hours), **plateau (3 consecutive benchmarked candidate tests
-with no KEEP** — env `INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK`),
+with no KEEP**),
 or an empty discovery batch. Resume skips completed candidates by
 idempotency key. The launcher only chooses whether the phase runs
 (`--no-framework-agent`).
@@ -325,18 +321,6 @@ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
-If you explicitly opt into the forge kernel backend, clone the private
-KernelForge checkout first and source the generated env so `install.sh` can
-find it:
-
-```bash
-export KERNEL_OPT_BACKEND_ORDER=forge
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/local_setup.sh" --no-next-steps
-. "${LOCAL_SETUP_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh}"
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
-```
-
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
 first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
@@ -359,10 +343,6 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-Default GEAK installs do not run `local_setup.sh`. If `KERNEL_OPT_BACKEND_ORDER`
-explicitly contains `forge`, run `local_setup.sh --no-next-steps` and source
-`local-setup.env.sh` before `install.sh`.
-
 Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
@@ -371,11 +351,11 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 | `ray==2.44.1` + `click<8.3.0` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
 | TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
-| GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
+| GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
 regenerated by `install.sh` and contains gateway URLs, auth aliases,
-GEAK config path, and InferenceX path. Source it (don't try to derive these by
+GEAK runtime variables, and InferenceX path. Source it (don't try to derive these by
 hand). Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
@@ -467,16 +447,16 @@ inference_optimizer optimize \
 
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
 `classify` actions were deleted; the SKILL caller is now expected to
-supply session metadata directly via CLI flags / env vars:
+supply session metadata directly via CLI flags:
 
-| Surface | CLI flag | Env var | Notes |
-|---|---|---|---|
-| Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
-| GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
-| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
-| External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
-| Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+| Surface | CLI flag | Notes |
+|---|---|---|
+| Model path | `--model` | required |
+| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
+| GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
+| Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
+| External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
@@ -712,8 +692,8 @@ Operator server flags have one supported CLI entry point:
 `EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` for baseline,
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
-`4,16,128` is treated as a sweep ladder: baseline uses the first value and the
-ladder is forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
+`4,16,128` is accepted for compatibility; baseline uses the first value.
+Use `--conc-sweep-concs` for the explicit sweep ladder.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
@@ -1098,10 +1078,6 @@ The Coordinator does NOT need to drive this step — the main agent executes
 the unittest skill before calling `kernel_optimization.py`. Observability
 shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
 
-The GEAK outer-timeout is managed by `_ensure_yaml_env_timeout()` in
-`kernel_optimization.py`, which sets a fallback of 3600s so GEAK's
-`LocalEnvironment.timeout` never silently inherits the 30s default.
-
 ## Kernel Apply Safety
 
 Kernel optimization may modify `/sgl-workspace/aiter`, `/sgl-workspace/sglang`,
@@ -1143,17 +1119,19 @@ Auth / SDK drift (`Claude SDK exit code 1`, `Primus.00009 token not present`,
 `Fatal error in message reader`) is owned by `_preflight()`; see
 `## Setup → Recovery` for the supervisor + install rerun loop. Manual SDK
 fallback if frozen pip blocks `_ensure_python_sdks()`:
-`python -m pip install 'claude-agent-sdk>=0.1.65' 'openai>=1.50' 'httpx>=0.27'`.
+`python -m pip install 'claude-agent-sdk>=0.2.110' 'openai>=1.50' 'httpx>=0.27'`.
 Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 
 ### Model-gate errors (preflight #10)
 
-Allowlist: `claude-opus-4-7` (preferred) → `claude-opus-4-6` (fallback). The
-gate is intentional — opus-4-5 / haiku silently degraded prior runs.
+Custom orchestration models are enabled by default and are validated against the
+configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
+only when you intentionally want the strict AMD Claude allowlist
+(`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|
-| `--claude-model=... is not allowed` | Drop `--claude-model` / `$CLAUDE_MODEL`. Update `_CLAUDE_ALLOWED_MODELS` in `cli.py` only when a successor is blessed. |
+| `--claude-model=... is not allowed` | You likely set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`; unset it or set it to `1`, then ensure the model appears in the gateway `/models` catalog. |
 | `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
 
 ### Critic-agent runtime errors
