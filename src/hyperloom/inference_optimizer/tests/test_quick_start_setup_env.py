@@ -7,8 +7,8 @@ import subprocess
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-SCRIPT = REPO_ROOT / "quick-start" / "setup_env.sh"
+ASSETS_ROOT = Path(__file__).resolve().parents[1] / "assets"
+SCRIPT = ASSETS_ROOT / "quick-start" / "setup_env.sh"
 
 
 def _run_setup_env_script(tmp_path: Path, env: dict[str, str]) -> str:
@@ -35,7 +35,7 @@ def _run_setup_env_script(tmp_path: Path, env: dict[str, str]) -> str:
     run_env.update(env)
     subprocess.run(
         ["bash", str(script_copy)],
-        cwd=REPO_ROOT,
+        cwd=tmp_path,
         env=run_env,
         text=True,
         check=True,
