@@ -1656,11 +1656,13 @@ class BaselineExecutor:
             params: Task params for this launch.
             ctx: Runner context carrying ``extra`` (e.g. multi-node round
                 state).
-            run_eval_disabled: When True, this run did not execute lm-eval
-                (RUN_EVAL forced off via the eval-failure fallback,
+            run_eval_disabled: When True, this run did not execute the serving
+                lm-eval (RUN_EVAL forced off via the eval-failure fallback,
                 ``disable_run_eval``, or a present-and-falsey ``extra_envs``
-                RUN_EVAL), so accuracy parsing is skipped to avoid reading a
-                prior attempt's stale ``results*.json`` from the reused slot.
+                RUN_EVAL), so the serving GSM8K parse is skipped to avoid reading
+                a prior attempt's stale ``results*.json`` from the reused slot.
+                Scriptable frameworks are unaffected: RUN_EVAL does not gate
+                their per-run image ``quality_gate``, which is still parsed.
 
         Returns:
             A result dict: ``status="succeeded"`` with measurements on
@@ -2028,16 +2030,26 @@ class BaselineExecutor:
         # gate for scriptable frameworks). Pass the framework so scriptable runs
         # fail closed on a missing quality gate instead of falling back to GSM8K.
         eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
-        if run_eval_disabled:
-            # RUN_EVAL was off this run (eval-failure fallback or
+        from hyperloom.inference_optimizer import framework_registry
+
+        # RUN_EVAL gates ONLY the serving lm-eval GSM8K run. Scriptable (xDiT)
+        # workloads carry no lm-eval; their sole correctness signal is the image
+        # ``quality_gate`` embedded in ``benchmark_report.json``, which the bench
+        # script writes every run and ``parse_quality_gate`` resolves by newest
+        # mtime -- so there is no stale-artifact risk to guard against. The skip
+        # below therefore applies to serving only, never dropping a scriptable
+        # gate (which would leave baseline_accuracy=0 -> throughput-only KEEP).
+        eval_scriptable = framework_registry.is_scriptable(eval_framework)
+        if run_eval_disabled and not eval_scriptable:
+            # Serving RUN_EVAL was off this run (eval-failure fallback or
             # ``disable_run_eval``), so lm-eval did not execute and there is no
             # fresh accuracy to read. Do NOT parse: the eval-failure retry reuses
             # ``output_dir``, so the slot may still hold a prior attempt's
             # ``results*.json`` and reading it would promote a stale score into
             # baseline_accuracy. Reading eval output strictly follows running eval.
             log.info(
-                "baseline_executor: RUN_EVAL disabled this run; skipping accuracy "
-                "parse (no eval executed)"
+                "baseline_executor: RUN_EVAL disabled this run (serving); skipping "
+                "accuracy parse (no lm-eval executed)"
             )
         else:
             from ._accuracy_gate import parse_eval_results
@@ -2056,8 +2068,6 @@ class BaselineExecutor:
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
             else:
                 log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
-
-        from hyperloom.inference_optimizer import framework_registry
 
         log.info(
             "baseline_executor: %s %s (output) e2el=%.1fms",

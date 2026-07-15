@@ -423,3 +423,82 @@ def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
     # baseline 0.90: measured 0.95 is within tolerance (pass); warmup 0.50 is not.
     passed = IntegratePatchExecutor._grade_accuracy(str(slot), 0.90, framework="vllm")
     assert passed is True
+
+
+# --- scriptable quality gate must survive a RUN_EVAL-off run ---------------
+
+
+def _fake_scriptable_workspace(slot: Path, *, gate_passed: bool = True) -> Path:
+    """A scriptable (xDiT) bench workspace: framework=xdit plus a fresh image
+    ``quality_gate`` block embedded in ``benchmark_report.json``.
+
+    ``RUN_EVAL`` gates only the serving lm-eval GSM8K run; the scriptable gate is
+    computed by the bench script and written every run regardless, so it must
+    still be read when ``RUN_EVAL`` is off.
+    """
+    ws = slot / "benchmark_xdit_20260715_010101"
+    ws.mkdir(parents=True)
+    (ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "xdit",
+                "model": "/wekafs/models/xdit-diffusion",
+                "throughput": {
+                    "request_throughput": 5.0,
+                    "output_throughput": 5.0,
+                    "total_token_throughput": 5.0,
+                    "completed_requests": 8,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
+                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
+                },
+                "quality_gate": {"passed": gate_passed},
+            }
+        )
+    )
+    return ws
+
+
+def test_baseline_reads_scriptable_quality_gate_when_run_eval_disabled(tmp_path):
+    """RUN_EVAL off must NOT drop a scriptable framework's image quality gate.
+
+    ``RUN_EVAL`` governs only the serving lm-eval GSM8K run. Scriptable (xDiT)
+    workloads carry no lm-eval; their sole correctness signal is the image
+    ``quality_gate`` embedded in ``benchmark_report.json``, freshly written every
+    run (``parse_quality_gate`` picks the newest by mtime -> no staleness). So
+    when ``RUN_EVAL`` is off (here via ``disable_run_eval``), the accuracy parse
+    must still resolve the quality gate rather than skip entirely and leave
+    ``baseline_accuracy=0`` -> throughput-only KEEP.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_scriptable_workspace(slot, gate_passed=True)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True}
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    # RUN_EVAL off, but the scriptable gate passed -> accuracy=1.0 (not skipped).
+    assert result.get("accuracy") == pytest.approx(1.0)
+    assert result.get("accuracy_task") == "quality_gate"
