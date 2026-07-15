@@ -583,12 +583,38 @@ class _ExploreStateMixin:
 
         args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
         envs = dict(variant.get("extra_envs") or {})
-        fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
+        def _list_field(key: str) -> list[str]:
+            raw = variant.get(key)
+            if isinstance(raw, str):
+                return [raw.strip()] if raw.strip() else []
+            if isinstance(raw, (list, tuple, set)):
+                return [str(v).strip() for v in raw if str(v).strip()]
+            return []
+
+        remove_args = _list_field("remove_args")
+        unset_envs = _list_field("unset_envs")
+        args_mode = str(variant.get("args_mode") or "append").strip().lower()
+        control_fields: dict[str, Any] = {}
+        if remove_args:
+            control_fields["remove_args"] = remove_args
+        if unset_envs:
+            control_fields["unset_envs"] = unset_envs
+        if args_mode == "replace":
+            control_fields["args_mode"] = "replace"
+        fp = str(
+            variant.get("fingerprint")
+            or canonical_fingerprint(
+                args,
+                envs,
+                **control_fields,
+            )
+        )
         entry = {
             "fingerprint": fp,
             "name": str(variant.get("name") or ""),
             "extra_server_args": args,
             "extra_envs": envs,
+            **control_fields,
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
             "gain_pct": variant.get("gain_pct"),
@@ -623,6 +649,7 @@ class _ExploreStateMixin:
                 "gain_pct": entry["gain_pct"],
                 "extra_args": args,
                 "extra_envs": envs,
+                **control_fields,
                 "provenance": entry["provenance"],
                 "ts": entry["ts"],
                 "cycle": entry["cycle"],

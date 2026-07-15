@@ -62,6 +62,101 @@ def merge_server_args(*parts: str | None) -> str:
     """
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize optional string/list controls to non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def remove_server_args(server_args: str | None, remove_args: Any) -> str:
+    """Remove flag specs from a server-arg string.
+
+    ``remove_args`` entries are flag-oriented. ``"--foo"`` removes ``--foo`` and
+    its following value when one is present; ``"--foo=bar"`` removes that exact
+    token shape; ``"--foo bar"`` removes the exact flag/value pair. Unknown /
+    unparseable inputs are left untouched rather than guessed.
+    """
+    args = str(server_args or "").strip()
+    removes = _coerce_str_list(remove_args)
+    if not args or not removes:
+        return args
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return args
+
+    remove_flags: set[str] = set()
+    remove_pairs: set[tuple[str, str | None]] = set()
+    for spec in removes:
+        try:
+            spec_tokens = shlex.split(spec)
+        except ValueError:
+            spec_tokens = spec.split()
+        i = 0
+        while i < len(spec_tokens):
+            tok = spec_tokens[i]
+            if not tok.startswith("--"):
+                i += 1
+                continue
+            if "=" in tok:
+                flag, _, value = tok.partition("=")
+                remove_pairs.add((flag, value))
+                i += 1
+            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+                remove_pairs.add((tok, spec_tokens[i + 1]))
+                i += 2
+            else:
+                remove_flags.add(tok)
+                i += 1
+
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
+        if flag and "=" in tok:
+            _flag, _, value = tok.partition("=")
+            if _flag in remove_flags or (_flag, value) in remove_pairs:
+                i += 1
+                continue
+        if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+            value = tokens[i + 1]
+            if flag in remove_flags or (flag, value) in remove_pairs:
+                i += 2
+                continue
+        if flag and flag in remove_flags:
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return " ".join(out)
+
+
+def compose_server_args(
+    *,
+    inherited_args: str | None = "",
+    base_extra_args: str | None = "",
+    variant_extra_args: str | None = "",
+    remove_args: Any = None,
+    args_mode: str = "append",
+) -> str:
+    """Compose inherited/base/variant args with optional remove/replace semantics."""
+    mode = str(args_mode or "append").strip().lower()
+    if mode == "replace":
+        pruned_base = remove_server_args(base_extra_args, remove_args)
+        pruned_variant = remove_server_args(variant_extra_args, remove_args)
+        return merge_server_args(pruned_base, pruned_variant)
+    combined_base = merge_server_args(inherited_args, base_extra_args)
+    pruned = remove_server_args(combined_base, remove_args)
+    return merge_server_args(pruned, variant_extra_args)
+
 def compact_json_server_args(
     server_args: str | None,
     framework: str | None,

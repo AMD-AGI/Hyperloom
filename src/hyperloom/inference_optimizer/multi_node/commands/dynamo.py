@@ -316,9 +316,22 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV
-    # as a JSON object; forwarded verbatim regardless of prefix and take
-    # precedence over prefix-matched values for the same key.
+    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    if unset_fwd:
+        try:
+            parsed_unset = json.loads(unset_fwd)
+            if isinstance(parsed_unset, list):
+                for key in parsed_unset:
+                    fwd.pop(str(key), None)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
+    # Explicit per-variant env overrides (e.g. specialist-proposed MoE
+    # tuning) come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object set
+    # by restart_server_for_round. Unlike _FORWARD_ENV_PREFIXES these are
+    # forwarded verbatim regardless of key prefix, so an explore variant's
+    # ``extra_envs`` reach the SSH-launched sglang. They take precedence
+    # over prefix-matched values for the same key (explicit > ambient) and
+    # intentionally win after unset_fwd, matching single-node YAML semantics.
     extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
     if extra_fwd:
         try:
