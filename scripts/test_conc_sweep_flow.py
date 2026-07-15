@@ -155,13 +155,22 @@ def _analyze(payload: dict, sweep_workspace: Path) -> bool:
     return overall_ok
 
 
-async def _run(session_dir: Path, concs: list[int], variant_timeout_sec: int) -> dict:
+async def _run(
+    session_dir: Path,
+    concs: list[int],
+    variant_timeout_sec: int,
+    *,
+    isl: int = 0,
+    osl: int = 0,
+) -> dict:
     """Load the copied state and run the sweep with single-server mode on.
 
     Args:
         session_dir: The fresh test session directory.
         concs: Descending CONC ladder to sweep.
         variant_timeout_sec: Per-variant hard timeout.
+        isl: Override input sequence length (0 keeps the session's value).
+        osl: Override output sequence length (0 keeps the session's value).
 
     Returns:
         The sweep payload dict.
@@ -174,6 +183,11 @@ async def _run(session_dir: Path, concs: list[int], variant_timeout_sec: int) ->
     state.closing_phase = False
     state.stop_reason = ""
     state.max_minutes = 0  # 0 => remaining_minutes() is None (unbounded)
+    # Optional workload-shape override (run_conc_sweep reads state.isl/state.osl).
+    if isl > 0:
+        state.isl = isl
+    if osl > 0:
+        state.osl = osl
     # total_budget_sec=0 disables the wall-clock budget gate too.
     return await run_conc_sweep(
         state,
@@ -202,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Real optimization session (baseline + accepted current_best).",
     )
     ap.add_argument("--concs", default="8,4,2", help="Descending CONC ladder (comma-separated).")
+    ap.add_argument("--isl", type=int, default=0, help="Override input seq len (0 = keep session value).")
+    ap.add_argument("--osl", type=int, default=0, help="Override output seq len (0 = keep session value).")
     ap.add_argument("--variant-timeout-sec", type=int, default=1800)
     ap.add_argument(
         "--out-dir",
@@ -228,11 +244,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[flowtest] source session : {source}")
     print(f"[flowtest] test session   : {out_dir}")
     print(f"[flowtest] CONC ladder     : {concs}  (descending single-server reuse)")
+    if args.isl or args.osl:
+        print(f"[flowtest] ISL/OSL override: {args.isl or '(keep)'} / {args.osl or '(keep)'}")
 
     _prepare_test_session(source, out_dir)
 
     started = time.time()
-    payload = asyncio.run(_run(out_dir, concs, args.variant_timeout_sec))
+    payload = asyncio.run(_run(out_dir, concs, args.variant_timeout_sec, isl=args.isl, osl=args.osl))
     print(f"\n[flowtest] run_conc_sweep finished in {time.time() - started:.1f}s; status={payload.get('status')}")
 
     # Locate the sweep workspace (runs/conc_sweep/<task_id>) for boot counting.
@@ -254,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
             tp=int(payload.get("tp") or 1),
             isl=int(payload.get("isl") or 0),
             osl=int(payload.get("osl") or 0),
-            draw_ceiling=True,
+            draw_ceiling=False,
         )
         if result is not None:
             print(f"[flowtest] plot rendered  : {result}")

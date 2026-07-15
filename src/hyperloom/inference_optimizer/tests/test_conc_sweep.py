@@ -1672,8 +1672,12 @@ def test_format_conc_sweep_curve_section_with_png():
     from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
 
     lines = _format_conc_sweep_curve_section({"conc_sweep_curve_png": "reports/conc_sweep_curve.png"})
-    assert any("conc_sweep_curve.png" in line for line in lines)
-    assert any("![" in line for line in lines)
+    embed = next(line for line in lines if line.startswith("!["))
+    # final.md lives in reports/, so the embed must use the basename, not the
+    # session-root-relative "reports/conc_sweep_curve.png" (which would resolve
+    # to reports/reports/... and 404).
+    assert embed == "![Concurrency sweep curve](conc_sweep_curve.png)"
+    assert "reports/conc_sweep_curve.png" not in embed
 
 
 # ─────────────────────────────────────────────────────────────────────────────

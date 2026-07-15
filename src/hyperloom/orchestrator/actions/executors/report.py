@@ -935,18 +935,20 @@ def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
     png_rel = summary.get("conc_sweep_curve_png")
     if not png_rel:
         return []
+    # final.md and the PNG both live in reports_dir, so the embed must be
+    # relative to final.md's own directory (its basename), not the
+    # session-root-relative path stored in final.json.
+    png_md_rel = Path(str(png_rel)).name
     lines: list[str] = []
     lines.append("## Concurrency Sweep — Throughput vs Interactivity")
     lines.append("")
     lines.append(
         "Efficiency (tok/s/GPU) vs Interactivity (tok/s/user) across the "
         "post-optimization concurrency ladder.  "
-        "Dark-red = baseline, orange = optimized."
+        "Red = baseline, orange = optimized."
     )
     lines.append("")
-    # Use the relative path so the image renders correctly when the report
-    # directory is the working directory.
-    lines.append(f"![Concurrency sweep curve]({png_rel})")
+    lines.append(f"![Concurrency sweep curve]({png_md_rel})")
     lines.append("")
     return lines
 
