@@ -49,7 +49,6 @@ gh release download v0.8 \
   -p 'hyperloom_inference_optimizer-0.8.0-py3-none-any.whl'
 
 rm -rf ~/hyperloom
-mkdir -p ~/hyperloom
 
 python3 -m pip install \
   ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl \
