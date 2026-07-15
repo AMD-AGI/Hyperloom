@@ -9,7 +9,7 @@ These instructions allow you to run Hyperloom inside a Docker container on an AM
 
 ### 1. Start the container
 
-Pick the ROCm image matching your GPU (browse SGLang tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)** and vLLM tages at [hub.docker.com/r/primussafe/vllm-openai-rocm/tags](https://hub.docker.com/r/primussafe/vllm-openai-rocm/tags)):
+Pick the ROCm image matching your GPU (browse SGLang tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)** and vLLM tags at [hub.docker.com/r/primussafe/vllm-openai-rocm/tags](https://hub.docker.com/r/primussafe/vllm-openai-rocm/tags)):
 
 - SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
@@ -61,7 +61,7 @@ Cursor opens a new window attached to the running container. Open a workspace fo
 
 ### 3. Install Hyperloom
 
-#### 3.2 Install with an agent (Recommended)
+#### 3.1 Install with an agent (Recommended)
 
 In the container, make sure GitHub authentication is available, then clone
 Hyperloom:
@@ -70,7 +70,7 @@ Hyperloom:
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 ```
 
-Start a coding agent from the repo root (i.e. run `cluade` here or open this folder in Cursor) and install Hyperloom using the following prompt:
+Start a coding agent from the repo root (i.e. run `claude` here or open this folder in Cursor) and install Hyperloom using the following prompt:
 
 > Follow the tutorial `examples/hyperloom-local-demo.md` and run the hyperloom demo.
 
