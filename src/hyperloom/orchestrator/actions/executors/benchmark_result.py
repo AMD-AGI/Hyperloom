@@ -441,7 +441,7 @@ def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, A
         Returns:
             float: The rounded reduced value, or 0.0 when none present.
         """
-        vals = [_to_float(r.get(key)) for r in rows]
+        vals = [to_float(r.get(key)) for r in rows]
         vals = [v for v in vals if v is not None]
         return round(fn(vals), 2) if vals else 0.0
 
