@@ -99,18 +99,22 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             spec_tokens = shlex.split(spec)
         except ValueError:
             spec_tokens = spec.split()
-        if not spec_tokens:
-            continue
-        first = spec_tokens[0]
-        if not first.startswith("--"):
-            continue
-        if "=" in first:
-            flag, _, value = first.partition("=")
-            remove_pairs.add((flag, value))
-        elif len(spec_tokens) >= 2 and not spec_tokens[1].startswith("--"):
-            remove_pairs.add((first, spec_tokens[1]))
-        else:
-            remove_flags.add(first)
+        i = 0
+        while i < len(spec_tokens):
+            tok = spec_tokens[i]
+            if not tok.startswith("--"):
+                i += 1
+                continue
+            if "=" in tok:
+                flag, _, value = tok.partition("=")
+                remove_pairs.add((flag, value))
+                i += 1
+            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+                remove_pairs.add((tok, spec_tokens[i + 1]))
+                i += 2
+            else:
+                remove_flags.add(tok)
+                i += 1
 
     out: list[str] = []
     i = 0
@@ -146,7 +150,9 @@ def compose_server_args(
     """Compose inherited/base/variant args with optional remove/replace semantics."""
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
-        return str(variant_extra_args or "").strip()
+        pruned_base = remove_server_args(base_extra_args, remove_args)
+        pruned_variant = remove_server_args(variant_extra_args, remove_args)
+        return merge_server_args(pruned_base, pruned_variant)
     combined_base = merge_server_args(inherited_args, base_extra_args)
     pruned = remove_server_args(combined_base, remove_args)
     return merge_server_args(pruned, variant_extra_args)

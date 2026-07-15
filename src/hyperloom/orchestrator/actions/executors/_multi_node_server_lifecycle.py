@@ -389,8 +389,6 @@ async def restart_server_for_round(
     unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
     if extra_env:
         safe_env = filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True)
-        for key in unset_keys:
-            safe_env.pop(key, None)
         os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(safe_env)
     else:
         os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
