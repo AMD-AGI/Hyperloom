@@ -1792,6 +1792,36 @@ class BaselineExecutor:
         # but tears down the whole descendant tree on every exit path).
         # Plain subprocess.run leaks daemonized server processes. See
         # ``_subprocess_kill.py``.
+        # Multi-node client warmup: one discarded pass against the persistent
+        # remote server (restarted just above) to warm JIT / steady-state
+        # before the measured pass. Best-effort; MN-only; skipped when another
+        # executor claimed the restart (profile round). Default ON
+        # (INFERENCE_OPTIMIZER_MN_BENCH_WARMUP=0 disables).
+        from ._multi_node_env import (
+            is_multi_node as _mn_imn,
+            mn_bench_warmup_enabled as _mn_warm,
+        )
+        if _mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"):
+            _mn_warm_dir = output_dir / "mn_warmup"
+            try:
+                _mn_warm_dir.mkdir(parents=True, exist_ok=True)
+                _mn_warm_cmd = [str(_mn_warm_dir) if c == str(output_dir) else c for c in cmd]
+                _mn_warm_env = dict(env)
+                _mn_warm_env["RESULT_DIR"] = str(_mn_warm_dir)
+                _mn_warm_env["SERVER_LOG"] = str(_mn_warm_dir / "server.log")
+                _mn_warm_env["GPU_METRICS_CSV"] = str(_mn_warm_dir / "gpu_metrics.csv")
+                await asyncio.to_thread(
+                    run_with_session_kill,
+                    _mn_warm_cmd,
+                    env=_mn_warm_env,
+                    cwd=str(_mn_warm_dir),
+                    timeout=timeout_sec,
+                    server_log_path=str(_mn_warm_dir / "server.log"),
+                )
+                log.info("baseline_executor: MN warmup pass done (discarded)")
+            except Exception as exc:  # noqa: BLE001 - warmup is best-effort
+                log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
+
         subprocess_started_unix = time.time()
         # Anchor the Magpie *parent* process cwd to the stable per-task
         # output_dir instead of the default ``/tmp`` (defence-in-depth for any

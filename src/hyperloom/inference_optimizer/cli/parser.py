@@ -241,31 +241,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "(unless already in /tmp/multi_node_state.json), runs bootstrap "
         "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
         "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
-        "stop-rayjob` when you want to release it. Requires "
-        "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
+        "stop-multi-job` when you want to release it. Requires "
+        "--mn-image or INFERENCE_OPTIMIZER_MN_IMAGE. "
         "Default: 1.",
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "dynamo"),
+        choices=("rayjob", "infera"),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'dynamo' (idle DynamoDeployment + SSH control "
+        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
         "plane). Resolution: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND "
         "> rayjob. Single-node runs ignore this flag.",
     )
     opt.add_argument(
-        "--rayjob-image",
+        "--mn-image",
         default=None,
-        help="Container image for the multi-node RayJob (head+workers). "
-        "Required when --nodes>=2 unless INFERENCE_OPTIMIZER_RAYJOB_IMAGE "
-        "is set or state file last_create_request.image is present.",
+        help="Container image for the multi-node pods (Infera worker/prefill/"
+        "decode pods, or RayJob head+workers). Required when --nodes>=2 unless "
+        "INFERENCE_OPTIMIZER_MN_IMAGE is set or state file "
+        "last_create_request.image is present.",
     )
     opt.add_argument(
-        "--rayjob-gpus-per-node",
+        "--gpus-per-node",
         type=int,
         default=None,
-        help="GPUs per RayJob pod (default: 8). Passed to multi_node create-rayjob.",
+        help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
+        "head+workers). Default: INFERENCE_OPTIMIZER_GPUS_PER_NODE or 8.",
     )
     # --rayjob-extra-env is a prompt-driven pass-through forwarded verbatim to workload_spec.env; the CLI
     # invents no keys. Reserved RAY_JOB_ENTRYPOINT stripped downstream; credential keys auto-injected elsewhere.
@@ -378,6 +380,34 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). "
         "Empty = use $NCCL_IB_HCA from RayJob pod env at server-launch time.",
+    )
+    opt.add_argument(
+        "--pd-prefill-ep",
+        type=int,
+        default=0,
+        help="EP for the prefill group (disaggregated only); 0 = fall back to "
+        "--ep. Multi-node PD only.",
+    )
+    opt.add_argument(
+        "--pd-decode-ep",
+        type=int,
+        default=0,
+        help="EP for the decode group (disaggregated only); 0 = fall back to "
+        "--ep. Multi-node PD only.",
+    )
+    opt.add_argument(
+        "--pd-prefill-extra-args",
+        type=str,
+        default="",
+        help="Per-role sglang server args for the prefill group, appended after "
+        "the shared server args (disaggregated only). Multi-node PD only.",
+    )
+    opt.add_argument(
+        "--pd-decode-extra-args",
+        type=str,
+        default="",
+        help="Per-role sglang server args for the decode group, appended after "
+        "the shared server args (disaggregated only). Multi-node PD only.",
     )
     opt.add_argument(
         "--skip-variants",
