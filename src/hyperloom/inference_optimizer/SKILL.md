@@ -715,6 +715,16 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is treated as a sweep ladder: baseline uses the first value and the
 ladder is forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
 
+Operator server flags are the workload baseline, but they are not sacred. When
+EXPLORE has evidence or an operator hint that a pinned flag may be harmful, it
+may test an ablation variant with `remove_args` (or `unset_envs` for inherited
+environment variables). Do not simulate deletion by adding an unrelated
+counter-flag: emit an explicit explore grid entry such as
+`{"name": "remove_cuda_graph_max_bs", "remove_args": ["--cuda-graph-max-bs"]}`.
+The executor removes those inherited args before appending the variant's
+`extra_args`, then records the removal fields in `explore_search` for dedup and
+audit.
+
 ### Workload-contract reuse (baseline → explore/sweep)
 
 `baseline` materializes its YAML once with the operator's process env

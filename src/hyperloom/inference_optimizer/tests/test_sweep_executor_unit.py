@@ -49,6 +49,31 @@ def test_build_grid_basic():
     assert v.extra_envs["NUM_PROMPTS"] == "20"
 
 
+def test_build_grid_threads_removal_controls():
+    grid, skipped = sw._build_grid(
+        conc_values=[4],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="--x",
+        base_remove_args=["--bad-base"],
+        base_unset_envs=["SGLANG_BAD_ENV"],
+    )
+    assert skipped == []
+    assert grid[0].remove_args == ["--bad-base"]
+    assert grid[0].unset_envs == ["SGLANG_BAD_ENV"]
+
+
+def test_build_grid_threads_replace_mode():
+    grid, _ = sw._build_grid(
+        conc_values=[4],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="--replacement",
+        base_args_mode="replace",
+    )
+    assert grid[0].args_mode == "replace"
+
+
 def test_build_grid_disables_eval_by_default(monkeypatch):
     """Sweep variants skip the (concurrency-invariant) accuracy eval by default."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", raising=False)

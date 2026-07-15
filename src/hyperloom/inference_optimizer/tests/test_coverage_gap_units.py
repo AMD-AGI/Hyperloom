@@ -373,10 +373,12 @@ def test_dynamo_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SGLANG_MORI_BAR", "2")
     monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/traces")
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"SGLANG_USE_AITER": "1", "MORI_FOO": "override"}))
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["SGLANG_MORI_BAR"]))
     fwd = dyn._collect_forward_env()
     assert fwd["MORI_FOO"] == "override"
     assert fwd["SGLANG_TORCH_PROFILER_DIR"] == "/shared/traces"
     assert fwd["SGLANG_USE_AITER"] == "1"
+    assert "SGLANG_MORI_BAR" not in fwd
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
     assert dyn._collect_forward_env()["MORI_FOO"] == "1"

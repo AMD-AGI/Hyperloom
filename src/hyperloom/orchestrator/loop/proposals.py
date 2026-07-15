@@ -458,14 +458,34 @@ class ProposalsCollaborator:
                 )
         cb = self.shared_state.current_best or {}
         cb_args = str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else ""
+        def _list_control(value: Any) -> list[str]:
+            if isinstance(value, str):
+                return [value] if value.strip() else []
+            return [str(v) for v in (value or []) if str(v).strip()]
+
+        cb_remove_args = _list_control(cb.get("remove_args")) if isinstance(cb, dict) else []
+        cb_unset_envs = _list_control(cb.get("unset_envs")) if isinstance(cb, dict) else []
+        cb_args_mode = str(cb.get("args_mode") or "").strip().lower() if isinstance(cb, dict) else ""
         if pending.action_name == "profile":
             # Stamp base_extra_args so post-task promotion records the server config that produced this trace.
             params.setdefault("base_extra_args", cb_args)
+            if cb_remove_args:
+                params.setdefault("base_remove_args", cb_remove_args)
+            if cb_unset_envs:
+                params.setdefault("base_unset_envs", cb_unset_envs)
+            if cb_args_mode == "replace":
+                params.setdefault("base_args_mode", "replace")
         if pending.action_name == "sweep":
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+            if cb_remove_args:
+                params.setdefault("base_remove_args", cb_remove_args)
+            if cb_unset_envs:
+                params.setdefault("base_unset_envs", cb_unset_envs)
+            if cb_args_mode == "replace":
+                params.setdefault("base_args_mode", "replace")
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
@@ -476,6 +496,12 @@ class ProposalsCollaborator:
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+            if cb_remove_args:
+                params.setdefault("base_remove_args", cb_remove_args)
+            if cb_unset_envs:
+                params.setdefault("base_unset_envs", cb_unset_envs)
+            if cb_args_mode == "replace":
+                params.setdefault("base_args_mode", "replace")
         if pending.action_name == "integrate_patch":
             keep = self._decaying_keep_threshold_pct()
             if keep is not None:
@@ -491,6 +517,12 @@ class ProposalsCollaborator:
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+            if cb_remove_args:
+                params.setdefault("base_remove_args", cb_remove_args)
+            if cb_unset_envs:
+                params.setdefault("base_unset_envs", cb_unset_envs)
+            if cb_args_mode == "replace":
+                params.setdefault("base_args_mode", "replace")
             if self.shared_state.baseline_config_path:
                 params.setdefault(
                     "config_path", self.shared_state.baseline_config_path
