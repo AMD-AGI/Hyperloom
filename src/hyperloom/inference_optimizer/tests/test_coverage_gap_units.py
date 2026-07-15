@@ -366,10 +366,14 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SGLANG_MORI_BAR", "2")
     monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/traces")
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"SGLANG_USE_AITER": "1", "MORI_FOO": "override"}))
+    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.setenv(k, f"secret-{k}")
     fwd = inf._collect_forward_env()
     assert fwd["MORI_FOO"] == "override"
     assert fwd["SGLANG_TORCH_PROFILER_DIR"] == "/shared/traces"
     assert fwd["SGLANG_USE_AITER"] == "1"
+    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"):
+        assert k not in fwd
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
     assert inf._collect_forward_env()["MORI_FOO"] == "1"
