@@ -2,31 +2,23 @@
 
 """HTTP client for the InferenceX public benchmarks API.
 
-Endpoint shape verified against
-``https://inferencex.semianalysis.com/api/v1/benchmarks?model=<name>``
-(see the end-to-end Go test in
-``Primus-SaFE/SaFE/apiserver/pkg/handlers/inferencex/handler_e2e_test.go``).
+Endpoint shape:
+``https://inferencex.semianalysis.com/api/v1/benchmarks?model=<name>``.
 
 Two design rules driven by the call-site (target_analysis executor):
 
 * **Never raise on network / parsing problems.** Returns ``None`` (or
   an empty list, depending on the call) plus a structured warning the
-  caller can persist into ``BaselineSummary.warning``. The orchestration
-  loop must keep running even if InferenceX is down.
-* **Bounded timeout + small retry budget.** Default total wall-time
-  budget is ~8 seconds (2 attempts * 3s connect/read + a touch of
-  jitter). target_analysis advertises ``cost_minutes_p50 = 0.1`` and we
-  want to honour that even on flaky upstreams.
+  caller can persist into ``BaselineSummary.warning``.
+* **Bounded timeout + small retry budget.**
 
 Optional environment overrides:
 
-* ``INFERENCEX_BASE_URL``     — defaults to upstream public URL; tests
-  point this at httptest.
+* ``INFERENCEX_BASE_URL``     — defaults to upstream public URL.
 * ``INFERENCEX_TIMEOUT_SEC``  — per-request timeout (default 5).
 * ``INFERENCEX_MAX_ATTEMPTS`` — default 2.
 * ``INFERENCEX_INSECURE``     — accept ``"1"``/``"true"`` to skip TLS
-  verification, mirroring the SaFE handler's ``InsecureSkipVerify``
-  (some pod images ship outdated CA bundles).
+  verification.
 """
 
 from __future__ import annotations
@@ -53,8 +45,7 @@ DEFAULT_MAX_ATTEMPTS = 2
 
 
 class InferenceXFetchError(Exception):
-    """Internal — only raised by ``_fetch_raw``; the public
-    ``fetch_rows`` swallows it and returns ``(None, warning)``."""
+    """Internal — only raised by ``_fetch_raw``; ``fetch_rows`` swallows it."""
 
     pass
 
@@ -171,17 +162,10 @@ def _fetch_raw(url: str) -> bytes:
 def fetch_rows(model: str) -> tuple[list[dict[str, Any]] | None, str]:
     """Pull every benchmark row for one model from InferenceX.
 
-    Returns a tuple ``(rows, warning)`` where:
-
-    * ``rows`` is the raw list of dicts as the upstream emitted (each
-      dict matches the Go ``BenchmarkRow`` shape — see handler.go).
-      Filtering by gpu / precision / isl / osl is done by the caller
-      (``target_analyzer``) so this module stays a thin transport.
-    * ``warning`` is the empty string on success, otherwise a short
-      human-readable note explaining why ``rows is None``.
-
-    Never raises. Retries up to ``INFERENCEX_MAX_ATTEMPTS`` times
-    with linear back-off between attempts (0.5s, 1.0s, …).
+    Filtering by gpu / precision / isl / osl is done by the caller
+    (``target_analyzer``) so this module stays a thin transport. Never
+    raises; retries up to ``INFERENCEX_MAX_ATTEMPTS`` times with linear
+    back-off between attempts.
 
     Args:
         model (str): The InferenceX display name to query benchmarks for.

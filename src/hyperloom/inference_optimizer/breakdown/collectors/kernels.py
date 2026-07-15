@@ -27,7 +27,7 @@ from ._common import (
 
 # Kernel backend invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
-    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render.
+    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -37,19 +37,19 @@ def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
         two legacy layouts. Empty when none exist.
     """
     candidates: list[Path] = []
-    # Canonical (current): <sd>/kernel-agent/runs/<sid>/
+    # Canonical: <sd>/kernel-agent/runs/<sid>/
     new_root = session_dir / "kernel-agent" / "runs"
     if new_root.is_dir():
         for sub in new_root.glob("*"):
             if sub.is_dir() and sub not in candidates:
                 candidates.append(sub)
-    # Legacy double-nested: <sd>/kernel-agent-workspace/kernel-agent/runs/<sid>/
+    # Legacy double-nested layout.
     legacy_root = session_dir / "kernel-agent-workspace"
     if legacy_root.is_dir():
         for sub in (legacy_root / "kernel-agent" / "runs").glob("*"):
             if sub.is_dir() and sub not in candidates:
                 candidates.append(sub)
-        # Even older per-kernel form: <sd>/kernel-agent-workspace/<kid>/kernel-agent/runs/<sid>/
+        # Even older per-kernel form.
         for kid_dir in legacy_root.glob("*/kernel-agent/runs/*"):
             if kid_dir.is_dir() and kid_dir not in candidates:
                 candidates.append(kid_dir)
@@ -89,7 +89,6 @@ def _parse_invocation_attempt(
         attempt.get("attempt_id") or attempt.get("id") or attempt.get("run_id") or "",
     )
 
-    # Resolve auxiliary paths
     prompt_path: Path | None = None
     for p in (run_dir / "prompts").glob(f"{attempt_id}*") if attempt_id else []:
         prompt_path = p
@@ -111,7 +110,6 @@ def _parse_invocation_attempt(
             decision = "FAILED"
         # otherwise leave empty; kernel-level decision is stamped later
 
-    # Per-attempt speedup (preferred) — falls back to None if not recorded.
     micro_speedup = _to_float(attempt.get("speedup") or attempt.get("micro_speedup"))
 
     return {
@@ -145,7 +143,7 @@ def _stamp_kernel_level_decisions(
     session_dir: Path,
     warnings: list[str],
 ) -> None:
-    """Stamp the kernel-level KEEP/PARTIAL/REVERT decision onto the single BEST attempt per kernel.
+    """Stamp the kernel-level KEEP/PARTIAL/REVERT decision onto the single best attempt per kernel.
 
     Reads kernel-level ``results/<kid>.json`` + ``verification/<kid>.json``;
     the best attempt is chosen by backend hint, else highest micro_speedup
@@ -203,8 +201,8 @@ def _stamp_kernel_level_decisions(
             )
 
         # Attribute the KEEP to the adopted backend via
-        # ``verification.best_attempt_id`` then ``best_backend``; the bare
-        # micro/ts heuristic is only a last resort (it can pick a FAILED lane).
+        # ``verification.best_attempt_id`` then ``best_backend``; the micro/ts
+        # heuristic is a last resort (it can pick a FAILED lane).
         best = None
         if isinstance(verification, dict):
             want_id = str(verification.get("best_attempt_id") or "")
@@ -233,7 +231,6 @@ def _stamp_kernel_level_decisions(
             )
         if isinstance(result, dict) and result.get("cli_log_path"):
             best["cli_log_path"] = result["cli_log_path"]
-        # Refresh metadata from the richer result file.
         best["kernel_metadata"] = _shape_kernel_metadata(
             result,
             {
@@ -278,7 +275,7 @@ def _shape_kernel_metadata(
 
 
 def _infer_run_dir_kernel_id(run_dir: Path) -> str:
-    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``; only when the dir holds a single kid.
+    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``, only when the dir holds a single kid.
 
     Args:
         run_dir (Path): A kernel-agent run directory.
@@ -318,8 +315,7 @@ def collect_kernel_invocations(
     for run_dir in run_dirs:
         attempts = _load_jsonl_safe(run_dir / "optimization_attempts.jsonl", warnings)
         parsed = [_parse_invocation_attempt(att, run_dir, session_dir, warnings) for att in attempts]
-        # Backfill kernel_id when the jsonl row omitted it, else the
-        # invocation can't be attributed or get its decision stamped.
+        # Backfill kernel_id when the jsonl row omitted it.
         if any(not (inv.get("kernel_id") or "") for inv in parsed):
             inferred = _infer_run_dir_kernel_id(run_dir)
             if inferred:
@@ -360,7 +356,7 @@ def _read_kernel_candidates(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Return the ``hot_kernels`` array from ``kernel_candidates.json`` (duration/call-count source the report needs).
+    """Return the ``hot_kernels`` array from ``kernel_candidates.json``.
 
     Resolves via the orchestrator-recorded path, then the new and legacy
     on-disk layouts (glob fallbacks), then ``last_trace_analyze.hot_kernels_top15``.
@@ -378,8 +374,8 @@ def _read_kernel_candidates(
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
-        # Recorded path is usually a container path; re-root it under
-        # session_dir via the kernel-agent[-workspace] anchors before glob.
+        # Re-root the (usually container) path under session_dir via the
+        # kernel-agent[-workspace] anchors before glob.
         p = Path(str(raw_path))
         candidate_paths.append(p)
         for anchor in ("kernel-agent-workspace", "kernel-agent"):
@@ -417,7 +413,7 @@ def _read_kernel_candidates(
 def _index_invocations_by_kernel(
     invs: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Fold per-attempt invocations into a per-kernel ``{attempts, best_speedup, decision, last_status}`` summary.
+    """Fold per-attempt invocations into a per-kernel summary.
 
     Args:
         invs (list[dict[str, Any]]): Per-attempt invocation records.
@@ -511,13 +507,9 @@ def _collect_detected_kernels(
             "optimization_notes": str(k.get("optimization_notes") or ""),
         }
 
-    # 2) benchmark_report.kernel_summary fallback — pulls in the long
-    #    tail of trace kernels that didn't make the top-N candidates
-    #    list. We dedupe by name against the candidates entries (so
-    #    k001..k0NN absorb their fallback rows instead of producing
-    #    twin entries), and any genuinely new fallback entry gets a
-    #    short ``rNNN`` alias as ``kernel_id`` so the table column
-    #    stays narrow.
+    # 2) benchmark_report.kernel_summary fallback for the tail of trace kernels
+    #    that didn't make the top-N candidates. Dedupe by name against the
+    #    candidates entries; new fallback entries get a short ``rNNN`` alias.
     name_to_kid = {e["name"]: kid for kid, e in by_kid.items() if e.get("name")}
     residual_counter = 0
     for task_dir, report_path in _scan_profile_reports(session_dir):
@@ -537,8 +529,7 @@ def _collect_detected_kernels(
                 continue
             existing_kid = name_to_kid.get(name_str)
             if existing_kid is not None:
-                # Merge missing fields into the candidates-side entry
-                # rather than appending a duplicate row.
+                # Merge missing fields into the candidates-side entry.
                 entry = by_kid[existing_kid]
                 if entry.get("gpu_pct") is None:
                     entry["gpu_pct"] = _to_float(k.get("gpu_pct"))
@@ -553,11 +544,8 @@ def _collect_detected_kernels(
                 continue
 
             input_kid = str(k.get("kernel_id") or "")
-            # Keep the input kernel_id when it's already a short alias
-            # (orchestrator-assigned, e.g. ``k002``) instead of clobbering
-            # it with a residual alias. Mangled C++ symbols (input_kid ==
-            # name, len ≫ 16) get a generated alias to keep the table
-            # narrow.
+            # Keep the input kernel_id when it's already a short alias (e.g.
+            # ``k002``); mangled C++ symbols get a generated ``rNNN`` alias.
             is_short_alias = input_kid and input_kid != name_str and len(input_kid) <= 8 and input_kid not in by_kid
             if is_short_alias:
                 alias = input_kid
@@ -1198,10 +1186,8 @@ def collect_conc_sweep_summary(
 
     out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
 
-    # Only fall back to run-workspace recovery when the authoritative report
-    # has no successful pairs. A healthy report is authoritative and must not
-    # be overridden by the weaker throughput-only recompute (also skips the
-    # full runs/ scan on the healthy path).
+    # Fall back to run-workspace recovery only when the authoritative report
+    # has no successful pairs (also skips the full runs/ scan on the healthy path).
     if _conc_sweep_successful_pairs(out) == 0:
         recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
         if _conc_sweep_successful_pairs(recovered) > 0:
@@ -1211,9 +1197,8 @@ def collect_conc_sweep_summary(
     return out
 
 
-# Optimization stack — raw KEEP ledger passthrough so consumers get the
-# full per-entry evidence (tuned_file / workspace / etc.) the summarised
-# sections drop, reading sbd alone without a state.json walk.
+# Optimization stack — raw KEEP ledger passthrough with the full per-entry
+# evidence the summarised sections drop.
 def collect_optimization_stack(
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -1249,7 +1234,7 @@ def _normalize_optimization_stack_entry(
     *,
     validated: bool,
 ) -> dict[str, Any]:
-    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim (Inv-10.1 fact-layer compat).
+    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim.
 
     Args:
         raw (dict[str, Any]): One raw ``optimization_stack`` entry.
@@ -1296,11 +1281,8 @@ def _normalize_optimization_stack_entry(
 def _resolve_gemm_engine(record: dict[str, Any]) -> str:
     """Resolve the GEMM-tuning engine label for a run/stack record.
 
-    The forge lane records its tuner under ``backend`` (e.g. ``forge``) and
-    leaves ``engine`` unset, while the legacy GEAK path sets ``engine``
-    directly. Reading only ``engine`` therefore mislabeled every forge run as
-    ``geak``. Prefer ``engine``, then ``backend``, then fall back to ``geak``
-    for older records that carry neither.
+    Prefer ``engine``, then ``backend`` (the forge lane records its tuner
+    there), then fall back to ``geak`` for records that carry neither.
     """
     return str(record.get("engine") or record.get("backend") or "geak")
 
@@ -1402,11 +1384,10 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
                 try:
                     run[knob] = int(chosen)
                 except (TypeError, ValueError):
-                    continue  # best-effort int coercion; skip non-numeric knob values
+                    continue  # skip non-numeric knob values
         if raw.get("libtype"):
             run["libtype"] = str(raw.get("libtype"))
-        # Surface why a run skipped (e.g. dense fp8 missing GEMM shapes) so the
-        # breakdown explains the outcome instead of an opaque "skipped".
+        # Surface why a run skipped (e.g. dense fp8 missing GEMM shapes).
         if raw.get("skip_reason"):
             run["skip_reason"] = str(raw.get("skip_reason"))
         if isinstance(raw.get("tuners_skipped"), list) and raw.get("tuners_skipped"):

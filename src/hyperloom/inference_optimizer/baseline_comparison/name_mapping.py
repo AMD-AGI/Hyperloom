@@ -12,16 +12,10 @@ Hard rules:
 
 * The mapping is **best-effort**. When we are not confident, we return
   ``None`` and the caller gracefully skips target_analysis. Never raise.
-* The known-models list is hardcoded here (it changes ~monthly). We
-  intentionally do NOT hit ``/filters`` at runtime to keep
-  target_analysis at < 250 ms total.
+* The known-models list is hardcoded here to keep target_analysis fast.
 * Matching is case-insensitive; vendor prefixes from common HF repo
   conventions (``MiniMaxAI-``, ``deepseek-ai-``, ``meta-llama-``, ...)
   are stripped before comparison.
-
-If you add a new model to the upstream you must add it here (and the
-unit test in ``tests/test_baseline_comparison.py`` will catch
-out-of-sync drift).
 """
 
 from __future__ import annotations

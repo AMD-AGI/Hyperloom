@@ -128,8 +128,8 @@ def _benchmark_report_metrics(
 ) -> tuple[float | None, float | None, float | None, float | None]:
     """Extract (output_throughput, ttft, tpot, e2el) from a benchmark_report.json across schema generations.
 
-    Priority: V2 nested (``throughput.*`` / ``latency.<m>.mean_ms``),
-    pre-V2 flat top-level, then legacy ``result.<flat>``.
+    Priority: V2 nested (``throughput.*`` / ``latency.<m>.mean_ms``), flat
+    top-level, then ``result.<flat>``.
 
     Args:
         report (dict[str, Any] | None): A parsed ``benchmark_report.json``, or
@@ -175,7 +175,7 @@ def _benchmark_report_metrics(
 
 
 def _benchmark_report_candidates(root: Path) -> list[Path]:
-    """Return benchmark reports under a task/workspace root (handles the several on-disk layouts used over time).
+    """Return benchmark reports under a task/workspace root (handles the several on-disk layouts).
 
     Args:
         root (Path): The task or workspace directory to search.

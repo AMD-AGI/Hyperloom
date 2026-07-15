@@ -21,8 +21,7 @@ from typing import Literal
 
 SectionShape = Literal["item", "singleton"]
 
-# Producer-written sections and their fragment shape. Payloads match the
-# corresponding ``schema.py`` TypedDict so assembly is structure-preserving.
+# Producer-written sections and their fragment shape.
 SECTION_SHAPES: dict[str, SectionShape] = {
     "session": "singleton",
     "workload": "singleton",
@@ -35,9 +34,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "explore_search": "singleton",
     "sweep": "singleton",
     "critic_robustness": "singleton",
-    # Author-time item substreams composed into the ``critic_robustness``
-    # singleton at assembly (recorded per-iteration so the backend's workdir
-    # pruning never erases history).
+    # Item substreams composed into the ``critic_robustness`` singleton at assembly.
     "critic_iterations": "item",
     "robustness_signals": "item",
     "telemetry": "singleton",
@@ -49,23 +46,16 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "conc_sweep_summary": "singleton",
     "roofline": "item",
     "roofline_progress": "singleton",
-    # Kernel-major lifecycle substreams. Recorded by their respective owners at
-    # author time and folded into the ``kernel_journey`` view at assembly (same
-    # compose-on-read pattern as ``critic_robustness``); none of these leak into
-    # the breakdown envelope on their own.
-    "kernel_discovery": "item",  # one per hot-kernel discovery run (tracelens/roofline)
+    # Kernel-major lifecycle substreams, folded into the ``kernel_journey`` view at assembly.
+    "kernel_discovery": "item",  # one per hot-kernel discovery run
     "kernel_dispatch": "item",  # one per kernel: dispatched? which backends?
     "kernel_backend_result": "item",  # one per backend attempt
     "kernel_e2e": "item",  # one per kernel: e2e integrate gain
-    # Authoritative external-tool versions (geak/tracelens/claude/codex/...),
-    # one item per tool (idempotent by tool name); folded into the top-level
-    # ``versions`` map at assembly.
+    # External-tool versions, one item per tool; folded into the top-level ``versions`` map.
     "versions": "item",
 }
 
-# Sections computed at finalize from in-memory state, never written as
-# fragments. Listed so the assembler can distinguish "expected absent" from
-# "missing producer".
+# Sections computed at finalize from in-memory state, never written as fragments.
 DERIVED_SECTIONS: frozenset[str] = frozenset(
     {
         "capability_summary",

@@ -45,10 +45,6 @@ LLM_AUTHORED_SOURCE = "llm_authored"
 def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
     """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo.
 
-    Upstream sometimes contains multiple rows for the same (conc, tp)
-    (different dates or sweep methods). The report only needs the best
-    one per slot — keeping all of them just clutters the markdown.
-
     Args:
         points (list[BaselinePoint]): Candidate points, possibly with
             duplicate ``(conc, decode_tp)`` combos.
@@ -69,10 +65,8 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
 def _format_report_md(summary: BaselineSummary) -> str:
     """Render a 10-15 line human-readable markdown summary.
 
-    Intentionally avoids printing a gap percentage — the agreed
-    contract is "facts only, no derived KPI" so this section never
-    accidentally becomes an optimisation target (see S2 in the design
-    chat).
+    Intentionally avoids printing a gap percentage — the contract is
+    "facts only, no derived KPI".
 
     Args:
         summary (BaselineSummary): The summary to render.

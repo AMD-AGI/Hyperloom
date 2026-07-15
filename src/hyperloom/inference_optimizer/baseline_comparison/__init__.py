@@ -17,11 +17,7 @@ shows up in any agent's system prompt. The only consumers are:
   section in ``final.md``.
 
 Source of upstream data: the InferenceX public benchmarks API
-(https://inferencex.semianalysis.com/api/v1/benchmarks). The exact same
-endpoint that the SaFE apiserver's ``apiserver/pkg/handlers/inferencex``
-proxies — so this client and that handler stay observationally
-equivalent (modulo authentication, which we don't need against the
-public endpoint).
+(https://inferencex.semianalysis.com/api/v1/benchmarks).
 """
 
 from .inferencex_client import (

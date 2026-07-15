@@ -27,7 +27,7 @@ def collect_roofline(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Shape ``state.roofline_snapshots`` into the per-session roofline comparison the ``Roofline`` renderer expects.
+    """Shape ``state.roofline_snapshots`` into the per-session roofline comparison the renderer expects.
 
     Returns ``[]`` when no snapshots exist or on parse failure
     (best-effort; errors recorded in ``warnings``).
@@ -45,7 +45,7 @@ def collect_roofline(
     if not isinstance(snapshots, list) or not snapshots:
         return []
     try:
-        # Lazy import to avoid the orchestrator → breakdown → orchestrator circular path.
+        # Lazy import to avoid a circular import path.
         from hyperloom.orchestrator.kernel.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
@@ -88,12 +88,11 @@ def collect_roofline_progress(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Build the ``roofline_progress`` section feeding the optimization-progress chart (spec §2); never raises.
+    """Build the ``roofline_progress`` section feeding the optimization-progress chart; never raises.
 
-    Renamed from ``roofline`` to avoid clashing with :func:`collect_roofline`'s
-    list-shaped key. Pure over ``state`` + ``manifest``. Output: ``trajectory[]``
-    (baseline + KEEPs, ts-sorted), ceiling/target reference lines from the latest
-    snapshot, headline current-best numbers, and a ``snapshots[]`` passthrough.
+    Pure over ``state`` + ``manifest``. Output: ``trajectory[]`` (baseline +
+    KEEPs, ts-sorted), ceiling/target reference lines from the latest snapshot,
+    headline current-best numbers, and a ``snapshots[]`` passthrough.
 
     Args:
         session_dir (Path): Absolute session root (kept for a uniform collector
@@ -173,11 +172,10 @@ def collect_roofline_progress(
         else None
     )
 
-    # Scriptable/diffusion (xDiT) image models have no tok/s decode ceiling; their
-    # roofline lives in the latency domain (ideal per-image compute floor vs the
-    # measured e2e latency). Surface it through DEDICATED ms fields + a
-    # ``ceiling_kind`` discriminator so the list page can render a roofline % for
-    # image models without overloading the tok/s fields (which stay null).
+    # Scriptable/diffusion (xDiT) image models have no tok/s decode ceiling;
+    # their roofline lives in the latency domain (ideal per-image compute floor
+    # vs measured e2e latency), surfaced through dedicated ms fields and a
+    # ``ceiling_kind`` discriminator while the tok/s fields stay null.
     ceiling_kind = "throughput" if ceiling_available else "none"
     latency_ceiling_ms: float | None = None
     achieved_latency_ms: float | None = None
@@ -191,9 +189,7 @@ def collect_roofline_progress(
             achieved_latency_ms = round(measured_ms, 4)
             latency_ceiling_available = True
             ceiling_kind = "latency"
-            # Latency "closer to the ceiling" means the measured e2e approaches
-            # the ideal floor, so the ratio is ideal/measured (higher = nearer,
-            # mirroring the serving achieved/peak semantics; caps well under 100).
+            # Ratio is ideal/measured (higher = nearer the floor).
             pct_of_latency_ceiling = round(ideal_ms / measured_ms * 100.0, 4)
 
     out: dict[str, Any] = {
@@ -269,8 +265,7 @@ def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
         "within_roofline_pct": _to_float(snap.get("within_roofline_pct")) or 0.0,
         "gap_to_roofline_pct": _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
         # Scriptable/diffusion (xDiT) latency-roofline pair — the ms analogue of
-        # the tok/s ceiling. Preserved (was previously dropped) so the progress
-        # collector can surface an independent latency ceiling for image models.
+        # the tok/s ceiling, used for an independent image-model latency ceiling.
         "e2e_mean_ms": _to_float(snap.get("e2e_mean_ms")),
         "roofline_ideal_ms": _to_float(snap.get("roofline_ideal_ms")),
         "roofline_bound_kind": str(snap.get("roofline_bound_kind") or "unknown"),

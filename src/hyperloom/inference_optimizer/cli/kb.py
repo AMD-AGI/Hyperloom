@@ -4,8 +4,7 @@
 
 Resolves the local KB root, builds the RecipeKB local-write/remote-read
 dispatcher, runs the T0 warm-start anchor, and wires the KnowledgePlane
-facade (PR Monitor + KB). Extracted from ``cli.py``; imports orchestrator
-packages only and must not import ``cli`` (one-way dependency).
+facade (PR Monitor + KB). Must not import ``cli`` (one-way dependency).
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
     if session_dir is None:
         return
     # Unwrap the inline gbrain-mirroring wrapper so the hook lands on the
-    # actual RecipeKB whose reads emit the audit events.
+    # RecipeKB whose reads emit the audit events.
     target = getattr(kb, "_inner", kb)
     if not hasattr(target, "audit_hook"):
         return
@@ -126,10 +125,9 @@ def _build_recipe_kb_dispatcher(
         return RecipeKB(local=local_store, remote=None)  # gbrain unconfigured: local-only
 
     kb = RecipeKB(local=local_store, remote=gbrain_remote)
-    # RECIPE_KB_MIRROR_MODE (default ``external``): external => an out-of-band
-    # CronJob ingests the local store into gbrain (gbrain off the write path);
-    # ``inline`` => best-effort mirror each local write into gbrain in-process
-    # (local write stays authoritative).
+    # RECIPE_KB_MIRROR_MODE (default ``external``): ``external`` keeps gbrain off
+    # the write path; ``inline`` best-effort mirrors each local write into gbrain
+    # in-process (local write stays authoritative).
     mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
     if mirror_mode == "inline":
         from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import (
@@ -163,7 +161,6 @@ def _bootstrap_cortex_kb(
         Any: The configured ``RecipeKB`` dispatcher.
     """
     kb = _build_recipe_kb_dispatcher(args)
-    # Trace every recipe-snapshot remote read into the session audit log.
     _attach_recipe_audit_hook(kb, session_dir)
 
     state = SharedState.load_or_init(session_dir)
@@ -176,8 +173,8 @@ def _bootstrap_cortex_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    # Mirror version + image fingerprint onto SharedState so the CLOSE-time
-    # recipe write can stamp recipe.extras without re-reading manifest.
+    # Mirror version + image fingerprint onto SharedState for the CLOSE-time
+    # recipe write.
     if isinstance(stack_fp, dict) and stack_fp:
         merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
         for key, value in stack_fp.items():
@@ -190,7 +187,7 @@ def _bootstrap_cortex_kb(
     extra_attrs = {
         "framework": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
-        # Operator traceability: which Claw job / sandbox produced best_config.
+        # Operator traceability.
         "claw_session_id": manifest.get("claw_session_id") or "",
         "sandbox_user_id": manifest.get("sandbox_user_id") or "",
     }
@@ -260,7 +257,7 @@ def _bootstrap_knowledge_plane(
         pr_reachable = True
 
     # One-shot status marker so breakdown.warnings can surface pr_monitor:*
-    # without scraping logs (best-effort).
+    # without scraping logs.
     if session_dir is not None:
         try:
             from ..session.session_paths import pr_monitor_status_json
@@ -286,11 +283,9 @@ def _bootstrap_knowledge_plane(
                 exc,
             )
 
-    # Read-only KB-graph MCP advertised to specialists as the ``cortex_kb``
-    # server. Default endpoint is the gbrain MCP (GBRAIN_BASE_URL/mcp + bearer
-    # GBRAIN_TOKEN); an explicit HYPERLOOM_SPECIALIST_KB_MCP_URL /
-    # HYPERLOOM_SPECIALIST_KB_MCP_TOKEN overrides it. Empty => disabled
-    # (mcp__cortex_kb__* tools are stripped from the specialist whitelist).
+    # Read-only KB-graph MCP advertised to specialists as ``cortex_kb``. Default
+    # is the gbrain MCP; HYPERLOOM_SPECIALIST_KB_MCP_URL / _TOKEN override it.
+    # Empty => disabled (mcp__cortex_kb__* tools stripped from the whitelist).
     kb_mcp_url, kb_mcp_headers = _resolve_specialist_kb_mcp(args)
     if kb_mcp_url:
         print(f"Specialist KB MCP: {kb_mcp_url} (cortex_kb, read-only)")

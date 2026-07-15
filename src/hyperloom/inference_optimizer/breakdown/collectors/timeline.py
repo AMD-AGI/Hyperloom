@@ -28,10 +28,7 @@ from ._common import (
 
 
 
-# Phase timeline
-# Action labels whose ``<action>_attempts`` lists feed the timeline +
-# capability tallies. Carries both the merged ``explore`` and the legacy
-# ``backends`` / ``params`` / ``validate_stack`` names; missing lists skip.
+# Action labels whose ``<action>_attempts`` lists feed the timeline + capability tallies.
 _AUDIT_ACTIONS = (
     "baseline",
     "profile",
@@ -45,7 +42,7 @@ _AUDIT_ACTIONS = (
 
 
 def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
-    """Map one optimization_journal entry to a phase_timeline event (keeps the declared ``phase`` for exact bucketing).
+    """Map one optimization_journal entry to a phase_timeline event.
 
     Args:
         e (dict[str, Any]): One ``optimization_journal.json`` entry.
@@ -72,8 +69,7 @@ def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
         for k, v in (
             ("variant_name", e.get("variant_name")),
             ("reason", e.get("reason")),
-            # Proposer attribution + stable filter label, threaded so the timeline
-            # answers "what / how / who" for each step.
+            # Proposer attribution + stable filter label.
             ("provenance", provenance),
             ("proposer", proposer_for(provenance) if provenance else ""),
             ("scope", str(e.get("scope") or "")),
@@ -109,18 +105,15 @@ def collect_phase_timeline(
 
     Merges two complementary sources so no action family is dropped:
 
-    * ``reports/optimization_journal.json`` — the canonical decision log
-      (target_analysis / baseline / roofline / specialist / explore
-      winners / sweep). Carries ``phase`` for exact segment attribution.
+    * ``reports/optimization_journal.json`` — the canonical decision log.
+      Carries ``phase`` for exact segment attribution.
     * the per-action ``*_attempts`` audit lists + ``kernel_opt`` /
       ``kernel_integrate`` histories — add per-attempt rows (incl.
-      failures) and the kernel lanes the journal records only as a single
-      KEEP.
+      failures) and the kernel lanes.
 
     Events are de-duplicated by ``(action, ts-to-second, change)`` with
     the journal copy winning, then sorted by ``ts``. Passing
-    ``session_dir=None`` degrades gracefully to the audit-list scrape
-    (used by unit fixtures that have no on-disk journal).
+    ``session_dir=None`` degrades gracefully to the audit-list scrape.
 
     Args:
         session_dir (Path | None): Absolute session root, or ``None`` to skip
@@ -134,12 +127,12 @@ def collect_phase_timeline(
     """
     events: list[dict[str, Any]] = []
 
-    # ── Source 1: canonical journal (preferred; carries phase) ──
+    # Source 1: canonical journal (carries phase).
     for e in _load_optimization_journal(session_dir, warnings):
         if isinstance(e, dict):
             events.append(_journal_entry_to_event(e))
 
-    # ── Source 2: per-action audit lists (complementary / legacy) ──
+    # Source 2: per-action audit lists.
     for action in _AUDIT_ACTIONS:
         attempts = state.get(f"{action}_attempts") or []
         if not isinstance(attempts, list):
@@ -247,7 +240,7 @@ def _capability_for_action(
     state: dict[str, Any],
     action: str,
 ) -> dict[str, Any]:
-    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback for V1/partial state.
+    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -302,8 +295,7 @@ def collect_capability_summary(
         A capability-summary dict (per-kernel status, attempt and keep counts).
     """
     forge_invocations = forge_invocations or []
-    # Integrate (e2e) outcome per kernel: a kernel-opt KEEP REVERTED at
-    # integrate is not a real adoption, so don't inflate the backend tally.
+    # Integrate (e2e) outcome per kernel: a KEEP reverted at integrate is not a real adoption.
     integ = state.get("kernel_integrate_attempts") or {}
     integ_by_kid: dict[str, dict[str, Any]] = {}
     if isinstance(integ, dict):
@@ -365,8 +357,7 @@ def collect_capability_summary(
     geak_cap = _from_invocations(geak_invocations)
     forge_cap = _from_invocations(forge_invocations)
 
-    # Legacy capability rows for archived (pre-merge) sessions; current
-    # sessions leave these not_attempted and carry activity under ``explore``.
+    # Legacy capability rows for archived sessions.
     backends = _capability_for_action(state, "backends")
     backends_search = state.get("backends_search") or {}
     if isinstance(backends_search, dict):
@@ -400,7 +391,7 @@ def collect_capability_summary(
         if sweep_cap.get("attempts", 0) > 0:
             sweep_cap["status"] = "completed"
 
-    # merged explore row carrying the unified explore_search ledger activity.
+    # Merged explore row carrying the unified explore_search ledger activity.
     explore = _capability_for_action(state, "explore")
     explore["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
     explore_search = state.get("explore_search") or {}
@@ -421,12 +412,12 @@ def collect_capability_summary(
             explore["keep_unstable_count"] = keep_unstable_count
         explore["winners_history"] = len(explore_search.get("winners_history") or [])
 
-    # specialist row derived from ``specialist_rounds`` (single source, agrees with specialist_runs).
+    # Specialist row derived from ``specialist_rounds``.
     specialist_row = _specialist_capability_row(state)
     return {
         "geak": geak_cap,
         "forge": forge_cap,
-        # primary post-merge row; backends/params/validate_stack are compat rows.
+        # Primary post-merge row; backends/params/validate_stack are compat rows.
         "explore": explore,
         "backends": backends,
         "params": params,
@@ -437,7 +428,7 @@ def collect_capability_summary(
 
 
 def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
-    """Derive ``capability_summary.specialist`` from ``specialist_rounds`` (single source per Inv-12.2).
+    """Derive ``capability_summary.specialist`` from ``specialist_rounds``.
 
     Headline counts aggregate all domains; ``by_specialist`` breaks them
     out per SpecialistDomain.key.
@@ -462,7 +453,7 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
     attempts = 0
     proposals_total = 0
     proposals_kept = 0
-    # Per-domain counters seeded with the catalogue for presence-free iteration (unknown domains survive).
+    # Per-domain counters seeded with the catalogue.
     by_specialist_raw: dict[str, dict[str, int]] = {
         d: {"attempts": 0, "keeps": 0, "tested": 0, "rejected": 0} for d in _SPECIALIST_DOMAIN_KEYS
     }
@@ -495,7 +486,7 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
                 bucket["tested"] += int(payload.get("proposals_total") or 0)
                 bucket["rejected"] += int(payload.get("proposals_rejected") or 0)
         else:
-            # Legacy round (no ``domain_breakdown``): impute equal share across tags/domains.
+            # No ``domain_breakdown``: impute equal share across tags/domains.
             domains = r.get("tags") or r.get("domains") or []
             if isinstance(domains, list) and domains:
                 share_total = int(r.get("proposals_total") or 0) // len(domains)
@@ -550,7 +541,7 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
-    """Seed every catalogue domain with a not_attempted CapabilityEntry (stable shape, no KeyError-guarding).
+    """Seed every catalogue domain with a not_attempted CapabilityEntry.
 
     Returns:
         dict[str, dict[str, Any]]: One zeroed, ``not_attempted`` capability
@@ -559,9 +550,8 @@ def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
     return {d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0} for d in _SPECIALIST_DOMAIN_KEYS}
 
 
-# Attribution
-# Catalogue of the 7 SpecialistDomain.key strings, inlined (not imported)
-# to keep breakdown free of orchestrator deps for offline use.
+# Catalogue of the 7 SpecialistDomain.key strings, inlined to keep breakdown
+# free of orchestrator deps for offline use.
 _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
     "serving_specialist",
     "kernel_switch_specialist",
@@ -573,7 +563,6 @@ _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
 )
 
 
-# Phase segments — phase state machine
 def collect_phase_segments(
     state: dict[str, Any],
     phase_timeline: list[dict[str, Any]],
@@ -657,7 +646,7 @@ def collect_phase_segments(
         )
 
     def _owner_by_window(ts: str) -> dict[str, Any] | None:
-        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts`` (lexicographic compare).
+        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts``.
 
         Args:
             ts (str): An ISO-8601 timestamp.

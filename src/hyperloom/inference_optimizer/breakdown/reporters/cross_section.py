@@ -194,7 +194,7 @@ def _data_quality_flags(
         flags.append(line)
 
     for sec in rendered:
-        # Skip dropped sections; no point flagging what the user won't see.
+        # Skip dropped sections.
         if sec.skipped:
             continue
         for w in sec.warnings:
@@ -206,7 +206,6 @@ def _data_quality_flags(
     cap = breakdown.get("capability_summary") or {}
     val = cap.get("validate_stack") or {}
     if val.get("status") == "not_attempted":
-        # Be explicit that this archived action did not re-run in-session.
         _push(
             "[legacy validate_stack] never ran — cumulative_gain_pct_validated "
             "comes from state, not a final archived-action re-run."

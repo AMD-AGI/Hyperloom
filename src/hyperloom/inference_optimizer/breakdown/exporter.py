@@ -55,13 +55,9 @@ def _merge_phase_timeline(
 ) -> list[dict[str, Any]]:
     """Union the recorder ``phase_timeline`` fragment with the collector result.
 
-    The collector merges three sources (optimization_journal + audit lists +
-    kernel_opt/integrate lanes); the recorder fragment only carries audit-action
-    attempts. A plain fragment-wins replacement (``_pick``) would therefore drop
-    the journal KEEP/REVERT and kernel lanes, so we keep the collector result as
-    the base and only append fragment rows whose dedupe key is missing (the
-    crash-survivable audit rows the on-disk state may have lost). Result stays
-    sorted by ``ts`` like the collector's own output.
+    The collector merges three sources; the recorder fragment only carries
+    audit-action attempts. Keep the collector result as the base and only append
+    fragment rows whose dedupe key is missing, staying sorted by ``ts``.
 
     Args:
         fragment: The recorder ``phase_timeline`` fragment (may be any type).
@@ -129,10 +125,9 @@ def _attach_kernel_roofline(
 
     For every journey entry with a matching ``kernel_roofline`` kernel (by
     ``kernel_id``, falling back to ``name``), attach the full roofline entry
-    under ``roofline`` and backfill the discovery numeric fields that discovery
-    surfaced empty (roofline enrichment happens after discovery records). Pure
-    best-effort: a missing/empty roofline table or kernel just leaves the
-    journey untouched.
+    under ``roofline`` and backfill the discovery numeric fields discovery left
+    empty. Best-effort: a missing/empty roofline table leaves the journey
+    untouched.
 
     Args:
         kernel_journey: The kernel-journey view mutated in place.
@@ -200,7 +195,7 @@ def build(
     *,
     include_transcripts: bool | None = None,
 ) -> dict[str, Any]:
-    """Build a complete :class:`SessionBreakdown` for ``session_dir`` (pure; reads disk, no mutation).
+    """Build a complete :class:`SessionBreakdown` for ``session_dir`` (pure; reads disk).
 
     Args:
         session_dir: hyperloom session directory (needs ``manifest.json``
@@ -220,14 +215,10 @@ def build(
     manifest = _load_session_json(manifest_path(sd), "manifest.json", warnings)
 
     # Author-time recorder fragments (write-side spool). When present they are
-    # the source of truth for their section (they capture facts the collectors
-    # can miss: pre-dispatch/infra failures, pruned robustness signals, ...);
-    # when absent the legacy collectors are used as fallback, so historical
-    # sessions and recorder-disabled runs behave exactly as before.
+    # the source of truth for their section; when absent the collectors are used
+    # as fallback.
     assembled = _load_assembled(sd, warnings)
-    # Version stamp follows the aggregation path: a recorder-aggregated
-    # breakdown ("new way", any fragments present) is v3.0; the legacy
-    # collector-only fallback keeps the previous v2 version unchanged.
+    # v3.0 when any recorder fragments are present; else the collector-only v2.
     schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
 
     def _pick(section: str, collector_value: Any) -> Any:
@@ -257,9 +248,8 @@ def build(
     session_section = _pick(
         "session", _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings)
     )
-    # Author-side ``session_meta`` enrichment. Emitted unconditionally from
-    # the manifest + resolved ``session`` block so the block no longer depends on
-    # the ci/optimize_submit backfill (which only ran on the GHA submit path).
+    # Author-side ``session_meta`` enrichment, emitted from the manifest +
+    # resolved ``session`` block.
     session_meta = _pick(
         "session_meta",
         _safe_collect(
@@ -272,8 +262,8 @@ def build(
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
     )
-    # Model basics — verbatim mirror of ``state.model_info`` (computed once
-    # at launch). Empty {} on non-transformers models / pre-field sessions.
+    # Model basics — verbatim mirror of ``state.model_info``. Empty {} on
+    # non-transformers models.
     model_info = _pick(
         "model_info",
         _safe_collect("model_info", lambda: collectors.collect_model_info(state, warnings), warnings, default={}),
@@ -284,9 +274,7 @@ def build(
     final = _pick("final", _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings))
     # Merge (not _pick replace): the recorder fragment only carries audit-action
     # attempts, while the collector also folds in optimization_journal KEEP/REVERT
-    # and the kernel_opt/integrate lanes. Fragment-wins would drop those (and
-    # cascade into action_timeline / phase_segments / token_usage which all
-    # derive from this), so union + dedupe instead.
+    # and the kernel lanes; union + dedupe instead of fragment-wins.
     phase_timeline = _merge_phase_timeline(
         assembled.get("phase_timeline"),
         _safe_collect("phase_timeline", lambda: collectors.collect_phase_timeline(sd, state, warnings), warnings),
@@ -336,9 +324,7 @@ def build(
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
     sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
-    # GEAK e2e KERNEL-phase section. Empty {} on native sessions
-    # (the optimizer was never engaged), so the dashboard hides it and historic
-    # breakdowns stay byte-for-byte identical.
+    # GEAK e2e KERNEL-phase section. Empty {} on native sessions.
     geak = _pick(
         "geak",
         _safe_collect(
@@ -379,7 +365,7 @@ def build(
             warnings,
         ),
     )
-    # specialist sub-agent dispatch records (single source: state + on-disk transcripts).
+    # Specialist sub-agent dispatch records (state + on-disk transcripts).
     specialist_runs = _pick(
         "specialist_runs",
         _safe_collect(
@@ -394,13 +380,12 @@ def build(
             default=[],
         ),
     )
-    # Raw ``state.optimization_stack[]`` passthrough (full per-entry evidence; never raises).
+    # Raw ``state.optimization_stack[]`` passthrough.
     optimization_stack = _pick(
         "optimization_stack",
         _safe_collect("optimization_stack", lambda: collectors.collect_optimization_stack(state), warnings, default=[]),
     )
-    # Fixed FP8 GEMM-tuning stage, engine-tagged (geak today, forge later);
-    # empty {} on non-fp8/sglang or pre-section sessions.
+    # Fixed FP8 GEMM-tuning stage, engine-tagged; empty {} on non-fp8/sglang.
     gemm_tuning = _pick(
         "gemm_tuning",
         _safe_collect("gemm_tuning", lambda: collectors.collect_gemm_tuning(state), warnings, default={}),
@@ -418,8 +403,8 @@ def build(
             default={},
         ),
     )
-    # Kernel-agent attempt outcome summary;
-    # mirrors ``reports/kernel_optimization_summary.json``, empty → dashboard hides Block 1.
+    # Kernel-agent attempt outcome summary; mirrors
+    # ``reports/kernel_optimization_summary.json``, empty → hides Block 1.
     kernel_optimization_summary = _pick(
         "kernel_optimization_summary",
         _safe_collect(
@@ -429,8 +414,8 @@ def build(
             default={},
         ),
     )
-    # Post-optimization concurrency sweep;
-    # mirrors ``reports/conc_sweep_summary.json``, empty → dashboard hides Block 2.
+    # Post-optimization concurrency sweep; mirrors
+    # ``reports/conc_sweep_summary.json``, empty → hides Block 2.
     conc_sweep_summary = _pick(
         "conc_sweep_summary",
         _safe_collect(
@@ -450,9 +435,7 @@ def build(
             default=[],
         ),
     )
-    # Optimization-progress curve: stack ledger + ceiling/target
-    # lines from state.json. Renamed from ``roofline`` to avoid clashing with the
-    # list-shaped section above.
+    # Optimization-progress curve: stack ledger + ceiling/target lines from state.json.
     roofline_progress = _pick(
         "roofline_progress",
         _safe_collect(
@@ -467,11 +450,9 @@ def build(
             default={},
         ),
     )
-    # Full-trace: unified token + decision timeline. Joins the per-call
-    # token ledger (reports/trace/llm_calls.jsonl) with the
-    # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
-    # rollup) on sessions that predate the trace subsystem. Also writes
-    # reports/trace/decision_trace.jsonl as a side effect.
+    # Full-trace: unified token + decision timeline. Joins the per-call token
+    # ledger with the KEEP/REVERT journal + dynamic_action dispatch history.
+    # Also writes reports/trace/decision_trace.jsonl as a side effect.
     decision_trace = _safe_collect(
         "decision_trace",
         lambda: collectors.collect_decision_trace(
@@ -482,11 +463,8 @@ def build(
         warnings,
         default={},
     )
-    # Promoted, discoverable token-spend rollup. Pure/derived from
-    # decision_trace's already-computed token_rollup (no second ledger read)
-    # plus an action_timeline correlation on task_id. Surfaces the full
-    # session total + by component/phase + decision attribution at top level
-    # so callers don't have to dig into decision_trace.token_rollup.
+    # Promoted token-spend rollup, derived from decision_trace's token_rollup
+    # plus an action_timeline correlation on task_id.
     token_usage = _safe_collect(
         "token_usage",
         lambda: collectors.collect_token_usage(
@@ -497,10 +475,8 @@ def build(
         warnings,
         default={},
     )
-    # Live-Langfuse push receipt (opt-in second sink): enabled? / redacted
-    # config / counts. Prefers the post-flush ``langfuse_receipt.json``;
-    # falls back to a live emitter read. The local trace jsonl is always
-    # written regardless of this section.
+    # Live-Langfuse push receipt (opt-in second sink). Prefers the post-flush
+    # ``langfuse_receipt.json``; falls back to a live emitter read.
     langfuse = _safe_collect(
         "langfuse",
         lambda: collectors.collect_langfuse(
@@ -511,19 +487,12 @@ def build(
         warnings,
         default={},
     )
-    # Kernel-major lifecycle view (discovery -> dispatch -> backend attempts ->
-    # e2e), composed by the recorder assembler from its four item substreams.
-    # Pure recorder section (no collector fallback): empty {} on sessions that
-    # predate the substreams, so v1/v2 readers that don't know it just ignore
-    # it and historical breakdowns stay byte-for-byte identical.
     # Authoritative external-tool versions, folded into a {tool: meta} map by
     # the recorder assembler. Pure recorder section (no collector fallback).
     versions = _pick("versions", {})
     kernel_journey = _pick("kernel_journey", {})
-    # Attach a copy of the per-kernel roofline metrics onto each journey entry
-    # and backfill discovery numeric fields that discovery couldn't surface
-    # (arithmetic_intensity / bound_type / efficiency) since roofline is
-    # enriched after discovery. Best-effort; never raises.
+    # Attach per-kernel roofline metrics onto each journey entry and backfill
+    # discovery numeric fields discovery couldn't surface. Best-effort.
     _attach_kernel_roofline(kernel_journey, kernel_roofline)
 
     source_files = collectors.collect_source_files(
@@ -538,16 +507,16 @@ def build(
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
         "session": session_section,
-        # Session metadata enrichment; always present from the exporter (no longer CI-only).
+        # Session metadata enrichment; always present from the exporter.
         "session_meta": session_meta,
         "workload": workload,
-        # Structural model summary (state.model_info mirror). Additive
-        # optional; empty {} on non-transformers models / pre-field sessions.
+        # Structural model summary (state.model_info mirror); empty {} on
+        # non-transformers models.
         "model_info": model_info,
         "baseline": baseline,
         "final": final,
         "phase_timeline": phase_timeline,
-        # Additive: v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
+        # v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
         "phase_segments": phase_segments,
         # v1-reader alias mirroring the flat per-action timeline.
         "action_timeline": phase_timeline,
@@ -559,22 +528,21 @@ def build(
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
         "sweep": sweep,
-        # GEAK e2e KERNEL section (additive, optional); empty {} →
-        # dashboard hides it on native sessions.
+        # GEAK e2e KERNEL section; empty {} → hidden on native sessions.
         "geak": geak,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         "attribution": attribution,
-        # Cortex KB integration audit; optional, so no schema_version bump.
+        # Cortex KB integration audit.
         "kb_provenance": kb_provenance,
         "specialist_runs": specialist_runs,
         # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
         "optimization_stack": optimization_stack,
-        # Fixed FP8 GEMM-tuning stage (KERNEL entry), engine-tagged (geak
-        # today, forge later). Gain mirrored here; ``attribution`` stays
-        # authoritative. Empty {} on non-fp8/sglang or pre-section sessions.
+        # Fixed FP8 GEMM-tuning stage (KERNEL entry), engine-tagged. Gain
+        # mirrored here; ``attribution`` stays authoritative. Empty {} on
+        # non-fp8/sglang.
         "gemm_tuning": gemm_tuning,
-        # Hot-kernel roofline table; empty → dashboard hides it.
+        # Hot-kernel roofline table; empty → hidden.
         "kernel_roofline": kernel_roofline,
         # Kernel-agent attempt outcome summary; empty → hides Block 1.
         "kernel_optimization_summary": kernel_optimization_summary,
@@ -582,31 +550,23 @@ def build(
         "conc_sweep_summary": conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown source).
         "roofline": roofline,
-        # Optimization-progress curve; ``ceiling_available`` False
-        # when the watermark roofline pipeline never ran.
+        # Optimization-progress curve; ``ceiling_available`` False when the
+        # watermark roofline pipeline never ran.
         "roofline_progress": roofline_progress,
-        # Full-trace token + decision timeline.
-        # ``decision_trace`` is the per-decision join (phase/tick/decision
-        # + token rollup); ``token_rollup`` is the by_phase / by_component
-        # / session_total summary. New optional section — v1 readers ignore
-        # it. Empty on pre-trace sessions.
+        # Full-trace token + decision timeline. ``decision_trace`` is the
+        # per-decision join; ``token_rollup`` is the by_phase / by_component /
+        # session_total summary.
         "decision_trace": decision_trace,
-        # Promoted token-spend summary (full total + by component/phase +
-        # decision attribution + action_timeline correlation). Derived from
-        # decision_trace.token_rollup; additive, v1 readers ignore it.
+        # Promoted token-spend summary, derived from decision_trace.token_rollup.
         "token_usage": token_usage,
-        # Live-Langfuse push receipt; ``enabled`` False (with a
-        # ``disabled_reason``) on the default path. Local jsonl ledger is
-        # always written regardless.
+        # Live-Langfuse push receipt; ``enabled`` False on the default path.
         "langfuse": langfuse,
         # Kernel-major lifecycle view (discovery -> dispatch -> backend
-        # attempts -> e2e), composed from the recorder substreams. Additive,
-        # optional; empty {} on sessions that predate the substreams.
+        # attempts -> e2e), composed from the recorder substreams. Empty {} on
+        # sessions that predate the substreams.
         "kernel_journey": kernel_journey,
-        # Authoritative external-tool versions, one object per tool
-        # (geak / tracelens / claude / codex / ...), keyed by tool name. Each
-        # carries ``{tool, root_dir, commit, version}``. Empty {} on sessions
-        # that predate the recorder.
+        # Authoritative external-tool versions, one object per tool keyed by
+        # tool name. Each carries ``{tool, root_dir, commit, version}``.
         "versions": versions,
         "warnings": warnings,
         "source_files": source_files,
@@ -619,8 +579,7 @@ def _load_assembled(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out
-    or when no fragments exist). Never raises — a recorder bug must not poison
-    the export; it just falls back to collectors.
+    or when no fragments exist). Never raises; falls back to collectors.
 
     Args:
         session_dir: The hyperloom session directory.
@@ -656,7 +615,7 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export).
+    """Run a collector with broad exception catching; failure → warning + ``default``.
 
     Args:
         name: Collector name used in the warning message.
@@ -805,7 +764,7 @@ def write_minimal_final_report(
     *,
     output_path: Path | str | None = None,
 ) -> Path:
-    """Issue-I: cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1.
+    """cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1.
 
     Stays minimal (one SharedState read) so it never raises or blocks
     shutdown. Idempotent: never overwrites an existing ``reports/final.md``.
@@ -857,7 +816,7 @@ def write_minimal_final_report(
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
     # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT
-    # shows the equivalent per-image latency e2el_mean_ms (ms).
+    # shows per-image latency e2el_mean_ms (ms).
     baseline_metric_s = framework_registry.format_primary_metric(
         state.framework, state.baseline_tput, precision=2
     )
@@ -934,13 +893,11 @@ def write_minimal_final_json(
     *,
     output_path: Path | str | None = None,
 ) -> Path:
-    """Issue #464: crash-safe ``reports/final.json`` fallback for any non-graceful exit.
+    """Crash-safe ``reports/final.json`` fallback for any non-graceful exit.
 
     The full ``ReportExecutor`` writes ``final.json`` only on the graceful
-    CLOSE step-1 path. When the run is time-exhausted, killed by an external
-    SIGTERM, or the report task itself fails, no machine-readable summary is
-    produced — yet the entire downstream stats/analytics pipeline keys off
-    ``final.json``. This mirror of :func:`write_minimal_final_report` emits a
+    CLOSE step-1 path. When the run is time-exhausted, killed, or the report
+    task fails, this mirror of :func:`write_minimal_final_report` emits a
     compact JSON summary from ``state.json`` so a consumable result always
     exists.
 
@@ -967,11 +924,9 @@ def write_minimal_final_json(
     target.parent.mkdir(parents=True, exist_ok=True)
     # Decide whether to keep the existing final.json or (re)write the fallback:
     #   * full report (``safety_net`` absent/false) -> keep, never clobber it.
-    #   * prior crash-safe fallback (``safety_net: true``) -> refresh: after
-    #     ``--resume`` the old fallback is stale vs the resumed state.json.
-    #   * corrupt / unreadable (e.g. a non-atomic full-report write killed
-    #     mid-flush) -> preserve the bytes as ``final.json.corrupt`` for
-    #     forensics, then overwrite so downstream still gets consumable JSON.
+    #   * prior crash-safe fallback (``safety_net: true``) -> refresh.
+    #   * corrupt / unreadable -> preserve as ``final.json.corrupt``, then
+    #     overwrite so downstream still gets consumable JSON.
     if target.exists() and target.stat().st_size > 0:
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
