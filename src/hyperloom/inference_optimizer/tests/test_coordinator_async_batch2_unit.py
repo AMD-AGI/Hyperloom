@@ -47,6 +47,15 @@ def _build_backends() -> dict[str, Backend]:
     }
 
 
+def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
+    coord = object.__new__(Coordinator)
+    coord.__dict__["dummy_owner"] = object()
+    monkeypatch.setitem(Coordinator._DELEGATED, "_deleted_delegate", "dummy_owner")
+
+    with pytest.raises(AttributeError, match="delegates '_deleted_delegate'"):
+        getattr(coord, "_deleted_delegate")
+
+
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
