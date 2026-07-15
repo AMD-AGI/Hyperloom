@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     F_LABEL_PRECISION,
     canonical_labels,
     detect_framework_version,
+    kb_hardware_slug,
     recipe_canonical_id,
 )
 
@@ -314,3 +315,37 @@ def test_detect_framework_version_strips_dunder_version_whitespace(
     fake.__version__ = "  0.6.0\n"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm", fake)
     assert detect_framework_version("vllm") == "0.6.0"
+
+
+def test_kb_hardware_slug_single_node_unchanged() -> None:
+    """Single-node KB keys must stay byte-for-byte identical to pre-infera runs."""
+    gpu = "MI300X"
+    assert kb_hardware_slug(gpu, nodes=1) == gpu
+    # PD / world-size kwargs are ignored when nodes < 2.
+    assert (
+        kb_hardware_slug(
+            gpu,
+            nodes=1,
+            gpus_per_node=8,
+            pd_mode="disaggregated",
+            pd_prefill_nodes=2,
+            pd_decode_nodes=1,
+        )
+        == gpu
+    )
+
+
+def test_kb_hardware_slug_multi_node_adds_topology_suffix() -> None:
+    """Contrast: multi-node encodes world_size (and PD split when disaggregated)."""
+    assert kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8) == "MI300X_ws16"
+    assert (
+        kb_hardware_slug(
+            "MI300X",
+            nodes=2,
+            gpus_per_node=8,
+            pd_mode="disaggregated",
+            pd_prefill_nodes=1,
+            pd_decode_nodes=1,
+        )
+        == "MI300X_ws16_pd1p1d"
+    )

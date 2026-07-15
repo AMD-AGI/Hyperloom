@@ -15,16 +15,16 @@ skips its own server launch and points ``benchmark_serving`` at the head pod.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.multi_node.state_paths import (
-    resolve_state_file,
-    state_file_safe_to_read,
+from hyperloom.inference_optimizer.multi_node._internal.external_state import (
+    external_service_url,
+    load_multi_node_state,
 )
+from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 
 log = logging.getLogger(__name__)
 
@@ -39,24 +39,29 @@ def _state_path() -> Path:
 
 
 def _read_state() -> dict[str, Any]:
-    """Best-effort read of the state file. Returns {} on any failure.
+    """Best-effort read of multi-node state (file, else external env synthesis).
 
     Returns:
-        dict[str, Any]: The parsed state dict, or ``{}`` if the file is
-            missing, unreadable, or not a JSON object.
+        dict[str, Any]: The effective state dict for this process.
     """
-    p = _state_path()
-    if not p.is_file():
-        return {}
-    if not state_file_safe_to_read(p):
-        log.warning("multi_node state file %s failed ownership/permission check", p)
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("multi_node state file %s unreadable: %s", p, exc)
-        return {}
-    return data if isinstance(data, dict) else {}
+    return load_multi_node_state()
+
+
+def mn_bench_warmup_enabled() -> bool:
+    """Whether multi-node runs a discarded client warmup pass before measuring.
+
+    Multi-node has no local server_lifecycle to reuse, so the single-node
+    warmup-before-measure path is ineligible. Instead callers run one extra
+    (discarded) Magpie client pass against the already-restarted, persistent
+    remote server to warm JIT / steady-state (esp. important now that PD legs
+    skip the server-side warmup). Default ON; disable via
+    ``INFERENCE_OPTIMIZER_MN_BENCH_WARMUP=0``.
+
+    Returns:
+        bool: True when the multi-node client warmup pass is enabled.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_MN_BENCH_WARMUP", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
 
 
 def is_multi_node() -> bool:
@@ -82,6 +87,147 @@ def is_multi_node() -> bool:
     return env_n >= 2
 
 
+def resolve_kb_topology() -> dict[str, int]:
+    """Resolve ``(nodes, gpus_per_node)`` for the KB hardware topology suffix.
+
+    Mirrors :func:`is_multi_node`'s source priority so the recipe KB key stays
+    stable across ``--resume``: the ``multi_node_state.json`` values win
+    (persisted), then the ``INFERENCE_OPTIMIZER_NODES`` /
+    ``INFERENCE_OPTIMIZER_GPUS_PER_NODE`` env fallbacks. The CLI exports both
+    before the T0 anchor, so a fresh run (where the state file is not written
+    until provision, which runs after T0) resolves the same world_size at T0
+    and at CLOSE — read and write keys never diverge.
+
+    Returns:
+        A ``{"nodes", "gpus_per_node", "pd_mode", "pd_prefill_nodes",
+        "pd_decode_nodes"}`` mapping ready to splat into
+        :func:`kb_hardware_slug`. Single-node returns ``nodes=1`` so the KB key
+        is left unchanged (the PD fields are then ignored downstream).
+    """
+    state = _read_state()
+    try:
+        nodes = int(state.get("nodes") or 0)
+    except (TypeError, ValueError):
+        nodes = 0
+    if nodes < 2:
+        try:
+            nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "1") or 1)
+        except ValueError:
+            nodes = 1
+    try:
+        gpn = int(state.get("gpus_per_node") or 0)
+    except (TypeError, ValueError):
+        gpn = 0
+    if gpn <= 0:
+        try:
+            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
+        except ValueError:
+            gpn = 8
+
+    # PD topology: env (PD_MODE / PD_PREFILL_NODES / PD_DECODE_NODES) is exported
+    # before T0 and stable across the run, so it wins; state fields (persisted at
+    # create / restart) are the resume fallback. Values come from the same CLI
+    # flags, so env vs state never disagree — only availability differs by phase.
+    pd_mode = (os.environ.get("PD_MODE", "") or "").strip().lower()
+    if not pd_mode:
+        pd_mode = str(state.get("pd_mode") or state.get("last_restart_pd_mode") or "aggregated").strip().lower()
+
+    def _pd_nodes(env_key: str, *state_keys: str) -> int:
+        raw = (os.environ.get(env_key, "") or "").strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+        for sk in state_keys:
+            try:
+                v = int(state.get(sk) or 0)
+            except (TypeError, ValueError):
+                v = 0
+            if v:
+                return v
+        return 0
+
+    pn = _pd_nodes("PD_PREFILL_NODES", "pd_prefill_nodes", "last_restart_pd_prefill_nodes")
+    dn = _pd_nodes("PD_DECODE_NODES", "pd_decode_nodes", "last_restart_pd_decode_nodes")
+
+    return {
+        "nodes": max(1, nodes),
+        "gpus_per_node": max(1, gpn),
+        "pd_mode": pd_mode or "aggregated",
+        "pd_prefill_nodes": pn,
+        "pd_decode_nodes": dn,
+    }
+
+
+def pd_topology_from_state() -> dict[str, Any]:
+    """PD-disaggregation topology from multi-node state (empty unless disaggregated).
+
+    Reads the ``pd_mode`` / ``last_restart_pd_*`` / prefill+decode pod fields the
+    CLI persisted into ``multi_node_state.json``. Returns ``{}`` when not
+    multi-node or when ``pd_mode != 'disaggregated'`` so every caller no-ops on
+    the single-node / colocated paths.
+
+    Returns:
+        dict[str, Any]: ``{mode, prefill_nodes, decode_nodes, prefill_tp,
+        decode_tp, prefill_ep, decode_ep, transfer_backend, prefill_pod_ips,
+        decode_pod_ips}`` when disaggregated, else ``{}``.
+    """
+    if not is_multi_node():
+        return {}
+    st = _read_state()
+    mode = str(st.get("pd_mode") or st.get("last_restart_pd_mode") or "").strip().lower()
+    if mode != "disaggregated":
+        return {}
+
+    def _iv(*keys: str) -> int:
+        """First state value (by key) coercible to int, else 0.
+
+        Args:
+            *keys (str): Candidate state keys, tried in order.
+
+        Returns:
+            int: The parsed value, or 0 when none parse.
+        """
+        for k in keys:
+            v = st.get(k)
+            try:
+                if v is not None:
+                    return int(v)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    def _ips(key: str) -> list[str]:
+        """String list from a state field, or ``[]`` when absent/not a list.
+
+        Args:
+            key (str): The state key holding a list of pod IPs.
+
+        Returns:
+            list[str]: The pod IPs as strings.
+        """
+        v = st.get(key)
+        return [str(x) for x in v] if isinstance(v, list) else []
+
+    return {
+        "mode": "disaggregated",
+        "prefill_nodes": _iv("last_restart_pd_prefill_nodes"),
+        "decode_nodes": _iv("last_restart_pd_decode_nodes"),
+        "prefill_tp": _iv("last_restart_pd_prefill_tp"),
+        "decode_tp": _iv("last_restart_pd_decode_tp"),
+        "prefill_ep": _iv("last_restart_pd_prefill_ep"),
+        "decode_ep": _iv("last_restart_pd_decode_ep"),
+        "transfer_backend": str(
+            st.get("last_restart_pd_transfer_backend")
+            or st.get("pd_transfer_backend")
+            or ""
+        ).strip(),
+        "prefill_pod_ips": _ips("prefill_pod_ips"),
+        "decode_pod_ips": _ips("decode_pod_ips"),
+    }
+
+
 def ray_gcs_address_from_state() -> str:
     """Ray GCS address for ``ray.init`` (head pod IP + default GCS port).
 
@@ -99,32 +245,33 @@ def ray_gcs_address_from_state() -> str:
     return ""
 
 
-def dynamo_ssh_env_from_state() -> dict[str, str]:
-    """Env that routes kernel-agent GEAK GPU work to a Dynamo pod over SSH.
+def infera_ssh_env_from_state() -> dict[str, str]:
+    """Env that routes kernel-agent GEAK GPU work to a Infera pod over SSH.
 
     Returns ``{KERNEL_AGENT_GPU_PLACEMENT=ssh, MN_SSH_HOST/PORT/KEY}`` ONLY when
-    the multi_node backend is Dynamo and a GPU pod IP + ssh key are known;
-    ``{}`` for the RayJob backend and single-node (keeps the SSH path
-    Dynamo-only).
+    the multi_node backend is Infera and a GPU pod IP + ssh key are known.
+    Returns ``{}`` for the RayJob backend and single-node so the Ray placement
+    path (``ray_gcs_address_from_state`` / ``RAY_ADDRESS``) is left untouched —
+    this is the isolation seam that keeps the SSH path Infera-only.
 
     Returns:
         A ``{KERNEL_AGENT_GPU_PLACEMENT, MN_SSH_HOST/PORT/KEY}`` mapping for the
-        Dynamo backend when a GPU pod IP and ssh key are known, else ``{}``.
+        Infera backend when a GPU pod IP and ssh key are known, else ``{}``.
     """
+    from hyperloom.inference_optimizer.multi_node._internal import infera_support
+
     state = _read_state()
-    if state.get("backend") != "dynamo":
+    if state.get("backend") != "infera":
         return {}
-    if (state.get("pd_mode") or "").lower() == "disaggregated":
-        gpu_ips = list(state.get("prefill_pod_ips") or []) + list(state.get("decode_pod_ips") or [])
-    else:
-        gpu_ips = list(state.get("worker_pod_ips") or [])
+    targets = infera_support.gpu_ssh_targets_from_state(state)
     key = str(state.get("ssh_key_path") or "").strip()
-    if not gpu_ips or not key:
+    if not targets or not key:
         return {}
+    first = targets[0]
     return {
         "KERNEL_AGENT_GPU_PLACEMENT": "ssh",
-        "MN_SSH_HOST": str(gpu_ips[0]),
-        "MN_SSH_PORT": str(state.get("ssh_port") or 2222),
+        "MN_SSH_HOST": str(first.get("podIP") or ""),
+        "MN_SSH_PORT": str(first.get("sshPort") or state.get("ssh_port") or 2233),
         "MN_SSH_KEY": key,
     }
 
@@ -164,6 +311,10 @@ def magpie_remote_env() -> dict[str, str]:
         Env vars to inject into the Magpie subprocess, or ``{}`` for the
         single-node path or when no service URL is available.
     """
+    # External mode: point benchmarks at the env-provided endpoint when multi-node.
+    ext = external_service_url()
+    if ext and is_multi_node():
+        return {"MAGPIE_RUN_PHASE": "client", "BENCHMARK_BASE_URL": ext}
     if not is_multi_node():
         return {}
 
@@ -246,4 +397,5 @@ __all__ = [
     "magpie_remote_env",
     "ray_gcs_address_from_state",
     "rayjob_id_from_state",
+    "resolve_kb_topology",
 ]
