@@ -305,15 +305,14 @@ def _write_measured_competitor_target(
     query: BaselineQuery,
     points: list[BaselinePoint],
     source: str,
-) -> None:
+) -> bool:
     """Persist a measured ``competitor_target.json`` (``source`` = live API URL).
 
     This is the advisory feed: the EXPLORE gap block reads this file, so
     writing only API-measured rows here guarantees optimization direction is
     guided by real InferenceX numbers, never LLM-authored estimates. The
     interactivity field mirrors ``gap_analysis``' own ``1000 / tpot_ms``
-    convention. Best-effort: any failure is swallowed (report artefacts are
-    already on disk).
+    convention. Never raises; returns ``False`` when nothing was written.
 
     Args:
         session_dir: Session directory to write the target into.
@@ -321,6 +320,9 @@ def _write_measured_competitor_target(
             precision recorded on the target).
         points: The deduplicated measured reference points.
         source: Provenance string (the live InferenceX API URL).
+
+    Returns:
+        bool: ``True`` when at least one sourced row was persisted.
     """
     per_conc: list[dict[str, Any]] = []
     for p in points:
@@ -335,11 +337,11 @@ def _write_measured_competitor_target(
             }
         )
     if not per_conc:
-        return
+        return False
     try:
         from hyperloom.orchestrator.knowledge import research_hints
 
-        research_hints.write_competitor_target(
+        return research_hints.write_competitor_target(
             Path(session_dir),
             {
                 "gpu": query.gpu,
@@ -351,7 +353,7 @@ def _write_measured_competitor_target(
             },
         )
     except Exception:  # noqa: BLE001 — advisory feed is best-effort
-        pass
+        return False
 
 
 def _clear_competitor_target(session_dir: Path) -> None:
@@ -518,7 +520,8 @@ def analyze(
         source=source,
     )
     _persist(summary, session_dir=session_dir)
-    _write_measured_competitor_target(Path(session_dir), query, all_points, source)
+    if not _write_measured_competitor_target(Path(session_dir), query, all_points, source):
+        _clear_competitor_target(session_dir)
     return summary
 
 
