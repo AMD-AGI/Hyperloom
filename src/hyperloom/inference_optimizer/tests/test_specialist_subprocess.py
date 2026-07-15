@@ -1,10 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-A2 (Arbor-into-Hyperloom): SpecialistRunner subprocess + worktree.
+"""SpecialistRunner subprocess + worktree tests.
 
 Pins the production specialist dispatch: per-task git worktree, the
 ``claude --print --add-dir ...`` spawn, done.json + patch harvesting, and the
-PR-A2 tool whitelist change. Uses a hermetic fake ``claude`` shell script.
+tool whitelist. Uses a hermetic fake ``claude`` shell script.
 """
 
 from __future__ import annotations
@@ -36,8 +36,6 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
-
-# Fixtures
 
 def _make_fake_claude(
     bin_dir: Path,
@@ -144,8 +142,7 @@ EOF
 exit 0
 """
     elif behavior == "done_with_llm_env":
-        # Echo the LLM-transport stability env so the test can assert the
-        # dispatcher injected a client-side request timeout (Sandbox-hang RCA).
+        # Echo the LLM-transport stability env for the dispatcher assertion.
         body += """
 cat > "$WORKSPACE/specialist_done.json" <<EOF
 {
@@ -166,9 +163,7 @@ exit 0
     elif behavior == "crash":
         body += "exit 3\n"
     elif behavior == "partial_then_crash":
-        # WS1: write an incremental checkpoint to the *partial* file (which must
-        # NOT trigger reap), then die before writing the final done.json — the
-        # dispatcher should recover the partial as the best-so-far result.
+        # Write only the partial checkpoint, then die before the final done.json.
         body += f"""
 cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
 {payload_json}
@@ -176,8 +171,7 @@ EOF
 exit 3
 """
     elif behavior == "hang":
-        # Sleep past any small wall budget without writing done.json; the
-        # reaper's wall-clock kill must terminate it.
+        # Sleep past any wall budget without writing done.json.
         body += 'sleep 600\n'
     else:
         raise ValueError(f"unknown behavior {behavior!r}")
@@ -209,7 +203,6 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# 1. Constructor invariants
 def test_runner_requires_exactly_one_dispatch_mode():
     with pytest.raises(ValueError, match="exactly one"):
         SpecialistRunner()
@@ -228,9 +221,8 @@ def test_runner_accepts_subprocess_config_only():
     assert runner.backend_factory is None
 
 
-# 2. Tool whitelist updates
 def test_default_tools_include_write_capabilities():
-    """PR-A2 lifted Edit/Write/MultiEdit out of the denylist for worktree patch authoring."""
+    """Edit/Write/MultiEdit are lifted out of the denylist for worktree patch authoring."""
     for tool in ("Edit", "Write", "MultiEdit"):
         assert tool in DEFAULT_SPECIALIST_TOOLS
         assert tool not in SPECIALIST_TOOL_DENYLIST
@@ -251,7 +243,6 @@ def test_task_allowed_tools_override_default_patch_tools():
     assert "Bash" not in tools
 
 
-# 3. Worktree helpers
 def test_pick_worktree_base_picks_first_git_root(
     tmp_path: Path,
     fake_framework_repo: Path,
@@ -292,7 +283,6 @@ def test_setup_worktree_creates_branch_off_base(
     assert "specialist-test1" in cp.stdout
 
 
-# 4. End-to-end subprocess dispatch with the fake `claude` binary
 @pytest.mark.asyncio
 async def test_subprocess_path_harvests_done_file(
     tmp_path: Path,
@@ -370,9 +360,8 @@ async def test_subprocess_path_injects_llm_stability_env(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The dispatcher injects low-risk claude-code stability flags but does not
-    set API_TIMEOUT_MS by default. Specialist liveness is governed by the
-    Hyperloom-owned process.log / heartbeat stale reaper, avoiding external
-    total-request timeout semantics for long streaming responses."""
+    set API_TIMEOUT_MS by default; liveness is governed by the process.log /
+    heartbeat stale reaper."""
     # Ensure no inherited values mask the setdefault under test.
     for var in (
         "API_TIMEOUT_MS",
@@ -548,15 +537,13 @@ async def test_subprocess_path_isolates_writes_to_worktree(
     assert not (fake_framework_repo / "dummy.txt").exists()
 
 
-# WS1 — incremental checkpoint recovery + explicit wall budget
 @pytest.mark.asyncio
 async def test_subprocess_recovers_partial_when_no_final(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A specialist that wrote only the incremental partial (then died before
-    the final done.json) surfaces the partial as a non-empty result rather than
-    being discarded as an empty crash."""
+    """A specialist that wrote only the partial (then died before the final
+    done.json) surfaces the partial as a non-empty result."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
@@ -577,7 +564,6 @@ async def test_subprocess_recovers_partial_when_no_final(
     ctx = _make_runner_ctx("t-spec-partial")
 
     result = await runner.run(ctx)
-    # Non-empty payload recovered from the partial → treated as a real result.
     assert result.status == "succeeded"
     assert result.specialist_done["empty"] is False
     assert result.specialist_done.get("_recovered_from_partial") is True
@@ -616,7 +602,6 @@ async def test_wall_budget_overrides_legacy_max_seconds(
     result = await runner.run(ctx)
     elapsed = time.monotonic() - started
 
-    # Killed by the 1s budget, not the 30s legacy ceiling.
     assert elapsed < 15.0
     assert result.status in ("stale", "empty_synthesised")
     assert "timeout" in (result.error or "")
@@ -642,13 +627,12 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     tmp_path: Path,
 ):
     """A specialist that streams to process.log but never self-writes
-    heartbeat.json must NOT be reaped as stale (regression: 100% of
-    specialists were killed mid-turn under gateway latency)."""
+    heartbeat.json must NOT be reaped as stale."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     process_log = workspace / "process.log"
     process_log.write_text("start\n", encoding="utf-8")
-    heartbeat_file = workspace / "heartbeat.json"  # intentionally never written
+    heartbeat_file = workspace / "heartbeat.json"  # never written
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=1.0,
@@ -658,8 +642,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     proc = _FakeProc()
 
     async def _keep_streaming() -> None:
-        # Touch process.log well past the 1.0s stale threshold, then let
-        # the process "exit" cleanly so the reaper breaks on poll().
+        # Touch process.log past the stale threshold, then exit cleanly.
         for i in range(15):  # ~3s, 3x the stale threshold
             process_log.write_text(f"line {i}\n", encoding="utf-8")
             await asyncio.sleep(0.2)

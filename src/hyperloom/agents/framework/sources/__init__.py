@@ -318,8 +318,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     states = request.pr_states
     broad = any(s in ("merged", "closed", "all") for s in states)
     search_state = "all" if broad else "open"
-    # Only forward ``state`` to the label-only list endpoint when broadening;
-    # the open-only default keeps the historical call shape unchanged.
+    # Only forward ``state`` to the label-only list endpoint when broadening.
     list_state_kwargs: dict[str, str] = {"state": search_state} if broad else {}
 
     keywords = _resolve_keywords(request)
@@ -347,8 +346,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             timeout_sec=cfg.timeout_sec,
         )
     except PrimusCortexError:
-        # Service may not implement /v1/search/prs; fall back to label-only
-        # listing and rerank the larger pool client-side.
+        # Service may not implement /v1/search/prs; fall back to label-only listing.
         prs = list_perf_prs(
             request.repo_url,
             base_url=cfg.base_url,
@@ -358,10 +356,8 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             **list_state_kwargs,
         )
 
-    # /v1/search/prs uses word-AND matching, so a long multi-keyword query can
-    # filter the pool to zero even when relevant PRs exist. Fall back to
-    # label-only listing + client rerank so IO's --framework-discover
-    # doesn't abort with "no candidates".
+    # /v1/search/prs uses word-AND matching; a long query can filter the pool to
+    # zero, so fall back to label-only listing + client rerank.
     if not prs:
         prs = list_perf_prs(
             request.repo_url,
@@ -372,8 +368,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             **list_state_kwargs,
         )
 
-    # Rank then trim; scores are carried on Candidate.score for IO's
-    # framework arm to log.
+    # Rank then trim; scores are carried on Candidate.score.
     ranked = _rank_by_keyword_overlap(prs, keywords)[:requested]
     return [
         _pr_to_candidate(

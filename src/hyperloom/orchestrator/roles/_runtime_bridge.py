@@ -20,10 +20,9 @@ from .base import BackendError
 class RuntimeCall:
     """One ``runtime.cli`` invocation, captured for tests + logging.
 
-    Shared by the sibling-agent backends (critic uses ``prepare-review`` /
-    ``commit-review`` phases and sets ``review_path``; robustness uses the
-    ``tick`` phase and leaves ``review_path`` unset), so ``phase`` is a plain
-    ``str`` and ``review_path`` is optional.
+    Shared by the sibling-agent backends (critic sets ``review_path``,
+    robustness leaves it unset), so ``phase`` is a plain ``str`` and
+    ``review_path`` is optional.
     """
 
     phase: str
@@ -37,9 +36,8 @@ class RuntimeCall:
 RuntimeCaller = Callable[["RuntimeCall"], None]
 """Callable that performs (or fakes) a ``runtime.cli`` invocation.
 
-The default real caller shells out via :mod:`subprocess`. Tests inject a
-fake that writes the desired output JSON to ``out_path`` directly without
-spawning a Python process.
+The default real caller shells out via :mod:`subprocess`; tests inject a fake
+that writes the output JSON to ``out_path`` directly.
 """
 
 

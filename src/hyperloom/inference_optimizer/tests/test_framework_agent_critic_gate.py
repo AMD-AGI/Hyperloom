@@ -2,11 +2,9 @@
 
 """Converged FRAMEWORK pre-screen gate.
 
-The candidate is submitted as a normal ``framework_agent`` proposal (PolicyGate
-bypassed, COORDINATOR_INTERNAL) and the async Critic verdict drives the
-apply/author enqueue (approve/advise) or the ``critic_denied`` row (reject) via
-``_handle_single_verdict`` → ``_materialize_framework_agent_candidate`` /
-``_record_framework_agent_critic_denied``.
+The candidate is submitted as a normal ``framework_agent`` proposal and the
+async Critic verdict drives the apply/author enqueue or the ``critic_denied``
+row.
 """
 
 from __future__ import annotations

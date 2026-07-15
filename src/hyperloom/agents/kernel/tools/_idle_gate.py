@@ -28,10 +28,7 @@ HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
 def resolve_idle_pct_threshold() -> float:
     """Return the idle-percent gate threshold (default 80.0%).
 
-    Relaxed from the docx §2 ~20% target to 80% because real SGLang inference
-    traces sit structurally at ~50-60% idle (host scheduling + JIT/launch
-    overhead), which the 20% gate over-suppressed. Pin via
-    ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
+    Pin via ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
 
     Returns:
         The idle-percent gate threshold.

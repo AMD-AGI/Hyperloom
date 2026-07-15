@@ -1,10 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the static-recon specialist (explore-opt-5 capability A).
+"""Unit tests for the static-recon specialist.
 
-Covers the seed checklist lookup/rendering, domain registration, and the
-Coordinator-side ``_consume_static_recon`` gap-seeding (bridge candidates ->
-gaps[]), without spinning up a full Coordinator.
+Covers seed checklist lookup/rendering, domain registration, and the
+Coordinator-side ``_consume_static_recon`` gap-seeding, without spinning up a
+full Coordinator.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from hyperloom.orchestrator.specialists.domains import (
 def test_checklist_fp8_rocm_matches_cutlass_guard():
     ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")]
     assert "rocm.fp8.cutlass_only_guard" in ids
-    # mxfp8-only entry must NOT leak into an fp8 run.
     assert "rocm.mxfp8.smallm_dispatch_gap" not in ids
 
 
@@ -55,8 +54,8 @@ def test_checklist_any_precision_entry_applies_to_rocm_bf16():
 
 def test_source_hint_directories_dedup_and_ordered():
     dirs = src.source_hint_directories_for(gpu_type="MI300X", precision="fp8")
-    assert dirs  # non-empty
-    assert len(dirs) == len(set(dirs))  # de-duplicated
+    assert dirs
+    assert len(dirs) == len(set(dirs))
     assert "vllm/model_executor/layers/quantization/" in dirs
 
 
@@ -177,8 +176,8 @@ def test_consume_static_recon_drops_incomplete_candidates(tmp_path):
     payload = {
         "recon": {
             "bridge_candidates": [
-                {"id": "no_file", "why_disabled_here": "x"},  # missing predicate_file
-                {"id": "no_why", "predicate_file": "a.py"},  # missing why
+                {"id": "no_file", "why_disabled_here": "x"},
+                {"id": "no_why", "predicate_file": "a.py"},
                 "not-a-dict",
             ],
         },

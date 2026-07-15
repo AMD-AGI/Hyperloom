@@ -30,7 +30,6 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 
 
-# Helper-level tests
 def test_kill_my_spawned_server_handles_none():
     """Plain no-op when given None so callers can use it in ``finally:`` unguarded."""
     kill_my_spawned_server(None)  # must not raise
@@ -152,7 +151,6 @@ def test_kill_my_spawned_server_reaps_grandchildren():
                 pass
 
 
-# BaselineExecutor integration — confirm the kill is on every exit path
 def _make_fake_magpie_command(
     tmp_path: Path,
     *,
@@ -239,7 +237,6 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
                 pass
 
 
-# Fix E — run_with_session_kill soft_deadline_sec
 def test_run_with_session_kill_soft_deadline_returns_sentinel():
     """A child past ``soft_deadline_sec`` is reaped and returns ``OVERTIME_KILL_RETURNCODE`` (no ``TimeoutExpired``)."""
     start = time.monotonic()
@@ -287,7 +284,7 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
         )
 
 
-# Server-liveness watchdog — fast-fail on a crashed-but-hung server
+# Server-liveness watchdog
 def test_server_log_shows_death_detects_marker(tmp_path):
     """A ``server.log`` containing a terminal-init marker reads as dead;
     a healthy / missing log reads as alive."""
@@ -303,9 +300,7 @@ def test_server_log_shows_death_detects_marker(tmp_path):
 
 
 def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
-    """The vLLM v1 engine-core bootstrap tail must read as dead. The
-    ``RuntimeError: Engine core initialization failed`` line and the
-    ``Failed core proc(s)`` anchor both trip the watchdog."""
+    """The vLLM v1 engine-core bootstrap tail must read as dead."""
     log_path = tmp_path / "server.log"
     log_path.write_text(
         "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', line 1057, "
@@ -319,8 +314,7 @@ def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
 def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
     """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a
     nested ``benchmark_<fw>_<ts>/server.log``. The watchdog must still detect the
-    crash via that nested file even when the watched ``output_dir/server.log`` is
-    absent (otherwise a hung-after-death server burns the full hard timeout)."""
+    crash via that nested file even when the watched ``output_dir/server.log`` is absent."""
     watched = tmp_path / "server.log"  # never written by the wrapper
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
@@ -354,10 +348,8 @@ def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
-    """The excerpt helper returns the engine/worker-init root-cause line
-    (with a little context) so the failure classifier can put the real server
-    fault in the operator-facing ``error`` field; a healthy / missing log
-    returns ``None``."""
+    """The excerpt helper returns the engine/worker-init root-cause line (with a
+    little context) for the failure classifier; a healthy / missing log returns ``None``."""
     log_path = tmp_path / "server.log"
     assert server_log_death_excerpt(str(log_path)) is None  # missing → None
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")

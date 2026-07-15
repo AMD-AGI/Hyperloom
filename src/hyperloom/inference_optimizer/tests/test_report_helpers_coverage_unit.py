@@ -257,7 +257,7 @@ def test_format_md_renders_stop_explanation():
     assert "Robustness escalated" in md
 
 
-# ---- stop_reason explanation vocabulary coverage (M1) ----
+# ---- stop_reason explanation vocabulary coverage ----
 def test_every_stop_reason_vocab_member_has_explanation():
     from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
 
@@ -266,8 +266,6 @@ def test_every_stop_reason_vocab_member_has_explanation():
 
 
 def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
-    # A KV-cache OOM message can also contain the generic "out of memory"
-    # phrase; the more specific bucket must win (L1).
     assert (
         rp._classify_root_cause_type(
             "kv_cache_oom",

@@ -74,7 +74,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
 
 
 def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
-    """A cross-stage KEEP whose stack name never matches the attempt still sediments its source via ``gap_canonical_id``."""
+    """A KEEP whose stack name never matches the attempt still sediments its source via ``gap_canonical_id``."""
     coord = _make_coordinator(tmp_path)
     ss = coord.shared_state
     ss.optimization_stack = [
@@ -217,7 +217,6 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
     assert restored.gaps[0]["provenance"] == "https://pr/9"
 
 
-# Cold-start prefers research hints over the domain-focus fallback (C9).
 def test_research_hints_suppress_cold_start():
     from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,

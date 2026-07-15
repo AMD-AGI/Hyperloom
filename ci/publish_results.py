@@ -12,8 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Public ingress URL (not cluster-internal DNS) so any GHA runner can reach the service;
-# Higress rewrites /hyperloom-results/* -> backend /*. Override via HYPERLOOM_RESULTS_SERVICE_URL.
+# Public ingress URL so any GHA runner can reach the service. Override via HYPERLOOM_RESULTS_SERVICE_URL.
 DEFAULT_SERVICE_URL = "http://core42.primus-safe.amd.com/hyperloom-results"
 
 
@@ -59,10 +58,8 @@ def load_results(path: Path) -> list[dict[str, Any]]:
 def _normalize_submitted_at(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Move ``run.submitted_at`` ISO strings to ``run.submitted_at_iso``.
 
-    Required because the ingest path binds ``submitted_at`` (timestamptz) as a
-    str and asyncpg rejects it with HTTP 500. The sibling key preserves the
-    value in the raw_result JSONB blob. Drop once the ingest path accepts ISO
-    strings directly.
+    The ingest path binds ``submitted_at`` (timestamptz) as a str and rejects
+    it; the sibling key preserves the value in the raw_result JSONB blob.
 
     Args:
         results: Normalized result dicts to clean.
@@ -96,9 +93,7 @@ def publish(
 ) -> dict:
     """POST results to ``/api/import`` with exponential-backoff retry.
 
-    Retries cover intermittent service-side failures: PG pool drops after a pod
-    crashloop (HTTP 500, succeeds on retry once asyncpg reconnects) and
-    liveness-probe restarts (5xx / refused).
+    Retries cover intermittent service-side failures (5xx / refused).
 
     Args:
         results: Normalized result dicts to publish.
@@ -130,7 +125,7 @@ def publish(
                 json=body,
                 timeout=timeout,
             )
-            # Only retry 5xx; 4xx means our payload is wrong and retrying won't help.
+            # Only retry 5xx; 4xx won't succeed on retry.
             if 500 <= resp.status_code < 600:
                 snippet = (resp.text or "")[:200].replace("\n", " ")
                 err = RuntimeError(f"HTTP {resp.status_code} from {endpoint}: {snippet}")

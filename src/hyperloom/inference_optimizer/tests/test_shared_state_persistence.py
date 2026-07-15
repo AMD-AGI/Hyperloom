@@ -21,7 +21,6 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
-# fixtures
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -42,7 +41,6 @@ def _backends_full() -> dict[str, object]:
     }
 
 
-# SharedState unit
 def test_shared_state_defaults_blank():
     s = SharedState()
     assert s.session_id == ""
@@ -81,13 +79,11 @@ def test_save_load_round_trip(tmp_path):
 
 
 def test_profile_osl_round_trip(tmp_path):
-    # The explicit profile OSL must survive save/load so a fresh-shell resume
-    # keeps it instead of reverting to the default.
+    # Explicit profile OSL must survive save/load across a fresh-shell resume.
     s = SharedState(session_id="abc", osl=8192, profile_osl=512)
     s.save(tmp_path)
     s2 = SharedState.load_or_init(tmp_path)
     assert s2.profile_osl == 512
-    # Default stays 0 (= unset → profile uses min(osl, 1024)).
     assert SharedState(session_id="x").profile_osl == 0
 
 
@@ -186,7 +182,6 @@ def test_to_prompt_summary_contains_key_fields():
     assert "deep_kernel" in summary
 
 
-# Coordinator × SharedState integration
 @pytest.mark.asyncio
 async def test_coordinator_loads_existing_shared_state(session_dir):
     """Coordinator.__init__ must pick up an existing state.json (resume hook)."""
@@ -212,9 +207,7 @@ async def test_coordinator_prune_branch_persists(session_dir):
                 payload={"family": "deep_kernel", "reason": "3 fails"},
             ),
         )
-        # In-memory updated
         assert "deep_kernel" in c.shared_state.pruned_families
-        # File on disk reflects it
         on_disk = json.loads((session_dir / "state.json").read_text())
         assert "deep_kernel" in on_disk["pruned_families"]
     finally:
@@ -235,12 +228,11 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     finally:
         await c1.stop()
 
-    # Restart — fresh Coordinator must still observe the prune
+    # Fresh Coordinator must still observe the prune after restart.
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("long")
-        # The prune is advisory — proposals still reach the pending queue
-        # with an advisory observation so the LLM can decide.
+        # Prune is advisory: proposals still reach the pending queue.
         await c2._handle_intent(
             "orchestration",
             Intent(
@@ -288,7 +280,6 @@ async def test_coordinator_update_state_drops_unknown_fields(session_dir):
             ),
         )
         assert c.shared_state.current_action == "baseline"
-        # The observation events should record the rejected key
         obs = await c.bus.tail(topic="observation", n=20)
         update_events = [m for m in obs if m.payload.get("kind") == "update_state"]
         assert update_events
@@ -298,7 +289,6 @@ async def test_coordinator_update_state_drops_unknown_fields(session_dir):
         await c.stop()
 
 
-# reference recipe fact-layer (resume survival + current_setting.sh render)
 def test_reference_fields_survive_resume(tmp_path):
     """R3: reference_* fields persist through save → from_dict (resume)."""
     s = SharedState(session_id="t", model_name="m", model_path="/x/m")

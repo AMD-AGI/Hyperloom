@@ -740,8 +740,7 @@ def test_framework_audit_common_patch_sources(tmp_path: Path, monkeypatch: pytes
         "-def gone(): pass\n"
     )
     changes = common.parse_unified_diff(diff)
-    # Deleted-file sections end at /dev/null and are filtered as placeholder
-    # sections by the current parser contract; the branch is still exercised.
+    # Deleted-file sections are filtered as placeholder sections.
     assert [c.path for c in changes] == ["pkg/a.py"]
     assert changes[0].is_new is True
     assert common._symbols(changes[0].added) == ["Added", "run"]

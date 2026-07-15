@@ -13,9 +13,7 @@ from hyperloom.agents.quantization.driver.outcomes import (
 )
 
 
-# The outcome rows grouped by category. Numbers are the table
-# IDs; the enum stores them by name only (the row number is implicit in the
-# outcome documentation).
+# Outcome rows grouped by category; numbers are the table IDs.
 _AUTO_RECOVER_NAMES = {
     "intent_parse_failed",  # #8
     "analysis_artifact_invalid_or_missing",  # #10

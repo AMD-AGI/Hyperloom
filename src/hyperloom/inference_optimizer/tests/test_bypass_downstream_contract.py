@@ -4,15 +4,10 @@
 BOTH the orchestrator kernel-opt gate AND the GEAK harness (no crash, not the
 synthetic default sweep).
 
-This guards the bypass<->downstream shape-format contract that lets bypass
-replace TraceLens end-to-end: bypass emits ``input_shapes``/``shapes`` as
+Bypass emits ``input_shapes``/``shapes`` as
 ``[{"call_num", "shape": "(dims) dtype<br>..."}]`` — the same form the harness
-(``_build_configs`` / ``_parse_shape_string``) and TraceLens candidates use. A
-regression to raw Kineto dims (``[[m, k], ...]``) crashes ``_build_configs`` with
-``AttributeError: 'list' object has no attribute 'get'``.
-
-Source-file resolution (op_to_source / trace kernel_file, incl. the /tmp
-inductor exclusion) is orthogonal and covered by test_bypass_source_resolver.
+(``_build_configs`` / ``_parse_shape_string``) and TraceLens candidates use.
+Raw Kineto dims (``[[m, k], ...]``) crash ``_build_configs``.
 """
 
 from __future__ import annotations
@@ -51,8 +46,7 @@ def _candidate_with_shapes() -> dict:
 
 def test_bypass_candidate_shapes_are_contract_shaped():
     cand = _candidate_with_shapes()
-    # Contract form: list of {call_num, shape:"(dims) dtype<br>..."} dicts — NOT
-    # raw Kineto dim lists (those crash the harness).
+    # Contract form: list of {call_num, shape} dicts, not raw Kineto dim lists.
     for field in ("shapes", "input_shapes"):
         assert isinstance(cand[field], list) and cand[field]
         entry = cand[field][0]
@@ -62,8 +56,7 @@ def test_bypass_candidate_shapes_are_contract_shaped():
 
 
 def test_bypass_candidate_feeds_real_shapes_to_geak_harness():
-    # _build_configs must parse the real trace shapes (no AttributeError) and NOT
-    # fall back to the synthetic default sweep, so GEAK benchmarks the real dims.
+    # _build_configs parses the real trace shapes and must not fall back to the default sweep.
     cand = _candidate_with_shapes()
     built = hg._build_configs(cand)
     assert built != hg._default_configs()
@@ -71,11 +64,7 @@ def test_bypass_candidate_feeds_real_shapes_to_geak_harness():
 
 
 def test_bypass_fp16_shapes_build_valid_torch_dtype_in_harness():
-    # Regression: bypass emitted compact "f16"/"f32" dtype suffixes, which the
-    # shared harness dtype_map does not recognize -> it fell back to torch.f16 /
-    # torch.f32 (invalid; AttributeError at harness RUNTIME, surfaced only by the
-    # real rocprof roofline enrichment / GEAK execution). Suffixes must match the
-    # harness dtype_map (bf16/fp16/fp32) so the generated config is valid torch.
+    # Dtype suffixes must match the harness dtype_map (bf16/fp16/fp32) so the generated config is valid torch.
     kernels = [{
         "name": "triton_silu", "op_name": "aten::silu",
         "gpu_time_us": 100.0, "count": 4,
@@ -84,15 +73,13 @@ def test_bypass_fp16_shapes_build_valid_torch_dtype_in_harness():
     cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")
     cand = cands["hot_kernels"][0]
     joined = "\n".join(hg._build_configs(cand))
-    assert "torch.float16" in joined  # fp16 suffix -> harness dtype_map -> torch.float16
-    assert "torch.f16" not in joined  # the bug: invalid torch attribute
+    assert "torch.float16" in joined
+    assert "torch.f16" not in joined
     assert "torch.f32" not in joined
 
 
 def test_bypass_candidate_passes_orchestrator_gate(tmp_path: Path):
-    # The kernel-opt gate accepts a bypass candidate with contract shapes,
-    # trusted provenance, and an existing source. (Source resolution itself is
-    # tested elsewhere; here we inject a real path to isolate the shape gate.)
+    # The kernel-opt gate accepts a bypass candidate with contract shapes, trusted provenance, and an existing source.
     cand = _candidate_with_shapes()
     src = tmp_path / "rmsnorm_kernel.py"
     src.write_text("# editable kernel\n", encoding="utf-8")
@@ -103,8 +90,7 @@ def test_bypass_candidate_passes_orchestrator_gate(tmp_path: Path):
 
 
 def test_raw_kineto_dims_would_crash_harness_regression_guard():
-    # Documents WHY the contract format matters: the pre-fix raw-dims form
-    # (candidate["input_shapes"] = [[[m, k], ...]]) crashes _build_configs.
+    # The raw-dims form (candidate["input_shapes"] = [[[m, k], ...]]) crashes _build_configs.
     import pytest
 
     raw = {"input_shapes": [[[4096, 2560], [2560]]]}

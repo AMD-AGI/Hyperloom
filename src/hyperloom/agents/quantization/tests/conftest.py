@@ -1,7 +1,6 @@
 """Shared fixtures for quantization_agent tests.
 
-Most tests build a synthetic workspace on tmp_path and feed it to the
-classifier / retry loop directly. Two helpers are exposed here:
+Two helpers are exposed here:
 
 * ``build_workspace`` — turn a small dict of artifact stubs into a
   workspace dir, no Quark / SDK needed.
@@ -23,8 +22,7 @@ import pytest
 # workspace builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Validation-report snippets keyed by short tag. Tests pick the tag they need
-# rather than copy-paste markdown.
+# Validation-report snippets keyed by short tag.
 _VALIDATION_REPORTS: dict[str, str] = {
     "all_ok": (
         "## Validation Report — quark-torch-result-validator\n\n"
@@ -101,9 +99,8 @@ def _make_quantized_dir(
 class WorkspaceBuilder:
     """Fluent builder mirroring the artifact fields SKILL.md writes.
 
-    Defaults to a fully-successful run (manifest + quantized dir + all-ok
-    validation_report + eval_report with 0% gap). Tests subtract or override
-    pieces to simulate failure modes.
+    Defaults to a fully-successful run. Tests subtract or override pieces to
+    simulate failure modes.
     """
 
     workspace: Path
@@ -145,7 +142,7 @@ class WorkspaceBuilder:
                 include_tokenizer=self.include_tokenizer,
             )
         else:
-            qdir = ws / "quantized-model"  # path referenced by manifest but absent
+            qdir = ws / "quantized-model"  # referenced by manifest but absent
 
         if self.include_manifest:
             _write_manifest(ws, qdir)
@@ -211,21 +208,20 @@ class FakeMessage:
 
 @dataclass
 class FakeOptions:
-    """Captures kwargs passed to ``sdk_options_cls``. Plays the role of
-    ``claude_agent_sdk.ClaudeAgentOptions`` in tests without touching network.
+    """Captures kwargs passed to ``sdk_options_cls``, playing the role of
+    ``claude_agent_sdk.ClaudeAgentOptions`` without touching network.
     """
 
     kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __init__(self, **kwargs: Any):
-        # Accept any kwarg set without validation.
         self.kwargs = dict(kwargs)
 
 
 @dataclass
 class FakeSDK:
     """Stub for ``sdk_query_factory`` — records prompts and replays scripted
-    responses. Pass to ``run_one_attempt(sdk_query_factory=..., sdk_options_cls=...)``.
+    responses.
 
     ``side_effect`` (when set) is raised on the next call. ``scripted_chunks``
     yields each string as a separate message.

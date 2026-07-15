@@ -46,12 +46,12 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A result written before a coordinator crash must be RECOVERED on resume.
+    """A result written before a coordinator crash must be recovered on resume.
 
-    Rebench-first: recovery records the win as an UNVALIDATED candidate (into
-    ``geak_result`` + ``geak_pending``) and enqueues the main-flow
-    rebench — it does NOT promote the self-reported value into current_best /
-    the gain ledger. The headline is only written once the rebench validates it.
+    Recovery records the win as an unvalidated candidate (into ``geak_result`` +
+    ``geak_pending``) and enqueues the main-flow rebench; it does not promote the
+    self-reported value into current_best / the gain ledger. The headline is only
+    written once the rebench validates it.
     """
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
@@ -93,7 +93,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
 
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
-    # The result.json is recovered into state, but as an UNVALIDATED candidate.
+    # The result.json is recovered into state, but as an unvalidated candidate.
     assert coord.shared_state.geak_result["status"] == "ok"
     assert coord.shared_state.geak_pending["status"] == "awaiting_rebench"
     assert coord.shared_state.geak_pending["self_reported_tput"] == 116.0
@@ -127,10 +127,10 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
 ) -> None:
     """A new cycle must rerun GEAK, not promote a stale prior-cycle result.
 
-    ``geak/`` is a fixed path, so a prior cycle's ``result.json`` survives
-    into the next KERNEL entry. When state already recorded that win the recovery
-    short-circuit must NOT fire, otherwise every later cycle silently reuses the
-    first cycle's result.
+    ``geak/`` is a fixed path, so a prior cycle's ``result.json`` survives into
+    the next KERNEL entry. When state already recorded that win the recovery
+    short-circuit must not fire, else every later cycle silently reuses the first
+    cycle's result.
     """
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
@@ -153,7 +153,6 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
         osl=1024,
         conc=64,
     )
-    # State already carries the prior cycle's promoted win.
     coord.shared_state.optimization_stack = [
         {"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 116.0},
     ]
@@ -172,7 +171,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
 
     await coord._run_geak_kernel_phase(from_phase="EXPLORE")
 
-    # The recovery short-circuit must NOT have fired; the normal path resolves
+    # The recovery short-circuit must not have fired; the normal path resolves
     # the runner (and here aborts via the injected error).
     assert resolved, "new cycle must re-run GEAK, not reuse stale result.json"
 

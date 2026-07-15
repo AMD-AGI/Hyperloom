@@ -154,10 +154,7 @@ class CommandSpec:
 class Candidate:
     """A single PR or git ref candidate (explicit, primus_cortex, or github).
 
-    ``score`` is the gap-relevance score from
-    :func:`framework_agent.keywords.score_title_with_anti_signal`; 0.0 when no
-    gap-driven ranking happened. Non-load-bearing in fa itself (sort order is
-    preserved by the list); downstream IO ``framework`` logs it.
+    ``score`` is the gap-relevance score; 0.0 when no gap-driven ranking happened.
     """
 
     ref: str
@@ -416,27 +413,20 @@ class ExploreRequest:
     model_class: str = ""
     gpu_type: str = ""
     precision: str = ""
-    # Explicit keyword override; non-empty bypasses extract_keywords() and is
-    # used verbatim. See ``sources._resolve_keywords``.
+    # Explicit keyword override; non-empty bypasses extract_keywords().
     keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
-    # PR states to include in discovery. Default open-only; broaden to
-    # ("open","merged","closed") so semantic audit can judge backport-relevant
-    # merged PRs that may already be in the local dev build (Step 4).
+    # PR states to include in discovery.
     pr_states: tuple[str, ...] = ("open",)
     # Empty string disables the KB contribute hook.
     kb_domain: str = ""
-    # True: keep going past the first winner, return list sorted by
-    # candidate_score descending. False (default): short-circuit on first winner.
+    # True: return all candidates sorted by score; False: short-circuit on first winner.
     ranking_mode: bool = False
-    # True: remove worktree+venv of every non-winner at end of run;
-    # candidate_dir + audit material stay so reviewers can diff losers.
+    # True: remove worktree+venv of every non-winner at end of run.
     keep_winner_only: bool = False
-    # > 0: build multiple candidates concurrently via asyncio.gather
-    # (bench/accuracy stay serial to avoid GPU contention). <=1 => fully serial.
+    # > 0: build multiple candidates concurrently; <=1 => fully serial.
     build_concurrency: int = 1
-    # Disk preflight threshold (GB); None -> env FRAMEWORK_EXPLORER_DISK_MIN_GB
-    # (default 20). Set 0 to bypass.
+    # Disk preflight threshold (GB); None -> env FRAMEWORK_EXPLORER_DISK_MIN_GB. Set 0 to bypass.
     disk_min_free_gb: float | None = None
 
     @classmethod

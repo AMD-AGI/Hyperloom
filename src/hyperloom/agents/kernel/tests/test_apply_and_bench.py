@@ -3,8 +3,7 @@
 """Unit tests for apply_and_bench helpers (no serving / no GPU required).
 
 Covers the patch-operation coverage gate (_diff_unsupported_ops) and the
-measurement spread/significance helper (_spread) — the parts a reviewer can
-verify deterministically without launching a server.
+measurement spread/significance helper (_spread).
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ def _load():
 ab = _load()
 
 
-# ---- _diff_unsupported_ops: modify/add allowed; delete/rename/copy/mode/binary refused ----
+# _diff_unsupported_ops: modify/add allowed; delete/rename/copy/mode/binary refused
 
 _MODIFY = "diff --git a/x.cu b/x.cu\n--- a/x.cu\n+++ b/x.cu\n@@ -1 +1 @@\n-a\n+b\n"
 _ADD = "diff --git a/n.cu b/n.cu\nnew file mode 100644\n--- /dev/null\n+++ b/n.cu\n@@ -0,0 +1 @@\n+z\n"
@@ -66,7 +65,7 @@ def test_unsupported_ops_dedup_and_sorted():
     assert ab._diff_unsupported_ops(mixed) == ["delete", "rename"]
 
 
-# ---- _spread: median + p25/p75 + stdev, None-safe ----
+# _spread: median + p25/p75 + stdev, None-safe
 
 
 def test_spread_basic():

@@ -1,13 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tiny Ray Dashboard REST client, running INSIDE THE SANDBOX.
+"""Tiny Ray Dashboard REST client, running inside the sandbox.
 
-Per ADDENDUM-02 the sandbox→inference-RayJob control channel must be
-Dashboard REST (HTTP/JSON, version-tolerant), never ``import ray`` /
-``ray.init(address=...)`` (the Python client is version-skew-sensitive).
-The rule is sandbox = HTTP only; RayJob pod entrypoints may use ray
-directly. Reachable at ``http://<head_pod_ip>:8265`` (fixed port; pod IP
-from SaFE GetWorkload).
+The sandbox->inference-RayJob control channel is Dashboard REST (HTTP/JSON),
+never ``import ray`` / ``ray.init(address=...)``. Reachable at
+``http://<head_pod_ip>:8265`` (fixed port; pod IP from SaFE GetWorkload).
 """
 
 from __future__ import annotations
@@ -23,7 +20,7 @@ from .log import warn
 # Hard-coded; see module docstring.
 RAY_DASHBOARD_PORT = 8265
 
-# 30s read so a multi-MB log fetch doesn't wedge the CLI's poll cadence.
+# 30s read so a multi-MB log fetch doesn't wedge the poll cadence.
 _HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 
 
@@ -159,7 +156,6 @@ class RayDashboardClient:
         """
         if not entrypoint:
             raise ValueError("entrypoint is empty")
-        # Wrap for dash compatibility (Ray Dashboard uses /bin/sh).
         entrypoint = _wrap_for_dash(entrypoint)
         endpoint = "POST /api/jobs/"
         payload: dict[str, Any] = {"entrypoint": entrypoint}
@@ -218,7 +214,7 @@ class RayDashboardClient:
             return ""
         try:
             data = resp.json()
-            # Newer Ray wraps as {"logs": "..."}; older return text.
+            # Ray may wrap as {"logs": "..."} or return plain text.
             return data.get("logs", "") if isinstance(data, dict) else str(data)
         except json.JSONDecodeError:
             return resp.text

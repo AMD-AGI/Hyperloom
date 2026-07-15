@@ -1,27 +1,19 @@
 """Durable, per-KEEP snapshot of the framework *source layer*.
 
-Root-cause this addresses: ``current_best``'s source-code / artifact wins
-(``scope=source_patch``) were applied to a *shared* live git tree and, in a
-non-cyclic run, left uncommitted. A later candidate's routine ``git
-reset --hard`` / ``git clean -fd`` / ``git stash pop`` on that same shared tree
-silently discarded them, so the realized best could no longer be relaunched and
-the GEAK handoff had no durable source artifact to reference (it fell back
-to the stock installed framework).
+Every KEEP snapshots its *realized* file contents into a session-scoped,
+self-contained directory that no later git hygiene can touch, rather than
+treating the mutable live tree as the source of truth.
 
-The fix is to stop treating the mutable live tree as the source of truth: every
-KEEP snapshots its *realized* file contents into a session-scoped, self-contained
-directory that no later git hygiene can touch.
-
-The on-disk format is the cross-tool contract (Hyperloom writes it; the GEAK/
-GEAK side re-implements the same trivial reader), so neither side needs to
-import the other::
+The on-disk format is the cross-tool contract (Hyperloom writes it; the GEAK
+side re-implements the same trivial reader), so neither side needs to import
+the other::
 
     <snapshot_dir>/manifest.json   # {framework_root, base_sha, files:[{rel,op}]}
     <snapshot_dir>/files/<rel>     # full copy of each realized file
 
-Full-file capture (not a fuzzy diff) is deliberate: it reconstructs
-byte-for-byte regardless of patch strip levels, generated/untracked files, or
-whether the framework root is a git tree at all.
+Full-file capture (not a fuzzy diff) reconstructs byte-for-byte regardless of
+patch strip levels, generated/untracked files, or whether the framework root
+is a git tree at all.
 """
 
 from __future__ import annotations
@@ -88,8 +80,7 @@ def snapshot_source_layer(
             shutil.copy2(src, dst)
             captured.append({"rel": rel, "op": "upsert"})
         else:
-            # Absent post-apply => the KEEP deleted it; record the removal so
-            # materialization reproduces the deletion on top of the base tree.
+            # Absent post-apply => the KEEP deleted it; record the removal.
             captured.append({"rel": rel, "op": "delete"})
 
     if not captured:

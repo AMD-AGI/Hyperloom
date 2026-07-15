@@ -78,7 +78,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if attempts:
         facts.append(f"Baseline attempts recorded: {len(attempts)}.")
 
-    # Annotate ttft inline when reconstructed via the runs/baseline/ disk walk fallback.
+    # Annotate ttft inline when reconstructed via the disk walk fallback.
     ttft_display: Any = ttft
     if ttft is not None and ttft_source == "runs_baseline_disk":
         ttft_display = f"{float(ttft):.1f} (reconstructed from runs/baseline/ disk walk)"

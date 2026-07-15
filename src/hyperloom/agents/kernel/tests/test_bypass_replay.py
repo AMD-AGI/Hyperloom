@@ -6,11 +6,10 @@
 
 """Replay test: run the bypass CLI against a real profiler trace.
 
-CI-safe: the large trace is not shipped in-repo, so this test is skipped
-unless a trace path is provided via ``HYPERLOOM_BYPASS_REPLAY_TRACE`` (or the
-known local dev path exists). When it runs it asserts the downstream artifact
-contract and the golden ranking (attention/SDPA is the top GPU-time kernel for
-the reference vLLM Llama session).
+Skipped unless a trace path is provided via ``HYPERLOOM_BYPASS_REPLAY_TRACE``
+(or the known local dev path exists). When it runs it asserts the downstream
+artifact contract and the golden ranking (attention/SDPA is the top GPU-time
+kernel for the reference vLLM Llama session).
 """
 
 from __future__ import annotations
@@ -61,16 +60,13 @@ def test_replay_real_trace_contract_and_ranking(tmp_path, capsys, monkeypatch):
     hot = result["hot_kernels"]
     assert hot, "expected non-empty hot kernels from a real trace"
 
-    # Artifact contract present + on disk.
     for key in ("kernel_candidates", "kernel_roofline", "tracelens_summary", "trace_input_manifest", "trace_report_path"):
         p = result["artifact_paths"][key]
         assert p and Path(p).is_file(), f"missing artifact {key}: {p}"
 
-    # Golden ranking: attention (SDPA) dominates GPU time -> top candidate.
     assert hot[0]["kernel_category"] == "SDPA", hot[0]["kernel_category"]
     assert hot[0]["gpu_pct"] > 10.0
 
-    # Vendor GEMM (Cijk / scaled_mm) present but routed as non-reusable.
     gemm = [k for k in hot if k["kernel_category"] == "GEMM"]
     assert gemm, "expected GEMM kernels"
     assert all(not k["reusable_native_kernel"] for k in gemm)

@@ -145,7 +145,7 @@ def test_filter_warm_patches_keeps_low_confidence_advisory() -> None:
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     patches = [{"patch_file": "maybe.py", "measured_gain_pct": 5}]
-    advisory = [{"patch_file": "maybe.py", "confidence": 0.5}]  # below 0.75 threshold
+    advisory = [{"patch_file": "maybe.py", "confidence": 0.5}]  # below threshold
     kept = Coordinator._filter_warm_patches_with_kg(
         SimpleNamespace(), patches, advisory, SimpleNamespace()
     )
@@ -227,7 +227,7 @@ def test_specialist_prompt_kg_section_placeholder_when_empty() -> None:
         task_id="t-kg-empty", domain=domain, max_turns=4, gap_canonical_id="gap.kg", gap_layer=domain.layer
     )
     _, user = build_specialist_prompts(inp)
-    assert "5d. GRAPH-RECOMMENDED KNOBS" in user  # section always present
+    assert "5d. GRAPH-RECOMMENDED KNOBS" in user
 
 
 class _RecordingKG:
@@ -287,7 +287,6 @@ def test_emit_kg_decision_revert_emits_reverted_on(monkeypatch: Any) -> None:
 
 
 def test_emit_kg_decision_skips_non_native(monkeypatch: Any) -> None:
-    # Non-native client would write a discarded fence; write-back must skip it.
     kg = _RecordingKG(native=False)
     _emit_decision(
         monkeypatch, kg,
@@ -307,7 +306,6 @@ def test_emit_kg_decision_keep_zero_gain_no_edge(monkeypatch: Any) -> None:
 
 
 def test_kg_disabled_when_no_client() -> None:
-    # No kg_client and env unset -> get_kg_client() returns None -> no KG keys.
     ctx = _build_warm_start_context(
         status="hit",
         tier="exact",

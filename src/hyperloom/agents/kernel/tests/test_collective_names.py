@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :mod:`kernel-agent.tools._collective_names` (locks r24-regression collective detection)."""
+"""Tests for :mod:`kernel-agent.tools._collective_names` collective detection."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from _collective_names import (  # type: ignore[import-not-found]
 
 class CollectiveNameDetectionTests(unittest.TestCase):
     def test_custom_allreduce_variants(self) -> None:
-        # r24 stall names plus framework-dispatcher variants.
         for name in [
             "custom_allreduce",
             "CustomAllReduce",
@@ -41,13 +40,13 @@ class CollectiveNameDetectionTests(unittest.TestCase):
             "all_to_all_dispatch",
             "rccl_broadcast",
             "broadcast_kernel",
-            "nccl_send",  # NCCL p2p still routes through NCCL collectives
+            "nccl_send",  # NCCL p2p routes through NCCL collectives
             "rccl_AllToAll",
         ]:
             self.assertTrue(kernel_name_implies_multigpu(name), msg=name)
 
     def test_non_collectives_do_not_match(self) -> None:
-        # Names containing reduce/all/broadcast as a substring but not collectives.
+        # Names with reduce/all/broadcast as a substring but not collectives.
         for name in [
             "rms_norm",
             "rotary_embedding",
@@ -57,14 +56,13 @@ class CollectiveNameDetectionTests(unittest.TestCase):
             "reduce_max",  # reduce only, not reduce_scatter
             "reduce_sum_kernel",
             "reduce_kernel",
-            "smallreduce",  # NOT a word-bounded "all_reduce"
-            "tall_gemm",  # NOT a bounded "all_gather"
-            "broadcastable_check",  # boundary: "broadcast" only matches when followed by "_"
+            "smallreduce",  # not a word-bounded "all_reduce"
+            "tall_gemm",  # not a bounded "all_gather"
+            "broadcastable_check",  # "broadcast" only matches when followed by "_"
             "",
         ]:
             with self.subTest(name=name):
                 if name == "broadcastable_check":
-                    # broadcast matches only when followed by "_"; this has none, so no match.
                     self.assertFalse(kernel_name_implies_multigpu(name))
                 else:
                     self.assertFalse(kernel_name_implies_multigpu(name))

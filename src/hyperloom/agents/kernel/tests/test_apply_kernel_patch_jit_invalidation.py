@@ -1,10 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-K — aiter JIT cache invalidation around .cu/.cuh rebuilds.
+"""aiter JIT cache invalidation around .cu/.cuh rebuilds.
 
-A csrc patch would be masked by a stale per-instance ``jit/build/`` .so
-(Qwen3-30B-A3B false REVERT @-2.66% E2E), so apply moves it aside before
-rebuild and revert moves it back; aiter-only no-op for sglang/vllm.
+A csrc patch would be masked by a stale per-instance ``jit/build/`` .so, so
+apply moves it aside before rebuild and revert moves it back; aiter-only no-op
+for sglang/vllm.
 """
 
 from __future__ import annotations
@@ -41,12 +41,12 @@ def apply_tool() -> types.ModuleType:
         ("/sgl-workspace/aiter/csrc/include/foo.cuh", True),
         ("/usr/local/lib/python3.12/dist-packages/aiter/csrc/include/bar.hpp", True),
         ("/opt/venv/lib/python3.10/site-packages/aiter/csrc/baz.cpp", True),
-        # Negative — sglang/vllm csrc, aiter python source, unrelated paths.
+        # Negative: sglang/vllm csrc, aiter python source, unrelated paths.
         ("/sgl-workspace/sglang/sgl-kernel/csrc/foo.cu", False),
         ("/sgl-workspace/vllm/csrc/bar.cu", False),
         ("/sgl-workspace/aiter/aiter/ops/moe_op.py", False),
         ("/tmp/foo/aiter.cu", False),
-        # Edge: leading-slash anchor in ``/aiter/csrc/`` must not match ``myaiter``.
+        # Edge: leading-slash anchor must not match ``myaiter``.
         ("/sgl-workspace/myaiter/csrc/foo.cu", False),
     ],
 )
@@ -195,9 +195,8 @@ def test_restore_moves_backup_back(apply_tool, tmp_path: Path) -> None:
     assert invalidate["status"] == "ok"
     assert not fake_jit_build.exists()
 
-    # Restore now requires the recorded src to be the importable aiter jit/build
-    # dir (blocks a forged manifest redirecting the rmtree); point the resolver
-    # at the synthetic layout.
+    # Restore requires the recorded src to be the importable aiter jit/build
+    # dir; point the resolver at the synthetic layout.
     with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=fake_jit_build):
         restore = apply_tool._restore_aiter_jit_build(invalidate)
     assert restore["status"] == "ok"

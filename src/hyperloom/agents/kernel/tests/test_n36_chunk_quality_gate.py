@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""low-quality steady-state chunk auto-recovery (DSR1-0528 10k/1k case).
+"""low-quality steady-state chunk auto-recovery.
 
-``_check_selected_chunk_has_gpu_events_quality`` emits ``steady_state_chunk_low_quality`` (N26 retry allowlist) when busy ratio is below threshold AND a meaningfully-better alternate exists; threshold via ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` (default 0.05).
+``_check_selected_chunk_has_gpu_events_quality`` emits ``steady_state_chunk_low_quality`` when busy ratio is below threshold AND a meaningfully-better alternate exists; threshold via ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` (default 0.05).
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def split_dir(tmp_path: Path) -> Path:
 
 # Quality gate behaviour
 def test_dsr1_style_low_quality_chunk_emits_warning(tl_module, split_dir):
-    """DSR1-0528 10k/1k case: 0.063%-busy mixed chunk fires ``steady_state_chunk_low_quality`` listing ``prefilldecode`` as alternate."""
+    """0.063%-busy mixed chunk fires ``steady_state_chunk_low_quality`` listing ``prefilldecode`` as alternate."""
     chunks = _make_chunks(split_dir)
     mixed = chunks["mixed_steady_state"]
     pd = chunks["prefilldecode_steady_state"]
@@ -120,7 +120,7 @@ def test_dsr1_style_low_quality_chunk_emits_warning(tl_module, split_dir):
     assert result["requested_mode"] == "mixed"
     assert result["busy_ratio"] < 0.01
     assert "prefilldecode" in result["non_empty_modes"]
-    # Remediation must point at the env knob the N26 retry consumes.
+    # Remediation must point at the env knob the retry consumes.
     assert "INFERENCE_OPTIMIZER_STEADY_STATE_MODE" in result["remediation"]
     assert "prefilldecode" in result["remediation"]
 
@@ -310,9 +310,9 @@ def test_missing_execution_details_csv_returns_none(tl_module, split_dir):
     )
 
 
-# N26 retry allowlist contract
+# Retry allowlist contract
 def test_n26_retry_allowlist_includes_low_quality_code():
-    """Pin that the N26 retry allowlist includes the N36 code, else auto-retry never fires."""
+    """Pin that the retry allowlist includes the low-quality code, else auto-retry never fires."""
     from hyperloom.orchestrator.actions.executors import (
         roofline as ro,
     )

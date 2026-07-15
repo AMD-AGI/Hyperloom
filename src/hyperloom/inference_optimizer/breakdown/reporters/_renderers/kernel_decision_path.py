@@ -54,7 +54,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """
     raw = breakdown.get("kernel_decision_path")
     if raw is None:
-        # Field absent (old JSON): skip silently, no warning.
         return RenderedSection(
             section_id="kernel_decision_path",
             title="Kernel Decision Path",

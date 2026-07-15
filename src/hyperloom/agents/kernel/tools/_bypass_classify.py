@@ -6,11 +6,9 @@
 
 """Device-kernel-name classification for the bypass analysis backend.
 
-Independent reimplementation of a compact kernel-name taxonomy (design
-referenced from TraceLens' ``classify_kernels.py`` rule set, but this module
-does not import TraceLens). It is the *primary* categorization signal for the
-bypass route because it has full coverage even when Kineto op-correlation is
-broken by cudagraph/torch.compile replay (see M2 finding).
+A compact kernel-name taxonomy; the primary categorization signal for the bypass
+route because it has full coverage even when Kineto op-correlation is broken by
+cudagraph/torch.compile replay.
 
 Two outputs per kernel name:
   * ``category``: coarse perf category aligned with the labels downstream and
@@ -39,17 +37,15 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
     (re.compile(r"(?i)attention_[23]d|unified_attention"), "SDPA", 20),
     (re.compile(r"(?i)flash_attn|flash_fwd|fmha"), "SDPA", 20),
     (re.compile(r"(?i)_fwd_kernel|reduce_segments"), "SDPA", 18),
-    # KV cache store (kept distinct; golden files this under attention extras/other).
+    # KV cache store.
     (re.compile(r"(?i)reshape_and_cache|concat_and_cache"), "KVCacheStore", 20),
     # Normalization.
     (re.compile(r"(?i)rmsnorm|rms_norm|layer_norm|layernorm|l2norm"), "Normalization", 20),
-    # DiT adaptive layernorm (adaLN / modulate) — specific, before generic norm.
+    # DiT adaptive layernorm (adaLN / modulate) — before generic norm.
     (re.compile(r"(?i)fusedlnmodulate|ada_?ln|modulate|scale_shift"), "Normalization", 19),
     (re.compile(r"(?i)add_rmsnorm|fused.*mean.*rsqrt|rsqrt.*mean"), "Normalization", 18),
-    # Convolution (diffusion VAE encode/decode; absent in text-gen LLMs).
-    # Require a conv context for miopen/cudnn: those libraries also emit
-    # norm/pooling/etc kernels that must not be mislabeled as Convolution
-    # (they are still marked vendor/non-reusable via _VENDOR_BINARY_RE below).
+    # Convolution. Require a conv context for miopen/cudnn (they also emit
+    # norm/pooling kernels that must not be mislabeled as Convolution).
     (re.compile(r"(?i)conv2d|conv_2d|conv_fwd|conv_bwd|convolution|miopen.*conv|cudnn.*conv"), "Convolution", 16),
     # Rotary embedding -> elementwise family.
     (re.compile(r"(?i)rotary|\brope\b"), "Elementwise", 18),
@@ -70,8 +66,7 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
     (re.compile(r"(?i)rocprim|hipcub|DeviceScan|DeviceRadixSort|DeviceReduce"), "Elementwise", 1),
 ]
 
-# Vendor precompiled kernels: rankable but not rewritable (skip for kernel-opt).
-# MIOpen / cuDNN convolution kernels are vendor conv libraries (no rewritable src).
+# Vendor precompiled kernels: rankable but not rewritable.
 _VENDOR_BINARY_RE = re.compile(
     r"(?i)Cijk_|wvSplitK|splitKreduce|hipblaslt|rocblas|cublas|nvjet_tst|miopen|cudnn"
 )
@@ -83,18 +78,10 @@ _REUSABLE_RE = re.compile(
 )
 
 
-# Launching-op-name -> category fallback. The device-kernel name is the primary
-# signal (100% coverage); when it is unclassifiable (``Others``) but the trace
-# resolved a launching op via Kineto correlation, the op name — a stable
-# framework/aten symbol regardless of the backend kernel variant — generalizes
-# far better than accumulating a device-name regex per model. Consulted only on
-# the ``Others`` fallthrough.
-#
-# ORDER IS PRIORITY: ``_classify_by_op`` returns the FIRST matching row, so rows
-# MUST stay ordered most-specific-first. A broad rule (e.g. the generic
-# Elementwise catch-all) must never precede a specific one, or it will shadow it.
-# Norm keeps only explicit ``*_norm`` layer names — a bare ``\bnorm\b`` would
-# mis-map the math reduction ``aten::norm`` / ``linalg_vector_norm``.
+# Launching-op-name -> category fallback, consulted only on the ``Others``
+# fallthrough. ORDER IS PRIORITY: ``_classify_by_op`` returns the FIRST matching
+# row, so rows MUST stay ordered most-specific-first. Norm keeps only explicit
+# ``*_norm`` names so a bare ``\bnorm\b`` does not mis-map ``aten::norm``.
 _OP_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?i)convolution|conv[123]d|conv_transpose|_convolution"), "Convolution"),
     (re.compile(r"(?i)scaled_dot_product_attention|efficient_attention|flash_attention|"
@@ -111,19 +98,16 @@ _OP_RULES: list[tuple[re.Pattern, str]] = [
 ]
 
 
-# High-level primitives that vendor libraries (MIOpen/cuDNN) lower onto a
-# Tensile GEMM (Cijk_) device kernel. When the device name classifies as GEMM
-# but the launching op is one of these, the op name is the true primitive and
-# overrides the GEMM implementation detail (so the roofline uses the right FLOP
-# model). Reusability stays device-name based (Cijk_ -> vendor), unchanged.
+# High-level primitives that vendor libraries lower onto a Tensile GEMM device
+# kernel. When the device name is GEMM but the launching op is one of these, the
+# op name overrides so the roofline uses the right FLOP model.
 _GEMM_LOWERED_OPS = frozenset({"Convolution", "SDPA"})
 
 
 def _classify_by_op(op_name: str) -> str:
     """Return a category from a launching op name, or ``""`` on no match.
 
-    Returns the FIRST matching :data:`_OP_RULES` row (rows are ordered
-    most-specific-first — see the note there).
+    Returns the FIRST matching :data:`_OP_RULES` row.
 
     Args:
         op_name: Resolved launching op name (e.g. ``aten::miopen_convolution``).
@@ -170,11 +154,8 @@ def classify_kernel(name: str, *, gpu_cat: str = "", op_name: str = "") -> Kerne
         if prio > best_prio and pat.search(n):
             category, best_prio = cat, prio
 
-    # Op-name category signal. Primarily a fallback when the device name is
-    # unclassifiable (``Others``); additionally, a Convolution/SDPA op overrides
-    # a GEMM device classification, because vendor libraries lower conv/attention
-    # onto a Tensile GEMM (Cijk_) kernel — the op name is the true primitive and
-    # a correct roofline needs the conv/attention FLOP model, not GEMM's.
+    # Op-name signal: fallback when the device name is ``Others``, and a
+    # Convolution/SDPA op overrides a GEMM device classification.
     if op_name:
         op_cat = _classify_by_op(op_name)
         if category == "Others":

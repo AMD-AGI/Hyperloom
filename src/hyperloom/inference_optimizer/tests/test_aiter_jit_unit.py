@@ -29,7 +29,7 @@ def test_resolve_dir_uses_env_override(tmp_path, monkeypatch):
     build = tmp_path / "build"
     build.mkdir()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(tmp_path))
-    # The env override adds both <dir> and <dir>/build; <dir> itself exists.
+    # Env override adds both <dir> and <dir>/build.
     resolved = aj._resolve_lock_sweep_dir(None)
     assert resolved in (tmp_path, build)
 
@@ -41,7 +41,7 @@ def test_resolve_dir_none_when_nothing_exists(monkeypatch):
         raise ImportError("no aiter")
 
     monkeypatch.setattr(aj.importlib.util, "find_spec", _no_aiter)
-    # All fallbacks are absolute system paths unlikely to exist in CI sandbox.
+    # Fallbacks are absolute system paths unlikely to exist in CI sandbox.
     resolved = aj._resolve_lock_sweep_dir(None)
     assert resolved is None or resolved.is_dir()
 
@@ -90,7 +90,7 @@ def test_clean_no_dir_returns_zero_stats():
 
 
 def test_clean_unresolvable_dir_returns_empty_stats(monkeypatch):
-    # Force resolution to fail so the early-return (resolved is None) is hit.
+    # Force resolution to fail so the resolved-is-None early return is hit.
     monkeypatch.setattr(aj, "_resolve_lock_sweep_dir", lambda d: None)
     stats = aj.clean_stale_aiter_locks(None)
     assert stats["dir"] is None
@@ -256,8 +256,7 @@ def test_any_live_compiler_skips_dead_process(monkeypatch):
         _RaisingProc(fake.NoSuchProcess()),
         _FakeProc({"name": "ninja", "cmdline": []}),
     ]
-    # Reinstall with the raising proc first so the per-proc except is exercised
-    # before the real match.
+    # Raising proc first so the per-proc except runs before the real match.
     import sys
 
     def _iter(fields):

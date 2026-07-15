@@ -17,7 +17,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _write_synthetic_model(model_dir: Path, *, total_size: int) -> None:
-    """Lay down a minimal HF-shaped MoE model dir (Qwen3-30B-A3B-like)."""
+    """Lay down a minimal HF-shaped MoE model dir."""
     model_dir.mkdir(parents=True, exist_ok=True)
     config = {
         "num_hidden_layers": 48,
@@ -74,6 +74,7 @@ class TestRecordBaselineRooflineCeiling:
 
         # Achieved + within/gap derived from baseline tput.
         assert ceiling["achieved_tok_per_sec"] == 1707.9
+
         assert ceiling["within_roofline_pct"] is not None
         assert ceiling["gap_to_roofline_pct"] is not None
 
@@ -81,7 +82,7 @@ class TestRecordBaselineRooflineCeiling:
         assert ceiling["ceiling_arm"] == "baseline"
         assert ceiling["roofline_provenance"]["runtime_tp"] == 4
         assert ceiling["roofline_provenance"]["effective_concurrency"] == 64
-        # Compute-peak convention is surfaced (unified max-achievable).
+        # Compute-peak convention is surfaced.
         assert ceiling["roofline_provenance"]["compute_peak_convention"] == "achievable"
         assert ceiling["roofline_provenance"]["compute_peak_tflops"] > 0
 
