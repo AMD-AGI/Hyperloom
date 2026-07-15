@@ -60,6 +60,20 @@ def append_jsonl(path: Path, row: Any, *, sort_keys: bool = True, ensure_ascii: 
         fh.write(json.dumps(row, sort_keys=sort_keys, ensure_ascii=ensure_ascii) + "\n")
 
 
+def read_json(path: str | Path | None, default: Any = None) -> Any:
+    """Parse JSON from ``path``; return ``default`` on missing/malformed input.
+
+    Kernel-local, stdlib-only mirror of ``common.jsonio.read_json`` tolerant
+    mode: a falsy path or an ``OSError`` / ``JSONDecodeError`` yields ``default``.
+    """
+    if not path:
+        return default
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
     """Return the last ``limit`` lines of ``log_path``, empty when missing."""
     if not log_path.exists():
@@ -204,6 +218,7 @@ __all__ = [
     "atomic_write_json",
     "extract_last_json",
     "kernel_row_matches",
+    "read_json",
     "read_last_lines",
     "safe_float",
     "source_text_looks_complete",

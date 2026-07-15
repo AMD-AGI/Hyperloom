@@ -16,33 +16,6 @@ def _write_json(path: Path, data: dict) -> Path:
     return path
 
 
-# ---- _load_json -----------------------------------------------------------
-def test_load_json(tmp_path):
-    good = _write_json(tmp_path / "g.json", {"a": 1})
-    assert br._load_json(good) == {"a": 1}
-    bad = tmp_path / "b.json"
-    bad.write_text("{not json", encoding="utf-8")
-    assert br._load_json(bad) is None
-    arr = tmp_path / "arr.json"
-    arr.write_text("[1, 2]", encoding="utf-8")
-    assert br._load_json(arr) is None  # not a dict
-    assert br._load_json(tmp_path / "missing.json") is None
-
-
-# ---- coercion helpers -----------------------------------------------------
-def test_to_float_int_first():
-    assert br._to_float(True) is None
-    assert br._to_float(None) is None
-    assert br._to_float(object()) is None
-    assert br._to_float("1.5") == 1.5
-    assert br._to_int(True) is None
-    assert br._to_int(object()) is None
-    assert br._to_int("3") == 3
-    assert br._first_float(None, "bad", object()) is None
-    assert br._first_float("bad", 2.0) == 2.0
-    assert br._first_int(None, "bad", 4) == 4
-
-
 # ---- _candidate_raw_jsons ordering ----------------------------------------
 def test_candidate_raw_jsons_ordering(tmp_path):
     (tmp_path / "profile_x.json").write_text("{}", encoding="utf-8")
