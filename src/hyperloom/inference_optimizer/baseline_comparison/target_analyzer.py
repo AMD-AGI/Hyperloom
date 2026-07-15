@@ -8,18 +8,24 @@ so the executor file stays tiny.
 
 Flow:
 
-1. Map the local model path to a canonical display name. Miss →
+1. Map the local model path to a canonical InferenceX API name. Miss →
    return a ``BaselineSummary`` with ``status="skipped"``.
-2. Read the LLM-authored ``competitor_target.json`` (produced by the
-   research scout, every datapoint source-backed). No sourced rows →
-   ``status="no_match"``.
-3. Project each per-concurrency target row into a ``BaselinePoint``;
-   pick the best per-GPU throughput row as ``best`` and record every
-   concurrency (deduplicated, sorted by conc) for the report.
+2. Fetch the model's benchmark rows live from the InferenceX API and keep
+   only rows whose ``hardware`` / ``isl`` / ``osl`` (and ``precision`` when
+   supplied) match our run. Unknown GPU / no shape match / API failure →
+   ``status="no_match"``. Every reference number is thus API-measured, never
+   LLM-authored.
+3. Project each matched row into a ``BaselinePoint``; pick the best per-GPU
+   throughput row as ``best`` and record every concurrency (deduplicated,
+   sorted by conc) for the report.
 4. Materialise the summary to disk:
 
    * ``target_analysis/target_baseline.json`` — machine-readable
    * ``target_analysis/target_analysis_report.md`` — short human note
+
+   and, on success, a measured ``competitor_target.json`` (``source`` = the
+   live API URL) so the EXPLORE advisory gap is driven by real InferenceX
+   data rather than any LLM-authored estimate.
 
 All paths derived via :mod:`session_paths` — no hand-rolled string
 concatenation under the session dir.
@@ -35,11 +41,13 @@ from typing import Any
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import now_iso
 
-from .inferencex_client import DEFAULT_BASE_URL
+from .inferencex_client import (
+    DEFAULT_BASE_URL,
+    base_url,
+    fetch_rows,
+    find_reference_rows,
+)
 from .types import BaselinePoint, BaselineQuery, BaselineSummary
-
-
-LLM_AUTHORED_SOURCE = "llm_authored"
 
 
 # --- InferenceX model name mapping -------------------------------------------
@@ -92,8 +100,11 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
     Matching algorithm:
 
     1. Take the basename (``Path.name``).
-    2. Strip a leading vendor prefix.
-    3. Case-insensitive exact match against the known list.
+    2. Try a case-insensitive exact match against the known list first, so
+       canonical names that themselves begin with a vendor-like token (e.g.
+       ``DeepSeek-R1-0528``, ``Qwen-3.5-397B-A17B``) are not mangled.
+    3. Otherwise strip a leading vendor prefix and match again, which handles
+       HF-style paths like ``MiniMaxAI-MiniMax-M2.5``.
 
     Args:
         model_path_or_name (str): A local weights path, HuggingFace repo
@@ -111,11 +122,14 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
 
     candidate = Path(raw).name if ("/" in raw or "\\" in raw) else raw
     stripped = _VENDOR_PREFIX_RE.sub("", candidate, count=1)
-    needle = stripped.casefold()
 
-    for known in KNOWN_INFERENCEX_MODELS:
-        if known.casefold() == needle:
-            return known
+    # Try the full candidate before the vendor-stripped form: several canonical
+    # InferenceX names start with a token the prefix regex would strip
+    # (``DeepSeek-``, ``Qwen-``), so stripping first would break exact matches.
+    for needle in (candidate.casefold(), stripped.casefold()):
+        for known in KNOWN_INFERENCEX_MODELS:
+            if known.casefold() == needle:
+                return known
 
     return None
 
@@ -206,8 +220,9 @@ def _format_report_md(summary: BaselineSummary) -> str:
         lines.append("")
 
     lines.append(
-        "> Advisory only. This data does **not** feed Objective, scoring, or "
-        "any agent prompt — it is shown here for post-mortem comparison."
+        "> Advisory only. This InferenceX-measured reference never feeds the "
+        "Objective, scoring, or any KEEP/REVERT gate; a matching row is "
+        "surfaced to the EXPLORE gap advisory as direction only."
     )
     return "\n".join(lines) + "\n"
 
@@ -250,33 +265,115 @@ def _persist(
     return json_path, md_path
 
 
-def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
-    """Project one LLM-authored ``per_conc`` row into a ``BaselinePoint``.
+def _row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
+    """Project one raw InferenceX benchmark record into a ``BaselinePoint``.
 
-    Returns ``None`` when ``tput_per_gpu`` is missing or non-positive.
-    ``tpot_ms`` is the per-output-token latency; ``interactivity`` (when
-    present) is informational only and not folded into the point shape.
+    The API reports latencies in **seconds** under ``metrics`` (``mean_ttft``
+    / ``mean_tpot`` / ``mean_e2el``); they are converted to milliseconds here.
+    Returns ``None`` when the record has no ``metrics`` or a non-positive
+    ``tput_per_gpu`` (numeric sanity gate).
 
     Args:
-        row: A single ``per_conc`` mapping from the competitor target data.
+        row: A single raw benchmark record from the InferenceX API.
 
     Returns:
-        A ``BaselinePoint`` built from the row, or ``None`` when the row has
-        no usable positive ``tput_per_gpu``.
+        A ``BaselinePoint`` built from the record, or ``None`` when it has no
+        usable positive ``tput_per_gpu``.
     """
-    tput = to_float(row.get("tput_per_gpu"), default=0.0)
+    if not isinstance(row, dict):
+        return None
+    metrics = row.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    tput = to_float(metrics.get("tput_per_gpu"), default=0.0)
     if tput <= 0:
         return None
     return BaselinePoint(
         tput_per_gpu=tput,
-        output_tput_per_gpu=0.0,
+        output_tput_per_gpu=to_float(metrics.get("output_tput_per_gpu"), default=0.0),
         conc=int(row.get("conc") or 0),
-        decode_tp=0,
-        mean_ttft_ms=0.0,
-        mean_tpot_ms=to_float(row.get("tpot_ms"), default=0.0),
-        mean_e2el_ms=0.0,
-        date="",
+        decode_tp=int(row.get("decode_tp") or 0),
+        mean_ttft_ms=to_float(metrics.get("mean_ttft"), default=0.0) * 1000.0,
+        mean_tpot_ms=to_float(metrics.get("mean_tpot"), default=0.0) * 1000.0,
+        mean_e2el_ms=to_float(metrics.get("mean_e2el"), default=0.0) * 1000.0,
+        date=str(row.get("date") or ""),
     )
+
+
+def _write_measured_competitor_target(
+    session_dir: Path,
+    query: BaselineQuery,
+    points: list[BaselinePoint],
+    source: str,
+) -> bool:
+    """Persist a measured ``competitor_target.json`` (``source`` = live API URL).
+
+    This is the advisory feed: the EXPLORE gap block reads this file, so
+    writing only API-measured rows here guarantees optimization direction is
+    guided by real InferenceX numbers, never LLM-authored estimates. The
+    interactivity field mirrors ``gap_analysis``' own ``1000 / tpot_ms``
+    convention. Never raises; returns ``False`` when nothing was written.
+
+    Args:
+        session_dir: Session directory to write the target into.
+        query: The resolved comparison query (gpu / model / framework /
+            precision recorded on the target).
+        points: The deduplicated measured reference points.
+        source: Provenance string (the live InferenceX API URL).
+
+    Returns:
+        bool: ``True`` when at least one sourced row was persisted.
+    """
+    per_conc: list[dict[str, Any]] = []
+    for p in points:
+        interactivity = (1000.0 / p.mean_tpot_ms) if p.mean_tpot_ms > 0 else 0.0
+        per_conc.append(
+            {
+                "conc": p.conc,
+                "tput_per_gpu": p.tput_per_gpu,
+                "tpot_ms": p.mean_tpot_ms,
+                "interactivity": interactivity,
+                "source": source,
+            }
+        )
+    if not per_conc:
+        return False
+    try:
+        from hyperloom.orchestrator.knowledge import research_hints
+
+        return research_hints.write_competitor_target(
+            Path(session_dir),
+            {
+                "gpu": query.gpu,
+                "model": query.model,
+                "framework": query.framework,
+                "precision": query.precision,
+                "per_conc": per_conc,
+                "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
+            },
+        )
+    except Exception:  # noqa: BLE001 — advisory feed is best-effort
+        return False
+
+
+def _clear_competitor_target(session_dir: Path) -> None:
+    """Remove any existing ``competitor_target.json``. Best-effort, never raises.
+
+    Only a successful, dimension-aligned InferenceX match may leave a
+    competitor target on disk. On every skip / no_match outcome we drop a
+    stale file (e.g. a scout-authored one left by an older run or a resumed
+    session) so the EXPLORE gap advisory can never read a non-API source.
+
+    Args:
+        session_dir: Session directory whose competitor target should be cleared.
+    """
+    try:
+        from ..session import session_paths
+
+        path = session_paths.competitor_target_json(Path(session_dir))
+        path.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — best-effort cleanup
+        pass
 
 
 def analyze(
@@ -289,40 +386,42 @@ def analyze(
     isl: int = 0,
     osl: int = 0,
 ) -> BaselineSummary:
-    """Build the target-analysis summary from LLM-authored competitor data.
+    """Build the target-analysis summary from live InferenceX measurements.
 
-    The reference numbers come from ``competitor_target.json`` (produced
-    by the research scout, every datapoint source-backed) rather than a
-    live HTTP pull. Persists the same ``BaselineSummary`` disk contract so
-    the report renderer is unchanged.
+    Reference numbers are fetched from the InferenceX benchmarks API and
+    dimension-aligned against our run (hardware / isl / osl, plus precision
+    when supplied). No numbers are ever LLM-authored. Persists the
+    ``BaselineSummary`` disk contract (report) and, on success, a measured
+    ``competitor_target.json`` (advisory feed).
 
     Never raises. ``BaselineSummary.status`` is one of:
 
-    * ``ok``       — competitor target had a usable per-conc row
+    * ``ok``       — at least one API-measured row matched our shape
     * ``skipped``  — model name mapping miss OR ``compare_against_gpu``
                      was empty
-    * ``no_match`` — no ``competitor_target.json`` / no sourced rows
+    * ``no_match`` — unknown GPU / no shape match / empty API result /
+                     fetch failure
 
     ``reason`` mirrors ``status`` with finer granularity:
     ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
-    ``no_competitor_target``.
+    ``unsupported_target_gpu`` / ``dimension_mismatch`` /
+    ``precision_mismatch`` / ``no_inferencex_data`` / ``fetch_error`` /
+    ``no_valid_rows``.
 
     Args:
-        session_dir: Session directory used to load competitor data and
-            persist the resulting summary.
-        model_path: Model path or name to map to a canonical display name.
+        session_dir: Session directory used to persist the resulting summary
+            and the measured advisory target.
+        model_path: Model path or name to map to a canonical InferenceX name.
         compare_against_gpu: Target GPU to compare against; when empty the
             analysis is skipped.
         framework: Optional framework name recorded on the query.
-        precision: Optional precision label recorded on the query.
-        isl: Optional input sequence length recorded on the query.
-        osl: Optional output sequence length recorded on the query.
+        precision: Optional precision label used to align rows.
+        isl: Input sequence length used to align rows (strict).
+        osl: Output sequence length used to align rows (strict).
 
     Returns:
         The persisted ``BaselineSummary`` describing the comparison outcome.
     """
-    from hyperloom.orchestrator.knowledge import research_hints
-
     canonical_model = to_inferencex_name(model_path) or ""
     query = BaselineQuery(
         model=canonical_model,
@@ -333,9 +432,14 @@ def analyze(
         osl=int(osl or 0),
     )
     now = now_iso(timespec="seconds", z_suffix=True)
+    source = base_url()
 
     def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
-        """Persist and return a no-data summary (skipped / no_match cases)."""
+        """Persist and return a no-data summary (skipped / no_match cases).
+
+        Also clears any stale ``competitor_target.json`` so the advisory feed
+        never surfaces a non-API source when there is no measured match.
+        """
         summary = BaselineSummary(
             query=query,
             fetched_at=now,
@@ -344,29 +448,66 @@ def analyze(
             status=status,
             reason=reason,
             warning=warning,
-            source=LLM_AUTHORED_SOURCE,
+            source=source,
         )
         _persist(summary, session_dir=session_dir)
+        _clear_competitor_target(session_dir)
         return summary
 
     if not canonical_model:
         return _skip("skipped", "model_mapping_miss",
-                     f"model name mapping miss for {model_path!r}; no display name found")
+                     f"model name mapping miss for {model_path!r}; no InferenceX name found")
 
     if not query.gpu:
         return _skip("skipped", "no_target_gpu_configured", "compare_against_gpu is empty")
 
-    target = research_hints.load_competitor_target(Path(session_dir))
-    rows = list((target or {}).get("per_conc") or [])
-    points = [p for p in (_target_row_to_point(r) for r in rows) if p is not None]
+    rows = fetch_rows(canonical_model)
+    if rows is None:
+        return _skip("no_match", "fetch_error",
+                     f"InferenceX API fetch failed for model={canonical_model!r}")
+    if not rows:
+        return _skip("no_match", "no_inferencex_data",
+                     f"InferenceX returned no benchmarks for model={canonical_model!r}")
 
+    matched = find_reference_rows(
+        rows,
+        hardware=query.gpu,
+        isl=query.isl,
+        osl=query.osl,
+        precision=query.precision,
+    )
+    if not matched:
+        hw = query.gpu.strip().casefold()
+        has_gpu = any(
+            isinstance(r, dict) and str(r.get("hardware") or "").strip().casefold() == hw
+            for r in rows
+        )
+        if not has_gpu:
+            return _skip("no_match", "unsupported_target_gpu",
+                         f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}")
+        # GPU present but no comparable row. Distinguish a precision-only miss
+        # (same GPU/shape exists at a different precision) from a shape miss so
+        # the strict precision filter is observable rather than silent.
+        if query.precision:
+            shape_rows = find_reference_rows(
+                rows, hardware=query.gpu, isl=query.isl, osl=query.osl, precision="",
+            )
+            if shape_rows:
+                return _skip("no_match", "precision_mismatch",
+                             f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
+                             f"but none at precision={query.precision}")
+        return _skip("no_match", "dimension_mismatch",
+                     f"no InferenceX row for gpu={query.gpu} isl/osl={query.isl}/{query.osl} "
+                     f"precision={query.precision or '(any)'}")
+
+    points = [p for p in (_row_to_point(r) for r in matched) if p is not None]
     if not points:
-        return _skip("no_match", "no_competitor_target",
-                     "no sourced competitor_target.json available (research scout disabled or produced no targets)")
+        return _skip("no_match", "no_valid_rows",
+                     "matched InferenceX rows had no positive tput_per_gpu")
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)
-    target_sources = sorted({str(r.get("source")).strip() for r in rows if str(r.get("source") or "").strip()})
+    dates = sorted({p.date for p in points if p.date})
     summary = BaselineSummary(
         query=query,
         fetched_at=now,
@@ -375,10 +516,12 @@ def analyze(
         all_concurrencies=all_points,
         status="ok",
         reason="ok",
-        warning=("sources: " + "; ".join(target_sources) if target_sources else ""),
-        source=LLM_AUTHORED_SOURCE,
+        warning=("reference dates: " + ", ".join(dates) if dates else ""),
+        source=source,
     )
     _persist(summary, session_dir=session_dir)
+    if not _write_measured_competitor_target(Path(session_dir), query, all_points, source):
+        _clear_competitor_target(session_dir)
     return summary
 
 
