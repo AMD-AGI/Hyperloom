@@ -1,20 +1,25 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""External baseline comparison layer (report-only).
+"""External baseline comparison layer.
 
 This subpackage owns the path from the user's ``--compare-against-gpu``
-flag to a persisted-on-disk reference data point that the final report
-can render alongside the run's own measured throughput.
+flag to persisted-on-disk InferenceX-measured reference points that the
+final report can render alongside the run's own measured throughput.
 
-Strict design boundary: nothing here ever writes to ``SharedState``,
-never participates in the orchestrator's scoring or Objective, never
-shows up in any agent's system prompt. The only consumers are:
+Design boundary: nothing here ever writes to ``SharedState``, participates
+in the orchestrator's scoring / Objective, or gates any KEEP/REVERT
+decision. On a successful match :func:`target_analyzer.analyze` does write a
+measured ``competitor_target.json`` (``source`` = the API URL) that the
+EXPLORE gap advisory surfaces to specialists as *direction, not a gate* — so
+any reference number reaching a prompt is always API-measured, never
+LLM-authored. Consumers:
 
 * :class:`hyperloom.orchestrator.actions.executors.TargetAnalysisExecutor`
   — calls :func:`target_analyzer.analyze` once per session.
 * :class:`hyperloom.orchestrator.actions.executors.ReportExecutor`
-  — reads ``target_analysis/target_baseline.json`` to render an advisory
+  — reads ``target_analysis/target_baseline.json`` to render the report
   section in ``final.md``.
+* the EXPLORE gap advisory — reads the measured ``competitor_target.json``.
 
 Source of upstream data: the InferenceX public benchmarks API
 (https://inferencex.semianalysis.com/api/v1/benchmarks).

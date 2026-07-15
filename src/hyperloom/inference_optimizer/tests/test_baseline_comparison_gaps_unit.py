@@ -4,14 +4,14 @@
 
 Covers uncovered branches in ``baseline_comparison``: whitespace-only input to
 ``to_inferencex_name``, the optional-field/all-concurrencies rendering in
-``_format_report_md``, and the fail-soft branches in ``_target_row_to_point``.
+``_format_report_md``, and the fail-soft branches in ``_row_to_point``.
 """
 
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     _format_report_md,
-    _target_row_to_point,
+    _row_to_point,
     to_inferencex_name,
 )
 from hyperloom.inference_optimizer.baseline_comparison.types import (
@@ -77,22 +77,40 @@ def test_format_report_md_renders_all_optional_fields() -> None:
     assert "All matched concurrencies" in md
 
 
-def test_target_row_to_point_valid_row() -> None:
-    point = _target_row_to_point({"tput_per_gpu": "10.5", "conc": "32", "tpot_ms": "1.5"})
+def test_row_to_point_valid_row() -> None:
+    point = _row_to_point(
+        {
+            "conc": 32,
+            "decode_tp": 4,
+            "metrics": {
+                "tput_per_gpu": 10.5,
+                "output_tput_per_gpu": 5.25,
+                "mean_ttft": 0.1,  # seconds
+                "mean_tpot": 0.02,
+                "mean_e2el": 3.0,
+            },
+            "date": "2026-05-12",
+        }
+    )
     assert point is not None
     assert point.tput_per_gpu == 10.5
     assert point.conc == 32
+    assert point.decode_tp == 4
+    # Latencies converted seconds → milliseconds.
+    assert round(point.mean_tpot_ms, 1) == 20.0
+    assert round(point.mean_ttft_ms, 1) == 100.0
 
 
-def test_target_row_to_point_unparseable_numeric_is_zero() -> None:
-    """A non-numeric field fails soft to 0.0; with a valid positive tput the point is still built."""
-    point = _target_row_to_point({"tput_per_gpu": "7.0", "tpot_ms": "not-a-number"})
+def test_row_to_point_unparseable_numeric_is_zero() -> None:
+    """A non-numeric latency fails soft to 0.0; a valid positive tput still builds the point."""
+    point = _row_to_point({"conc": 8, "metrics": {"tput_per_gpu": 7.0, "mean_tpot": "not-a-number"}})
     assert point is not None
     assert point.mean_tpot_ms == 0.0
 
 
-def test_target_row_to_point_none_on_nonpositive_tput() -> None:
-    """A row with non-positive throughput is dropped (returns None)."""
-    assert _target_row_to_point({"tput_per_gpu": "0"}) is None
-    assert _target_row_to_point({"tput_per_gpu": "-3.2"}) is None
-    assert _target_row_to_point({}) is None
+def test_row_to_point_none_on_nonpositive_or_missing_metrics() -> None:
+    """Non-positive throughput or a missing ``metrics`` block is dropped (returns None)."""
+    assert _row_to_point({"metrics": {"tput_per_gpu": 0}}) is None
+    assert _row_to_point({"metrics": {"tput_per_gpu": -3.2}}) is None
+    assert _row_to_point({"metrics": {}}) is None
+    assert _row_to_point({}) is None
