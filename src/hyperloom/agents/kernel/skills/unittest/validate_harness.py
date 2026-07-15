@@ -295,7 +295,7 @@ def main():
             sys.exit(1)
 
     if args.run or args.all:
-        if args.all and not report.get("static", {}).get("ok", True):
+        if args.all and not report["static"].get("ok", True):
             report["runtime"] = {"ok": False, "errors": ["Skipped: static check failed"]}
         else:
             ok, errs, results = runtime_check(args.harness_path)

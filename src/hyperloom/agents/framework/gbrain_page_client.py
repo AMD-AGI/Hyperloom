@@ -81,7 +81,7 @@ class GbrainPageClient:
         try:
             headers = resp.headers
             ctype = (headers.get("Content-Type") or "").lower()
-            clen = headers.get("Content-Length") or ""
+            clen = headers.get("Content-Length")
         except Exception:  # noqa: BLE001
             ctype, clen = "", ""
         if "text/event-stream" not in ctype and clen:
