@@ -116,9 +116,11 @@ the host:
 ```bash
 set -a; . ./.env; set +a
 export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
 bash hyperloom/inference_optimizer/assets/install.sh
 . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
 If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
@@ -128,11 +130,13 @@ checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
 
 1. Run the pre-launch runtime install above and source
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Run in background with `setsid nohup`.
-3. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-4. Include `--no-kernel` in the `python -m hyperloom.inference_optimizer.cli optimize` command so the Kernel Agent phase is skipped.
-5. Include `--no-enable-conc-sweep` in the `python -m hyperloom.inference_optimizer.cli optimize` command so the SWEEP-phase post-optimization concurrency sweep is skipped.
-6. Report the session ID, log path, PID, and initial health check result.
-7. Monitor the process every 300 seconds until work is done.
-8. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-9. If `stop_reason` in the current session `state.json` is final, stop and exit.
+2. Keep `PYTHONPATH="$PWD:${PYTHONPATH:-}"` in the launch shell so robustness
+   and critic subprocesses can import `hyperloom.agents` after changing cwd.
+3. Run in background with `setsid nohup`.
+4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+5. Include `--no-kernel` in the `python -m hyperloom.inference_optimizer.cli optimize` command so the Kernel Agent phase is skipped.
+6. Include `--no-enable-conc-sweep` in the `python -m hyperloom.inference_optimizer.cli optimize` command so the SWEEP-phase post-optimization concurrency sweep is skipped.
+7. Report the session ID, log path, PID, and initial health check result.
+8. Monitor the process every 300 seconds until work is done.
+9. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+10. If `stop_reason` in the current session `state.json` is final, stop and exit.
