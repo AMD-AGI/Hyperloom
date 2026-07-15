@@ -65,8 +65,9 @@ def test_sweep_never_paused():
     assert _paused(stub) is False
 
 
-# Short bounded run (≤24h) is not "long" → phases anchored on whole session, no cyclic pause.
-def test_short_bounded_run_not_paused():
+# Short bounded run (<24h) is not "long" → phases anchored on whole session, no cyclic pause.
+def test_short_bounded_run_not_paused(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
     stub = _stub(phase="KERNEL_AGENT", elapsed_h=9.0, max_minutes=120, cycle_minutes=360.0)
     assert ps.is_long_run(stub.shared_state) is False
     assert _paused(stub) is False
