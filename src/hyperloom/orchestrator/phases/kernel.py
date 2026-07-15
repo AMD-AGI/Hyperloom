@@ -770,6 +770,19 @@ class KernelPhase(PhaseHandler):
             for item in (self.shared_state.optimization_stack or [])
         )
 
+    def _geak_legacy_promote(self) -> bool:
+        """Whether the GEAK win was already written before revalidation.
+
+        Older sessions promoted GEAK directly into ``current_best`` /
+        ``optimization_stack`` before the same-harness replay. Rebench-first
+        sessions instead carry a ``geak_pending`` candidate and should promote
+        from the measured replay result.
+        """
+        if self.shared_state.geak_pending:
+            return False
+        current_best = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        return self._geak_win_already_recorded() or str(current_best.get("action") or "") == "geak_e2e"
+
     @staticmethod
     def _parse_geak_accepted_config(
         result: dict[str, Any],

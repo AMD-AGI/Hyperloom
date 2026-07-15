@@ -46,6 +46,15 @@ def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
     assert root == tmp_path / "framework_optimization"
 
 
+def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
+    from hyperloom.orchestrator.knowledge import kb_writeback
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+
+    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "kb" / "framework_optimization"
+
+
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
 

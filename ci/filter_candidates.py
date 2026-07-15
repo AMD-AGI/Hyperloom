@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Filter HF candidate pools by structural un-runnability on the AMD/ROCm stack.
 
-Primary signal is the locally cached model under ``/wekafs/models/<slug>``
+Primary signal is the locally cached model under ``<model-cache>/<slug>``
 (``config.json``, tokenizer files, ``model.safetensors.index.json``); ``gated``
 is verified through the HuggingFace API. Models with no local cache and no other
 signal are KEPT (cannot judge from config alone).
@@ -29,15 +29,17 @@ Env
 ---
 - ``HF_TOKENS``         : comma-separated HF tokens for the gated check (rotated).
                           Falls back to ``HF_TOKEN`` / ``HF_TOKEN_2``.
-- ``CI_MODELS_DIR``     : local model cache root (default ``/wekafs/models``).
+- ``CI_MODELS_DIR``     : local model cache root (default ``/mnt/shared/models``).
 - ``CI_FILTER_OUT_DIR`` : output directory for filtered JSON + reports.
+- ``CI_FILTER_POOLS``   : optional comma-separated pool JSON paths used when no
+                          positional pool paths are passed.
 - ``SAFE_OPTIMIZE_GPU_TYPE`` : target GPU for gpu-specific rules (default ``MI300X``).
 
 Usage
 -----
     HF_TOKENS=hf_a,hf_b python3 ci/filter_candidates.py POOL1.json [POOL2.json ...]
 
-When no pool paths are given, the two production pools are used by default.
+When no pool paths are given, set ``CI_FILTER_POOLS``.
 """
 import json
 import os
@@ -47,17 +49,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import model_compat  # noqa: E402  (local sibling module)
 
-MODELS_DIR = os.environ.get("CI_MODELS_DIR", "/wekafs/models")
+MODELS_DIR = os.environ.get("CI_MODELS_DIR", "/mnt/shared/models")
 # Target GPU for the gpu-specific rules; override via SAFE_OPTIMIZE_GPU_TYPE.
 GPU_TYPE = os.environ.get("SAFE_OPTIMIZE_GPU_TYPE", "MI300X")
-OUT_DIR = os.environ.get(
-    "CI_FILTER_OUT_DIR", "/wekafs/weilei/claw-dev/ci-candidates-filtered")
+OUT_DIR = os.environ.get("CI_FILTER_OUT_DIR", "ci-candidates-filtered")
 GATED_CACHE = os.path.join(OUT_DIR, "gated_cache.tsv")
 
-DEFAULT_POOLS = {
-    "gt100_rotate": "/wekafs/chenyi/ci-candidates/hf_downloads_gt100_rotate.json",
-    "sub100_pulse": "/wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun.json",
-}
+
+def _default_pools_from_env() -> dict[str, str]:
+    raw = os.environ.get("CI_FILTER_POOLS", "")
+    paths = [p.strip() for p in raw.split(",") if p.strip()]
+    return {os.path.splitext(os.path.basename(p))[0]: p for p in paths}
 
 
 def hf_tokens():
@@ -132,7 +134,9 @@ def gated_check_all(repos):
 
 def main(argv):
     pools = ({os.path.splitext(os.path.basename(p))[0]: p for p in argv}
-             if argv else DEFAULT_POOLS)
+             if argv else _default_pools_from_env())
+    if not pools:
+        raise SystemExit("provide pool JSON paths or set CI_FILTER_POOLS")
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # Phase 1: local config rules -> tentative keep set per pool. Whitelisted

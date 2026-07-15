@@ -219,11 +219,18 @@ def test_grid_from_proposals_keeps_applicable_and_stamps_provenance():
         [
             {"name": "a", "extra_args": "--foo", "reason": "r"},
             {"extra_envs": {"E": "1"}},  # unnamed -> fallback name
+            {
+                "name": "remove-only",
+                "remove_args": ["--enable-prefix-caching"],
+                "unset_envs": ["SGLANG_ENABLE_FOO"],
+            },
             {"name": "empty", "reason": "no args/envs"},  # dropped
             "nope",  # skipped
         ]
     )
-    assert [g["name"] for g in out] == ["a", "framework-config-1"]
+    assert [g["name"] for g in out] == ["a", "framework-config-1", "remove-only"]
+    assert out[2]["remove_args"] == ["--enable-prefix-caching"]
+    assert out[2]["unset_envs"] == ["SGLANG_ENABLE_FOO"]
     assert all(g["provenance"] == "framework_agent:config" for g in out)
 
 

@@ -240,6 +240,7 @@ _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
+_FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 
 def _visible_gpu_count() -> int | None:
@@ -1358,6 +1359,24 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
     return max(60, value)
 
 
+def _forge_fusion_timeout_sec(payload: dict) -> int:
+    """Resolve the forge-fusion subprocess timeout in seconds."""
+    raw = payload.get("timeout") or payload.get("timeout_sec") or os.environ.get(
+        "FORGE_FUSION_TIMEOUT",
+        "",
+    )
+    try:
+        value = int(float(raw))
+    except (OverflowError, TypeError, ValueError):
+        value = 7200
+    return max(1, value)
+
+
+def _forge_fusion_wrapper_timeout_sec(timeout_sec: int) -> int:
+    """Give the wrapper time to reap its child tree and emit the timeout sentinel."""
+    return max(1, int(timeout_sec)) + _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC
+
+
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
@@ -1750,7 +1769,13 @@ def _read_model_config(model_path: str) -> dict | None:
     """Load a HF ``config.json`` as a dict; ``None`` when unavailable/unreadable."""
     if not model_path:
         return None
-    cfg = Path(model_path) / "config.json"
+    # ``model_path`` may be an HF repo id; resolve to the local weights dir
+    # (shared resolver) so the config read works for repo-id launches.
+    from hyperloom.inference_optimizer.model_config_utils import (
+        resolve_local_model_dir,
+    )
+
+    cfg = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -2215,6 +2240,12 @@ async def _run_geak_gemm_tuning(
     }
     if geak_config:
         input_payload["config"] = geak_config
+    elif not payload.get("dry_run"):
+        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+        result.setdefault("requested_backend", "geak")
+        result.setdefault("fallback_backend", "forge")
+        result.setdefault("fallback_reason", "legacy_geak_config_missing")
+        return result
     if payload.get("dry_run"):
         input_payload["dry_run"] = True
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -2421,7 +2452,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     llm_model = str(
         payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    timeout = int(payload.get("timeout") or os.environ.get("FORGE_FUSION_TIMEOUT") or 7200)
+    timeout = _forge_fusion_timeout_sec(payload)
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -2435,6 +2466,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "llm_model": llm_model,
         "max_turns": max_turns,
         "gpu": gpu,
+        "timeout": timeout,
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
         "verbose": bool(payload.get("verbose", False)),
     }
@@ -2443,8 +2475,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
 
+    wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
     try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=wrapper_timeout)
         result = _parse_forge_fusion_sentinel(stdout)
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
@@ -2452,7 +2485,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {"status": "failed", "backend": "forge", "engine": "forge_fusion",
                   "error_class": "subprocess_timeout",
-                  "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+                  "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
                   "decision": "REVERT", "kept": False}
 
     result.setdefault("backend", "forge")

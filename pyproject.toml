@@ -415,7 +415,6 @@ omit = [
     "ci/optimize_submit.py",
     "ci/optimize_submit_lib/*.py",
     "ci/orchestrator.py",
-    "ci/import_session_breakdown.py",
     "ci/claw_client.py",
     "ci/prewarm_models.py",
     "ci/send_webhook.py",
