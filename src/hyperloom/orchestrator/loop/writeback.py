@@ -2265,9 +2265,9 @@ class WritebackCollaborator:
             best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
             promoted = False
-            # A post-resume stack revalidation task confirms the EXISTING
-            # cumulative stack rather than adding a variant, so it never
-            # "promotes". Reconcile the validation watermark + clear the
+            # A post-resume revalidation task confirms the EXISTING stack/current
+            # best rather than adding a variant, so it never "promotes".
+            # Reconcile the validation watermark + clear the
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
