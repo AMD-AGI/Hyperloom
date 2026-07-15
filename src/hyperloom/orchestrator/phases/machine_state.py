@@ -591,13 +591,12 @@ def is_cyclic_phases_enabled() -> bool:
 
 
 # Long-run gate. The cyclic macro-cycle behaviour (per-cycle budget window +
-# SWEEP→EXPLORE reloop) only engages for unbounded runs or bounded runs longer
-# than this threshold. A short bounded run (``--max-hours ≤ 24``) stays on the
-# legacy single-pass chain with whole-run phase budgets, regardless of the
-# (default-on) cyclic env flag — this is the "≤24h behaves exactly as before"
-# contract. Gating on the budget (not just the env flag) keeps short-run phase
-# budgets spanning the whole run rather than being compressed to the cycle
-# window (DEFAULT_CYCLE_HOURS).
+# SWEEP→EXPLORE reloop) engages for unbounded runs or bounded runs at least as
+# long as this threshold. A short bounded run (``--max-hours < 24``) stays on
+# the legacy single-pass chain with whole-run phase budgets, regardless of the
+# (default-on) cyclic env flag. Gating on the budget (not just the env flag)
+# keeps short-run phase budgets spanning the whole run rather than being
+# compressed to the cycle window (DEFAULT_CYCLE_HOURS).
 DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
 
 
@@ -605,21 +604,21 @@ def is_long_run(state: Any) -> bool:
     """True when the session budget justifies cyclic macro-cycling.
 
     Unbounded runs (``max_minutes`` == 0, i.e. the 14-day ceiling) and bounded
-    runs longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are "long".
-    Everything ``≤ 24h`` is a short bounded run and must behave like the legacy
-    monotonic chain.
+    runs at least as long as :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are
+    "long". Everything ``< 24h`` is a short bounded run and must behave like
+    the legacy monotonic chain.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
 
     Returns:
         bool: True for unbounded runs (``max_minutes`` == 0) or bounded runs
-        longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES`.
+        at least as long as :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES`.
     """
     mm = _max_minutes(state)
     if mm <= 0:
         return True
-    return mm > float(DEFAULT_LONGRUN_THRESHOLD_MINUTES)
+    return mm >= float(DEFAULT_LONGRUN_THRESHOLD_MINUTES)
 
 
 def _cumulative_gain_validated(state: Any) -> float:
@@ -680,7 +679,7 @@ def should_reloop_to_explore(
     if not is_cyclic_phases_enabled():
         return False, evidence
 
-    # Short bounded runs (``--max-hours ≤ 24``) never open a new macro-cycle:
+    # Short bounded runs (``--max-hours < 24``) never open a new macro-cycle:
     # they wind down to CLOSE on a single pass exactly like the legacy chain,
     # even though cyclic mode is on by default. Without this gate a 4h run that
     # reached SWEEP with ≥30min remaining would reloop.
@@ -944,7 +943,7 @@ def _budget_minutes(state: Any) -> float:
     total ``max_minutes`` so behaviour is identical to the monotonic chain.
 
     The per-cycle window only applies to long/unbounded runs (:func:`is_long_run`).
-    A short bounded run (``--max-hours ≤ 24``) always anchors its phase budgets
+    A short bounded run (``--max-hours < 24``) always anchors its phase budgets
     on the whole session even when ``cycle_minutes`` is set, so its phases are
     never silently compressed to the cycle window (DEFAULT_CYCLE_HOURS).
     Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
