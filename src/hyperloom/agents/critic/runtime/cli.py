@@ -150,7 +150,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
             ``topic``, ``limit``, ``session``, ``out``).
     """
     packet = read_json(args.packet) or {}
-    context = packet.get("context") or {}
+    context = packet.get("context") or packet.get("environment") or {}
     scope = build_scope(context, require_critical=False)
     scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
     client = _resolve_kb_client()

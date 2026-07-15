@@ -92,7 +92,6 @@ def main(argv: list[str] | None = None) -> int:
     env = os.environ.copy()
     _scrub_ambient_llm_env(env, env_file)
     env["REPO_ROOT"] = str(root)
-    env["HYPERLOOM_ENV_FILE"] = str(env_file)
     env["HYPERLOOM_SKILL_PATH"] = str(_PACKAGE_SKILL)
     if _setup_dotenv_is_authoritative(env_file):
         env["HYPERLOOM_SETUP_ENV_AUTHORITATIVE"] = "1"
