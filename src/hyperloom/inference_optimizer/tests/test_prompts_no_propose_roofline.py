@@ -23,8 +23,7 @@ _PROMPT_ROOTS = (
 # ``SharedState.format_for_prompt()``.
 _PROMPT_AUX_FILES = (Path("src/hyperloom/orchestrator/state/shared_state.py"),)
 
-# Allow-list: these files document the denial rule and necessarily quote the
-# forbidden pattern.
+# Allow-list: files that document the denial rule and necessarily quote it.
 _DOC_ALLOWLIST = {
     Path("src/hyperloom/inference_optimizer/actions/roofline.md"),
     Path("src/hyperloom/inference_optimizer/actions/profile.md"),

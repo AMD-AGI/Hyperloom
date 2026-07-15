@@ -2,9 +2,8 @@
 
 """Shared non-git patch apply / revert primitives.
 
-Extracted from ``integrate_patch`` so both the EXPLORE specialist executor
-and the FRAMEWORK-phase per-candidate executor can share the same
-backup-based apply/revert channel without git.
+Lets the EXPLORE specialist executor and the FRAMEWORK-phase per-candidate
+executor share one backup-based apply/revert channel without git.
 
 Public surface
 --------------
@@ -19,24 +18,21 @@ Supporting constants / helpers used by both callers:
 * :func:`_strip_path_prefix` — drop leading path components like ``git apply -p<n>``.
 * :func:`_is_within`        — containment check (both paths pre-resolved).
 
-Backup naming (#3 fix)
-----------------------
+Backup naming
+-------------
 Backup files are named ``<patch_stem>__<rel_flat>__<seq:04d>.bak`` where
 ``rel_flat`` is the target's relative path with ``/`` replaced by ``__`` and
-``seq`` is a caller-supplied global offset (``seq_offset``) plus the record
-index within this apply call.  Callers that accumulate backups across multiple
-``_apply_patch_no_git`` calls (``integrate_patch``, ``framework_agent``) pass
-``seq_offset=len(existing_backups)`` so backup names are globally unique within
-a shared ``backup_root`` directory even when different patches touch files with
-the same basename.
+``seq`` is a caller-supplied offset (``seq_offset``) plus the record index.
+Callers that accumulate backups across multiple ``_apply_patch_no_git`` calls
+pass ``seq_offset=len(existing_backups)`` so names are globally unique within a
+shared ``backup_root`` even when patches touch files with the same basename.
 
-Rename / move revert (#4 fix)
-------------------------------
-When a patch hunk renames a file (``---`` old path ≠ ``+++`` new path, neither
-is ``/dev/null``), ``_apply_patch_no_git`` backs up *both* the old source file
-(so its content can be restored on revert) *and* tracks the new destination
-(so it can be deleted on revert).  Each backup record carries a ``revert_action``
-key:
+Rename / move revert
+--------------------
+For a rename hunk (``---`` old path != ``+++`` new path, neither ``/dev/null``),
+``_apply_patch_no_git`` backs up the old source file (to restore on revert) and
+tracks the new destination (to delete on revert). Each backup record carries a
+``revert_action`` key:
 
 * ``"restore"`` — copy ``backup_path`` back to ``target`` (modified/created files).
 * ``"delete"``  — remove ``target`` (the rename destination, which did not exist
@@ -45,8 +41,7 @@ key:
   which existed before the patch and must be put back).
 
 ``_revert_patches_no_git`` dispatches on ``revert_action`` (falling back to the
-original ``backup_path``-present → restore / absent → delete heuristic for
-records written by older code).
+``backup_path``-present → restore / absent → delete heuristic for older records).
 """
 
 from __future__ import annotations
@@ -63,12 +58,9 @@ from ...specialists.patch_safety import patch_file_targets
 log = logging.getLogger(__name__)
 
 
-# Candidate ``-p`` strip levels, tried in priority order.  ``-p1`` is the
-# git-native default and stays first for backward-compat; specialists author
-# patches with heterogeneous path prefixes (``a/vllm/...`` -> -p1,
-# ``b/_aiter_ops.py`` -> -p0/-p2, full absolute
-# ``b/usr/local/lib/python3.12/dist-packages/vllm/...`` -> -p7), so we must
-# auto-detect rather than assume a single level.
+# Candidate ``-p`` strip levels, tried in priority order (``-p1`` first).
+# Specialists author patches with heterogeneous path prefixes, so we auto-detect
+# rather than assume a single level.
 _P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 _PATCH_DEV_NULL = "/dev/null"
@@ -154,9 +146,8 @@ def _apply_patch_no_git(
     ``backup_root`` when callers pass ``seq_offset=len(accumulated_backups)``
     (see module docstring for the naming scheme).
 
-    Rename/move hunks (``---`` old ≠ ``+++`` new, neither ``/dev/null``) are
-    handled completely: the old source file is backed up so revert can restore
-    it; the new destination is tracked so revert can delete it.
+    Rename/move hunks back up the old source file (to restore on revert) and
+    track the new destination (to delete on revert).
 
     Args:
         framework_root: The source-tree root to apply into (need not be a git repo).
@@ -366,8 +357,8 @@ def _apply_patch_no_git(
                     "revert_action": "delete",
                 })
 
-    # Apply for real.  Use --reject to write .rej files for failed hunks so we
-    # can collect them for reauthor feedback rather than silently losing them.
+    # Apply for real. --reject writes .rej files for failed hunks so we can
+    # collect them for reauthor feedback.
     rej_dir = backup_root / "rej"
     rej_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -389,10 +380,9 @@ def _apply_patch_no_git(
         )
         return False, err_msg, backups, feedback
     if cp2.returncode != 0:
-        # Collect any .rej files that were left next to the target files.
+        # Collect any .rej files left next to the target files.
         rejected_hunks = _collect_rej_files(framework_root, patch_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
-        # Build source context from the patch text.
         source_ctx = ""
         try:
             patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
@@ -440,7 +430,7 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
                         parts.append(f"# {rej.relative_to(framework_root)}\n{content}")
                     rej.unlink(missing_ok=True)
             except OSError:
-                # Best-effort scan: skip unreadable/racing .rej files silently.
+                # Best-effort scan: skip unreadable/racing .rej files.
                 continue
     except Exception:  # noqa: BLE001
         log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)

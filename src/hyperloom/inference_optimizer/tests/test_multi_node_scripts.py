@@ -158,13 +158,10 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
 
 
 def test_pd_decode_dist_init_port_derives_from_prefill():
-    """PD-disaggregated decode rendezvous port = prefill port + 1, so an operator override shifts both in lock-step (regression guard for the hard-coded `_PD_DECODE_DIST_INIT_PORT`)."""
+    """PD-disaggregated decode rendezvous port = prefill port + 1, so an operator override shifts both in lock-step."""
     lm = _load_script_module("lm_test_pd_decode_port", "launch_multinode.py")
-    # Default: 29500 → 29501
     assert lm._pd_decode_dist_init_port(lm._DEFAULT_DIST_INIT_PORT) == 29501
-    # Operator override (the exact override example the source-comment cites)
     assert lm._pd_decode_dist_init_port(29501) == 29502
-    # Arbitrary value: still + 1
     assert lm._pd_decode_dist_init_port(40000) == 40001
     # Hard-coded constant must NOT come back (regression guard).
     assert not hasattr(lm, "_PD_DECODE_DIST_INIT_PORT"), (
@@ -467,8 +464,6 @@ def test_build_rayjob_entrypoints_empty_submitter_tail():
     assert dec == "tail -f /dev/null"
 
 
-# (formerly test_multi_node_env_ray.py)
-
 # Common kwargs for builder tests; keeps each test focused on the one field under test.
 _BUILDER_MIN_KWARGS = dict(
     workspace="ws-a",
@@ -483,7 +478,7 @@ _BUILDER_MIN_KWARGS = dict(
 
 
 def test_extra_env_rayjob_long_lived_passthrough():
-    # RAYJOB_LONG_LIVED is no longer stripped; user-supplied values reach body.env unchanged.
+    # User-supplied RAYJOB_LONG_LIVED reaches body.env unchanged.
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_rayjob_workload_body(
@@ -688,8 +683,7 @@ def test_infera_body_pd_independent_instances_no_multinode():
     assert "multinodeRoles" not in b["inferaOptions"]
     assert len(b["resources"]) == 3 and len(b["images"]) == 3
     assert b["resources"][1]["replica"] == 2 and b["resources"][2]["replica"] == 2
-    # PD always carries rdmaResource ("1k") for the cross-pod KV transfer
-    # plane, even when each role is single-node (TP <= gpus_per_node).
+    # PD always carries rdmaResource ("1k") for cross-pod KV transfer.
     assert b["resources"][1]["rdmaResource"] == "1k"
     assert b["resources"][2]["rdmaResource"] == "1k"
 
@@ -1202,8 +1196,7 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 
 def test_multinode_entrypoint_shlex_quotes_malicious_value():
-    """A shell-metacharacter kernel_id must be shlex-quoted into the Ray
-    Dashboard entrypoint, not spliced in as bare shell (no command injection)."""
+    """A shell-metacharacter kernel_id must be shlex-quoted into the Ray Dashboard entrypoint (no command injection)."""
     import shlex
 
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli

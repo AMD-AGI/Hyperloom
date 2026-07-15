@@ -2,19 +2,9 @@
 
 """Shared LLM-transport stability env for spawned claude-CLI / SDK children.
 
-Orchestrator-side twin of
-``src/hyperloom/agents/kernel/tools/backends/_llm_stability_env.py``
-(the two packages are independent, so the helper is duplicated rather than
-cross-imported). See that module for the full RCA: a streaming request to the
-SaFE/LiteLLM gateway can return a partial response (``stop_reason=None``) and
-then stop pushing chunks while the socket stays open.
-
-Only local, Hyperloom-controlled idle monitors should decide whether a
-long-running stream is stalled. ``API_TIMEOUT_MS`` is therefore opt-in: some
-external clients may interpret it as a total request timeout, which could kill a
-legitimate long streaming response. The default helper only cuts non-essential /
-auto-update traffic that can block in headless containers. ``setdefault`` keeps
-operator overrides authoritative.
+``API_TIMEOUT_MS`` is opt-in (some clients treat it as a total request timeout);
+the default helper only cuts non-essential / auto-update traffic that can block
+in headless containers. ``setdefault`` keeps operator overrides authoritative.
 """
 
 from __future__ import annotations

@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Content fingerprint regression tests for the ``explore_search`` dedup-ledger key.
-
-Pins: name is not an input; args/envs are order-normalized; env values are
-string-coerced; GridVariant/VariantResult fingerprints match the function.
-"""
+"""Content fingerprint regression tests for the ``explore_search`` dedup-ledger key."""
 
 from __future__ import annotations
 

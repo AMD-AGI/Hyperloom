@@ -8,7 +8,7 @@ action); the markdown body at ``actions/<name>.md`` is loaded lazily.
 Operational fields gate execution/dispatch (``allowed_tools``,
 ``requires_lanes``, ``lease_ttl_sec``, ``preferred_backend`` /
 ``preferred_model``, ``max_turns``, ``side_effects``); all other fields are
-prompt-advisory only (Inv-9.1 enforced by construction here).
+prompt-advisory only.
 
 Schema::
 
@@ -48,7 +48,7 @@ from typing import Any
 from hyperloom.inference_optimizer.session.paths import asset_actions_dir
 
 
-# ``family`` is a prompt grouping label only; no runtime scheduler uses it.
+# prompt grouping label only; no runtime scheduler uses it.
 VALID_FAMILIES: frozenset[str] = frozenset(
     {
         "prep",
@@ -63,8 +63,7 @@ VALID_FAMILIES: frozenset[str] = frozenset(
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex", "forge"})
 
-# Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory
-# only (the real state machine lives in :mod:`phase_state`).
+# Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory only.
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
     {
         "prep",  # target_analysis / baseline / warm replay
@@ -78,8 +77,7 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
     }
 )
 
-# Per-action verdict policy class — selects which Critic prompt rule set
-# applies; never a hidden hard gate.
+# Per-action verdict policy class selecting which Critic prompt rule set applies.
 VALID_VERDICT_CLASSES: frozenset[str] = frozenset(
     {
         "archival",
@@ -89,7 +87,7 @@ VALID_VERDICT_CLASSES: frozenset[str] = frozenset(
 )
 
 # Default classifier for live actions; yaml ``verdict_class`` overrides.
-# Unknown names fall back to ``"exploration"`` (safest non-deadlocking default).
+# Unknown names fall back to ``"exploration"``.
 _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # archival — transcribe state, no new measurement
     "report": "archival",
@@ -97,7 +95,7 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "target_analysis": "archival",
     # promotion — mutate optimization_stack + claim gain
     "integrate": "promotion",
-    # exploration — everything else (run benchmarks to generate data)
+    # exploration — everything else
     "baseline": "exploration",
     "roofline": "exploration",
     "sweep": "exploration",
@@ -162,7 +160,6 @@ class ActionMetadata:
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # Routes Critic prompt rules only, never a hidden hard gate.
     verdict_class: str = ""
 
     @classmethod
@@ -202,7 +199,6 @@ class ActionMetadata:
                 raise ActionRegistryError(f"action {expected_name!r}: {ratio_field}={v} not in 0..1")
         backend = str(data.get("preferred_backend", "claude"))
         _require_vocab(expected_name, "preferred_backend", backend, VALID_BACKENDS)
-        # prompt-builder fields — all optional with safe defaults.
         cost_p50 = float(data["cost_minutes_p50"])
         description = str(data.get("description", "")).strip()
         pipeline_phase = str(data.get("pipeline_phase", "explore")).strip() or "explore"
@@ -218,7 +214,7 @@ class ActionMetadata:
             raise ActionRegistryError(
                 f"action {expected_name!r}: typical_runtime_min must be >= 0, got {typical_runtime_min}"
             )
-        # verdict_class — yaml override wins, else table default; validated against allowlist.
+        # yaml override wins, else table default; validated against allowlist.
         verdict_class = (
             str(
                 data.get("verdict_class") or "",
@@ -329,6 +325,16 @@ class ActionRegistry:
         if not self._loaded:
             self.load()
         return list(self._cache.values())
+
+    def names(self) -> list[str]:
+        """Return the loaded action names in deterministic order.
+
+        Returns:
+            list[str]: Sorted action names known to the registry.
+        """
+        if not self._loaded:
+            self.load()
+        return sorted(self._cache)
 
 
 __all__ = [

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline-v2 C1: ``record_trace_analyze`` caches TraceLens analysis.md (full text, monotonic snapshot id, point-in-time gain capture, silent read failures)."""
+"""``record_trace_analyze`` caches TraceLens analysis.md (full text, monotonic snapshot id, point-in-time gain capture, silent read failures)."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:
 
 
 def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
-    """Real-world 200 KB report round-trips intact (Decision A3: no truncation)."""
+    """A 200 KB report round-trips intact (no truncation)."""
     analysis_md = tmp_path / "big_analysis.md"
     big_content = "# Analysis\n" + ("filler line\n" * 20000)
     analysis_md.write_text(big_content, encoding="utf-8")
@@ -121,7 +121,7 @@ def test_snapshot_id_starts_at_one_after_empty_state() -> None:
 
 
 def test_baseline_gain_captured_at_snapshot_time() -> None:
-    """``roofline_baseline_gain_at_snapshot`` is a point-in-time capture of cumulative_gain; later mutations don't retroact."""
+    """``roofline_baseline_gain_at_snapshot`` is a point-in-time capture of cumulative_gain."""
     state = SharedState()
     state.cumulative_gain_validated = 0.0
     state.record_trace_analyze(
@@ -259,12 +259,12 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert row["suggestion"] == "reduce memory traffic"
     assert row["rocprof_roofline"]["before_kernel_opt"]["roofline_efficiency_pct"] == 31.2
     assert row["rocprof_roofline"]["after_kernel_opt"]["roofline_efficiency_pct"] == 44.0
-    # kernel_category propagates from TraceLens hot_kernels to kernel_attempt_summary.by_kernel[].kernel_category.
+    # kernel_category propagates from TraceLens hot_kernels through to the cached row.
     assert row["kernel_category"] == "LayerNorm"
     assert cached["kernel_roofline_top15"][0] == row
 
 
-# skipped_kernels projection + prompt rendering: when all candidates are skipped, project them so the prompt shows detected-but-unoptimizable kernels instead of an empty list the LLM hallucinates over.
+# skipped_kernels projection: when all candidates are skipped, project them for the prompt.
 
 
 def _result_with_skipped(skipped: list[dict]) -> dict:
@@ -287,7 +287,7 @@ def test_skipped_kernels_projected_when_hot_empty() -> None:
         ),
     )
     proj = state.last_trace_analyze["skipped_kernels_top"]
-    # Sorted by gpu_pct desc so the heaviest operator leads.
+    # Sorted by gpu_pct desc.
     assert [p["kernel_id"] for p in proj] == ["k003", "k001"]
     assert proj[0]["name"] == "aten::mm"
     assert proj[0]["skip_reason"] == "source file not resolved"

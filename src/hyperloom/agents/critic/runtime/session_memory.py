@@ -118,10 +118,9 @@ class MergeResult:
 class SessionMemory:
     """File-backed session memory.
 
-    Concurrency: the Critic agent is single-process per A2A session today.
-    We therefore do not implement file locking — the worst we'd do under
-    concurrent writers is overwrite the small JSON files. If multi-writer
-    becomes a concern later, swap the underlying store, not the API.
+    Concurrency: the Critic agent is single-process per A2A session, so no
+    file locking is implemented; concurrent writers would at worst overwrite
+    the small JSON files.
     """
 
     def __init__(self, root: str | Path | None = None):
@@ -163,8 +162,7 @@ class SessionMemory:
         """
         if not session_id or not isinstance(session_id, str):
             raise SessionMemoryError(f"invalid session_id: {session_id!r}")
-        # Disallow path traversal — session_id is meant to be a short
-        # opaque token, not a path fragment.
+        # Disallow path traversal.
         if "/" in session_id or ".." in session_id:
             raise SessionMemoryError(f"session_id must not contain slashes: {session_id!r}")
         return self.root / session_id
@@ -502,7 +500,7 @@ class SessionMemory:
 
 
 # ---------------------------------------------------------------------------
-# Tiny JSON helpers — kept private so we don't grow them into a real ORM.
+# Tiny JSON helpers
 # ---------------------------------------------------------------------------
 def _read_json(path: Path, *, default: Any) -> Any:
     """Read and decode a JSON file, returning ``default`` if absent.

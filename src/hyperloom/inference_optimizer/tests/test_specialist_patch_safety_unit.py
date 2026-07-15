@@ -16,14 +16,14 @@ _DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ 
 def test_strip_path_prefix():
     assert ps._strip_path_prefix("a/b/c.py", 0) == "a/b/c.py"
     assert ps._strip_path_prefix("a/b/c.py", 1) == "b/c.py"
-    assert ps._strip_path_prefix("a/b/c.py", 5) == "c.py"  # level >= parts
+    assert ps._strip_path_prefix("a/b/c.py", 5) == "c.py"
 
 
 def test_patch_file_targets():
     pairs = ps.patch_file_targets(_DIFF)
     assert pairs == [("a/foo.py", "b/foo.py")]
     assert ps.patch_file_targets("") == []
-    # header with trailing timestamp stripped
+    # trailing timestamp on the header is stripped
     txt = "--- a/x.py\t2026-01-01\n+++ b/x.py\t2026-01-01\n"
     assert ps.patch_file_targets(txt) == [("a/x.py", "b/x.py")]
 
@@ -32,7 +32,6 @@ def test_patch_targets_missing(tmp_path):
     (tmp_path / "foo.py").write_text("x", encoding="utf-8")
     # foo.py exists at strip level 1 -> not missing
     assert ps.patch_targets_missing(_DIFF, tmp_path) == []
-    # non-existent target
     miss_diff = _DIFF.replace("foo.py", "ghost.py")
     assert ps.patch_targets_missing(miss_diff, tmp_path) == ["a/ghost.py"]
 
@@ -58,7 +57,7 @@ def test_is_unified_diff():
 
 def test_patch_escapes_tree():
     assert ps.patch_escapes_tree(_DIFF) is None
-    # cand after the b/ prefix begins with "/" -> absolute escape
+    # target after the b/ prefix begins with "/" -> absolute escape
     abs_diff = "--- a/foo.py\n+++ b//etc/passwd\n"
     assert ps.patch_escapes_tree(abs_diff) == "/etc/passwd"
     dotdot = "--- a/../../escape.py\n+++ b/ok.py\n"

@@ -40,11 +40,6 @@ def _ctx(
     return ReactorContext(tick_index=tick, shared_state=snap, now_unix=1.0)
 
 
-# ---------------------------------------------------------------------------
-# gain_plateau
-# ---------------------------------------------------------------------------
-
-
 def test_no_history_silent():
     det = ProgressDetector()
     out = det.evaluate(_ctx(tick=0), SourceData())
@@ -75,7 +70,7 @@ def test_plateau_with_productive_gain_fires_medium():
 
 
 def test_plateau_with_zero_gain_also_fires_medium():
-    """``gain_plateau`` is now uniformly MEDIUM advisory (previously HIGH on still-zero validated gain)."""
+    """``gain_plateau`` is uniformly MEDIUM advisory."""
     det = ProgressDetector(
         ProgressConfig(
             gain_window_ticks=3,
@@ -92,7 +87,7 @@ def test_plateau_with_zero_gain_also_fires_medium():
 
 
 def test_plateau_suppressed_when_stack_empty():
-    """Cold-start guard: empty stack must not fire ``gain_plateau`` (``no_levers_found`` owns that case); else two HIGH escalations bias toward early report. Repro: primus-claw-20260522020448-z6rg6 tick=6."""
+    """Cold-start guard: empty stack must not fire ``gain_plateau`` (``no_levers_found`` owns that case)."""
     det = ProgressDetector(
         ProgressConfig(
             gain_window_ticks=3,
@@ -116,7 +111,6 @@ def test_plateau_resets_on_movement():
     det.evaluate(_ctx(tick=0, cumulative_gain_validated=5.0), SourceData())
     det.evaluate(_ctx(tick=1, cumulative_gain_validated=5.0), SourceData())
     out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=7.0), SourceData())
-    # Delta=2 > epsilon=0.5 → no plateau.
     assert all(s.name != "gain_plateau" for s in out)
 
 
@@ -137,11 +131,6 @@ def test_stop_reason_short_circuits():
         SourceData(),
     )
     assert out == []
-
-
-# ---------------------------------------------------------------------------
-# no_levers_found
-# ---------------------------------------------------------------------------
 
 
 def test_no_levers_silent_before_min_elapsed():
@@ -173,7 +162,7 @@ def test_no_levers_silent_before_min_ticks():
 
 
 def test_no_levers_fires_medium_when_quotas_met():
-    """``no_levers_found`` is MEDIUM advisory once floors met with empty stack; ``explore_started=True`` distinguishes genuine no-lever from cold-start delay."""
+    """``no_levers_found`` is MEDIUM advisory once floors met with empty stack; ``explore_started=True`` distinguishes genuine no-lever from cold-start."""
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
@@ -213,11 +202,9 @@ def test_no_levers_silent_when_validated_gain_present():
     assert all(s.name != "no_levers_found" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # In-flight kernel-opt short-circuits no_levers_found.
-# ---------------------------------------------------------------------------
 def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
-    """In-flight kernel_opt (``kernel_opt_attempts_count > 0``) with empty stack must short-circuit so Orch doesn't race to report. Repro: Qwen3-30B-A3B-Base 20260522T093903Z."""
+    """In-flight kernel_opt (``kernel_opt_attempts_count > 0``) with empty stack must short-circuit so Orch doesn't race to report."""
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
@@ -229,7 +216,7 @@ def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
             tick=20,
             elapsed_minutes=70.0,
             optimization_stack_size=0,
-            kernel_opt_attempts_count=3,  # batch of 3 kernels in flight
+            kernel_opt_attempts_count=3,
             explore_started=True,
         ),
         SourceData(),

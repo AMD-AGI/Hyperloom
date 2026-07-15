@@ -2,12 +2,9 @@
 
 """Optional client for the substrate KB ``/v2/reasoning/assess`` endpoint.
 
-The Critic can *associate* each proposal's raw optimisation levers (server
-args / env vars / params) to the knowledge substrate's calibrated mechanism
-evidence to judge whether the proposal is reasonable. This is strictly
-best-effort enrichment that reuses the **same** cortex KB endpoint the
-recipe-snapshot integration already points at — there is no separate Critic
-KB URL. It honours recipe-snapshot's "no URL = no network" contract:
+Best-effort enrichment associating each proposal's raw optimisation levers to
+the knowledge substrate's calibrated mechanism evidence. Honours a "no URL =
+no network" contract:
 
 * ``CORTEX_KB_URL`` set (or explicit ``base_url``) → POST per proposal to
   ``{CORTEX_KB_URL}/v2/reasoning/assess`` and fold the verdict into the bundle;
@@ -67,9 +64,8 @@ class KBAssessClient:
     def from_env(cls) -> "KBAssessClient | None":
         """Build a client from env, or ``None`` when no cortex KB is configured.
 
-        Reuses recipe-snapshot's config: ``CORTEX_KB_URL`` (no default by
-        design — the Critic never silently connects to a remote KB) and
-        ``CORTEX_KB_HTTP_TIMEOUT_SEC`` for the per-request timeout.
+        Reads ``CORTEX_KB_URL`` (no default, so the Critic never silently
+        connects to a remote KB) and ``CORTEX_KB_HTTP_TIMEOUT_SEC``.
 
         Returns:
             KBAssessClient | None: A client when ``CORTEX_KB_URL`` is set,
@@ -78,10 +74,7 @@ class KBAssessClient:
         url = (os.environ.get("CORTEX_KB_URL") or "").strip()
         if not url:
             return None
-        try:
-            timeout = float(os.environ.get("CORTEX_KB_HTTP_TIMEOUT_SEC", str(DEFAULT_TIMEOUT_SEC)))
-        except ValueError:
-            timeout = DEFAULT_TIMEOUT_SEC
+        timeout = float(os.environ.get("CORTEX_KB_HTTP_TIMEOUT_SEC") or DEFAULT_TIMEOUT_SEC)
         return cls(url, timeout_sec=timeout)
 
     def assess(

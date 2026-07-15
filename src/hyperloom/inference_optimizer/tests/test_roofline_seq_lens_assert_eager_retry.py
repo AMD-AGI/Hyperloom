@@ -25,7 +25,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
-# Real crash tail captured from a failing roofline run (issue #622, Part A).
+# Real crash tail captured from a failing roofline run.
 _SEQ_LENS_ASSERT_LOG = """\
 [2026-06-16 21:18:45] INFO:     Application startup complete.
 [2026-06-16 21:18:46] Scheduler hit an exception: Traceback (most recent call last):
@@ -44,14 +44,12 @@ AssertionError
 
 
 def test_detector_recognises_seq_lens_assert_as_recoverable():
-    # Bug repro: this exact assert returned False before the fix (assertionerror
-    # was a blanket non-recoverable marker).
     assert _is_cuda_graph_capture_failure(_SEQ_LENS_ASSERT_LOG) is True
 
 
 def test_detector_keeps_generic_assertion_non_recoverable():
-    # Guard: a generic AssertionError without the seq_lens markers stays
-    # non-recoverable, so we don't waste the eager retry.
+    # A generic AssertionError without the seq_lens markers stays
+    # non-recoverable.
     generic = (
         "Traceback (most recent call last):\n"
         '  File "x.py", line 1, in f\n    assert cond\nAssertionError\n'
@@ -88,14 +86,14 @@ def _ta_success() -> dict:
 
 @pytest.mark.asyncio
 async def test_seq_lens_assert_in_server_log_triggers_eager_retry(tmp_path):
-    # The crash lives only in server.log; the failed result merely points to its
-    # trace_dir. The retry must read that log and boot eager.
+    # The crash lives only in server.log; the retry must read that log and boot
+    # eager.
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     (trace_dir / "server.log").write_text(_SEQ_LENS_ASSERT_LOG, encoding="utf-8")
     first_result = {
         "status": "failed", "error_class": "server_init_dead",
-        "error": "profile sub-step failed",  # no seq_lens hint here
+        "error": "profile sub-step failed",
         "trace_dir": str(trace_dir),
     }
 

@@ -2,12 +2,9 @@
 
 """Unit tests for :mod:`hyperloom.inference_optimizer.cli.executors`.
 
-Cover the specialist-executor factory (both the subprocess and in-process
-branches) and the ``_register_executors`` wiring / ``_noop_prep`` stub without
-launching any real ``claude`` subprocess. The subprocess branch is exercised by
-faking ``shutil.which('claude')`` so ``_build_specialist_executor`` builds a
-``SpecialistRunner`` with a ``SpecialistSubprocessConfig`` (no process is
-spawned — only the factory wiring runs).
+Cover the specialist-executor factory (subprocess and in-process branches) and
+the ``_register_executors`` wiring / ``_noop_prep`` stub without launching any
+real ``claude`` subprocess.
 """
 
 from __future__ import annotations
@@ -46,7 +43,6 @@ def test_noop_prep_returns_success_envelope():
 
 def test_build_specialist_executor_inprocess_when_no_claude(monkeypatch, tmp_path):
     """dispatch_mode=inprocess builds the in-process backend runner."""
-    # `shutil` is imported inside the function; patch the module-level lookup.
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda _n: "")
@@ -135,7 +131,6 @@ def test_register_executors_wires_full_set_and_kernel_noops():
     assert "integrate_patch" in reg
     assert "framework" in reg
     assert "roofline" in reg
-    # kernel-owned no-ops present when no_kernel is False.
     assert any(fn is _noop_prep for fn in reg.values())
 
 
@@ -144,9 +139,7 @@ def test_register_executors_no_kernel_skips_noops_and_debug_log(caplog):
     with caplog.at_level(logging.DEBUG, logger=cli_executors.log.name):
         _register_executors(coord, no_kernel=True, session_dir=None)
     reg = coord.sub.executor_registry
-    # roofline/profile still wired even with no_kernel.
     assert "roofline" in reg
-    # No kernel-owned no-op stubs registered.
     assert not any(fn is _noop_prep for fn in reg.values())
 
 

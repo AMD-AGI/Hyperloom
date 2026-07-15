@@ -2,8 +2,7 @@
 
 """Unit coverage for the offline Langfuse backfill plan builder.
 
-Focuses on the recipe-snapshot / gbrain audit folding (the live emitter's
-``_flush_recipe_kb_audit`` counterpart): a finished session's
+Focuses on the recipe-snapshot / gbrain audit folding: a finished session's
 ``runtime/recipe_snapshot/.audit.jsonl`` must surface in the backfill plan so
 a recovery replay re-creates the KB read spans on the same trace.
 """

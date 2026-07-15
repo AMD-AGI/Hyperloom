@@ -1,12 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Problem 1 Step C — FRAMEWORK ranker soft-guidance from working memory.
+"""FRAMEWORK ranker soft-guidance from working memory.
 
-Covers the deterministic (zero-LLM) working-memory aggregation
+Covers the deterministic working-memory aggregation
 (``_build_framework_working_memory``), its prompt rendering
 (``_render_framework_memory_for_prompt``), and that the candidate ranker folds
-the "already tried this session" negative-sample block into its prompt so it
-stops re-picking equivalents.
+the "already tried this session" negative-sample block into its prompt.
 """
 
 from __future__ import annotations
@@ -52,9 +51,6 @@ class _MemCoord:
         self.framework_ranker_timeout_sec = 5.0
 
 
-# --------------------------------------------------------------------------- #
-# _build_framework_working_memory
-# --------------------------------------------------------------------------- #
 def test_build_working_memory_aggregates_tried_excluded_learnings():
     coord = _MemCoord()
     st = coord.shared_state
@@ -70,7 +66,7 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
                 {"candidate_id": "PR:723"},
                 {"candidate_id": "PR:1015"},
                 {"candidate_id": "PR:900"},
-                {"candidate_id": "PR:2000"},  # still unprocessed
+                {"candidate_id": "PR:2000"},
             ],
         },
     ]
@@ -87,9 +83,9 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
     assert revert["status"] == "reverted"
     assert revert["gain_pct"] == 0.0
     assert "baseline" in revert["why"]
-    # excluded_refs = known ids ∪ processed keys (the 3 with terminal rows + all batch ids).
+    # excluded_refs = known ids ∪ processed keys.
     assert {"PR:723", "PR:1015", "PR:900", "PR:2000"} <= set(mem["excluded_refs"])
-    # learnings only from *denied* critic decisions (approve is excluded).
+    # learnings only from denied critic decisions.
     assert mem["learnings"] == ["does not address mem-bw bottleneck"]
     # pending = unprocessed candidate in the latest batch.
     assert mem["pending"] == ["PR:2000"]
@@ -114,9 +110,6 @@ def test_build_working_memory_caps_tried_rows():
     assert mem["tried_and_why"][-1]["ref"] == f"PR:{cap + 4}"
 
 
-# --------------------------------------------------------------------------- #
-# _render_framework_memory_for_prompt
-# --------------------------------------------------------------------------- #
 def test_render_memory_empty_returns_blank():
     assert Coordinator._render_framework_memory_for_prompt(None) == ""
     assert Coordinator._render_framework_memory_for_prompt({"tried_and_why": [], "learnings": []}) == ""
@@ -138,9 +131,6 @@ def test_render_memory_lists_tried_and_learnings():
     assert "env-only fp8 levers are no-op" in txt
 
 
-# --------------------------------------------------------------------------- #
-# Ranker prompt integration (Step C)
-# --------------------------------------------------------------------------- #
 class _FakeStream:
     def __init__(self, text: str) -> None:
         self._text = text
@@ -186,7 +176,7 @@ def test_ranker_prompt_includes_tried_block_and_returns_match():
     # The already-tried negative-sample block is present in the ranker prompt.
     assert "Already tried THIS session" in captured["prompt"]
     assert "PR:723 [reverted]" in captured["prompt"]
-    # And the ranker still resolves the model's pick.
+    # And the ranker resolves the model's pick.
     assert chosen is not None
     assert chosen["candidate_id"] == "PR:2000"
 

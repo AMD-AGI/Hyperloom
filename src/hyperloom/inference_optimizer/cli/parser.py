@@ -1,15 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CLI argument parser — ``_build_parser`` and its purely-computational helpers.
-
-Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). None of
-``_RetiredFlag`` / ``_default_research_lane_capacity`` /
-``_default_gpu_specialist_capacity`` / ``_positive_int_arg`` / ``_build_parser`` is
-monkeypatched by name anywhere in the test suite (verified via a repo-wide
-grep for ``setattr(cli, "<name>"`` and fully-qualified
-``"hyperloom.inference_optimizer.cli.<name>"`` string patches before this
-split), so this is a low-risk pure move: no lazy-lookup indirection needed.
-"""
+"""CLI argument parser — ``_build_parser`` and its purely-computational helpers."""
 
 from __future__ import annotations
 
@@ -684,7 +675,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "select the forge kernel rewrite ladder."
         ),
     )
-    # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.
+    # Critic backend selection; flags are aliases setting the same dest.
     opt.add_argument(
         "--critic-mock",
         dest="critic_backend",
@@ -821,8 +812,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
-    # Cortex KB flag (Critic agent only)
-    # --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL.
+    # Cortex KB flag (Critic agent only).
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
@@ -887,8 +877,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "in manifest.json). Default: lenient (M1 records the flag "
         "in manifest only; consumed by M5 specialist assembly).",
     )
-    # Warm-recipe replay (PRELUDE auto-applies KB best_config before EXPLORE): --no-warm-replay disables;
-    # --warm-replay-min-confidence (0.7) gates trigger tier; --warm-replay-min-reproduce-pct (0.8) gates reproduction.
+    # Warm-recipe replay: PRELUDE auto-applies KB best_config before EXPLORE.
     opt.add_argument(
         "--no-warm-replay",
         dest="no_warm_replay",
@@ -925,9 +914,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "``status=drift`` and continue with the regular EXPLORE "
         "flow without inheriting the warm config.",
     )
-    # PR Monitor REST + MCP
-    # --pr-monitor-url overrides the in-cluster default (port-forward when outside the primus-cortex namespace);
-    # --degraded-pr strips mcp__pr_monitor__* from the specialist whitelist.
+    # PR Monitor REST + MCP.
     opt.add_argument(
         "--pr-monitor-url",
         dest="pr_monitor_url",
@@ -967,9 +954,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=30,
         help="Look-back window for the PR feed warmup (days). Default: 30.",
     )
-    # specialist research_lane capacity
-    # --research-lane-capacity locks concurrent LLM specialists (0=no dispatch, ceiling=2×GPU, clamped).
-    # Locked at session start (manifest + SharedState); PolicyGate denies mid-flight mutation.
+    # specialist research_lane capacity (locked at session start).
     opt.add_argument(
         "--research-lane-capacity",
         dest="research_lane_capacity",
@@ -997,8 +982,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "comma-separated GPU id pool when the specialist pool should "
         "not use device ids 0..N-1. Locked at session start.",
     )
-    # Advisory specialist-proposal scorer (ProposalScorer): scores each proposal_set with gateway models
-    # (0-10 + reason) as one reference for Orchestration; never gates. Add a model by appending its slug.
+    # Advisory specialist-proposal scorer (ProposalScorer): scores each
+    # proposal_set with gateway models as a reference for Orchestration; never gates.
     opt.add_argument(
         "--proposal-scorer-models",
         dest="proposal_scorer_models",
@@ -1025,15 +1010,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
-    # Retired: the earlier --enable-proposal-scoring spelling was folded into
-    # the --proposal-scoring / --no-proposal-scoring BooleanOptionalAction pair;
-    # hard-fail with a migration hint instead of an opaque unrecognized-arg error.
+    # Retired flag: hard-fail with a migration hint instead of an opaque error.
     opt.add_argument(
         "--enable-proposal-scoring",
         action=_RetiredFlag,
         hint="Use ``--proposal-scoring`` (default off) / ``--no-proposal-scoring`` instead.",
     )
-    # specialist sub-agent backend selection: Claude (default), inherits orchestration model; per-task caps bound LLM use.
+    # specialist sub-agent backend selection: Claude (default), inherits orchestration model.
     opt.add_argument(
         "--specialist-model",
         dest="specialist_model",
@@ -1083,8 +1066,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "MCP servers into specialists. Default: None.",
     )
 
-    # Integration toggles. Roofline refresh is unconditional now (fires at PRELUDE and every 10%
-    # cumulative_gain_validated crossing); the legacy composite/deny profile toggles are gone.
+    # Integration toggles. Roofline refresh is unconditional (fires at PRELUDE
+    # and every 10% cumulative_gain_validated crossing).
     opt.add_argument(
         "--allow-empty-kernel-shape",
         dest="allow_empty_kernel_shape",
@@ -1168,9 +1151,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC
-    # values, output to reports/conc_sweep_summary.json (see orchestrator/conc_sweep.py). Bounded by
-    # --conc-sweep-total-budget-sec; skip conditions short-circuit. Disable via --no-enable-conc-sweep.
+    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized
+    # Magpie grid across CONC values (see orchestrator/conc_sweep.py).
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
@@ -1211,7 +1193,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "main session wall-clock deadline since conc_sweep runs as "
         "a SWEEP-phase action.",
     )
-    # Retired flags operator scripts may still pass; hard-fail at argparse with a migration hint, not a silent alias.
+    # Retired flags: hard-fail at argparse with a migration hint, not a silent alias.
     _retired_hint = (
         "Use ``--enable-roofline`` (default on) / ``--no-enable-roofline`` "
         "instead. The PRELUDE-initial analysis task is unconditional and "
@@ -1231,13 +1213,8 @@ def _build_parser() -> argparse.ArgumentParser:
             hint=_retired_hint,
         )
 
-    # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
-    # Default 2.0: kill the decision (warm) run once its warm hot-client benchmark phase exceeds
-    # the baseline warm measure time by 2x (outcome=KILLED_OVERTIME). The decision round reuses a
-    # pre-warmed server (client-only) and the kill clock starts at the server-ready marker, so the
-    # measured runtime and the anchor are both the warm client-only phase (apples-to-apples) and
-    # one-time cold-boot / aiter recompile no longer trips the kill.
-    # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
+    # Per-variant explore overtime kill ratio (mirrored to
+    # SharedState.explore_overtime_kill_ratio). 0 disables.
     opt.add_argument(
         "--explore-overtime-kill-ratio",
         dest="explore_overtime_kill_ratio",
@@ -1256,8 +1233,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "at +100%% over the warm client anchor). Pass 0 to disable.",
     )
     # Explore variant hard timeout — operator override for the auto-derived cap.
-    # ExploreExecutor auto-derives from baseline_runtime_sec*(kill_ratio+0.5); 0 (default) keeps auto-derive.
-    # Mirrored to SharedState.explore_variant_timeout_sec_override (injected as params['variant_timeout_sec']).
+    # 0 (default) keeps auto-derive; mirrored to
+    # SharedState.explore_variant_timeout_sec_override.
     opt.add_argument(
         "--explore-variant-timeout-sec",
         dest="explore_variant_timeout_sec",
@@ -1284,9 +1261,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "backstop. No effect when --explore-variant-timeout-sec is "
         "set to a positive value.",
     )
-    # drop scoreboard
-    # Legacy action_scores is retired; flag controls a resumed session's leftover scoreboard:
-    # drop (default) strips the fields silently; warn additionally logs + adds a breakdown.warnings entry.
+    # Controls a resumed session's leftover legacy scoreboard (action_scores).
     opt.add_argument(
         "--legacy-action-scores",
         dest="legacy_action_scores",
@@ -1298,9 +1273,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "silently discards. 'warn' logs a WARNING + adds a "
         "breakdown.warnings entry. KB_design §3.9 §7.",
     )
-    # SharedState evolution
-    # --migration-mode: strict (default) makes a missing fact-layer field in a non-empty state.json fatal (exit 1);
-    # lenient downgrades to WARNING. --reset-state backs up state.json and starts fresh (Cortex KB untouched).
+    # SharedState migration controls.
     opt.add_argument(
         "--migration-mode",
         dest="migration_mode",
@@ -1322,7 +1295,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "KB_design §3.10 §5.3.",
     )
     # observability
-    # --breakdown-include-transcripts: inline specialist transcript bodies (true) or path-only (false, default).
     opt.add_argument(
         "--breakdown-include-transcripts",
         dest="breakdown_include_transcripts",
@@ -1333,8 +1305,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "``specialist_runs`` (true) or reference them by path "
         "only (false, default). KB_design §3.12 §7.",
     )
-    # plateau threshold tuning
-    # Swap library default plateau thresholds; land in SharedState.plateau_overrides, locked at session start.
+    # plateau threshold tuning: override defaults; locked at session start.
     opt.add_argument(
         "--plateau-explore-keep-gain",
         dest="plateau_explore_keep_gain",
@@ -1384,8 +1355,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # IR-6 — EXPLORE HARD force-exit thresholds
-    # Either condition fires explore_force_exit_low_budget (EXPLORE→KERNEL/SWEEP); non-negotiable, locked at start.
+    # IR-6 — EXPLORE hard force-exit thresholds (either condition fires; locked at start).
     opt.add_argument(
         "--explore-force-exit-hours-remaining",
         dest="explore_force_exit_hours_remaining",
@@ -1404,10 +1374,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "(0..1) below which EXPLORE exits immediately. Default "
         "0.20 (IR-6).",
     )
-    # phase budget percentages
-    # Each phase claims a fraction of the wall-clock budget (caps; may exit earlier). Sum need not equal 1.0.
-    # Both spellings are accepted for every phase: the legacy ``--max-minutes-*-pct``
-    # and the newer ``--phase-budget-*-pct`` (matches the ``phase_budget_*`` dest).
+    # phase budget percentages: each phase claims a fraction of the wall-clock
+    # budget (caps; may exit earlier). Both ``--max-minutes-*-pct`` and
+    # ``--phase-budget-*-pct`` spellings are accepted.
     opt.add_argument(
         "--max-minutes-prelude-pct",
         "--phase-budget-prelude-pct",

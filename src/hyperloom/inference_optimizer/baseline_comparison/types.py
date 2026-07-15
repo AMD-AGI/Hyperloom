@@ -2,21 +2,13 @@
 
 """Data shapes for the external baseline comparison layer.
 
-These types live in their own module so:
+These types live in their own module so the HTTP client and the
+orchestration executor can import them without pulling in each other's
+dependencies, tests can construct ``BaselineSummary`` directly, and the
+on-disk JSON shape is pinned by ``BaselineSummary.to_dict``.
 
-* the HTTP client (``inferencex_client``) and the orchestration
-  executor (``target_analysis``) can both import them without pulling
-  in each other's dependencies (the executor needs nothing more than
-  these dataclasses + the analyzer);
-* tests can construct ``BaselineSummary`` directly without mocking the
-  upstream HTTP path;
-* on-disk JSON shape is pinned by ``BaselineSummary.to_dict`` rather than
-  scattered ad-hoc dict literals.
-
-Design constraint (from the chat plan): this data is **report-only**.
-Nothing in SharedState / Objective / prompt_builder consumes these
-types — only ``ReportExecutor`` reads the on-disk JSON to render the
-"External baseline (advisory)" section in ``final.md``.
+This data is report-only: only ``ReportExecutor`` reads the on-disk JSON
+to render the "External baseline (advisory)" section in ``final.md``.
 """
 
 from __future__ import annotations
@@ -29,12 +21,9 @@ from typing import Any
 class BaselineQuery:
     """Fully-resolved query against the InferenceX upstream.
 
-    Built once per ``target_analysis`` invocation by ``target_analyzer``:
-    it merges the user-supplied ``--compare-against-gpu`` with
-    process-derived fields (model display name, framework, precision,
-    isl, osl). Persisted to disk so the report can show **exactly**
-    what was queried even if env vars drift between the analysis step
-    and the final report step.
+    Merges the user-supplied ``--compare-against-gpu`` with process-derived
+    fields (model display name, framework, precision, isl, osl). Persisted
+    to disk so the report can show exactly what was queried.
     """
 
     model: str
@@ -65,9 +54,7 @@ class BaselineQuery:
 class BaselinePoint:
     """One reference data point pulled out of the upstream rows.
 
-    We keep this minimal on purpose: anything more than the fields
-    needed by the report ends up tempting future code to push it into
-    SharedState / scoring (which the design explicitly forbids).
+    Kept minimal on purpose: only the fields the report needs.
     """
 
     tput_per_gpu: float
@@ -121,13 +108,12 @@ class BaselineSummary:
         }
 
     The ``status`` field is the single source of truth: ``ok`` means
-    ``best`` is populated and the report should render it; any other
-    value means the report can show a one-line note and move on.
+    ``best`` is populated and the report should render it; any other value
+    means the report can show a one-line note and move on.
 
-    The ``reason`` field is the structured machine-readable counterpart
-    to ``warning``: callers should branch on it instead of regex-matching
-    the human-readable warning string. The two are kept side-by-side so
-    existing log/UI consumers that only know ``warning`` still work.
+    The ``reason`` field is the structured machine-readable counterpart to
+    ``warning``: callers should branch on it instead of regex-matching the
+    human-readable warning string.
     """
 
     query: BaselineQuery

@@ -1,13 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Import-lint guard for ``hyperloom.common`` ("防环规则").
+"""Import-lint guard for ``hyperloom.common``.
 
 ``hyperloom.common`` is the zero-dependency shared library: it may import only
-the stdlib (plus ``httpx`` for the future ``llm`` submodule) and must NEVER
-import a first-party package (``inference_optimizer`` / ``orchestrator`` /
-``agents`` / ``ci`` / …). This keeps the dependency graph acyclic so any package
-can safely depend on ``common``. This test statically parses every module under
-``hyperloom.common`` and fails if a forbidden import creeps in.
+the stdlib (plus ``httpx``) and must NEVER import a first-party package. This
+test statically parses every module under ``hyperloom.common`` and fails if a
+forbidden import creeps in.
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ from pathlib import Path
 
 import hyperloom.common
 
-# First-party top-level module names that ``common`` must never import.
 _FORBIDDEN_TOP_LEVEL = frozenset(
     {
         "inference_optimizer",
@@ -45,7 +42,7 @@ def _imported_module_names(path: Path) -> list[str]:
         if isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            # A relative import (level > 0) stays inside hyperloom.common.
+            # A relative import stays inside hyperloom.common.
             if node.level and node.level > 0:
                 names.append("hyperloom.common")
             elif node.module:
@@ -67,8 +64,7 @@ def test_common_has_no_first_party_imports():
                 offenders.append(f"{path.name}: import {module}")
             elif top == "hyperloom":
                 parts = module.split(".")
-                # Only hyperloom.common(.*) is allowed; any other hyperloom
-                # subpackage would be a first-party dependency / cycle risk.
+                # Only hyperloom.common(.*) is allowed.
                 if len(parts) >= 2 and parts[1] != "common":
                     offenders.append(f"{path.name}: import {module}")
 

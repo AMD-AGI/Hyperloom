@@ -5,29 +5,22 @@ workspace state into a single ``OutcomeId``.
 phase hint → OutcomeId | None). The retry loop accumulates per-attempt
 outcomes into a multi-attempt ``Assessment``.
 
-## Classification precedence
+Classification precedence (first match wins):
 
-Decisions are made in this order. The first match wins:
-
-  1. **Hard SDK-level signatures in ``sdk_error``** that map to bootstrap-class
-     outcomes (#1 quark_root, #7 quark_skill, #23 workspace_unwritable, #24
-     sdk_runtime_error). These are decisive even if some artifacts exist.
-  2. **Explicit ``blocked.md`` outcome marker**. SKILL.md writes
-     ``outcome_id: <id>`` (one line) when it knows the outcome — e.g. it
-     parsed a Quark stderr we don't have to re-parse. The classifier respects
-     that hint as long as the ID is a known ``OutcomeId``.
-  3. **Phase-aware artifact gaps** (intake → analysis missing, plan → plan
-     missing, …) — disk evidence under the recorded ``last_phase``.
-  4. **MUST-have model files** on the quantized directory.
-  5. **Validator step results** (FAIL > SKIPPED > absent step heading).
-  6. **Eval phase** — ``eval_skipped.txt`` first (env failure / OOM), then
-     ``eval_report.json`` gap vs. threshold.
-  7. **sdk_error pattern match** (exec_oom, exec_model_load_failed,
-     export_crashed, eval_oom, quantized_load_failed) — these can fire even
-     when artifacts look partially intact.
-  8. **Fallback**: ``unclassified_failure`` if any failure signal is present,
-     otherwise ``None`` for clean success (with the ``eval_gap_accepted``
-     narrative tag when the gap is non-zero and within budget).
+  1. Hard SDK-level signatures in ``sdk_error`` mapping to bootstrap-class
+     outcomes, decisive even if some artifacts exist.
+  2. Explicit ``blocked.md`` outcome marker (``outcome_id: <id>``) when it is
+     a known ``OutcomeId``.
+  3. Phase-aware artifact gaps under the recorded ``last_phase``.
+  4. MUST-have model files on the quantized directory.
+  5. Validator step results (FAIL > SKIPPED > absent step heading).
+  6. Eval phase — ``eval_skipped.txt`` first, then ``eval_report.json`` gap
+     vs. threshold.
+  7. sdk_error pattern match, which can fire even when artifacts look
+     partially intact.
+  8. Fallback: ``unclassified_failure`` if any failure signal is present,
+     otherwise ``None`` for clean success (with the ``eval_gap_accepted`` tag
+     when the gap is non-zero and within budget).
 """
 
 from __future__ import annotations
@@ -51,7 +44,7 @@ from .result_collector import CollectedArtifacts, collect_artifacts
 
 _BLOCKED_OUTCOME_RE = re.compile(r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 
-_GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are "clean success"
+_GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are clean success
 
 
 @dataclass(frozen=True)
@@ -93,9 +86,7 @@ class Assessment:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # pattern banks
-# ─────────────────────────────────────────────────────────────────────────────
 
 _SDK_RUNTIME_PATTERNS = (
     "rate limit",
@@ -208,7 +199,7 @@ def _classify_eval_outcome(
         return OutcomeId.eval_env_unavailable
 
     if not art.eval_report_present:
-        return None  # eval was simply not run this attempt
+        return None  # eval was not run this attempt
 
     decision = decide_eval(
         art.eval_report_data,
@@ -216,8 +207,7 @@ def _classify_eval_outcome(
         acceptable_eval_gap=acceptable_eval_gap,
     )
     if decision.status == "missing":
-        # File present but unparsable — fall back to env-unavailable rather
-        # than silently passing.
+        # File present but unparsable — treat as env-unavailable, not a pass.
         return OutcomeId.eval_env_unavailable
     if decision.status == "exceeded":
         return OutcomeId.eval_gap_exceeded
@@ -320,9 +310,7 @@ def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # main entry
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def classify_attempt(
@@ -370,17 +358,14 @@ def classify_attempt(
     if phase_gap is not None:
         return phase_gap
 
-    # (3b) Phase-tagged sdk_error (exec_oom, export_crashed, …) before
-    # generic artifact checks — these can fire even when partial artifacts
-    # remain on disk from a prior run.
+    # (3b) Phase-tagged sdk_error before generic artifact checks — can fire
+    # even when partial artifacts remain on disk from a prior run.
     if sdk_error:
         phase_outcome = _classify_sdk_phase_error(sdk_error, phase)
         if phase_outcome is not None:
             return phase_outcome
 
     # (4) MUST-have files on the quantized directory.
-    # ``quantized_dir_exists`` covers "manifest pointed to a path that wasn't
-    # created"; the granular file checks then differentiate which gap matters.
     if art.manifest_present and not art.manifest_parse_error:
         if not art.quantized_dir_exists or not art.has_weights:
             return OutcomeId.must_have_weights_missing
@@ -403,8 +388,7 @@ def classify_attempt(
         if steps.auxiliary == "FAIL":
             return OutcomeId.should_have_aux_missing
         if steps.md5 == "skipped" or steps.config == "skipped":
-            # Tier mapping (strict/lenient) is the retry loop's job — classifier
-            # only emits the ID.
+            # Tier mapping (strict/lenient) is the retry loop's job.
             return OutcomeId.must_validate_skipped
 
     # (6) Eval phase.
@@ -412,7 +396,7 @@ def classify_attempt(
     if eval_outcome is not None:
         return eval_outcome
 
-    # (7) Residual sdk_error with no specific bucket → unclassified.
+    # (7) Residual sdk_error with no specific bucket.
     if sdk_error:
         return OutcomeId.unclassified_failure
 
@@ -420,9 +404,7 @@ def classify_attempt(
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Assessment assembly
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def build_assessment(
@@ -449,7 +431,7 @@ def build_assessment(
     """
 
     if not attempts:
-        attempts = [OutcomeId.unclassified_failure]
+        raise ValueError("attempts must be non-empty")
 
     art = artifacts if artifacts is not None else collect_artifacts(Path(workspace))
     final = attempts[-1]
@@ -495,21 +477,16 @@ def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
     if final in AUTO_FAIL:
         return "failed"
 
-    # eval_gap_exceeded is partial per §5.2 in CI mode (model usable, but
-    # quality bar didn't meet user's stated budget).
+    # eval_gap_exceeded is partial: model usable, but quality bar not met.
     if final == OutcomeId.eval_gap_exceeded:
         return "partial"
 
-    # must_validate_skipped — STRICT controls demotion (see §5.4 + the
-    # HYPERLOOM_QUANT_STRICT_VALIDATION env knob in _result_collector).
+    # must_validate_skipped — STRICT controls demotion.
     if final == OutcomeId.must_validate_skipped:
         return "failed" if artifacts.strict_validation else "partial"
 
-    # Auto-recover outcomes reaching the final attempt mean SKILL.md couldn't
-    # self-heal in-session and the Python loop chose not to retry. Treat as
-    # partial — quantized model is usable but the audit/eval chain didn't
-    # complete — UNLESS the missing artifact is a MUST-have file the user
-    # can't load without (config.json / tokenizer / config field divergence).
+    # Auto-recover outcomes reaching the final attempt are partial (model
+    # usable, audit/eval chain incomplete) unless a MUST-have file is missing.
     if final in AUTO_RECOVER:
         if final in MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT and not (
             artifacts.has_config_json and artifacts.has_tokenizer
@@ -520,8 +497,7 @@ def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
     if final in ASK or final == OutcomeId.unclassified_failure:
         return "failed"
 
-    # Defensive — partition is exhaustive, but be loud rather than silent.
-    return "failed"
+    raise AssertionError(f"unhandled outcome: {final}")
 
 
 __all__ = [

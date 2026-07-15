@@ -2,13 +2,7 @@
 
 """Model / GPU gate for the CLI: GPU-type resolution, arch / config loading,
 unsupported-model detection, and the pre-flight gates that run before a session
-is born.
-
-Extracted from ``cli.py`` (phase 4) and consolidated in phase 6D: the former
-``cli_gpu.py`` (GPU-type resolution) and ``cli_preflight.py`` (context-window +
-model-config compatibility gates) were folded back in — they answer the same
-"can this model run on this hardware?" question. Imports stdlib only; must not
-import ``cli`` (one-way dependency, mirroring cli_kb / cli_backends).
+is born. Imports stdlib only; must not import ``cli``.
 """
 
 from __future__ import annotations
@@ -23,78 +17,27 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import gpu_types as _gpu_types
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _config_architectures,
     _load_model_config_dict,
 )
 
-# Re-exported from model_config_utils for callers/tests that import these via
-# ``cli_model_gate``; declared here so the re-export is intentional rather than
-# a flagged unused import.
+# Re-exported from model_config_utils for callers/tests.
 __all__ = ["_GEMMA2_ARCHITECTURES", "_config_architectures", "_load_model_config_dict"]
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# GPU-type resolution (folded back from cli_gpu.py; phase 6D). Pure helpers
-# that detect / normalize the AMD GPU type from args, env, and ``rocm-smi``.
+# GPU-type resolution. Implementations live below the CLI package so runtime
+# orchestrator modules can use them without importing ``cli.__init__``.
 # ---------------------------------------------------------------------------
-_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
+_AMD_GPU_TYPES = _gpu_types._AMD_GPU_TYPES
+_GFX_TO_RUNNER = _gpu_types._GFX_TO_RUNNER
+_gpu_runner_type = _gpu_types._gpu_runner_type
+_resolve_gpu_type = _gpu_types._resolve_gpu_type
 
-_GFX_TO_RUNNER: dict[str, str] = {
-    # Mirror Magpie/modes/benchmark/image_selector.py:138-140 so we can log resolved value at session start.
-    "gfx942":  "mi300x",
-    "gfx950":  "mi355x",
-}
-
-
-def _gpu_runner_type(gpu_type: str) -> str:
-    """Return the Magpie runner label for a resolved real GPU type.
-
-    MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
-    the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
-
-    Args:
-        gpu_type (str): The resolved real GPU type (e.g. ``mi325x``).
-
-    Returns:
-        str: The Magpie runner label (``mi325x`` / ``mi308x`` collapse to
-            ``mi300x``).
-    """
-    normalized = str(gpu_type or "").strip().lower()
-    if normalized in ("mi325x", "mi308x"):
-        return "mi300x"
-    return normalized
-
-def _resolve_gpu_type(
-    user_specified: str,
-    probed: str,
-) -> tuple[str, list[str]]:
-    """Resolve effective gpu_type from a user hint and a hardware probe; pure for unit testing.
-
-    Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
-    only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
-    the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
-
-    Args:
-        user_specified (str): The user-supplied ``--gpu-type`` hint.
-        probed (str): The hardware-probed GPU type.
-
-    Returns:
-        tuple[str, list[str]]: ``(effective_gpu_type, warnings)`` — the probe
-            wins on disagreement; ``warnings`` carries any stderr notes.
-    """
-    warnings: list[str] = []
-    if probed and user_specified and probed != user_specified:
-        warnings.append(
-            f"WARN: --gpu-type={user_specified!r} disagrees with probed "
-            f"{probed!r}; using probed {probed!r}. The probe wins because "
-            f"Magpie runner_type + KB recipe rows must match the actual "
-            f"hardware to keep baseline numbers comparable across sessions."
-        )
-        return probed, warnings
-    return (probed or user_specified), warnings
 
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort).
@@ -102,26 +45,7 @@ def _autodetect_gpu_type() -> str | None:
     Returns:
         str | None: The detected GPU type, or ``None`` when undetectable.
     """
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rocm-smi", "--showproductname"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
-            if tag in out:
-                return tag.lower()
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        # rocm-smi missing / slow / not permitted — fall through to the torch
-        # gcnArchName probe below (autodetect is best-effort).
-        pass
-    try:
-        import torch
-        arch = torch.cuda.get_device_properties(0).gcnArchName
-        gfx = arch.split(":", 1)[0].lower()
-        return _GFX_TO_RUNNER.get(gfx)
-    except Exception:  # noqa: BLE001
-        return None
+    return _gpu_types._autodetect_gpu_type()
 
 def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     """Resolve the current AMD GPU type, or None when not on AMD/unknown.
@@ -141,10 +65,12 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
         str | None: The resolved AMD runner type, or ``None`` when not on a
             known AMD GPU.
     """
-    for cand in (explicit, os.environ.get("GPU_TYPE")):
-        norm = str(cand or "").strip().lower()
-        if norm in _AMD_GPU_TYPES:
-            return norm
+    explicit_norm = str(explicit or "").strip().lower()
+    if explicit_norm:
+        return explicit_norm if explicit_norm in _AMD_GPU_TYPES else None
+    env_norm = os.environ.get("GPU_TYPE", "").strip().lower()
+    if env_norm:
+        return env_norm if env_norm in _AMD_GPU_TYPES else None
     detected = (_autodetect_gpu_type() or "").strip().lower()
     return detected if detected in _AMD_GPU_TYPES else None
 
@@ -168,8 +94,7 @@ _SUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_MODEL_TYPES = frozenset({
-    # RWKV6/Qwen2 hybrid can also be identified by model_type alone in some
-    # checkpoints; keep this aligned with CI submit filtering.
+    # RWKV6/Qwen2 hybrid identifiable by model_type alone in some checkpoints.
     "rwkv6qwen2",
     "gemma3",
     "mllama",
@@ -187,8 +112,7 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_ARCHITECTURES = frozenset({
-    # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
-    # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
+    # RWKV6/Qwen2 hybrid linear-attention arch: fails ModelConfig validation at boot.
     "RWKV6Qwen2ForCausalLM",
     "Gemma3ForConditionalGeneration",
     "InternVLChatModel",
@@ -242,9 +166,8 @@ _MAXPOS_CONFIG_KEYS = (
 
 _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
-# minimax_m1: its lightning-attention kernel needs 128KB LDS (Required: 131072)
-# but MI300X's per-CU shared-memory limit is 64KB → "out of resource: shared
-# memory" → engine core init failed. Confirmed from MiniMax-M1-80k server.log.
+# minimax_m1: its lightning-attention kernel needs 128KB LDS but MI300X's per-CU
+# shared-memory limit is 64KB → "out of resource: shared memory" at engine init.
 _AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
 
 _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({
@@ -254,33 +177,9 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
 # Architectures Transformers/sglang's ModelConfig does not recognize at all
-# (hardware-agnostic). The pydantic ModelConfig validation raises
-# "model type `X` but Transformers does not recognize this architecture"
-# → ValidationError in engine init regardless of GPU vendor. Matched
-# case-insensitively against model_type and architectures.
-# glm4_moe_lite: confirmed from zai-org-GLM-4.7-Flash server.log.
-# mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
-# type mimo_v2_flash to instantiate a model of type ." + Unknown attention
-# backend TRITON) — the unrecognized arch leaves an empty model type.
-# deepseek_v4: removed from the blocklist. The original entry assumed the
-# framework did not recognize DeepSeek V4, but the current runtime
-# (transformers 5.8.1 + vLLM 0.21.0 rocm722) resolves it successfully:
-# AutoConfig and vLLM's get_config both load DeepseekV4Config for the local
-# model, so keeping it here falsely blocks launch before baseline.
-# gemma4: removed from the blocklist. The original entry assumed the framework
-# did not recognize gemma4, but the current runtime (transformers 5.5.0 +
-# vLLM 0.18.2rc1 rocm721) registers it: CONFIG_MAPPING contains "gemma4",
-# AutoConfig resolves Gemma4Config, and vLLM ModelConfig resolves
-# "Gemma4ForConditionalGeneration" (runner_type=generate) without a
-# validation/registry error. The wrapper carries vision_config, so it now
-# falls through to the text_coercible degraded-mode path instead.
-# glm_moe_dsa: removed from the blocklist (same rationale as gemma4). The
-# original entry was confirmed from a zai-org-GLM-5.1 server.log ModelConfig
-# ValidationError, but the current runtime (transformers 5.12.1 + vLLM 0.24.0)
-# now supports it: AutoConfig resolves GlmMoeDsaConfig ("glm_moe_dsa") and
-# vLLM's ModelRegistry registers "GlmMoeDsaForCausalLM" (runner reuses the
-# deepseek_v2 module; gfx942 sparse-MLA ops fall back to Triton via
-# vllm-project/vllm#45782). Keeping it here would falsely block GLM-5.x.
+# (hardware-agnostic): ModelConfig validation raises a ValidationError in engine
+# init regardless of GPU vendor. Matched case-insensitively against model_type
+# and architectures.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
     "glm4_moe_lite", "mimo_v2_flash",
 })
@@ -289,18 +188,9 @@ _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "mimov2flashforcausallm",
 })
 # Some model_type values only appear inside nested decoder configs carried by a
-# wrapper. A bare top-level type is left to the framework unless we have a direct
-# repro, so these are checked only against the nested text_config scope.
-#
-# ministral3: Mistral3 multimodal wrapper (Surpem-Supertron2 server.log: vLLM
-# registry raises KeyError('ministral3') for text_config.model_type).
-# qwen3_5_moe_text: removed from the blocklist. The original entry assumed the
-# framework did not recognize the Qwen3.5-MoE text decoder, but the current
-# runtime (transformers 5.8.1 + vLLM 0.21.0 rocm722) registers it: AutoConfig
-# resolves Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and vLLM ModelRegistry knows
-# Qwen3_5MoeForConditionalGeneration (+ Qwen3_5MoeMTP). The wrapper carries
-# vision_config and model_type qwen3_5_moe is text-coercible, so it now falls
-# through to the text_coercible degraded-mode path instead.
+# wrapper, so these are checked only against the nested text_config scope.
+# ministral3: Mistral3 multimodal wrapper (vLLM registry raises
+# KeyError('ministral3') for text_config.model_type).
 _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({
     "ministral3",
 })
@@ -308,16 +198,13 @@ _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({
 _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
 _STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
 
-# ``_GEMMA2_ARCHITECTURES`` is imported from model_config_utils (single source
-# of truth) at module top.
-
 _AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
 
 _AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
 
 # Quant methods with a real vLLM/sglang loader. Anything else declared in
-# config.json is a private/third-party format (e.g. paroquant) that fails in
-# engine init. bitsandbytes/bnb are listed here but separately gated on AMD.
+# config.json is a private/third-party format that fails in engine init.
+# bitsandbytes/bnb are listed here but separately gated on AMD.
 _SUPPORTED_QUANT_METHODS = frozenset({
     "fp8", "mxfp8", "mxfp4", "nvfp4", "blockwise_int8", "modelopt",
     "modelopt_fp8", "modelopt_fp4", "modelopt_mixed", "w8a8_int8", "w8a8_fp8",
@@ -458,11 +345,9 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
         ):
             return True
 
-        # Some multimodal configs (including newer family wrappers) expose a
-        # text_config with decoder dimensions but do not use a model_type that
-        # this package has seen yet. Because the evidence is scoped to an
-        # explicitly named text block, this does not widen fallback for a
-        # top-level mislabeled VLM.
+        # Some multimodal configs expose a text_config with decoder dimensions
+        # but an unseen model_type; scoped to a named text block, so this does
+        # not widen fallback for a top-level mislabeled VLM.
         has_vocab = isinstance(nested.get("vocab_size"), int) and nested["vocab_size"] > 0
         has_decoder_shape = any(
             isinstance(nested.get(field), int) and nested[field] > 0
@@ -502,7 +387,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         return None
     architectures = _config_architectures(config)
     # Wrapper models may nest the real arch under text_config; merge so the
-    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
+    # unsupported-arch blocklist still matches.
     nested = config.get("text_config")
     if isinstance(nested, dict):
         for a in _config_architectures(nested):
@@ -517,13 +402,12 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         nested_model_type_l = nested_model_type.lower()
 
     # Registry/config incompatibilities are handled by the model-config gate so
-    # they get the precise model_config_incompatible stop reason. Do not emit a
-    # misleading multimodal text-fallback warning for wrappers such as Gemma4.
+    # they get the precise model_config_incompatible stop reason.
     if _detect_unrecognized_architecture(config) is not None:
         return None
 
     # Hard denylist wins first: explicit VLM arch / model_type is vision_only
-    # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
+    # even if it also carries a ForCausalLM marker.
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
             return {
@@ -547,17 +431,11 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
             "verdict": _VERDICT_VISION_ONLY,
         }
 
-    # A multimodal config key (vision_config, image_token_id, …) is only a
-    # degrade signal, not a hard block: if a text decoder exists we coerce to
-    # the text path with a warning instead of fail-fasting. Routing to
-    # text_coercible requires a *positive* text-decoder signal — either an
-    # explicitly coercible model_type family, a confirmed text-generation
-    # architecture class, or a nested text decoder config. We deliberately do
-    # NOT fall back to top-level ``_SUPPORTED_MODEL_TYPES`` here: that allowlist
-    # is a last-resort match for a bare model_type with no architectures, and a
-    # mislabeled VLM config (e.g. a real vision model carrying model_type="llama"
-    # but no decoder evidence) must fail-fast rather than silently degrade to a
-    # text run.
+    # A multimodal config key is only a degrade signal, not a hard block: if a
+    # text decoder exists we coerce to the text path with a warning. Routing to
+    # text_coercible requires a positive text-decoder signal; we do NOT fall
+    # back to top-level ``_SUPPORTED_MODEL_TYPES`` here, so a mislabeled VLM
+    # config with no decoder evidence must fail-fast rather than degrade.
     _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
@@ -983,8 +861,7 @@ def _detect_null_strict_bool_config(data: dict) -> str | None:
 # Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
 # checkpoint shipping only weights + config (no tokenizer) loads a degraded
 # fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
-# rotary_embedding SIGFPE on MI300X. Confirmed by repro: adding the official
-# Qwen2.5 tokenizer to such a model removes the M:0 crash entirely.
+# rotary_embedding SIGFPE on MI300X.
 _TOKENIZER_ARTIFACT_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -1134,14 +1011,9 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
             ):
                 continue
             actual = shape[0]
-            # Only block when the checkpoint has FEWER vocab rows than the
-            # config declares — that is an unambiguously broken/wrong checkpoint
-            # (not enough embeddings for the tokenizer). A larger on-disk
-            # dimension (actual > expected) is commonly a padded embedding
-            # (rounded up to an alignment / TP boundary while config + tokenizer
-            # keep the unpadded value); the framework handles that, so do not
-            # pre-empt it here and risk a false-positive skip of a runnable
-            # model.
+            # Only block when the checkpoint has FEWER vocab rows than the config
+            # declares (a broken checkpoint). A larger on-disk dimension is
+            # commonly a padded embedding the framework handles, so don't pre-empt.
             if actual < expected:
                 return (
                     f"config.json vocab_size={expected} but {st_path.name}:"
@@ -1644,13 +1516,9 @@ def _detect_incompatible_model_config(
     return None
 
 
-# ===========================================================================
-# Pre-flight gates (folded back from cli_preflight.py; phase 6D). Validate the
-# requested context window + model-config compatibility before a run is born.
-# They drive the detectors above (same "can this model run?" concern), so they
-# live here too. Each persists a stop reason and returns True when the caller
-# should exit.
-# ===========================================================================
+# Pre-flight gates: validate the requested context window + model-config
+# compatibility before a run is born. Each persists a stop reason and returns
+# True when the caller should exit.
 _CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
 
 _CONTEXT_HEADROOM_DEFAULT = 512
@@ -1694,18 +1562,12 @@ def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
 def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     """Best-effort: push the just-written ``session_breakdown.json`` to Langfuse.
 
-    The pre-flight gates below fail-fast *before* ``coordinator.run()``'s
-    ``finally`` — the one place a normal session flushes Langfuse and attaches
-    the breakdown document. Without this, an early-aborted session writes
-    ``session_breakdown.json`` to disk (so the on-disk collector path still
-    forwards it downstream) but never emits the trace/observation to Langfuse,
-    leaving the session absent from Langfuse entirely. Mirror ``cli``'s
-    end-of-session order (flush -> patch -> record) so the attached document
-    carries the post-flush receipt counts.
+    The pre-flight gates fail-fast before ``coordinator.run()``'s ``finally`` (the
+    one place a normal session flushes Langfuse and attaches the breakdown), so
+    this emits the trace/observation itself in flush -> patch -> record order.
 
     No-op unless ``HYPERLOOM_LANGFUSE_ENABLE`` + the ``LANGFUSE_*`` connection
-    vars are set; never raises (a Langfuse outage must not mask the stop
-    reason). Call only *after* ``write_breakdown_json`` has run.
+    vars are set; never raises. Call only after ``write_breakdown_json`` has run.
 
     Args:
         session_dir (Path): The session root directory whose breakdown is
@@ -1765,7 +1627,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         f"conservative (it is added to `required`, so raising it makes "
         f"admission stricter, not looser)."
     )
-    # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
+    # Persist the stop reason so CI / the robustness monitor read it from state.json.
     try:
         from hyperloom.orchestrator.state.shared_state import SharedState
         from hyperloom.orchestrator.actions.executors.report import (
@@ -1775,7 +1637,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         from ..session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
+        # Validated writer keeps the vocab-closed invariant Inv-8.3.
         state.set_stop_reason("model_context_window_too_small")
         state.closing_phase = True
         state.save(session_dir)
@@ -1792,8 +1654,8 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             f"WARNING: failed to persist context-window stop report: {exc!r}",
             file=sys.stderr,
         )
-    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
-    # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
+    # Delivery-artifact parity: emit session_breakdown.json here too since
+    # fail-fast exits before coordinator.run()'s finally.
     try:
         from ..breakdown import write_breakdown_json
         write_breakdown_json(session_dir)
@@ -1804,8 +1666,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             file=sys.stderr,
         )
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
-    # push the breakdown to Langfuse here too (else the session is on disk for
-    # the collector but missing from Langfuse).
+    # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
@@ -1882,8 +1743,7 @@ def _preflight_model_config_compat(
             file=sys.stderr,
         )
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
-    # push the breakdown to Langfuse here too (else the session is on disk for
-    # the collector but missing from Langfuse).
+    # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
@@ -1982,7 +1842,7 @@ def _preflight_unsupported_model_arch(
         f"{hit.get('signal', 'unknown architecture')}. Submit a "
         f"text-generation checkpoint instead."
     )
-    # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
+    # Persist the stop reason so CI / the robustness monitor read it from state.json.
     try:
         from hyperloom.orchestrator.state.shared_state import SharedState
         from hyperloom.orchestrator.actions.executors.report import (
@@ -1992,7 +1852,7 @@ def _preflight_unsupported_model_arch(
         from ..session.session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
+        # Validated writer keeps the vocab-closed invariant Inv-8.3.
         state.set_stop_reason("unsupported_model_arch")
         state.closing_phase = True
         state.save(session_dir)
@@ -2009,8 +1869,8 @@ def _preflight_unsupported_model_arch(
             f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
             file=sys.stderr,
         )
-    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
-    # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
+    # Delivery-artifact parity: emit session_breakdown.json here too since
+    # fail-fast exits before coordinator.run()'s finally.
     try:
         from ..breakdown import write_breakdown_json
         write_breakdown_json(session_dir)
@@ -2021,8 +1881,7 @@ def _preflight_unsupported_model_arch(
             file=sys.stderr,
         )
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
-    # push the breakdown to Langfuse here too (else the session is on disk for
-    # the collector but missing from Langfuse).
+    # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
     return True

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-K — Prompt rendering carries the source-promotion notice.
+"""Prompt rendering carries the source-promotion notice.
 
 Promoted candidates get a ``SOURCE ATTRIBUTION NOTE`` block + launcher
 fields in metadata; un-promoted candidates carry neither.

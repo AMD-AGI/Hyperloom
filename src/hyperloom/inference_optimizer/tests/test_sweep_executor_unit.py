@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 
 
-# ---- int coercion (sweep.max_model_len now uses common.coerce.to_int default=0) ----
+# ---- int coercion ----
 
 
 @pytest.mark.parametrize(
@@ -124,7 +124,7 @@ def test_pareto_front_dominance():
         {"status": "succeeded", "output_throughput": 100, "e2el_mean_ms": 10},
         {"status": "succeeded", "output_throughput": 90, "e2el_mean_ms": 20},  # dominated
         {"status": "succeeded", "output_throughput": 80, "e2el_mean_ms": 5},  # not dominated
-        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},  # excluded
+        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},  # excluded (failed)
     ]
     front = sw._pareto_front(entries)
     tputs = sorted(e["output_throughput"] for e in front)
