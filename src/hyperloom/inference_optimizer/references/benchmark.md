@@ -64,6 +64,14 @@ calculation. A comma `$CONC` value such as `4,16,128` is accepted for
 compatibility; the single baseline CONC becomes the first value. Use
 `--conc-sweep-concs` for the explicit sweep ladder.
 
+EXPLORE may deliberately ablate operator-supplied server flags. A grid variant
+can carry `remove_args` to delete inherited CLI flags before its own
+`extra_args` are appended, or `unset_envs` to remove inherited environment
+keys before `extra_envs` are applied. Use these fields when testing whether a
+pinned operator/base knob is harmful; do not approximate deletion by adding
+another unrelated flag. Removal controls are part of the variant fingerprint
+and are recorded in `explore_search`.
+
 ## Workload-contract reuse (baseline → explore/sweep)
 
 `baseline` materializes its YAML once with the operator's process env (`CONC` /

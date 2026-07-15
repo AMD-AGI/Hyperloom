@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from artifact_normalizer import normalize_task_result, write_single_result  # noqa: E402
 from publish_results import publish  # noqa: E402
 
-DEFAULT_SERVICE_URL = "http://hyperloom-results-service.primus-claw-dev.svc.cluster.local"
+DEFAULT_SERVICE_URL = ""
 
 
 def _default_model(task_dir: Path) -> str:
@@ -108,7 +108,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--url",
         default=os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", DEFAULT_SERVICE_URL),
-        help="Results service base URL",
+        help="Results service base URL (skips publish when unset)",
     )
     parser.add_argument("--token", default=os.environ.get("HYPERLOOM_RESULTS_SERVICE_TOKEN", ""))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("HYPERLOOM_RESULTS_TIMEOUT", "20")))
@@ -157,6 +157,11 @@ def main() -> int:
         write_single_result(normalized, out_dir)
         result["normalizer_exit_code"] = 0
         result["warnings"] = normalized.get("warnings") or []
+
+        if not args.url:
+            result["publish_skipped"] = "HYPERLOOM_RESULTS_SERVICE_URL is not set"
+            print(json.dumps(result, indent=2))
+            return 0
 
         reachable, reason = _host_reachable(args.url)
         if not reachable:

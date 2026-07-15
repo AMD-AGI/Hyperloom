@@ -1135,6 +1135,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 ) from exc
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
+    def _inline_action_whitelist(self) -> frozenset[str]:
+        return self.dispatcher._inline_action_whitelist()
+
+    def _run_action_now_sync(self, action_name: str, params: dict[str, Any] | None = None) -> str:
+        return self.dispatcher._run_action_now_sync(action_name, params)
+
+    async def _run_action_now(self, action_name: str, params: dict[str, Any] | None = None) -> str:
+        return await self.dispatcher._run_action_now(action_name, params)
+
     def _collaborator(self, attr: str, factory):
         """Lazily build + cache a collaborator object (like ``router``/``writeback``);
         works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""

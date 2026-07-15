@@ -465,7 +465,7 @@ def _find_nfs_state_session_dir(
         str | None: The best-matching session directory path, or ``None`` when
         none matches.
     """
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = os.environ.get("NFS_ROOT", "/mnt/shared")
     users_root = Path(nfs_root) / "users"
     if not rec.safe_user_id or not users_root.is_dir():
         return None
