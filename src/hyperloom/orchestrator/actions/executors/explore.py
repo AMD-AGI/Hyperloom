@@ -63,6 +63,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._grid_server_args import compose_server_args, server_args_env_name
 from ._stack_rebench import measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -84,13 +85,11 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold: after a KEEP, rebench tput must beat
 # ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
-# (KEEP_UNSTABLE → REVERT). Set below the KEEP threshold so a genuine win
-# losing a little headroom when layered isn't immediately evicted. Override
-# via ``params['stack_stable_threshold_pct']``.
+# (KEEP_UNSTABLE → REVERT). Set below the KEEP threshold. Override via
+# ``params['stack_stable_threshold_pct']``.
 DEFAULT_STACK_STABLE_PCT = 0.5
 
 
-# bare ``isoformat()`` (auto timespec) + ``+00:00`` (canonical helper; kept importable).
 _now_iso = functools.partial(now_iso, "auto")
 
 
@@ -120,13 +119,9 @@ def _coerce_args_str(value: Any) -> str:
     """Coerce a payload ``extra_args`` / ``extra_server_args`` value into a
     shell-arg string.
 
-    The Orchestration/specialist LLM sometimes emits the server flags as a
-    JSON list (``["--max-num-batched-tokens", "32768"]``) instead of a single
-    string. A naive ``str(list)`` yields the Python repr
-    (``"['--max-num-batched-tokens', '32768']"``) which Magpie's
-    ``vllm serve ... $EXTRA_VLLM_ARGS`` splices verbatim, so the server rejects
-    it as ``unrecognized arguments`` and every server-arg variant aborts.
-    Lists/tuples are space-joined into individual tokens.
+    The LLM sometimes emits the server flags as a JSON list instead of a single
+    string; a naive ``str(list)`` yields the Python repr which the server
+    rejects. Lists/tuples are space-joined into individual tokens.
 
     Args:
         value: The raw payload value (string, list/tuple, or None).
@@ -141,6 +136,69 @@ def _coerce_args_str(value: Any) -> str:
     return str(value)
 
 
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize optional list-like grid controls."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _variant_control_fields(variant: Any) -> dict[str, Any]:
+    """Return non-default remove/unset/replace controls for ledger rows."""
+    remove_args = _coerce_str_list(getattr(variant, "remove_args", []))
+    unset_envs = _coerce_str_list(getattr(variant, "unset_envs", []))
+    args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
+    out: dict[str, Any] = {}
+    if remove_args:
+        out["remove_args"] = remove_args
+    if unset_envs:
+        out["unset_envs"] = unset_envs
+    if args_mode == "replace":
+        out["args_mode"] = "replace"
+    return out
+
+
+def _entry_control_fields(entry: Any) -> dict[str, Any]:
+    """Return remove/unset/replace controls from a persisted ledger entry."""
+    if not isinstance(entry, dict):
+        return {}
+    remove_args = _coerce_str_list(entry.get("remove_args"))
+    unset_envs = _coerce_str_list(entry.get("unset_envs"))
+    args_mode = str(entry.get("args_mode") or "append").strip().lower()
+    out: dict[str, Any] = {}
+    if remove_args:
+        out["remove_args"] = remove_args
+    if unset_envs:
+        out["unset_envs"] = unset_envs
+    if args_mode == "replace":
+        out["args_mode"] = "replace"
+    return out
+
+
+def _flag_names_for_removal(args_text: str) -> list[str]:
+    """Return flag names from an arg string for base replace-mode ablation."""
+    if not args_text.strip():
+        return []
+    import shlex
+
+    try:
+        tokens = shlex.split(args_text)
+    except ValueError:
+        tokens = args_text.split()
+    out: list[str] = []
+    for tok in tokens:
+        if tok.startswith("--"):
+            flag = tok.split("=", 1)[0]
+            if flag not in out:
+                out.append(flag)
+    return out
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
@@ -150,6 +208,9 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "name": str (required, unique-in-round),
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
+          "remove_args": list[str],      # inherited/base flags to remove
+          "unset_envs": list[str],       # inherited env keys to remove
+          "args_mode": "append"|"replace",
           "note": str,
           "provenance": str,            # llm_direct / default_grid / specialist:<tag>
           "scope": str,                 # specialist dial: domain / domains / freeform (advisory)
@@ -179,14 +240,16 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             extra_server_args=args,
             extra_envs=envs,
             note=str(raw.get("note") or raw.get("provenance") or ""),
+            remove_args=_coerce_str_list(raw.get("remove_args")),
+            unset_envs=_coerce_str_list(raw.get("unset_envs")),
+            args_mode=str(raw.get("args_mode") or "append"),
         )
         # Stash extra metadata on the GridVariant so the ledger writer can
-        # pull provenance/evidence; safe on the plain dataclass.
+        # pull provenance/evidence.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag
-        # variants. Consumed by _grid_runner._build_variant_yaml. Stashed as a
-        # plain attr like the other metadata above.
+        # variants. Consumed by _grid_runner._build_variant_yaml.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
@@ -195,16 +258,8 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     return out
 
 
-# Atom default grid seed: ``_atom_default_grid`` returns a curated grid from
-# atom's CLI flag space; only atom has a programmatic seed today (sglang/vllm
-# callers get ``[]`` and rely on LLM-emitted ``default_grid`` variants).
-# Variants are gated up-front on ``model_class``; ``apply_compatibility_filter``
-# (``_grid_runner.py``) is the second-line drop for flags missing from
-# ``atom --help``.
-
-# Curated MTP-capable model class set (needs multi-token-prediction heads,
-# DeepSeek family today). Cross-reference atom's ``atom/model_engine/``
-# before adding entries rather than guessing from the model name.
+# Curated MTP-capable model class set (needs multi-token-prediction heads).
+# Cross-reference atom's ``atom/model_engine/`` before adding entries.
 _ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset(
     {
         "moe_mla",
@@ -264,11 +319,8 @@ def _atom_default_grid(
         gv.provenance = "default_grid"  # type: ignore[attr-defined]
         variants.append(gv)
 
-    # ``atom_level_3`` is atom's default (atom_mi*x.sh injects ``--level 3``),
-    # so a level-3 variant would A/B against itself; use ``atom_level_2`` as
-    # the off-default contrast. (Level 2's ``compile_sizes is None`` crash in
-    # cuda_piecewise_backend.py:54 only fires with ``--torch-profiler-dir``,
-    # which EXPLORE variants don't pass.)
+    # ``atom_level_3`` is atom's default, so use ``atom_level_2`` as the
+    # off-default contrast.
     _add("atom_level_2", "--level 2")
     _add("atom_prefix_cache", "--enable_prefix_caching")
 
@@ -313,11 +365,10 @@ def _xdit_default_grid(
 ) -> list[GridVariant]:
     """xDiT (diffusion) EXPLORE default grid, seeded from the empirical KB.
 
-    Only BF16-safe knobs are emitted (precision is locked: a precision change
-    is a different model). Known-regression / crash knobs are intentionally
-    omitted here and additionally enforced by ``xdit_blacklist_reason`` in
-    ``_grid_runner.py`` (defense in depth). Variant names are ``xdit_``-prefixed
-    for cross-session disambiguation.
+    Only BF16-safe knobs are emitted (precision is locked). Known-regression /
+    crash knobs are omitted here and additionally enforced by
+    ``xdit_blacklist_reason`` in ``_grid_runner.py``. Variant names are
+    ``xdit_``-prefixed for cross-session disambiguation.
 
     Args:
         model_class: Model-class label (reserved for future DiT gating).
@@ -351,12 +402,10 @@ def _xdit_default_grid(
 
     # AMD buffer load/store instructions — directionally correct, BF16-safe.
     _add("xdit_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
-    # torch.compile reduce-overhead (cudagraph) is the proven big win; expose an
-    # explicit on/off contrast so the loop can A/B against the YAML default.
+    # torch.compile reduce-overhead: expose an explicit on/off contrast.
     _add("xdit_compile_reduce_overhead", envs={"XDIT_USE_TORCH_COMPILE": "1"})
     _add("xdit_no_compile", envs={"XDIT_USE_TORCH_COMPILE": "0"})
-    # Confirm the safe attention backend (aiter) — quantized backends are
-    # blacklisted, not seeded.
+    # Confirm the safe attention backend (aiter).
     _add("xdit_attn_aiter", envs={"XDIT_ATTENTION_BACKEND": "aiter"})
     return variants
 
@@ -403,15 +452,12 @@ def _default_grid_for_framework(
     return []
 
 
-# Auto-derived per-variant hard timeout: rather than a universal constant
-# (the legacy 2400s smoke floor times out slow workloads like Qwen3-32B TP=1
-# ~70 min baselines), derive the cap from the Coordinator-injected measured
-# baseline runtime plus a safety margin above the soft-kill ratio (preserves
-# soft-kill → hard-cap layering). Override per-task via
-# ``params['variant_timeout_sec']`` or ``--explore-variant-timeout-sec``;
-# floor/ceiling guard pathological inputs.
-DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min — legacy smoke-workload default
-DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — matches roofline composite budget
+# Auto-derived per-variant hard timeout: derive the cap from the
+# Coordinator-injected measured baseline runtime plus a safety margin above the
+# soft-kill ratio (preserves soft-kill → hard-cap layering). Override per-task
+# via ``params['variant_timeout_sec']``; floor/ceiling guard pathological inputs.
+DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min
+DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — roofline composite budget
 DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5  # hard cap ≥ baseline × (kill_ratio + 0.5)
 
 
@@ -463,8 +509,7 @@ def _join_args(*parts: str) -> str:
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action.
 
-    Subsumes the retired v0.6 ``backends`` / ``params`` / ``validate_stack``
-    executors via per-variant KEEP/REVERT gating + inlined per-KEEP stack rebench.
+    Per-variant KEEP/REVERT gating + inlined per-KEEP stack rebench.
     """
 
     def __init__(
@@ -498,7 +543,6 @@ class ExploreExecutor:
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self.stack_stable_threshold_pct = float(stack_stable_threshold_pct)
-        # Stack-rebench (default on) can be disabled for tests / fast smoke runs.
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
@@ -569,11 +613,13 @@ class ExploreExecutor:
         # ----- Inputs ------------------------------------------------------
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
+        base_remove_args = _coerce_str_list(params.get("base_remove_args"))
+        base_unset_envs = _coerce_str_list(params.get("base_unset_envs"))
+        base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # Backstop: when params carries no positive ``base_tput``, recover the
-        # comparison anchor from live SharedState (else every ``_gain_pct``
-        # returns None and real wins get marked FAILED). Prefer running best,
-        # fall back to the original baseline.
+        # Backstop: recover the comparison anchor from live SharedState when
+        # params carries no positive ``base_tput``. Prefer running best, fall
+        # back to the original baseline.
         if base_tput <= 0:
             ss = extra.get("shared_state") or extra.get("state")
             if ss is not None:
@@ -605,11 +651,10 @@ class ExploreExecutor:
             )
         )
 
-        # per-variant overtime kill — anchored on baseline wall-clock,
-        # single-variant runs only (not stack_rebench). Coordinator injects
-        # ``baseline_runtime_sec`` + ``explore_overtime_kill_ratio``; if
-        # either is missing the deadline stays None and only the
-        # ``variant_timeout_sec`` hard cap gates.
+        # per-variant overtime kill — anchored on baseline wall-clock.
+        # Coordinator injects ``baseline_runtime_sec`` +
+        # ``explore_overtime_kill_ratio``; if either is missing the deadline
+        # stays None and only the ``variant_timeout_sec`` hard cap gates.
         baseline_runtime_sec_raw = params.get("baseline_runtime_sec")
         try:
             baseline_runtime_sec = float(baseline_runtime_sec_raw) if baseline_runtime_sec_raw is not None else 0.0
@@ -620,9 +665,8 @@ class ExploreExecutor:
             overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
         except (TypeError, ValueError):
             overtime_kill_ratio = 0.0
-        # WARM measure-round anchor (client-only, no boot). When warm-decision
-        # is active the overtime kill anchors on this so a one-time cold boot /
-        # aiter recompile no longer trips it; falls back to the cold baseline.
+        # WARM measure-round anchor (client-only). When warm-decision is active
+        # the overtime kill anchors on this; falls back to the cold baseline.
         baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
         try:
             baseline_warm_runtime_sec = (
@@ -638,8 +682,7 @@ class ExploreExecutor:
         if explicit_timeout is not None:
             timeout_sec = int(explicit_timeout)
         else:
-            # Operator-tunable headroom; unset uses the helper default,
-            # negative clamps to 0 (hard cap collapses onto the soft kill).
+            # Operator-tunable headroom; negative clamps to 0.
             safety_margin_raw = params.get("variant_timeout_safety_margin")
             try:
                 safety_margin = (
@@ -662,20 +705,21 @@ class ExploreExecutor:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
             framework = str((_cfg.get("benchmark") or {}).get("framework") or "").lower()
-            # Pull CONC so the seed grid's cudagraph-bracket variant brackets
-            # the live decode concurrency.
+            # Pull CONC so the seed grid's cudagraph-bracket variant brackets it.
             _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
+            _base_inherited_args = str(_yaml_envs.get(server_args_env_name(framework)) or "").strip()
         except (OSError, yaml.YAMLError) as exc:
             log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
             framework = ""
             _yaml_envs = {}
+            _base_inherited_args = ""
+        _effective_inherited_args = "" if base_args_mode == "replace" else _base_inherited_args
 
         # ----- Variant grid ------------------------------------------------
         grid_payload = params.get("grid") or []
         if not isinstance(grid_payload, list) or not grid_payload:
             # No LLM variants: fall through to the framework's programmatic
-            # seed grid (stamped ``provenance='default_grid'``) instead of
-            # failing the task.
+            # seed grid instead of failing the task.
             seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
             seed_conc = 0
             try:
@@ -774,17 +818,15 @@ class ExploreExecutor:
             return canonical_fingerprint(
                 str(entry.get("extra_server_args") or ""),
                 dict(entry.get("extra_envs") or {}),
+                **_entry_control_fields(entry),
             )
 
-        # Conditional dedup. KEEP'd variants are permanently blocked (never
-        # re-proposed). A variant that ran but did not promote (REVERT /
-        # KEEP_UNSTABLE / no_promote) only stays blocked while its prior measured
-        # gain is below the current KEEP bar; once the (decaying) bar drops to or
-        # below that gain the variant unblocks so a later cycle can re-test it.
-        # Infra failures (KILLED_OVERTIME / FAILED) stay blocked regardless of
-        # gain. Unblocking only lifts the hard skip — the variant still re-runs
-        # the full KEEP + stack-rebench gate, so a stale measurement can't
-        # promote on its own.
+        # Conditional dedup. KEEP'd variants are permanently blocked. A variant
+        # that ran but did not promote (REVERT / KEEP_UNSTABLE / no_promote) only
+        # stays blocked while its prior measured gain is below the current KEEP
+        # bar; once the bar drops to or below that gain it unblocks for re-test.
+        # Infra failures stay blocked regardless of gain. Unblocking only lifts
+        # the hard skip — the variant still re-runs the full gate.
         gain_unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
 
         def _is_blocked(entry: Any) -> bool:
@@ -838,13 +880,30 @@ class ExploreExecutor:
         name_index = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
-        # loop needn't recompute (content-only hash, same as canonical).
+        # loop needn't recompute.
         ws_sig = workload_signature()
 
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
-            fp = canonical_fingerprint(gv.extra_server_args, gv.extra_envs)
+            identity_controls = _variant_control_fields(gv)
+            identity_remove_args = list(
+                dict.fromkeys(base_remove_args + _coerce_str_list(identity_controls.get("remove_args")))
+            )
+            identity_unset_envs = list(
+                dict.fromkeys(base_unset_envs + _coerce_str_list(identity_controls.get("unset_envs")))
+            )
+            if identity_remove_args:
+                identity_controls["remove_args"] = identity_remove_args
+            if identity_unset_envs:
+                identity_controls["unset_envs"] = identity_unset_envs
+            if base_args_mode == "replace":
+                identity_controls["args_mode"] = "replace"
+            fp = canonical_fingerprint(
+                gv.extra_server_args,
+                gv.extra_envs,
+                **identity_controls,
+            )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in seen_fps:
                 skipped_dup.append(
@@ -875,16 +934,11 @@ class ExploreExecutor:
             len(skipped_dup),
         )
 
-        # Multi-node grid shaping.
-        # Both helpers short-circuit on ``is_multi_node() is False``: the
-        # invalid filter returns ``(list(grid), [])`` and reorder preserves the
-        # original order, so the single-node ``runnable`` is bit-for-bit
-        # identical and ``skipped_dup`` gains nothing — single-node behaviour is
-        # never altered (hard requirement). In multi-node mode: drop
-        # known-regression variants (cuda-graph-max-bs < CONC), then surface
-        # likely-winners first so a max-hours cut still benches the strong
-        # candidates. (apply_single_node_invalid_variants is intentionally NOT
-        # called here: it would mutate the single-node grid.)
+        # Multi-node grid shaping. Both helpers short-circuit in single-node
+        # mode, leaving ``runnable`` bit-for-bit identical. In multi-node mode:
+        # drop known-regression variants (cuda-graph-max-bs < CONC), then
+        # surface likely-winners first so a max-hours cut still benches the
+        # strong candidates.
         if runnable:
             runnable, _mn_dropped = apply_multi_node_invalid_variants(runnable)
             for _d in _mn_dropped:
@@ -912,10 +966,12 @@ class ExploreExecutor:
         winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
 
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running
-        # accumulation; after a KEEP they extend with the KEEP'd variant so
-        # the next variant is benched on the freshest stack.
+        # accumulation; after a KEEP they extend with the KEEP'd variant.
         stack_extra_args = base_extra_args
         stack_extra_envs = dict(base_extra_envs)
+        stack_remove_args = list(dict.fromkeys(base_remove_args))
+        stack_unset_envs = list(dict.fromkeys(base_unset_envs))
+        stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
@@ -929,13 +985,11 @@ class ExploreExecutor:
         lifecycle_framework = str(lifecycle.get("framework") or "")
         lifecycle_port = int(lifecycle.get("port") or 0)
 
-        # Warm-decision mode. Run a discarded cold *warmup* round first so
-        # the decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with how ``baseline_tput`` is measured (its own
-        # warmup+measure double-run). Requires server_lifecycle reuse; otherwise
-        # we cannot keep a server hot between rounds, so fall back to a
-        # single cold-decision run. Opt out with
-        # INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
+        # Warm-decision mode. Run a discarded cold warmup round first so the
+        # decision round reuses the hot server (client-only) and is measured
+        # warm — apples-to-apples with ``baseline_tput``. Requires
+        # server_lifecycle reuse; otherwise fall back to a single cold-decision
+        # run. Opt out with INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
         warm_decision_enabled = os.environ.get(
             "INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1"
         ).strip().lower() not in {"0", "false", "no", "off"}
@@ -948,9 +1002,8 @@ class ExploreExecutor:
             else baseline_runtime_sec
         )
         # The soft deadline is anchored on the warm client-only measure time and
-        # is enforced from the server-ready marker (see run_with_session_kill), so
-        # the measured runtime and this anchor are both the warm client phase —
-        # apples-to-apples, with cold boot / warmup excluded from both sides.
+        # enforced from the server-ready marker, so both the measured runtime and
+        # this anchor exclude cold boot / warmup.
         if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
             decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
         else:
@@ -961,29 +1014,57 @@ class ExploreExecutor:
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
+                control_fields = _variant_control_fields(gv)
+                if stack_base_args_mode == "replace":
+                    run_remove_args = _coerce_str_list(getattr(gv, "remove_args", []))
+                else:
+                    run_remove_args = list(
+                        dict.fromkeys(stack_remove_args + _coerce_str_list(getattr(gv, "remove_args", [])))
+                    )
+                run_unset_envs = list(
+                    dict.fromkeys(stack_unset_envs + _coerce_str_list(getattr(gv, "unset_envs", [])))
+                )
+                run_extra_envs = dict(stack_extra_envs)
+                run_extra_envs.update(gv.extra_envs)
+                run_gv = GridVariant(
+                    name=gv.name,
+                    extra_server_args=gv.extra_server_args,
+                    extra_envs=run_extra_envs,
+                    note=gv.note,
+                    remove_args=run_remove_args,
+                    unset_envs=run_unset_envs,
+                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                )
+                for attr in (
+                    "provenance",
+                    "scope",
+                    "overlay_pythonpath",
+                    "kb_evidence",
+                    "pr_evidence",
+                    "source_evidence",
+                ):
+                    if hasattr(gv, attr):
+                        setattr(run_gv, attr, getattr(gv, attr))
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # Round 1 + round 2 share this slot as the lifecycle pid_dir so
-                # round 2 re-attaches to round 1's hot server; teardown in the
-                # finally below reaps it on every exit path.
+                # round 2 re-attaches to round 1's hot server.
                 round1_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 try:
-                    # Warm-decision warmup round. Boot the variant's server
-                    # once and DISCARD the (cold) measurement so the decision
-                    # round below runs warm / client-only — apples-to-apples with
-                    # baseline_tput. cleanup=false keeps the server hot; NO
-                    # soft_deadline (one-time cold boot / aiter recompile must not
-                    # trip the overtime kill — only the hard variant_timeout cap
-                    # gates the warmup).
+                    # Warm-decision warmup round. Boot the variant's server once
+                    # and DISCARD the cold measurement so the decision round runs
+                    # warm / client-only. cleanup=false keeps the server hot; no
+                    # soft_deadline (only the hard variant_timeout cap gates the
+                    # warmup, so a one-time cold boot doesn't trip the kill).
                     if use_warm_decision:
                         warmup_slot = slot / "warmup_round"
                         warmup_slot.mkdir(parents=True, exist_ok=True)
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[gv],
+                            grid=[run_gv],
                             output_root=warmup_slot,
                             variant_timeout_sec=timeout_sec,
                             model_path=resolved_model,
@@ -992,6 +1073,7 @@ class ExploreExecutor:
                             result_dir=override_result_dir,
                             soft_deadline_sec=None,
                             server_lifecycle=round1_lifecycle,
+                            base_args_mode=stack_base_args_mode,
                         )
                         w = warmup_results[0] if warmup_results else None
                         if w is None or getattr(w, "status", "") != "succeeded":
@@ -1007,6 +1089,7 @@ class ExploreExecutor:
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "note": gv.note,
                                 "outcome": "FAILED",
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
@@ -1028,6 +1111,7 @@ class ExploreExecutor:
                                     "name": gv.name,
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
+                                    **control_fields,
                                     "note": gv.note,
                                     "reason": "warmup_failed",
                                     "gain_pct": None,
@@ -1043,6 +1127,7 @@ class ExploreExecutor:
                                     "name": gv.name,
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
+                                    **control_fields,
                                     "provenance": provenance,
                                     "gain_pct": None,
                                     "tput": None,
@@ -1052,16 +1137,14 @@ class ExploreExecutor:
                             )
                             continue
                     # Decision round: warm (re-attaches to the warmup's hot
-                    # server, client-only) when ``use_warm_decision``; otherwise a
-                    # fresh cold boot (legacy). cleanup=false keeps it hot for the
-                    # warm stack-rebench round below. ``soft_deadline_sec`` is the
-                    # overtime kill, anchored on the WARM measure time when
-                    # warm-decision is active; round-2 stack-rebench inherits the
-                    # same ``decision_deadline_sec`` (Issue 1 fix).
+                    # server, client-only) when ``use_warm_decision``, otherwise a
+                    # fresh cold boot. cleanup=false keeps it hot for the stack-
+                    # rebench round below. ``soft_deadline_sec`` is the overtime
+                    # kill; round-2 stack-rebench inherits the same deadline.
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
-                        grid=[gv],
+                        grid=[run_gv],
                         output_root=slot,
                         variant_timeout_sec=timeout_sec,
                         model_path=resolved_model,
@@ -1070,11 +1153,12 @@ class ExploreExecutor:
                         result_dir=override_result_dir,
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=round1_lifecycle,
+                        base_args_mode=stack_base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                     )
                     if not results:
-                        # Defensive — run_grid returns one result per grid entry.
+                        # run_grid returns one result per grid entry.
                         log.warning(
                             "explore: variant %s produced no result",
                             gv.name,
@@ -1082,24 +1166,24 @@ class ExploreExecutor:
                         continue
                     r = results[0]
 
-                    # Overtime gate fired: record a ``KILLED_OVERTIME`` row with
-                    # runtime_sec + wall_clock_ratio (no faked tput/gain),
-                    # skip all downstream gates + dedup, leave the stack unadvanced.
+                    # Overtime gate fired: record a ``KILLED_OVERTIME`` row (no
+                    # faked tput/gain), skip downstream gates, leave the stack
+                    # unadvanced.
                     if getattr(r, "killed_overtime", False):
                         variant_runtime = float(r.runtime_sec or 0.0)
                         wall_clock_ratio = (
                             round(variant_runtime / decision_anchor_sec, 3) if decision_anchor_sec > 0 else None
                         )
-                        # Rough output tok/s salvaged from the engine's partial
-                        # server.log throughput logs. Informational only: ``tput``
-                        # stays None so this never enters winner selection or gain
-                        # math; the estimate rides alongside as a separate key.
+                        # Rough output tok/s salvaged from partial server.log.
+                        # Informational only: ``tput`` stays None so this never
+                        # enters winner selection or gain math.
                         est_tput = getattr(r, "estimated_output_throughput", None)
                         tested_update[fp] = {
                             "fingerprint": fp,
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "note": gv.note,
                             "outcome": "KILLED_OVERTIME",
                             "status": r.status,
@@ -1133,6 +1217,7 @@ class ExploreExecutor:
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "note": gv.note,
                                 "reason": "killed_overtime",
                                 "gain_pct": None,
@@ -1151,6 +1236,7 @@ class ExploreExecutor:
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "provenance": provenance,
                                 "gain_pct": None,
                                 "tput": None,
@@ -1177,9 +1263,8 @@ class ExploreExecutor:
                         continue
 
                     # Decision-round gain is the cost gate: only variants that
-                    # already clear keep_threshold (and the accuracy gate) earn
-                    # a warm stack-rebench round. With warm-decision active this
-                    # measurement is already warm (the cold warmup was discarded).
+                    # clear keep_threshold (and the accuracy gate) earn a warm
+                    # stack-rebench round.
                     gain = gain_pct(r.output_throughput, running_base_tput)
                     outcome = "FAILED"
                     reason: str = ""
@@ -1190,19 +1275,16 @@ class ExploreExecutor:
                         reason = "gain_below_threshold"
                     else:
                         # Accuracy gate. For serving it runs only for high-risk
-                        # variants (precision/compute-path changes). For
-                        # scriptable frameworks (xDiT diffusion) the image-quality
-                        # gate is the sole correctness signal, so EVERY variant is
+                        # variants. For scriptable frameworks the image-quality
+                        # gate is the sole correctness signal, so every variant is
                         # gated and a missing gate fails closed.
                         from hyperloom.inference_optimizer import framework_registry
 
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
                         accuracy_value: float | None = None
-                        # Scriptable: the image-quality gate is absolute (vs a
-                        # fixed reference), so gate EVERY variant regardless of
-                        # baseline_accuracy. Serving: only high-risk variants,
-                        # and only when a baseline accuracy was recorded.
+                        # Scriptable: gate every variant. Serving: only high-risk
+                        # variants, and only when a baseline accuracy was recorded.
                         if scriptable or (
                             baseline_accuracy > 0
                             and is_high_accuracy_risk(
@@ -1214,19 +1296,16 @@ class ExploreExecutor:
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
                                 # Scriptable maps gate pass→1.0 / fail→0.0, so
-                                # compare against a perfect reference (1.0) to
-                                # revert a failed gate; serving compares vs the
-                                # measured baseline.
+                                # compare against a perfect reference (1.0);
+                                # serving compares vs the measured baseline.
                                 reference = 1.0 if scriptable else baseline_accuracy
                                 accuracy_ok = accuracy_passed(
                                     reference,
                                     float(accuracy_value),
                                 )
                             else:
-                                # No eval result. Serving: follow the legacy "no
-                                # accuracy data => skip the gate" convention so
-                                # high-risk flags aren't auto-rejected on a benign
-                                # gap. Scriptable: fail closed (gate is required).
+                                # No eval result. Serving: skip the gate (no
+                                # accuracy data). Scriptable: fail closed.
                                 accuracy_ok = not scriptable
                         if not accuracy_ok:
                             outcome = "REVERT"
@@ -1240,6 +1319,7 @@ class ExploreExecutor:
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
+                        **control_fields,
                         "note": gv.note,
                         "outcome": outcome,
                         "status": r.status,
@@ -1258,13 +1338,50 @@ class ExploreExecutor:
                     if gv.name:
                         name_index[gv.name] = fp
 
-                    # ---- KEEP path (with warm round-2 rebench) ------------
+                    # ---- KEEP path (with warm round-2 rebench) ----
                     if outcome == "KEEP":
+                        # Layer onto the running stack BEFORE rebench. For
+                        # removal variants, next_args/next_envs are the
+                        # effective launch config that must persist if the KEEP
+                        # survives; gv.extra_* remain only the candidate delta.
+                        next_effective_args = compose_server_args(
+                            inherited_args=_effective_inherited_args,
+                            base_extra_args=stack_extra_args,
+                            variant_extra_args=gv.extra_server_args,
+                            remove_args=run_remove_args,
+                            args_mode="replace" if stack_base_args_mode == "replace" else getattr(gv, "args_mode", "append"),
+                        )
+                        next_stack_args = compose_server_args(
+                            inherited_args="",
+                            base_extra_args=stack_extra_args,
+                            variant_extra_args=gv.extra_server_args,
+                            remove_args=_coerce_str_list(getattr(gv, "remove_args", [])),
+                            args_mode=getattr(gv, "args_mode", "append"),
+                        )
+                        next_envs = dict(stack_extra_envs)
+                        for k in run_unset_envs:
+                            next_envs.pop(str(k), None)
+                        next_envs.update(gv.extra_envs)
+                        effective_control_fields = dict(control_fields)
+                        if run_remove_args:
+                            effective_control_fields["remove_args"] = list(run_remove_args)
+                        if run_unset_envs:
+                            effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        persist_effective_args = bool(
+                            run_remove_args
+                            or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
+                            or stack_base_args_mode == "replace"
+                        )
+                        if persist_effective_args:
+                            effective_control_fields["args_mode"] = "replace"
                         keep_entry = {
                             "fingerprint": fp,
                             "name": gv.name,
-                            "extra_server_args": gv.extra_server_args,
-                            "extra_envs": dict(gv.extra_envs),
+                            "candidate_extra_server_args": gv.extra_server_args,
+                            "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
+                            "effective_extra_server_args": next_effective_args,
+                            "extra_envs": dict(next_envs),
+                            **effective_control_fields,
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
@@ -1275,10 +1392,6 @@ class ExploreExecutor:
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
                         }
-                        # Layer onto the running stack BEFORE rebench.
-                        next_args = _join_args(stack_extra_args, gv.extra_server_args)
-                        next_envs = dict(stack_extra_envs)
-                        next_envs.update(gv.extra_envs)
                         in_batch_keeps.append(keep_entry)
 
                         stack_rebench_tput: float | None = None
@@ -1289,16 +1402,17 @@ class ExploreExecutor:
                             # Round 2: same config as round 1. When eligible,
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
-                            # comparable; otherwise a fresh cold boot.
-                            # ``soft_deadline_sec=decision_deadline_sec`` applies
-                            # (Issue 1 fix: warm client-only rounds must be
-                            # bounded by the overtime-kill ratio, just like the
-                            # decision round).
+                            # comparable; otherwise a fresh cold boot. The
+                            # overtime-kill deadline applies as in the decision
+                            # round.
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
                                 extra_envs=dict(gv.extra_envs),
                                 note="stack_rebench",
+                                remove_args=list(run_remove_args),
+                                unset_envs=list(run_unset_envs),
+                                args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                             )
                             round2_lifecycle = (
                                 {
@@ -1322,6 +1436,7 @@ class ExploreExecutor:
                                 benchmark_script=override_script,
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
+                                base_args_mode=stack_base_args_mode,
                                 preclean_before_run=not lifecycle_eligible,
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
@@ -1330,8 +1445,7 @@ class ExploreExecutor:
                             stack_rebench_workspace = rebench.workspace
                             stack_rebench_warnings = rebench.warnings
                             stable_floor = rebench.stable_floor
-                            # Rebench missed the stability floor: evict the
-                            # KEEP and treat as REVERT.
+                            # Rebench missed the stability floor: evict as REVERT.
                             if not rebench.stable:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
@@ -1361,6 +1475,7 @@ class ExploreExecutor:
                                         "name": gv.name,
                                         "extra_server_args": gv.extra_server_args,
                                         "extra_envs": dict(gv.extra_envs),
+                                        **control_fields,
                                         "note": gv.note,
                                         "reason": "stack_unstable",
                                         "gain_pct": gain,
@@ -1377,10 +1492,13 @@ class ExploreExecutor:
                             else:
                                 # Stable — the warm round-2 tput is the headline;
                                 # recompute gain from it and fold the variant onto
-                                # the stack so the next variant benches against it.
+                                # the stack.
                                 gain = gain_pct(stack_rebench_tput, running_base_tput)
-                                stack_extra_args = next_args
+                                stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                                 stack_extra_envs = next_envs
+                                stack_remove_args = list(run_remove_args)
+                                stack_unset_envs = list(run_unset_envs)
+                                stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
                                 last_run_tput = stack_rebench_tput
                                 keep_entry["gain_pct"] = gain
@@ -1396,8 +1514,11 @@ class ExploreExecutor:
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
                             # measurement, advance the running baseline naively.
-                            stack_extra_args = next_args
+                            stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                             stack_extra_envs = next_envs
+                            stack_remove_args = list(run_remove_args)
+                            stack_unset_envs = list(run_unset_envs)
+                            stack_base_args_mode = "replace" if persist_effective_args else "append"
                             running_base_tput = cold_tput or running_base_tput
                             last_run_tput = cold_tput
 
@@ -1410,6 +1531,7 @@ class ExploreExecutor:
                                 "gain_pct": gain,
                                 "extra_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
+                                **control_fields,
                                 "provenance": provenance,
                                 "scope": scope,
                                 "ts": _now_iso(),
@@ -1424,6 +1546,7 @@ class ExploreExecutor:
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "note": gv.note,
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
@@ -1439,6 +1562,7 @@ class ExploreExecutor:
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
+                            **control_fields,
                             "provenance": provenance,
                             "gain_pct": gain,
                             "tput": cold_tput,
@@ -1449,9 +1573,8 @@ class ExploreExecutor:
                     if cold_tput:
                         last_run_tput = cold_tput
                 finally:
-                    # Reap the persistent server on every exit path (KEEP,
-                    # REVERT, KEEP_UNSTABLE, KILLED_OVERTIME, exceptions).
-                    # Idempotent + no-op when reuse was ineligible.
+                    # Reap the persistent server on every exit path. Idempotent
+                    # + no-op when reuse was ineligible.
                     if lifecycle_eligible:
                         teardown_lifecycle_server(
                             pid_dir=slot,
@@ -1470,8 +1593,7 @@ class ExploreExecutor:
             rejected_dedup[fp] = entry
 
         # Flat per-variant outcomes for the Coordinator's per-variant
-        # fact-write hook (KEEP / REVERT / FAILED / KEEP_UNSTABLE /
-        # SKIPPED_DEDUP from this round). Serialized as plain JSON.
+        # fact-write hook (this round's outcomes).
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "")
             for r in rejected_update
@@ -1498,14 +1620,13 @@ class ExploreExecutor:
             if te.get("stack_rebench_tput") is not None:
                 metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
             # Rough decode tput salvaged from a killed-overtime variant's
-            # partial server.log. Informational only (no ``tput``/gain), but
-            # lets the LLM/KB see roughly how fast the killed run was decoding.
+            # partial server.log. Informational only (no ``tput``/gain).
             if te.get("estimated_output_throughput") is not None:
                 metrics["estimated_output_throughput"] = te.get(
                     "estimated_output_throughput",
                 )
-            # surface wall-clock + kill ratio so the LLM/KB sees "ran too
-            # slow → early kill" instead of an opaque FAILED row.
+            # Surface wall-clock + kill ratio so the LLM/KB sees "ran too slow
+            # → early kill" instead of an opaque FAILED row.
             if te.get("runtime_sec") is not None:
                 metrics["runtime_sec"] = te.get("runtime_sec")
             if te.get("wall_clock_ratio_vs_baseline") is not None:
@@ -1522,8 +1643,7 @@ class ExploreExecutor:
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
                     # Carry the variant knobs so the journal's
-                    # ``classify_change_kind`` can classify the change kind
-                    # (backend / param / env) at decision-write time.
+                    # ``classify_change_kind`` can classify the change kind.
                     "variant": {
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),
@@ -1588,9 +1708,8 @@ class ExploreExecutor:
         else:
             output_throughput = None
 
-        # Successful = at least one bench produced a measurement (KEEP /
-        # REVERT / KEEP_UNSTABLE) or was reaped by the overtime gate
-        # (KILLED_OVERTIME is a real signal the LLM needs to see).
+        # Successful = at least one bench produced a measurement or was reaped
+        # by the overtime gate (KILLED_OVERTIME is a real signal).
         produced_measurement = any(
             t.get("outcome")
             in (

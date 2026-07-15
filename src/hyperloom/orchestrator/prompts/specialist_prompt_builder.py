@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Specialist sub-agent prompt assembler — v0.8 M5.
+"""Specialist sub-agent prompt assembler.
 
 Returns ``(system_prompt, user_prompt)``: the system prompt carries the
 immutable contract (identity / output protocol / iron rules) so the
@@ -35,8 +35,8 @@ BASH_KILL_SAFETY_PREAMBLE = (
 )
 
 
-# Soft cap on ``proposal_set`` size; re-exported from ``policy.py`` so the
-# prompt-side cap and the runner-side hard truncate stay aligned.
+# Soft cap on ``proposal_set`` size; re-exported so the prompt-side cap and the
+# runner-side hard truncate stay aligned.
 from hyperloom.orchestrator.policy.gate import (
     DEFAULT_SPECIALIST_MAX_PROPOSALS,
 )
@@ -150,7 +150,7 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_cross_framework_rewrite_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for cross-framework feature porting (#5-P2).
+    """Build the domain-focus block for cross-framework feature porting.
 
     Static porting methodology only (cacheable in the system prompt). The
     per-task landing data (source diff, symbol-level landing points, target
@@ -663,8 +663,8 @@ class SpecialistPromptInputs:
     # Soft cap on ``proposal_set`` size (rendered into Sections 1 + 8).
     max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
-    # Hardware context. ``tp`` defaults to 0 (sentinel for "unspecified"),
-    # NOT 1, so comm_specialist doesn't veto its own TP proposals.
+    # ``tp`` defaults to 0 (sentinel for "unspecified"), not 1, so
+    # comm_specialist doesn't veto its own TP proposals.
     gpu_type: str = ""
     allocated_gpu_ids: tuple[int, ...] = ()
     tp: int = 0
@@ -683,12 +683,9 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
-    # Runtime fingerprint so the specialist can judge lesson applicability;
-    # ``framework_version`` is the precise install version. Empty => no
-# version annotation. ``framework`` is the active server framework
-    # (``sglang`` / ``vllm`` / ``atom``); empty falls back to the canonical
-    # sglang/vllm hint blocks, and switches "what to read first" bullets to
-    # atom paths when ``framework == 'atom'``.
+    # ``framework`` is the active server framework (``sglang`` / ``vllm`` /
+    # ``atom``); empty falls back to the canonical sglang/vllm hint blocks.
+    # ``framework_version`` is the precise install version (empty => no note).
     framework: str = ""
     framework_version: str = ""
 
@@ -710,14 +707,11 @@ class SpecialistPromptInputs:
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    # KG graph-recommended knobs (cross-recipe IMPROVES candidates reached via
-    # the architecture family graph); advisory candidates rendered in their own section.
-    # Each entry: ``{knob, expected_gain, confidence, source}``.
+    # KG graph-recommended knobs (cross-recipe IMPROVES candidates via the
+    # architecture family graph). Each entry: ``{knob, expected_gain, confidence, source}``.
     kg_recommended_knobs: list[dict[str, Any]] = field(default_factory=list)
-    # KG graph-guided config knobs (journal-derived ``KNOB_IMPROVES`` for the
-    # current arch+precision); rendered in their own section. Unlike ``kg_recommended_knobs``
-    # these carry runnable ``args``/``envs``. Each entry:
-    # ``{knob, args, envs, name, expected_gain, confidence, source}``.
+    # KG graph-guided config knobs (journal ``KNOB_IMPROVES``) carrying runnable
+    # ``args``/``envs``. Each entry: ``{knob, args, envs, name, expected_gain, confidence, source}``.
     kg_guided_knobs: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
@@ -731,15 +725,11 @@ class SpecialistPromptInputs:
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
 
-    # Structured model architecture features (attention_type / is_moe /
-    # num_experts / quantization, etc.) mirrored from SharedState.model_info.
-    # Richer + machine-parseable companion to ``arch_notes`` (the compact
-    # string); consumed by the static-recon focus block to gate checklist
-    # entries. Empty dict => not warmed.
+    # Structured model architecture features mirrored from SharedState.model_info;
+    # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
     model_info: dict[str, Any] = field(default_factory=dict)
-    # Pre-rendered static-recon checklist block (Markdown) seeded by
-    # ``static_recon_checklist`` for the current (model, gpu, precision). Only
-    # populated for the static_recon_specialist dispatch; empty otherwise.
+    # Pre-rendered static-recon checklist block (Markdown); only populated for
+    # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
     # Workspace path (for transcript / heartbeat instructions)
@@ -761,10 +751,9 @@ class SpecialistPromptInputs:
     # (timeout / crash / stale-heartbeat) attempt; empty on the first attempt.
     auto_retry_reason: str = ""
 
-    # WS1 wall-clock budget for this dispatch (seconds) and the dispatch start
-    # timestamp (ISO-8601 UTC), so the specialist can self-throttle instead of
-    # only learning the deadline when the reaper hard-kills it. 0 / "" => not
-    # supplied (legacy turn-bounded path); the budget section renders nothing.
+    # Wall-clock budget (seconds) and dispatch start timestamp (ISO-8601 UTC)
+    # so the specialist can self-throttle. 0 / "" => not supplied (the budget
+    # section renders nothing).
     wall_budget_sec: float = 0.0
     started_at_iso: str = ""
 
@@ -815,7 +804,6 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         + "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
         + "multi-round depth (e.g. coordinate-descent autotune) yourself.",
     ]
-    # Per-domain expertise + focus blocks.
     rendered_focus_keys: set[str] = set()
     focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
     if focus is not None:
@@ -824,7 +812,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.append("")
         body.extend(focus(inp))
         rendered_focus_keys.add(inp.domain.key)
-    # Multi-tag dispatch: append each extra tag's focus block.
+    # Append each extra tag's focus block (multi-tag dispatch).
     for tag in inp.extra_focus_tags:
         tag_domain = domain_for_tag(tag)
         if tag_domain is None or tag_domain.key in rendered_focus_keys:
@@ -1029,7 +1017,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- HBM per GPU: {inp.hbm_gb:.1f} GB")
     if inp.peak_tflops > 0:
         rows.append(f"- Peak TFLOPs (declared): {inp.peak_tflops:.1f}")
-    # Workload context — concrete numbers so the specialist doesn't guess.
+    # Workload context.
     workload_rows: list[str] = []
     if inp.precision:
         workload_rows.append(f"- precision: {inp.precision}")
@@ -1163,7 +1151,6 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
         if inp.research_hints:
-            # Research hints stand in as an advisory prior when KB is empty.
             rows.extend(
                 [
                     "Structured KB context is empty for this (model, hardware, domain), but "
@@ -1178,8 +1165,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             )
             return rows
         if cold:
-            # Cold-start directive so the specialist proposes domain-focus
-            # defaults rather than an empty proposal_set.
+            # Cold-start directive: propose domain-focus defaults, not an empty set.
             rows.extend(
                 [
                     "**COLD-START MODE — no priors available.**",
@@ -1385,9 +1371,8 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     for point in inp.warm_start_lessons:
-        # Warm-start data is external (Cortex/GBRAIN KB row) and may arrive as
-        # a plain-string lesson rather than a dict "point" with attrs; render
-        # the bare statement so the scout prompt never crashes on shape drift.
+        # External warm-start data may arrive as a plain string rather than a
+        # dict "point"; render the bare statement to tolerate shape drift.
         if isinstance(point, str):
             statement = point.strip()
             if statement:
@@ -1404,8 +1389,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # validated_count first (strongest cross-session signal); legacy
-        # rows fall back to source_session_id.
+        # validated_count is the strongest cross-session signal; fall back to source_session_id.
         vc = attrs.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"validated={vc}")
@@ -1501,8 +1485,7 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     for point in inp.warm_start_pitfalls:
-        # Symmetric with lessons: tolerate plain-string pitfalls from the
-        # external KB row alongside the structured dict "point" shape.
+        # Tolerate plain-string pitfalls alongside the structured dict "point".
         if isinstance(point, str):
             description = point.strip()
             if description:
@@ -1751,6 +1734,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "name": "<unique-in-round>",
                             "extra_args": "--example-flag value",
                             "extra_envs": {"EXAMPLE_ENV": "1"},
+                            "remove_args": ["--harmful-base-flag"],
+                            "unset_envs": ["HARMFUL_BASE_ENV"],
+                            "args_mode": "append",
                             "reason": "why this might help the gap",
                             "atomic": False,
                             "kb_evidence": [],
@@ -1773,7 +1759,16 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Field contract:",
         "",
-        "- ``proposal_set`` items reuse the explore variant schema.",
+        (
+            "- ``proposal_set`` items reuse the explore variant schema: "
+            "``extra_args`` / ``extra_envs`` add or override knobs, "
+            "``remove_args`` removes inherited server flags before appending, "
+            "``unset_envs`` removes inherited env vars before applying "
+            "``extra_envs``, and ``args_mode='replace'`` runs without "
+            "inherited server args. Use removal fields when a user/base "
+            "knob may be harmful; do not simulate deletion by adding an "
+            "unrelated flag."
+        ),
         (
             "- ``atomic`` (bool, default false): set ``true`` when this "
             "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "

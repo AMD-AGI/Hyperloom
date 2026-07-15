@@ -422,7 +422,7 @@ def _to_num(value: Any) -> float | None:
         return None
 
 
-# Direction keywords for cutting per-output-token latency (flag variants aligning with a dominant TPOT gap; advisory).
+# Direction keywords for cutting per-output-token latency (advisory).
 _LATENCY_DIRECTION_KEYWORDS: tuple[str, ...] = (
     "mtp",
     "speculative",

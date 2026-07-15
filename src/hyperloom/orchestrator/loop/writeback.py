@@ -85,8 +85,6 @@ class WritebackCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    # REQUEST / RESPONSE (Plan A)
-    # ------------------------------------------------------------------
     def _emit_lifecycle(
         self,
         *,
@@ -116,18 +114,14 @@ class WritebackCollaborator:
                 detail=detail,
                 duration_s=duration_s,
             )
-            # Terminal events (END/ERROR) carry the produced artifact paths an
-            # operator is waiting on — always flush them. Non-terminal markers
-            # (START / phase ENTER) are debounced: skip the write if we flushed
-            # within the last ``_lifecycle_save_min_interval_s`` seconds, since
-            # the next terminal event (or a later marker past the window) will
-            # persist the coalesced tail anyway.
+            # Terminal events (END/ERROR) always flush; non-terminal markers are
+            # debounced by ``_lifecycle_save_min_interval_s``.
             terminal = status in ("END", "ERROR")
             now = time.monotonic()
             if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
                 self.shared_state.save(self.session_dir)
                 self._coord._lifecycle_last_save = now
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:  # noqa: BLE001
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",
                 step,
@@ -135,7 +129,6 @@ class WritebackCollaborator:
                 exc_info=True,
             )
 
-    # Bookkeeping
     async def _record_policy_denied(
         self,
         source: str,
@@ -157,10 +150,8 @@ class WritebackCollaborator:
             action_name (str | None): Explicit action name override; falls back
                 to ``intent.payload['action_name']``.
         """
-        # Surface every PolicyGate denial in the standard process log (not just
-        # on the bus) so security rejections — including the newly-gated
-        # framework_source_root / CORE-field / path-containment checks — are
-        # observable in ops logs. Denials are exceptional, so this is not noisy.
+        # Surface every PolicyGate denial in the process log (not just the bus)
+        # so security rejections are observable in ops logs.
         log.warning(
             "PolicyGate denied intent: source=%s type=%s rule=%s reason=%s",
             source,
@@ -184,7 +175,7 @@ class WritebackCollaborator:
             )
         )
         resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
-        # Streak counter is a fact for LLM self-correction only; system no longer auto-prunes or stops on it (long-run continuity over loop stop-loss).
+        # Streak counter is a fact for LLM self-correction only; the system does not auto-prune or stop on it.
         self.shared_state.record_policy_denial(
             action_name=resolved_action,
             rule=str(denied.rule or ""),
@@ -214,7 +205,7 @@ class WritebackCollaborator:
             self.shared_state.record_kernel_opt(result)
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
-            # Never let a per-sub-attempt hiccup poison the gather; the post-gather record_kernel_opt picks it up.
+            # Never let a per-sub-attempt hiccup poison the gather.
             log.exception(
                 "_record_kernel_opt_partial failed for kernel_id=%s",
                 (result or {}).get("kernel_id") if isinstance(result, dict) else None,
@@ -312,7 +303,6 @@ class WritebackCollaborator:
                 reason="integrate_keep_watermark",
             )
 
-    # Dispatcher (pulls queued tasks → SubAgentRunner)
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         """Decide whether a settled task result should be promoted.
 
@@ -335,7 +325,7 @@ class WritebackCollaborator:
             return is_valid_measurement(result)
         if task_kind == "sweep":
             return result.get("status") == "succeeded"
-        # replay_warm_recipe ALWAYS routes through _promote_warm_replay (owns succeeded/drift/FAILED + clears in_flight); else PRELUDE blocks forever.
+        # replay_warm_recipe always routes through _promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":
             return True
         return result.get("status") != "failed"
@@ -410,10 +400,10 @@ class WritebackCollaborator:
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
         any_changed = False
-        # Per-action audit (failed attempt) for the 6 in-scope kinds.
+        # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}
-            # Stamp baseline-params fingerprint so the self-loop denial helper detects "same params failed twice".
+            # Stamp baseline-params fingerprint for the self-loop denial helper.
             if task.kind == "baseline":
                 audit_extras["fingerprint"] = _baseline_params_fingerprint(task.params)
             self.shared_state.record_action_attempt(
@@ -452,11 +442,9 @@ class WritebackCollaborator:
                 },
             )
             self.shared_state.record_conc_sweep(result_payload)
-        # FRAMEWORK apply/bench silent failure: a
-        # framework_agent task that settles ``status="failed"`` (or empty) never
-        # reaches the promote branch that writes the terminal progress row, so
-        # without stamping here the candidate stays "unprocessed" and the pump
-        # re-selects it every tick until the budget cap. Stamp no_result_failed.
+        # A framework_agent task that settles failed/empty never reaches the
+        # promote branch that writes the terminal progress row; stamp
+        # no_result_failed so the pump does not re-select it every tick.
         if task.kind == "framework_agent":
             cand = (task.params or {}).get("candidate")
             cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
@@ -471,25 +459,17 @@ class WritebackCollaborator:
                     extra={"status": str(result_payload.get("status") or "")},
                 )
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
-        # Fast arg errors (fast_exit_arg_error) get their own streak so
-        # they don't burn the slow-baseline retry budget on deterministic
-        # failures that the same params will never fix.
+        # Fast arg errors get their own streak so they don't burn the
+        # slow-baseline retry budget on deterministic failures.
         baseline_event_payload: dict[str, Any] | None = None
-        # Intentional: only arm/streak while no baseline has succeeded yet
-        # (tput <= 0). On resume with an existing baseline we never re-arm the
-        # eager fallback. Scope is baseline-only; explore/sweep do not benefit.
+        # Only arm/streak while no baseline has succeeded yet (tput <= 0).
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             err_class = result_payload.get("error_class", "")
-            # Enablement-aware backstop suppression: while a serial enablement is
-            # actively engaged, baseline boots re-fail *on purpose* — each round
-            # clears gap #n and the next boot stops at a new, deeper gap #(n+1).
-            # Those crashes are progress, so the ``baseline_failed`` fast-fail
-            # (streak / total) must NOT fire here; the honest ``enablement_stalled``
-            # cap (consecutive NO-progress rounds in _maybe_rearm_enablement) is
-            # the correct fast-fail in this regime. Engaged = a progressing patch
-            # already stacked OR a specialist currently dispatched/attempting.
-            # ``fast_exit_arg_error`` is deterministic (a bad CLI arg the same
-            # params never fix) and stays gated on its own streak regardless.
+            # While a serial enablement is actively engaged, baseline boots
+            # re-fail on purpose (each round clears a deeper gap), so the
+            # ``baseline_failed`` fast-fail must NOT fire here; the
+            # ``enablement_stalled`` cap is the correct fast-fail instead.
+            # ``fast_exit_arg_error`` stays gated on its own streak regardless.
             enablement_engaged = bool(
                 (getattr(self.shared_state, "enablement_kept_patches", None) or [])
                 or getattr(self.shared_state, "enablement_dispatched", False)
@@ -504,10 +484,8 @@ class WritebackCollaborator:
                 self.shared_state.baseline_arg_error_streak = 0
                 if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged:
                     self.shared_state.set_stop_reason("baseline_failed")
-            # Combined backstop: mixed error_classes split the per-class
-            # streaks above so neither reaches its threshold and the session
-            # burns the whole budget -> time_exhausted. Count ALL baseline
-            # failures and fast-fail at the same 3-failure intent.
+            # Combined backstop: count ALL baseline failures so mixed
+            # error_classes that split the per-class streaks still fast-fail.
             self.shared_state.baseline_total_failures += 1
             if (
                 self.shared_state.baseline_total_failures
@@ -517,7 +495,7 @@ class WritebackCollaborator:
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
-            # often recoverable by disabling cuda-graph capture. Arm it once.
+            # often recoverable by disabling cuda-graph capture.
             if err_class == "cuda_graph_capture_failed" and not self.shared_state.baseline_eager_fallback:
                 self.shared_state.baseline_eager_fallback = True
                 log.warning(
@@ -525,8 +503,7 @@ class WritebackCollaborator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump to classify
-            # and dispatch an enablement_specialist. Fast arg errors are excluded.
+            # Stash the launch/traceback text for the FRAMEWORK pump (fast arg errors excluded).
             if err_class != "fast_exit_arg_error":
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
@@ -541,7 +518,7 @@ class WritebackCollaborator:
                 "error_class": err_class,
             }
             any_changed = True
-        # Mirror the promote-path roofline failure handling: bump streak, clear auto-roofline gate, emit operator warning.
+        # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
         if task.kind == "roofline":
             if hasattr(self.shared_state, "roofline_failure_streak"):
                 self.shared_state.roofline_failure_streak += 1
@@ -570,7 +547,6 @@ class WritebackCollaborator:
                 )
             )
 
-    # Fact-write dispatcher (KEEP / REVERT entry point): route terminal results to journal + KB fact-write helpers.
     def _source_session_id(self) -> str:
         """Return the hyperloom-local session id used as source_session_id on KB fact writes.
 
@@ -673,10 +649,8 @@ class WritebackCollaborator:
         if not isinstance(result_dict, dict):
             return None
         error_class = str(result_dict.get("error_class") or "").lower()
-        # ``detokenizer_stall`` is a hang in all but name (server ready, no
-        # generation progress); record it as a crash-severity pitfall so the
-        # offending variant config is remembered and not re-proposed, instead
-        # of burning explore budget on the same stall again.
+        # ``detokenizer_stall`` is a hang in all but name; record it as a
+        # crash-severity pitfall so the offending config is not re-proposed.
         if error_class in ("crash", "oom", "hang", "detokenizer_stall"):
             return _SEVERITY_CRASH
         status = str(result_dict.get("status") or "").lower()
@@ -1192,10 +1166,7 @@ class WritebackCollaborator:
                         break
             out.append({
                 "kernel_id":     str(kid),
-                # source persisted under last_source_file; source_file is a legacy fallback.
-                "source_file":   str(
-                    e.get("last_source_file") or e.get("source_file") or ""
-                ),
+                "source_file":   str(e.get("last_source_file") or ""),
                 "artifact_path": str(e.get("last_artifact_path") or ""),
                 "micro_speedup": micro,
                 "decision":      "KEEP",
@@ -1203,7 +1174,7 @@ class WritebackCollaborator:
                 "e2e_tput":      e2e_tput,
                 "e2e_decision":  e2e_decision,
                 "integrated":    integrated,
-                "ts":            str(e.get("last_ts") or e.get("ts") or ""),
+                "ts":            str(e.get("last_ts") or ""),
             })
         return out
 
@@ -1269,7 +1240,7 @@ class WritebackCollaborator:
             cb_args = current_best.get("extra_server_args")
             if cb_args:
                 best_config["extra_server_args"] = str(cb_args)
-            for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
+            for key in ("extra_envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
         # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
@@ -1851,12 +1822,26 @@ class WritebackCollaborator:
         full_args = ""
         if isinstance(bv, dict):
             full_args = str(bv.get("extra_server_args") or "").strip()
-        # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
-        full_args = _merge_cumulative_extra_server_args(
-            base_args,
-            candidate_args,
-            full_args,
+        controls_effective = bool(
+            isinstance(bv, dict)
+            and (
+                bv.get("remove_args")
+                or bv.get("unset_envs")
+                or str(bv.get("args_mode") or "").strip().lower() == "replace"
+            )
         )
+        # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
+        if controls_effective:
+            # Removal/replace winners publish their effective cumulative config
+            # from ExploreExecutor. Prepending the prior current_best would
+            # reintroduce flags the variant deliberately removed.
+            full_args = _dedupe_extra_server_args(full_args)
+        else:
+            full_args = _merge_cumulative_extra_server_args(
+                base_args,
+                candidate_args,
+                full_args,
+            )
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -1871,6 +1856,7 @@ class WritebackCollaborator:
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
+                    "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
@@ -1879,10 +1865,7 @@ class WritebackCollaborator:
                 if gap_canonical_id:
                     stack_entry["gap_canonical_id"] = gap_canonical_id
                 # Stamp the variant's stable join key (and source) so breakdown
-                # attribution can map this explore gain back to its specialist
-                # provenance via explore_search.winners_history. Without it the
-                # phase_breakdown.explore.by_domain join always misses and every
-                # gain collapses into ``default_grid``.
+                # attribution maps this explore gain to its specialist provenance.
                 fp_val = ""
                 prov_val = ""
                 if isinstance(bv, dict):
@@ -1895,12 +1878,21 @@ class WritebackCollaborator:
                         fp_val = canonical_fingerprint(
                             candidate_args or full_args,
                             dict(bv.get("extra_envs") or {}),
+                            remove_args=bv.get("remove_args"),
+                            unset_envs=bv.get("unset_envs"),
+                            args_mode=str(bv.get("args_mode") or "append"),
                         )
                     prov_val = str(bv.get("provenance") or "").strip()
                 if fp_val:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
+                if isinstance(bv, dict):
+                    for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                        if bv.get(_ctrl_key):
+                            stack_entry[_ctrl_key] = bv.get(_ctrl_key)
+                    if bv.get("effective_extra_server_args"):
+                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -1915,7 +1907,7 @@ class WritebackCollaborator:
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
                 self.shared_state.optimization_stack.append(stack_entry)
-                # Mirror append into gain_per_stack_entry so the two parallel lists stay index-aligned.
+                # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
                     action=task_kind,
                     variant_name=variant_name,
@@ -1923,7 +1915,7 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
-        self.shared_state.current_best = {
+        current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
@@ -1935,6 +1927,15 @@ class WritebackCollaborator:
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
+        if isinstance(bv, dict):
+            for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                if bv.get(_ctrl_key):
+                    current_best[_ctrl_key] = bv.get(_ctrl_key)
+            if bv.get("effective_extra_server_args"):
+                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+            if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
+                current_best["args_mode"] = "replace"
+        self.shared_state.current_best = current_best
         if self.shared_state.baseline_tput > 0:
             self.shared_state.cumulative_gain = (
                 (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -1965,11 +1966,9 @@ class WritebackCollaborator:
             tput = result.get("output_throughput")
             warmup_anchor = result.get("warmup_round_tput")
             if isinstance(tput, (int, float)) and tput > 0:
-                # Baseline's conclusion contract is the hot measure round:
-                # BaselineExecutor already discards the cold first round and
-                # returns the second round as ``output_throughput``. Keep the
-                # discarded value only as an audit field so leaderboard/report
-                # gain math never mixes cold-before with hot-after.
+                # Baseline's conclusion contract is the hot measure round; the
+                # discarded cold round is kept only as an audit field so gain math
+                # never mixes cold-before with hot-after.
                 if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
                     self.shared_state.baseline_tput = float(tput)
                     self.shared_state.baseline_cold_tput = float(warmup_anchor)
@@ -1990,12 +1989,12 @@ class WritebackCollaborator:
             if isinstance(acc, (int, float)):
                 self.shared_state.baseline_accuracy = float(acc)
                 changed = True
-            # Persist the materialized YAML so downstream tasks reuse the exact workload contract baseline ran.
+            # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
             materialized = result.get("materialized_config")
             if isinstance(materialized, str) and materialized:
                 self.shared_state.baseline_config_path = materialized
                 changed = True
-                # parse workload-shape extras from the YAML for lesson/pitfall attrs. Best-effort.
+                # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
                 try:
                     parsed = _parse_baseline_workload_extra(materialized)
                 except Exception:  # noqa: BLE001 — defensive
@@ -2006,15 +2005,14 @@ class WritebackCollaborator:
                     parsed = {}
                 if parsed:
                     self.shared_state.baseline_workload_extra = parsed
-            # Promote baseline wall-clock so ExploreExecutor derives the per-variant overtime kill deadline.
+            # Promote baseline wall-clock so ExploreExecutor derives the overtime kill deadline.
             runtime_sec_raw = result.get("subprocess_runtime_sec")
             if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
                 self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
                 changed = True
-            # Promote the WARM measure-round wall-clock (client-only, no
-            # boot) as the anchor for the explore decision-round overtime kill.
-            # Present only on the double-run baseline path; absent on the
-            # single-round path (then explore falls back to the cold anchor).
+            # Promote the warm measure-round wall-clock as the anchor for the
+            # explore decision-round overtime kill (present only on the
+            # double-run baseline path; else explore uses the cold anchor).
             warm_runtime_raw = result.get("measure_round_runtime_sec")
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
@@ -2022,10 +2020,8 @@ class WritebackCollaborator:
             elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
                 self.shared_state.baseline_warm_runtime_sec = 0.0
                 changed = True
-            # current_best.tput follows the same hot baseline contract.
-            # run_grid/explore/integrate_patch measure optimization candidates
-            # on the same warm second-round basis when lifecycle reuse is
-            # available, so the numerator and denominator stay aligned.
+            # current_best.tput follows the same hot baseline contract so the
+            # gain numerator and denominator stay aligned.
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
@@ -2047,14 +2043,13 @@ class WritebackCollaborator:
                 "materialized_config": result.get("materialized_config"),
                 "accuracy": result.get("accuracy"),
                 "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
-                # Stamp canonical params fingerprint so the self-loop denial helper compares run-vs-proposed (_baseline_params_fingerprint).
+                # Stamp canonical params fingerprint for the self-loop denial helper.
                 "fingerprint": _baseline_params_fingerprint(task.params if task is not None else None),
             }
             # seed the gaps[] ledger from baseline (best-effort).
             await self._refresh_gaps(reason="baseline_done")
-            # Standalone baseline-arm roofline ceiling (pure CPU, no GPU/trace):
-            # backs up the snapshot ceiling so the frontend still has data when
-            # the roofline (profile + trace_analyze) step later fails.
+            # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
+            # snapshot ceiling in case the later roofline step fails.
             if isinstance(tput, (int, float)) and tput > 0:
                 try:
                     self.shared_state.record_baseline_roofline_ceiling()
@@ -2062,7 +2057,7 @@ class WritebackCollaborator:
                     log.warning(
                         "baseline roofline-ceiling backup failed: %r", exc,
                     )
-            # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis (deferred while replay in_flight, same GPU/port), (4) research scout.
+            # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
             if (
                 isinstance(tput, (int, float))
                 and tput > 0
@@ -2076,9 +2071,7 @@ class WritebackCollaborator:
                         "PRELUDE: warm-recipe history injection failed: %r",
                         exc,
                     )
-                # Warm-recipe replay. Anchor replay gain on the hot
-                # baseline_tput contract; candidate replays also return their
-                # hot measure round.
+                # Warm-recipe replay, anchored on the hot baseline_tput contract.
                 try:
                     await self._maybe_enqueue_warm_replay(
                         baseline_tput=float(self.shared_state.baseline_tput or tput),
@@ -2094,12 +2087,11 @@ class WritebackCollaborator:
                 )
                 # Research scout (parallel, read-only, CPU-only).
                 await self._maybe_enqueue_prelude_research_scout()
-                # Static-recon (parallel, read-only, CPU-only): grep
-                # the framework source for un-bridged capability switches and
-                # seed bridge candidates as gaps[] before EXPLORE starts.
+                # Static-recon (parallel, read-only, CPU-only): seed bridge
+                # candidates as gaps[] before EXPLORE starts.
                 await self._maybe_enqueue_prelude_static_recon()
         elif task_kind == "replay_warm_recipe":
-            # separate promote path so replay doesn't overwrite baseline_tput/current_best via the baseline branch.
+            # Separate promote path so replay doesn't overwrite baseline_tput/current_best.
             try:
                 self._promote_warm_replay(result, task=task)
             except Exception:  # noqa: BLE001 — defensive
@@ -2107,7 +2099,7 @@ class WritebackCollaborator:
             # PRELUDE initial roofline was deferred while replay ran.
             await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
         elif task_kind == "profile":
-            # atom profiles natively now, so this skipped arm is defensive; audit as skipped + drop the gate.
+            # Defensive skipped arm: audit as skipped + drop the gate.
             if str(result.get("status") or "") == "skipped":
                 audit_decision = "skipped"
                 audit_extras = {
@@ -2124,7 +2116,7 @@ class WritebackCollaborator:
                     "profile_args": None,
                     "output_throughput": result.get("output_throughput"),
                 }
-            # Surface ProfileExecutor's trace path so Orch passes a real path to trace_analyze.
+            # Surface the trace path so Orch passes a real path to trace_analyze.
             trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
             profile_status = str(result.get("status") or "")
             if profile_status == "failed" or result.get("error_class") == "no_trace_files":
@@ -2135,7 +2127,7 @@ class WritebackCollaborator:
             elif trace_path:
                 self.shared_state.last_profile_trace = str(trace_path)
                 self.shared_state.last_profile_status = "succeeded"
-                # Record the server config in effect for this trace so Orch can decide whether to re-profile.
+                # Record the server config in effect for this trace.
                 profile_args = ""
                 if task is not None:
                     profile_args = str((task.params or {}).get("base_extra_args") or "")
@@ -2145,7 +2137,7 @@ class WritebackCollaborator:
                 changed = True
                 audit_extras["trace_path"] = str(trace_path)
                 audit_extras["profile_args"] = profile_args
-            # profile result may include a tput; promote into current_best on the same +1% rule as the grid path.
+            # profile result may include a tput; promote into current_best on the +1% rule.
             tput = result.get("output_throughput")
             cb = self.shared_state.current_best or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
@@ -2173,8 +2165,7 @@ class WritebackCollaborator:
                         (float(tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
                     )
                 changed = True
-            # On a successful profile, mirror the roofline-branch watermark handling: re-anchor
-            # last_roofline_tput on the projected tput and clear the pending field for THIS task id.
+            # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
             if profile_status == "succeeded":
                 anchor_tput = self._current_tput_from_validated_gain()
                 if anchor_tput > 0:
@@ -2184,11 +2175,11 @@ class WritebackCollaborator:
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
         elif task_kind == "roofline":
-            # The composite roofline action runs profile + trace_analyze atomically and
-            # its executor already writes last_profile_* + last_trace_analyze; here we just record the audit row.
+            # The composite roofline action runs profile + trace_analyze atomically;
+            # its executor writes last_profile_* + last_trace_analyze, so here we just record the audit row.
             status = str(result.get("status") or "")
             if status == "skipped":
-                # Defensive arm (atom profiles natively now): clean no-op, no streak/watermark touch.
+                # Defensive arm: clean no-op, no streak/watermark touch.
                 audit_decision = "skipped"
                 audit_extras = {
                     "error_class": result.get("error_class"),
@@ -2200,7 +2191,7 @@ class WritebackCollaborator:
                     changed = True
             elif status == "succeeded":
                 audit_decision = "promoted"
-                # prefer the executor's published last_trace_analyze snapshot over the result dict for the audit row.
+                # Prefer the executor's last_trace_analyze snapshot over the result dict.
                 _last_ta = self.shared_state.last_trace_analyze or {}
                 audit_extras = {
                     "snapshot_id": (
@@ -2213,7 +2204,7 @@ class WritebackCollaborator:
                     "profile_workspace": result.get("profile_workspace"),
                     "degraded": bool(result.get("degraded", False)),
                 }
-                # reset the roofline failure streak on a successful snapshot (prompt-visibility only).
+                # Reset the roofline failure streak on a successful snapshot.
                 if hasattr(self.shared_state, "roofline_failure_streak"):
                     self.shared_state.roofline_failure_streak = 0
                 # Re-anchor the 10% watermark step on the projected current tput.
@@ -2228,7 +2219,7 @@ class WritebackCollaborator:
                     "error_class": result.get("error_class"),
                     "error": result.get("error"),
                 }
-                # bump the failure streak (mirrors the audit ledger on SharedState for prompt renderers).
+                # Bump the failure streak (mirrors the audit ledger for prompt renderers).
                 if hasattr(self.shared_state, "roofline_failure_streak"):
                     self.shared_state.roofline_failure_streak += 1
                 changed = True
@@ -2242,14 +2233,14 @@ class WritebackCollaborator:
                     result.get("phase"),
                     result.get("error_class"),
                 )
-            # Clear the pending pointer (matched by task id so an unrelated roofline can't clear another's anchor).
+            # Clear the pending pointer (matched by task id).
             if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
         elif task_kind == "explore":
-            # explore is the merged grid runner; the executor already did per-variant KEEP/REVERT + rebench,
-            # so winners are authoritative. Coordinator is single-writer for explore_search.accepted +
-            # current_best + optimization_stack and does NOT re-threshold.
+            # The executor already did per-variant KEEP/REVERT + rebench, so winners
+            # are authoritative; Coordinator is single-writer for explore_search.accepted +
+            # current_best + optimization_stack and does not re-threshold.
             # 1. Apply the executor's ledger increment.
             update = result.get("explore_search_update")
             if isinstance(update, dict):
@@ -2268,7 +2259,7 @@ class WritebackCollaborator:
                 if err:
                     self.shared_state.discovered_flags_error = str(err)
                 changed = True
-            # 3. Per-winner record_explore_accepted — Coordinator is sole writer of explore_search.accepted.
+            # 3. Per-winner record_explore_accepted (Coordinator is sole writer).
             winners = result.get("winners") or []
             round_id = str(result.get("round_id") or "")
             best_winner = result.get("best_variant")
@@ -2280,16 +2271,15 @@ class WritebackCollaborator:
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
-            # Full-stack ``resume_stack_revalidate`` or env-gated current_best
-            # ``resume_reverify_best`` both confirm the existing stack.
-            _revalidate_sources = {"resume_stack_revalidate", "resume_reverify_best"}
-            if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
+            if task is not None and str((task.params or {}).get("source") or "") in {
+                "resume_stack_revalidate",
+                "resume_reverify_best",
+            }:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
-                # A GEAK revalidation (2b) must not blindly stamp validated
-                # from the measured tput: assert the ran config's identity + that
-                # the optimization actually engaged, else replay via the GEAK
-                # harness (2a). Generic (native) revalidations keep the original
+                # A GEAK revalidation (2b) must assert config identity + that the
+                # optimization engaged before stamping validated, else replay via
+                # the GEAK harness (2a). Native revalidations keep the
                 # unconditional watermark reconciliation below.
                 if bool((task.params or {}).get("geak_fallback")):
                     got_hash = ""
@@ -2305,10 +2295,9 @@ class WritebackCollaborator:
                         min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     )
                     if decision == "validated":
-                        # Rebench-first: THIS is where the headline is first
-                        # written - from the measured orchestrator-harness
-                        # rebench. Lifts current_best + optimization_stack +
-                        # the validated gain and clears geak_pending.
+                        # Write the headline from the measured orchestrator-harness
+                        # rebench: lift current_best + optimization_stack + the
+                        # validated gain and clear geak_pending.
                         ps = (
                             self.shared_state.geak_result
                             if isinstance(
@@ -2322,10 +2311,8 @@ class WritebackCollaborator:
                             provenance="geak_orch_harness_validated",
                         )
                     else:
-                        # 2b inconclusive (config-identity or engagement) -> GEAK
-                        # harness replay (2a). Leaves pending flag set; 2a clears
-                        # it on success. Best-effort so a fallback failure never
-                        # crashes the reactor (provisional gain + warning remain).
+                        # 2b inconclusive -> GEAK harness replay (2a), which
+                        # clears the pending flag on success. Best-effort.
                         log.warning(
                             "geak 2b revalidation inconclusive "
                             "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
@@ -2378,8 +2365,7 @@ class WritebackCollaborator:
                     accepted.setdefault("accepted_at_round", round_id)
                     accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
                     self.shared_state.record_explore_accepted(accepted)
-                    # Per-anchor coverage (point 1): a specialist-provenance KEEP
-                    # zeroes that domain's rounds_since_last_keep counter.
+                    # A specialist-provenance KEEP zeroes that domain's rounds_since_last_keep counter.
                     prov = str(accepted.get("provenance") or "")
                     if prov.startswith("specialist:"):
                         try:
@@ -2390,7 +2376,7 @@ class WritebackCollaborator:
                                 prov,
                             )
                     changed = True
-                # 4. Lift the best winner into current_best / optimization_stack (best_tput is post-rebench).
+                # 4. Lift the best winner into current_best / optimization_stack.
                 if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
                     explore_gap_cid = (
                         str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
@@ -2408,8 +2394,8 @@ class WritebackCollaborator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("depth: note_explore_outcome failed")
             if promoted:
-                # explore inlines the per-KEEP rebench, so promote it into cumulative_gain_validated +
-                # advance validated_stack_len so the long-run #4 unvalidated-stack guard clears immediately.
+                # explore inlines the per-KEEP rebench: promote into cumulative_gain_validated +
+                # advance validated_stack_len so the unvalidated-stack guard clears.
                 if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
                     validated_gain = (
                         (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -2417,7 +2403,7 @@ class WritebackCollaborator:
                     self.shared_state.cumulative_gain_validated = float(validated_gain)
                     self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
                     self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                    # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10% over the last.
+                    # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                     await self._maybe_enqueue_watermark_roofline(
                         reason="explore_keep_watermark",
                     )
@@ -2449,9 +2435,8 @@ class WritebackCollaborator:
                     "workspace": result.get("workspace"),
                     "provenance": "integrate_patch",
                     "scope": "source_patch",
-                    # Durable source-layer handles so current_best stays
-                    # relaunchable (and reproducible in the GEAK baseline)
-                    # regardless of later git hygiene on the shared live tree.
+                    # Durable source-layer handles so current_best stays relaunchable
+                    # and reproducible in the GEAK baseline.
                     "source_snapshot": result.get("source_snapshot") or "",
                     "framework_root": result.get("framework_root") or "",
                     "base_sha": result.get("base_sha") or "",
@@ -2469,8 +2454,7 @@ class WritebackCollaborator:
                         reason="integrate_keep_watermark",
                     )
                 changed = True
-            # Clear long-run #4 sentinel after the task outcome has been
-            # observed. On a crash before this point, resume sees it and audits.
+            # Clear the pending_integrate sentinel after the task outcome is observed.
             if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
                 pending = self.shared_state.pending_integrate
                 if not pending or str(pending.get("task_id") or "") in {
@@ -2490,16 +2474,14 @@ class WritebackCollaborator:
                 "patches_reverted": result.get("patches_reverted") or [],
             }
         elif task_kind == "framework_agent":
-            # FRAMEWORK per-candidate result: append a progress row, update the batch max-gain stat, and on
-            # KEEP lift to current_best + optimization_stack + cumulative_gain_validated + watermark roofline.
+            # FRAMEWORK per-candidate result: append a progress row, update the batch
+            # max-gain stat, and on KEEP lift to current_best + validated gain + watermark.
             status = str(result.get("status") or "")
             candidate = result.get("candidate") or {}
             cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
-            # Silent apply/bench failure: the executor returned a promotable-
-            # looking result (status != "failed") but with no candidate / no
-            # status (empty result dict). Recover the candidate key from the
-            # task params and coerce the status so the row is a real terminal
-            # verdict the pump can dedup on, not a blank row keyed on "".
+            # Silent apply/bench failure: recover the candidate key from task
+            # params and coerce the status so the row is a real terminal verdict
+            # the pump can dedup on, not a blank row keyed on "".
             if not cand_id and task is not None:
                 task_cand = (getattr(task, "params", None) or {}).get("candidate")
                 cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
@@ -2543,7 +2525,7 @@ class WritebackCollaborator:
                     accuracy_pass=result.get("accuracy_pass"),
                     extra={"workspace": str(result.get("workspace") or "")},
                 )
-            except Exception:  # noqa: BLE001 — observability is best-effort
+            except Exception:  # noqa: BLE001
                 log.debug("FRAMEWORK: executor decision.json write failed", exc_info=True)
             # Update batch max-gain rolling stat (for the plateau judge).
             batches = getattr(self.shared_state, "framework_agent_batches", None) or []
@@ -2600,15 +2582,15 @@ class WritebackCollaborator:
                 },
             )
             self.shared_state.record_sweep(result)
-            # Sweep is discovery-only (never promotes) and MUST NOT mutate params_no_promote_streak.
+            # Sweep is discovery-only (never promotes) and must not mutate params_no_promote_streak.
             self.shared_state.save(self.session_dir)
-            # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in (best-effort, non-blocking).
+            # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in.
             if getattr(self.shared_state, "conc_sweep_enabled", False) and result.get("status") == "succeeded":
                 try:
                     await self._enqueue_internal_conc_sweep_task(
                         reason="post_sweep",
                     )
-                except Exception:  # noqa: BLE001 — never block SWEEP->CLOSE
+                except Exception:  # noqa: BLE001
                     log.exception("conc_sweep: post-sweep enqueue raised (non-fatal)")
             return
         elif task_kind == "conc_sweep":
@@ -2630,11 +2612,11 @@ class WritebackCollaborator:
                     "report_path": result.get("report_json_path"),
                 },
             )
-            # Write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done without budget exhaustion.
+            # Write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done.
             self.shared_state.record_conc_sweep(result)
             self.shared_state.save(self.session_dir)
             return
-        # Audit trail (kernel-parity): one succeeded-attempt record with branch-supplied decision/extras.
+        # Audit trail: one succeeded-attempt record with branch-supplied decision/extras.
         if audit_decision is not None and task_kind in _AUDIT_ACTIONS:
             self.shared_state.record_action_attempt(
                 action=task_kind,
@@ -3281,7 +3263,11 @@ class WritebackCollaborator:
         args = str(rebuilt.get("extra_server_args") or "").strip()
         envs = rebuilt.get("extra_envs") or {}
         overlay = str(rebuilt.get("final_overlay") or "").strip()
-        if not (args or envs):
+        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_remove = cb_now.get("remove_args")
+        cb_unset = cb_now.get("unset_envs")
+        cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"
+        if not (args or envs or cb_remove or cb_unset or cb_replace):
             return {"skipped": True, "reason": "empty_stack"}
         params: dict[str, Any] = {
             "source": "resume_stack_revalidate",
@@ -3301,6 +3287,12 @@ class WritebackCollaborator:
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
             "enable_stack_rebench": False,
         }
+        if cb_remove:
+            params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])
+        if cb_unset:
+            params["base_unset_envs"] = [cb_unset] if isinstance(cb_unset, str) else list(cb_unset or [])
+        if cb_replace:
+            params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
         task, existing = await self.tasks.create_or_return_existing(
@@ -3378,34 +3370,24 @@ class WritebackCollaborator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            if self._geak_legacy_promote():
-                # Legacy: current_best/stack were written up front; stamp the
-                # same-harness validated watermark from GEAK's OWN headline speedup.
-                self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
-                self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                self.shared_state.cumulative_gain_provenance = "geak_same_harness_geak"
-                self.shared_state.resume_pending_revalidation = False
-                gain_out = (geak_sp - 1.0) * 100.0
-            else:
-                # Rebench-first: write the headline from the GEAK-harness MEASURED
-                # throughput (engages by construction via the launch-script replay),
-                # keeping the leaderboard number a same-harness total rather than a
-                # self-reported speedup.
-                measured = _geak_sweep_measured_tput(res)
-                if measured is None:
-                    log.warning(
-                        "geak 2a: succeeded sweep but no measurable throughput; "
-                        "candidate stays pending"
-                    )
-                    return {"validated": False, "status": res.get("status"), "reason": reason}
-                self._promote_geak_from_candidate(
-                    ps,
-                    measured_tput=measured,
-                    provenance="geak_same_harness_geak",
+            # Rebench-first: write the headline from the GEAK-harness MEASURED
+            # throughput (engages by construction via the launch-script replay),
+            # keeping the leaderboard number a same-harness total rather than a
+            # self-reported speedup.
+            measured = _geak_sweep_measured_tput(res)
+            if measured is None:
+                log.warning(
+                    "geak 2a: succeeded sweep but no measurable throughput; "
+                    "candidate stays pending"
                 )
-                base = float(self.shared_state.baseline_tput or 0.0)
-                gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
+                return {"validated": False, "status": res.get("status"), "reason": reason}
+            self._promote_geak_from_candidate(
+                ps,
+                measured_tput=measured,
+                provenance="geak_same_harness_geak",
+            )
+            base = float(self.shared_state.baseline_tput or 0.0)
+            gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive

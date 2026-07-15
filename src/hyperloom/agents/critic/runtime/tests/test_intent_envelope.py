@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Validation + parity tests for :mod:`runtime.intent_envelope`; mirrors the Coordinator schema so drift fails loudly here."""
+"""Validation + parity tests for :mod:`runtime.intent_envelope`."""
 
 from __future__ import annotations
 

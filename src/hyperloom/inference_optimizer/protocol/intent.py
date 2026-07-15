@@ -4,8 +4,7 @@
 
 Claude (``emit_intent`` MCP tool_call) and Codex (``validated_json_output``)
 transports share one envelope shape, validated via :func:`validate_envelope`.
-Bottom-layer definition: must never import ``orchestrator`` / ``shared_state``
-(import cycle).
+Must never import ``orchestrator`` / ``shared_state`` (import cycle).
 """
 
 from __future__ import annotations
@@ -29,8 +28,7 @@ class IntentType(str, Enum):
     PROPOSE_ACTION = "propose_action"
     UPDATE_STATE = "update_state"
     ALERT = "alert"
-    # Bidirectional agent-to-agent RPC; PolicyGate restricts (source,
-    # target_agent) pairs and `kind` per pair.
+    # Bidirectional agent-to-agent RPC.
     REQUEST = "request"
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"  # Critic-only
@@ -58,14 +56,12 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # verdict/verdict_map mutual exclusion enforced by
-    # _validate_review_verdict_payload; only the structural field required here.
+    # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # specialist exit envelope; per-variant schema enforced by PolicyGate R3
-    # (policy._validate_specialist_done).
+    # specialist exit envelope; per-variant schema enforced by PolicyGate R3.
     IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
 }
 
@@ -141,9 +137,6 @@ def _validate_review_verdict_payload(
 ) -> None:
     """Enforce REVIEW_VERDICT structural shape: exactly one of ``verdict``
     (single) or ``verdict_map`` (per-variant batch) must be present.
-
-    PolicyGate handles content validation (verdict vocab, variant_name vs
-    grid); this only guarantees at-most-one-present for downstream callers.
 
     Args:
         payload: The REVIEW_VERDICT intent payload to validate.

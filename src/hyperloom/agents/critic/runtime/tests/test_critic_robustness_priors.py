@@ -126,12 +126,11 @@ def test_load_priors_filters_severity_and_caps(tmp_path: Path) -> None:
         "\n".join(json.dumps(r) for r in rows) + "\n",
         encoding="utf-8",
     )
-    # HIGH only: 3 rows; cap to 2 → last two (high2, high3).
+    # HIGH only: cap to 2 → last two (high2, high3).
     priors = _load_robustness_priors(path, limit=2, min_severity="high")
     names = [p["symptom_name"] for p in priors]
     assert names == ["high2", "high3"]
     assert priors[0]["tick_index"] == 4
-    # MEDIUM-or-above: still capped to 2; last two of {med1, high1..3}
     priors_med = _load_robustness_priors(
         path,
         limit=10,
@@ -146,7 +145,6 @@ def test_load_priors_filters_severity_and_caps(tmp_path: Path) -> None:
 
 
 def test_load_priors_handles_missing_file(tmp_path: Path) -> None:
-    # Nonexistent path → empty list (no crash).
     out = _load_robustness_priors(
         tmp_path / "missing.jsonl",
         limit=5,
@@ -208,7 +206,6 @@ def test_prepare_review_injects_robustness_priors(reviewer, tmp_path: Path, monk
     assert p["severity"] == "high"
     assert p["rca_text"] == "reboot mitigated last 3 times"
     assert any("robustness_priors_injected" in n for n in bundle.notes)
-    # to_dict() must include the new field.
     serialised = bundle.to_dict()
     assert "robustness_priors" in serialised
     assert serialised["robustness_priors"][0]["symptom_name"] == ("gpu_leak_persistent")
@@ -252,7 +249,6 @@ def test_prepare_review_no_priors_when_no_findings(
     monkeypatch,
     tmp_path: Path,
 ):
-    # ROBUSTNESS_AGENT_SESSION_DIR points to an empty dir → no file.
     monkeypatch.setenv("ROBUSTNESS_AGENT_SESSION_DIR", str(tmp_path))
     monkeypatch.delenv("CRITIC_ROBUSTNESS_FINDINGS_DIR", raising=False)
     bundle = reviewer.prepare_review(

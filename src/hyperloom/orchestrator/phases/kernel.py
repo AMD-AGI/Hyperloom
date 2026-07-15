@@ -50,8 +50,7 @@ class KernelPhase(PhaseHandler):
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return
-        # With a measured trace, reprofile only on a material change; with none,
-        # fall through so GEAK still gets a real trace.
+        # With a measured trace, reprofile only on a material change.
         if before > 0 and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL:
             return
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
@@ -73,13 +72,10 @@ class KernelPhase(PhaseHandler):
     def _geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer.
 
-        The single source of truth is the kernel backend order
-        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when
-        ``geak`` appears there, it owns the whole phase.  The
-        ``kernel_optimizer`` state field is the persisted record of that
-        decision (derived from the order at startup); it is used as a resume
-        fallback so this stays correct even when the env var is not re-exported
-        in a fresh shell.
+        The source of truth is the kernel backend order
+        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when ``geak``
+        appears there it owns the whole phase. The ``kernel_optimizer`` state
+        field is the persisted record used as a resume fallback.
         """
         from ..kernel.request_handlers import geak_selected
 
@@ -99,7 +95,6 @@ class KernelPhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         if not self._kernel_enabled():
-            # Should not happen — --no-kernel routes EXPLORE → SWEEP.
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 from_phase or "<unknown>",
@@ -107,16 +102,15 @@ class KernelPhase(PhaseHandler):
             return
         if self._geak_enabled():
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run
-            # seeded with the EXPLORE best config, then hand straight to SWEEP
-            # (which reuses GEAK' final_launch.sh + bench_e2e.sh).
+            # seeded with the EXPLORE best config, then hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
-            # No GEMM tuning here: refresh the snapshot (explore gains) before the LLM drives GEAK.
+            # No GEMM tuning here: refresh the snapshot before the LLM drives GEAK.
             await self._maybe_reprofile_for_kernel()
             return
 
-        # Refresh the snapshot (explore gains) before GEMM tuning targets the bottleneck.
+        # Refresh the snapshot before GEMM tuning targets the bottleneck.
         await self._maybe_reprofile_for_kernel()
         log.info(
             "KERNEL entry: running GEMM tuning before source-level kernel_opt",
@@ -192,12 +186,10 @@ class KernelPhase(PhaseHandler):
                 "tuned_file": result.get("tuned_file"),
             },
         )
-        # Capture explore + GEMM-tuning gains before inline GEAK targets the bottleneck.
+        # Capture explore + GEMM-tuning gains before inline GEAK.
         await self._maybe_reprofile_for_kernel()
-        # Autonomous kernel fusion (forge-fusion) sits between GEMM tuning and generic
-        # kernel-opt: it authors serving-validated fused kernels from the decode trace
-        # and hands a patch + env flags to integrate. Gated + non-blocking — a fusion
-        # failure just falls through to the generic kernel-opt batch below.
+        # Autonomous kernel fusion (forge-fusion) between GEMM tuning and generic
+        # kernel-opt; gated + non-blocking (a failure falls through to kernel-opt).
         if self._fusion_required_before_kernel_opt():
             await self._run_forge_fusion_after_gemm()
             await self._maybe_reprofile_for_kernel()
@@ -245,10 +237,8 @@ class KernelPhase(PhaseHandler):
     def _should_run_bf16_dense_gemm_fallback(self, result: dict[str, Any]) -> bool:
         """Return True when a forge fp8 run should try bf16 dense GEMM tuning.
 
-        Recent production runs showed the automatic KERNEL-entry GEMM step can
-        stop after a single fp8 a8w8/a8w8_blockscale no-op. Historical wins came
-        from a follow-up ``sglang_dense_bf16`` run, so make that fallback
-        deterministic when the fp8 tuner produced no E2E-validatable candidate.
+        Makes the ``sglang_dense_bf16`` fallback deterministic when the fp8 tuner
+        produced no E2E-validatable candidate.
         """
         if not isinstance(result, dict):
             return False
@@ -330,15 +320,13 @@ class KernelPhase(PhaseHandler):
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
         """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
 
-        Reads the materialized baseline recipe's ``benchmark.envs`` (the exact
-        knobs Magpie benched with) and falls back to the process env. Returns
-        only the keys that resolve so absent values leave GEAK on its own
-        standalone defaults. Never raises — measurement-protocol propagation must
-        not block the KERNEL_AGENT phase.
+        Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
+        to the process env) and returns only the keys that resolve, so absent
+        values leave GEAK on its standalone defaults. Never raises.
         """
         envs: dict[str, Any] = {}
         try:
-            import yaml  # local import: yaml is not a coordinator top-level dep
+            import yaml
 
             if recipe_path and Path(recipe_path).is_file():
                 cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
@@ -375,12 +363,9 @@ class KernelPhase(PhaseHandler):
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget.
 
-        The KERNEL_AGENT phase-entry hook runs GEAK synchronously, so a fixed
-        subprocess default would (a) ignore ``--max-hours`` / the run deadline
-        and (b) keep the tick loop from reaching the deadline → closing-phase
-        check until it returns. To stay inside the budget we cap the run so it
-        ALWAYS finishes with at least the closing-grace window left, and shrink
-        the runner's own budget by a safety margin on top of that.
+        The KERNEL_AGENT phase-entry hook runs GEAK synchronously, so the run is
+        capped to always finish with at least the closing-grace window left, and
+        the runner's own budget is shrunk by a safety margin on top of that.
 
         Returns:
             tuple[int, int, bool]: ``(runner_timeout_s, kill_timeout_s,
@@ -392,12 +377,8 @@ class KernelPhase(PhaseHandler):
             is used verbatim.
         """
         # Standalone fallback ONLY: the 12h (43200s) default applies when no run
-        # deadline is set (budget_known=False) — e.g. a unit test invoking the
-        # hook directly, or GEAK run outside an orchestrated session. When
-        # Hyperloom DRIVES the run (deadline known) the budget MUST come from
-        # Hyperloom's live deadline / KERNEL_AGENT phase allocation, so this default
-        # never caps a Hyperloom-driven run (a long --max-hours session can
-        # legitimately allot KERNEL more than 12h).
+        # deadline is set (budget_known=False). A Hyperloom-driven run sources the
+        # budget from the live deadline / phase allocation instead.
         env_default_timeout = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))
         deadline = self._run_deadline
         if deadline is None:
@@ -407,22 +388,17 @@ class KernelPhase(PhaseHandler):
             float(getattr(self.shared_state, "max_minutes", 0) or 0), None,
         )
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
-        # Reserve the closing window: the subprocess (incl. result.json flush)
-        # must be killed with at least ``grace`` left so closing can still run.
+        # Reserve the closing window: kill the subprocess with at least ``grace`` left.
         kill_budget = remaining - grace
-        # Also honour the KERNEL_AGENT phase's own wall-clock budget: GEAK runs
-        # synchronously inside the phase-entry hook, so a run longer than the
-        # phase allocation would overrun the phase budget the same way it would
-        # overrun the session deadline. Cap by min(session, kernel_phase).
+        # Also honour the KERNEL_AGENT phase's own wall-clock budget:
+        # cap by min(session, kernel_phase).
         phase_rem = _phase_state.phase_budget_remaining_seconds(
             self.shared_state, budget_pct=self._phase_budget_pct,
         )
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
-        # Hyperloom-authoritative budget: the runner self-stops ``margin`` before
-        # the hard subprocess kill, and the kill reserves the closing-grace
-        # window. Derived purely from the live budget — the 12h env default does
-        # NOT cap it (requirement: GEAK time comes from Hyperloom here).
+        # The runner self-stops ``margin`` before the hard subprocess kill, which
+        # reserves the closing-grace window.
         kill_timeout = int(max(0.0, kill_budget))
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
@@ -445,25 +421,16 @@ class KernelPhase(PhaseHandler):
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
             "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
         }
-        # Bench measurement protocol: forward the SAME knobs Hyperloom
-        # actually benched with so GEAK' internal e2e measures identically.
-        # Without this GEAK falls back to its own standalone defaults
-        # (e.g. RANDOM_RANGE_RATIO=1 fixed-length vs Hyperloom's 0 variable-length)
-        # and the cross-harness numbers diverge. Source of truth = the materialized
-        # baseline recipe's benchmark.envs (the exact values Magpie ran), with a
-        # process-env fallback. Only keys that resolve are sent; absent keys leave
-        # GEAK on its own defaults so it still runs standalone.
+        # Forward the SAME bench knobs Hyperloom benched with so GEAK's internal
+        # e2e measures identically; source = the baseline recipe's benchmark.envs
+        # (process-env fallback). Only resolved keys are sent.
         bench_protocol = self._resolve_bench_protocol(
             str(getattr(state, "baseline_config_path", "") or "")
         )
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
-        # Magpie's baseline served with, so GEAK/e2e launches the IDENTICAL vLLM
-        # engine and its own baseline matches raw_baseline_tput. Otherwise GEAK
-        # re-baselines on a slower stack default and kernel wins never translate
-        # e2e (see #805, gpt-oss-120b MXFP4). Hyperloom keeps these as raw flags
-        # inside the baseline server-args (NOT structured fields), so the resolver
-        # parses them from there (dedicated state.max_model_len wins; env last).
-        # Only resolved knobs are injected below (absent => GEAK adapter default).
+        # the baseline served with so GEAK launches the identical engine and its
+        # baseline matches raw_baseline_tput. Resolver parses these from the raw
+        # baseline server-args (dedicated state.max_model_len wins; env last).
         try:
             from ..kernel.roofline_ceiling import read_baseline_server_args
 
@@ -476,10 +443,8 @@ class KernelPhase(PhaseHandler):
         )
 
         handoff = {
-            # v2 adds ``baseline_env_spec`` (the full layered env of current_best:
-            # config + durable source snapshots + overlay). Consumers that only
-            # understand v1 ignore the new key and degrade to the flags/env-only
-            # baseline (back-compatible).
+            # v2 adds ``baseline_env_spec`` (the full layered env of current_best);
+            # v1-only consumers ignore it and degrade to the flags/env-only baseline.
             "schema_version": 2,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
             "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
@@ -491,41 +456,27 @@ class KernelPhase(PhaseHandler):
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
             "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             # Orchestrator throughput of the SAME config GEAK seeds its baseline
-            # with (accepted_flags/accepted_env == current_best config). Lets
-            # run_e2e compute a PURE measurement divergence (GEAK-vs-orchestrator
-            # on identical config) separate from the explore/framework config
-            # gain that inflates raw_baseline-relative divergence. 0.0 => no
-            # accepted config yet (falls back to raw baseline downstream).
+            # with, so run_e2e can compute a pure measurement divergence. 0.0 =>
+            # no accepted config yet (falls back to raw baseline downstream).
             "orchestrator_best_tput_same_config": float(
                 (state.current_best or {}).get("tput") or 0.0
             ) if isinstance(getattr(state, "current_best", None), dict) else 0.0,
-            # Serving-launch fidelity: forward the same max-model-len / mem-util production
-            # (Magpie) served with, so GEAK's baseline launches the SAME engine and its baseline
-            # matches raw_baseline_tput (else the accepted SP config crashes and GEAK re-baselines
-            # on a slower stack default -> kernel wins never translate e2e). Both optional: when
-            # unset the GEAK vllm adapter applies its own production-faithful defaults.
+            # Serving-launch fidelity (both optional; unset => GEAK adapter default).
             "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
             "mem_fraction": float(getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)),
             "exp_root": str(self.session_dir / "geak"),
-            # Pin a stable, macro-cycle-scoped eval_dir so a resumed / re-entered
-            # KERNEL reuses the SAME on-disk workflow artifacts (continue-from-disk)
-            # instead of minting a fresh timestamped dir every invocation. Scoping
-            # by macro_cycle keeps multi-cycle correct: a NEW cycle's KERNEL gets
-            # its own dir and runs fresh, while a same-cycle resume lands back on
-            # the in-progress dir (so run_e2e's terminal-marker short-circuit and
-            # its disk-recovery both target exactly this cycle's work).
+            # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the
+            # in-progress on-disk artifacts while a new cycle gets a fresh dir.
             "eval_dir": str(
                 self.session_dir
                 / "geak"
                 / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"
             ),
-            # Align GEAK' bench CLIENT to Hyperloom's exact one (InferenceX
-            # benchmark_serving.py) so final/sweep numbers are cross-harness comparable.
+            # Align GEAK's bench CLIENT to Hyperloom's exact one so final/sweep
+            # numbers are cross-harness comparable.
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
-            # Pin the serving / optimization GPU set so GEAK never guesses:
-            # honour an explicit visibility mask, else 0..tp-1 (matches run_e2e
-            # map_args' own default). Removes ambiguity when Hyperloom drives.
+            # Pin the serving GPU set: explicit visibility mask, else 0..tp-1.
             "gpu_ids": (
                 os.environ.get("HIP_VISIBLE_DEVICES")
                 or os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -536,10 +487,8 @@ class KernelPhase(PhaseHandler):
             handoff["bench_protocol"] = bench_protocol
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.
         handoff.update(_serving_fidelity)
-        # Full layered environment of current_best so GEAK materializes its
-        # baseline ref from the SAME config + source-patch snapshots + overlay
-        # (not just accepted_flags/accepted_env). This is what makes the ref ==
-        # orchestrator best (same-harness) instead of a stock-framework baseline.
+        # Full layered environment of current_best so GEAK's baseline ref ==
+        # orchestrator best (config + source-patch snapshots + overlay).
         try:
             handoff["baseline_env_spec"] = self.build_env_spec()
         except Exception:  # noqa: BLE001 — env_spec is additive; never block handoff
@@ -567,9 +516,8 @@ class KernelPhase(PhaseHandler):
             runner_timeout_s: int | None = None,
         ) -> None:
             state.geak_result = result
-            # Rebench-first: record the recovered win as an UNVALIDATED
-            # candidate; the caller enqueues the main-flow rebench that will
-            # write the headline once it lands.
+            # Rebench-first: record the recovered win as an UNVALIDATED candidate;
+            # the caller enqueues the main-flow rebench that writes the headline.
             self._record_geak_candidate(result)
             self._record_geak_kernel_journey(result)
             evidence = {
@@ -583,9 +531,7 @@ class KernelPhase(PhaseHandler):
             if runner_timeout_s is not None:
                 evidence["runner_timeout_s"] = runner_timeout_s
             self._record_phase_entry_evidence(geak=evidence)
-            # Set the wind-down hint BEFORE the durable save so a crash between
-            # here and the next tick's SWEEP transition cannot lose it
-            # (set_pending_escalate_hint is in-memory only).
+            # Set the wind-down hint BEFORE the durable save (it is in-memory only).
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
@@ -603,15 +549,13 @@ class KernelPhase(PhaseHandler):
                 "error_class": result.get("error_class"),
                 "error": (str(result.get("error") or "")[:500] or None),
             })
-            # Persist the wind-down hint durably (see _promote_recovered_result).
+            # Persist the wind-down hint durably.
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
-        # Crash-recovery: a validated result.json written before the coordinator
-        # crashed (handback never reached state.save) must be promoted on resume.
-        # Guard with ``_geak_win_already_recorded`` so a prior cycle's
-        # result.json (``geak/`` is a fixed path) does not short-circuit a
-        # fresh KERNEL entry in a later macro-cycle.
+        # Crash-recovery: a validated result.json written before a coordinator
+        # crash is promoted on resume, guarded by ``_geak_win_already_recorded``
+        # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
         if (
@@ -669,8 +613,7 @@ class KernelPhase(PhaseHandler):
 
         # Run in its own process group so a timeout can SIGTERM the whole
         # runner -> run_e2e -> vllm/node tree (grace to flush result.json), then
-        # SIGKILL. A bare subprocess.run(timeout=) would SIGKILL only the direct
-        # child and orphan run_e2e + its servers.
+        # SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
         def _run() -> subprocess.CompletedProcess:
@@ -709,9 +652,8 @@ class KernelPhase(PhaseHandler):
             log.warning("GEAK runner exceeded kill_timeout=%ds; SIGTERM'd "
                         "to let it flush, then reclaimed the closing window",
                         kill_timeout)
-            # The graceful SIGTERM gives run_e2e a window to flush result.json
-            # (recover-from-disk). If it landed a real win, keep it instead of
-            # discarding the whole KERNEL_AGENT phase as a timeout.
+            # The graceful SIGTERM gives run_e2e a window to flush result.json;
+            # keep a real win instead of discarding the phase as a timeout.
             recovered = _read_geak_result(result_path)
             if recovered.get("status") == "ok":
                 log.info("GEAK flushed an OK result.json under SIGTERM "
@@ -721,9 +663,8 @@ class KernelPhase(PhaseHandler):
                     recovered_from="sigterm_flushed_result_json",
                     runner_timeout_s=runner_timeout,
                 )
-                # Rebench-first: enqueue the main-flow rebench. Under a budget cap
-                # it may not get to run, in which case the candidate honestly
-                # stays pending (never a self-reported headline).
+                # Rebench-first: enqueue the main-flow rebench (candidate stays
+                # pending if a budget cap prevents it from running).
                 try:
                     await self._enqueue_internal_stack_rebench(
                         reason="geak_e2e_win_sigterm_recovered"
@@ -762,11 +703,9 @@ class KernelPhase(PhaseHandler):
         result.setdefault("returncode", proc.returncode)
         state.geak_result = result
 
-        # Invariant guard: GEAK self-reports when its baseline ref failed to
-        # reproduce ``orchestrator_best_tput_same_config`` (env_spec materialization
-        # mismatch). Such a run optimized against a PHANTOM baseline, so any gain is
-        # non-comparable - never promote it; wind down honestly. This replaces the
-        # old after-the-fact cross-harness rollback with a hard, upstream gate.
+        # Invariant guard: a GEAK run whose baseline ref failed to reproduce
+        # ``orchestrator_best_tput_same_config`` optimized against a phantom
+        # baseline, so its gain is non-comparable — never promote it.
         if str(result.get("status") or "") == "baseline_reproduction_failed":
             log.warning(
                 "GEAK baseline_reproduction_failed: ref did not match "
@@ -789,12 +728,8 @@ class KernelPhase(PhaseHandler):
         # headline is written later from the measured rebench.
         self._record_geak_candidate(result)
         self._record_geak_kernel_journey(result)
-        # Enqueue the same-harness config-identity rebench (2b, GEAK-harness 2a
-        # fallback). Rebench-first: this is the ONLY path that writes the headline
-        # (via _promote_to_shared_state / _validate_geak_via_geak_harness);
-        # until it lands the candidate stays out of current_best / the gain ledger.
-        # Best-effort: a failure to enqueue leaves the candidate pending, which
-        # reports surface honestly (never a false validated).
+        # Enqueue the same-harness config-identity rebench — the ONLY path that
+        # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
             try:
                 await self._enqueue_internal_stack_rebench(reason="geak_e2e_win")
@@ -820,19 +755,15 @@ class KernelPhase(PhaseHandler):
             },
             priority=1,
         ))
-        # KERNEL is a one-shot under GEAK: wind down to SWEEP. Persist the
-        # hint so a crash before the next tick's SWEEP transition doesn't lose it
-        # (set_pending_escalate_hint is in-memory only).
+        # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state.
 
-        Used to gate crash-recovery from an existing ``result.json`` so a prior
-        cycle's win (``geak/`` is a fixed path) is not re-promoted on a
-        later KERNEL entry. Mirrors the ``optimization_stack`` dedup in the
-        measured GEAK candidate promotion path.
+        Gates crash-recovery from an existing ``result.json`` so a prior cycle's
+        win is not re-promoted on a later KERNEL entry.
         """
         return any(
             isinstance(item, dict) and item.get("action") == "geak_e2e"
@@ -858,11 +789,9 @@ class KernelPhase(PhaseHandler):
     ) -> tuple[str, dict[str, str]]:
         """Parse ``result.accepted_config`` into (flags, env dict).
 
-        Single source of truth for turning the bench-style ``{"flags":..,
-        "env":..}`` blob into a reproducible (server-args, real-env) pair - used
-        by both the candidate record and the rebench-validated promote so they
-        never diverge. Any ``KEY=VAL`` token in ``env`` becomes a real env var;
-        any ``--flag`` token folds into flags (see ``_split_env_and_flags``).
+        Turns the bench-style ``{"flags":.., "env":..}`` blob into a reproducible
+        (server-args, real-env) pair: any ``KEY=VAL`` token in ``env`` becomes a
+        real env var; any ``--flag`` token folds into flags.
         """
         accepted_cfg = result.get("accepted_config") or {}
         accepted_flags = str(accepted_cfg.get("flags") or "").strip()
@@ -874,14 +803,12 @@ class KernelPhase(PhaseHandler):
     def _record_geak_candidate(self, result: dict[str, Any]) -> None:
         """Record a GEAK e2e win as an UNVALIDATED candidate (no headline).
 
-        It stores the accepted config + the optimizer's OWN (audit-only)
-        throughput/speedup under ``geak_pending`` but deliberately does NOT touch
-        ``current_best`` /
-        ``optimization_stack`` / ``cumulative_gain*``. The headline is written
-        only later, from a measured main-flow rebench, by
-        ``_promote_geak_from_candidate`` (mirrors forge's "no integrate ->
-        not in optimization_stack"). The candidate config is the single source
-        the rebench (2b/2a) launches from - so it must be captured verbatim.
+        Stores the accepted config + the optimizer's own (audit-only)
+        throughput/speedup under ``geak_pending`` without touching
+        ``current_best`` / ``optimization_stack`` / ``cumulative_gain*``. The
+        headline is written later from a measured rebench by
+        ``_promote_geak_from_candidate``; the config is captured verbatim as the
+        source the rebench launches from.
         """
         if not isinstance(result, dict) or result.get("status") not in ("ok",):
             return
@@ -894,7 +821,7 @@ class KernelPhase(PhaseHandler):
         am = result.get("alignment_metrics") or {}
         self.shared_state.geak_pending = {
             "status": "awaiting_rebench",
-            # Audit-only self-reported numbers (NEVER the headline until rebench).
+            # Audit-only self-reported numbers (not the headline until rebench).
             "self_reported_tput": new_tput,
             "self_reported_speedup": result.get("throughput_speedup"),
             "self_reported_gain_pct": self_gain,
@@ -917,8 +844,7 @@ class KernelPhase(PhaseHandler):
             },
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        # Surface a large cross-harness measurement divergence as a warning only
-        # (reporting/audit); it never gates scheduling and no gain is written here.
+        # Surface a large cross-harness measurement divergence as a warning only.
         bb = result.get("baseline_basis") or {}
         mdiv = bb.get("measurement_divergence_pct")
         try:
@@ -942,15 +868,11 @@ class KernelPhase(PhaseHandler):
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
-        The single headline writer in the rebench-first flow. Given the accepted
-        config from ``result`` (the GEAK result.json) and a throughput
-        ``measured_tput`` produced by the orchestrator (2b) or GEAK (2a) harness,
-        it lifts ``current_best`` (config/overlay/scripts + the MEASURED tput),
-        appends the ``geak_e2e`` optimization_stack entry + gain ledger,
-        and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` as a
-        same-harness total ``(measured - baseline)/baseline`` - EXACTLY the
-        explore/integrate convention (never a cross-harness or self-reported
-        number). Clears ``geak_pending`` and the revalidation flag.
+        The single headline writer: lifts ``current_best`` (config/overlay/scripts
+        + the measured tput), appends the ``geak_e2e`` optimization_stack entry +
+        gain ledger, and stamps ``cumulative_gain`` / ``cumulative_gain_validated``
+        as the same-harness total ``(measured - baseline)/baseline``. Clears
+        ``geak_pending`` and the revalidation flag.
         """
         if not isinstance(result, dict):
             return
@@ -978,8 +900,7 @@ class KernelPhase(PhaseHandler):
             "final_overlay": result.get("final_overlay") or "",
             "workspace": result.get("eval_dir"),
         })
-        # Audit cross-check: GEAK's OWN within-harness speedups next to the
-        # measured headline (never fed into the leaderboard number).
+        # Audit cross-check: GEAK's own within-harness speedups (not the headline).
         am = result.get("alignment_metrics") or {}
         cb["geak_alignment"] = {
             "hot_geak_speedup": am.get("hot_geak_speedup"),
@@ -1032,16 +953,11 @@ class KernelPhase(PhaseHandler):
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
         """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
 
-        GEAK-e2e is a whole-pipeline e2e optimizer whose authored kernels do
-        not go through the per-kernel SDK recorder path. It emits a
-        self-contained ``kernel_journey.json`` whose per-kernel
-        sub-objects are shaped EXACTLY as the recorder's
-        ``record_kernel_{dispatch,backend_result,e2e}`` inputs (see GEAK-e2e
-        ``interface/run_e2e.py`` ``build_kernel_journey``). We replay them
-        verbatim so the assembler folds the e2e optimizer's kernels into
-        ``kernel_journey`` next to tracelens discovery — no mapping logic here,
-        the contract file owns it. Best-effort: a missing/partial file never
-        breaks the phase.
+        GEAK-e2e emits a ``kernel_journey.json`` whose per-kernel sub-objects are
+        shaped exactly as the recorder's ``record_kernel_{dispatch,backend_result,
+        e2e}`` inputs; replay them verbatim so the assembler folds the e2e
+        optimizer's kernels into ``kernel_journey``. Best-effort: a missing/partial
+        file never breaks the phase.
         """
         if not isinstance(result, dict):
             return
@@ -1063,11 +979,9 @@ class KernelPhase(PhaseHandler):
 
         sdir = self.session_dir
         commit = str(getattr(self.shared_state, "code_revision", "") or "")
-        # Replay GEAK-e2e's discovery substream so the
-        # assembler backfills each kernel's discovery-sourced fields
-        # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
-        # not tracelens, so the route is ``bypass``; ``tool="geak"`` keeps the
-        # version provenance under the canonical GEAK e2e optimizer.
+        # Replay GEAK-e2e's discovery substream so the assembler backfills each
+        # kernel's discovery-sourced fields; GEAK profiles via rocprofv3 (route
+        # ``bypass``), ``tool="geak"`` for version provenance.
         for run in (journey.get("discovery_runs") or []):
             if not isinstance(run, dict):
                 continue
@@ -1135,22 +1049,13 @@ class KernelPhase(PhaseHandler):
     def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
         """Whether the fp8 block-scale CK backend switch should be E2E-validated.
 
-        The CK backend switch (``SGLANG_FP8_BLOCKSCALE_CK_MAX_M``) routes the
-        fp8 block-scale GEMM from the Triton default to the aiter CK
-        ``gemm_a8w8_blockscale`` kernel on gfx942. This is the big lever
-        (~2x at decode M, ~+109% e2e) and is INDEPENDENT of the a8w8 table
-        tuning result: the table tuner routinely reports ``no_improvement``
-        because the CK default is already optimal, yet the switch itself must
-        still be flipped and E2E-validated as its own gemm_tuning candidate.
-
-        Gated strictly so it only fires for the forge backend on a
-        sglang + fp8 + gfx942 + block-scale workload. fp8 is accepted from any
-        signal — session precision, the resolved forge result, or a runtime
-        ``--quantization fp8`` server arg (session/yaml precision may still read
-        ``bf16``). Block-scale is required positively (the checkpoint declares
-        ``weight_block_size``), which naturally excludes per-tensor, static and
-        per-channel/per-token fp8 — those take other GEMM paths and must never
-        be switched here.
+        The CK backend switch (``SGLANG_FP8_BLOCKSCALE_CK_MAX_M``) routes the fp8
+        block-scale GEMM from the Triton default to the aiter CK
+        ``gemm_a8w8_blockscale`` kernel on gfx942; it is independent of the a8w8
+        table tuner result and must be flipped + E2E-validated as its own
+        candidate. Gated strictly to the forge backend on a
+        sglang + fp8 + gfx942 + block-scale workload (block-scale asserted
+        positively via ``weight_block_size``).
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result.
@@ -1173,18 +1078,14 @@ class KernelPhase(PhaseHandler):
         if not self._ck_switch_precision_is_fp8(result):
             return False
 
-        from hyperloom.inference_optimizer.cli.model_gate import _resolve_amd_gpu_type
+        from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
         from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
 
         gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")
         if gpu not in _GFX942_GPU_TYPES:
             return False
 
-        # Block-scale fp8 only, asserted positively: the CK patch only rewrites
-        # the block-scale path (``aiter_w8a8_block_fp8_linear`` /
-        # ``gemm_a8w8_blockscale``), so the checkpoint must declare
-        # ``weight_block_size``. This excludes per-tensor, static and
-        # per-channel/per-token fp8, which take other GEMM paths.
+        # Block-scale fp8 only, asserted positively via ``weight_block_size``.
         from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
 
         model_path = str(
@@ -1196,15 +1097,9 @@ class KernelPhase(PhaseHandler):
     def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
         """Whether the workload runs fp8, resolved from any available signal.
 
-        The session-level ``precision`` is not authoritative: precision is often
-        resolved at runtime from server args (``--quantization fp8``) while the
-        session/yaml precision still reads ``bf16``. Accept fp8 from, in order:
-
-        1. ``shared_state.precision`` (session-level), OR
-        2. the forge ``result`` envelope, which stamps the resolved precision
-           (see ``_run_forge_gemm_tuning``), OR
-        3. the runtime ``--quantization`` resolved by
-           ``_resolve_forge_precision_and_quant`` from the actual server args.
+        Accepts fp8 from, in order: ``shared_state.precision``, the forge
+        ``result`` envelope's resolved precision, or the runtime
+        ``--quantization`` resolved from the actual server args.
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result.
@@ -1230,14 +1125,12 @@ class KernelPhase(PhaseHandler):
         """Record and post-process a run_gemm_tuning result from any entrypoint.
 
         Both the KERNEL-entry auto hook and orchestration-issued
-        ``run_gemm_tuning`` requests must converge here; otherwise forge
-        results can bypass per-tuner E2E validation.
+        ``run_gemm_tuning`` requests converge here so forge results never bypass
+        per-tuner E2E validation.
         """
         self.shared_state.record_gemm_tuning(result)
         # Forge results route to the per-tuner E2E validator when table tuning
-        # asked for it OR when the CK block-scale backend switch is eligible —
-        # the latter is a standalone lever that must be validated even when the
-        # a8w8 table tuner reported no_improvement (decision != KEEP).
+        # asked for it OR when the CK block-scale backend switch is eligible.
         if result.get("backend") == "forge" and (
             result.get("requires_e2e_validation")
             or self._ck_blockscale_switch_eligible(result)
@@ -1255,15 +1148,9 @@ class KernelPhase(PhaseHandler):
     ) -> None:
         """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row.
 
-        GEMM-tuning adoptions previously landed only in ``optimization_stack``
-        / ``roofline_progress.trajectory`` and never as a ``phase_timeline``
-        event. As a result the run's serving throughput was invisible to the
-        timeline (and to downstream throughput-attempt series that read the
-        flat phase_timeline). Emitting a KEEP journal row — carrying the
-        end-to-end ``throughput_after`` plus the originating ``task_id`` for
-        token attribution — closes that gap so the GEMM tuning point shows up
-        alongside every other attempt. Best-effort: journaling failures never
-        abort the run.
+        Emits a KEEP journal row carrying the end-to-end ``throughput_after`` plus
+        the originating ``task_id`` so the GEMM tuning point shows up on the
+        phase_timeline alongside every other attempt. Best-effort.
 
         Args:
             entry: The ``optimization_stack`` entry just appended for this
@@ -1342,8 +1229,7 @@ class KernelPhase(PhaseHandler):
         backend = str(result.get("backend") or "geak").strip().lower()
         ts = datetime.now(timezone.utc).isoformat()
 
-        # Resolve extra_envs: forge provides recommended_env/extra_envs;
-        # GEAK infers from tuned_file.
+        # Resolve extra_envs: forge provides them; GEAK infers from tuned_file.
         if backend == "forge":
             extra_envs = dict(result.get("extra_envs") or result.get("recommended_env") or {})
             tuned_file = ""
@@ -1360,19 +1246,14 @@ class KernelPhase(PhaseHandler):
             )
             variant_name = "a8w8_blockscale_tuned_gemm"
 
-        # fp8 block-scale CK backend switch (still attributed to gemm_tuning).
-        # The primary forge path validates this as a standalone candidate in
-        # _validate_forge_gemm_tuning_e2e (see _handle_gemm_tuning_result
-        # routing); this inline-promote path only injects it as a safety net
-        # for an eligible forge result that reaches inline promotion without
-        # the validator. setdefault so an operator-set value always wins.
+        # fp8 block-scale CK backend switch safety net (an operator-set value
+        # wins via setdefault); the primary forge path validates it standalone.
         if self._ck_blockscale_switch_eligible(result):
             extra_envs.setdefault("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "256")
 
         final_report = str(result.get("final_report_path") or "")
 
         # GEAK path: E2E already validated internally.
-        # (Forge path is handled by _validate_forge_gemm_tuning_e2e before this.)
         tuned_tput = baseline * speedup
         existing = {
             str(item.get("tuned_file") or "")
@@ -1446,8 +1327,7 @@ class KernelPhase(PhaseHandler):
         from ..kernel.request_handlers import integrate_handler
 
         tuners_run = result.get("tuners_run") or []
-        # Sort by priority: fmoe_ck (MoE) first, dense tuners second.
-        # The original list is already priority-sorted by forge CLI.
+        # The list is already priority-sorted by forge CLI (fmoe_ck first).
         candidates = []
         for t in tuners_run:
             if not isinstance(t, dict):
@@ -1466,11 +1346,8 @@ class KernelPhase(PhaseHandler):
                     "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
                 })
 
-        # Standalone fp8 block-scale CK backend switch: independent of the a8w8
-        # table tuner outcome (often no_improvement because the CK default is
-        # already optimal). Inject it as its own candidate so the loop below
-        # E2E-validates baseline Triton vs CK and, on KEEP, attributes the gain
-        # to gemm_tuning. Shape matches a table candidate exactly.
+        # Standalone fp8 block-scale CK backend switch: inject as its own
+        # candidate so the loop E2E-validates baseline Triton vs CK.
         if self._ck_blockscale_switch_eligible(result):
             if not any(
                 c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
@@ -1514,7 +1391,7 @@ class KernelPhase(PhaseHandler):
                 if tuner_name == "fmoe_ck" and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
                 else ""
             )
-            # Merge with previously KEEP'd envs for stacked validation.
+            # Merge with previously KEEP'd envs.
             test_envs = dict(stacked_envs)
             test_envs.update(env)
 
@@ -1559,7 +1436,6 @@ class KernelPhase(PhaseHandler):
                 running_tput = new_tput
                 kept.append({**cand, "tput": new_tput, "gain_pct": gain_pct})
 
-                # Push to optimization_stack.
                 entry = {
                     "action": "gemm_tuning",
                     "variant_name": f"forge_{tuner_name}",
@@ -1616,9 +1492,8 @@ class KernelPhase(PhaseHandler):
                 len(reverted),
             )
 
-        # Rewrite the stored GEMM tuning result to the *E2E-validated*
-        # outcome. This prevents the orchestration LLM from seeing the raw
-        # combined recommended_env and issuing a bundled integrate later.
+        # Rewrite the stored result to the E2E-validated outcome so the LLM never
+        # sees the raw combined recommended_env and issues a bundled integrate.
         result["e2e_results"] = {"kept": kept, "reverted": reverted}
         result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
         result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
@@ -1738,8 +1613,8 @@ class KernelPhase(PhaseHandler):
     async def _handle_fusion_result(self, result: dict) -> None:
         """Record the forge-fusion result + surface it on the bus.
 
-        Stage 4 extends this to hand a KEPT fusion (source patch + env flags) to
-        ``integrate_handler`` for the real e2e re-baseline / adopt decision.
+        Hands a KEPT fusion (source patch + env flags) to ``integrate_handler``
+        for the real e2e re-baseline / adopt decision.
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
         try:
@@ -1760,8 +1635,7 @@ class KernelPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001
             log.exception("failed to post run_fusion_done bus message")
-        # Stage 4: a KEPT fusion (kernel-parity + serving-smoke validated) is handed
-        # to integrate for the real e2e re-baseline + adopt/revert decision.
+        # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             await self._integrate_fusion(result)
 
@@ -1959,7 +1833,7 @@ class KernelPhase(PhaseHandler):
         return 0.0
 
     def _needs_roofline_for_watermark(self) -> bool:
-        """True iff projected tput crossed the 10% watermark over ``last_roofline_tput`` (bootstrap guard: False until PRELUDE roofline ran; re-arm guard: False while auto_roofline_pending_task_id is in-flight).
+        """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight).
 
         Returns:
             ``True`` when a fresh roofline is warranted because projected tput

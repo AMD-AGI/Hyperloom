@@ -18,7 +18,7 @@ Keys are session-scoped and ephemeral:
 * The public key is injected into the workload body as ``MN_SSH_AUTHORIZED_KEY``
   (``mn-sshd-init.sh`` writes it to the pod's ``authorized_keys`` at start).
 * The private key stays in the sandbox and is passed to :func:`ssh_run`.
-* Host keys are recorded under ``known_hosts`` beside the keypair (P1-1).
+* Host keys are recorded under ``known_hosts`` beside the keypair.
 """
 
 from __future__ import annotations
@@ -31,9 +31,8 @@ from pathlib import Path
 from .env_safety import assert_env_key_shapes, assert_forward_env_keys
 from .log import info, warn
 
-# Default sshd port baked into the image's mn-sshd-init.sh. Not 22: the SaFE
-# Dynamo pod template runs ClusterFirstWithHostNet and may be promoted to
-# hostNetwork, where :22 collides with the node's own sshd.
+# Default sshd port baked into the image's mn-sshd-init.sh (not 22, to avoid a
+# hostNetwork collision with the node's own sshd).
 DEFAULT_SSH_PORT = 2222
 
 def _ssh_common_opts(known_hosts: Path) -> list[str]:
@@ -97,7 +96,6 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
         try:
             p.unlink()
         except FileNotFoundError:
-            # File already absent; nothing to remove.
             pass
     proc = subprocess.run(
         [
@@ -183,16 +181,11 @@ def ssh_run_script(
 ) -> subprocess.CompletedProcess:
     """Ship ``script_text`` to the pod (base64 over the command line) and run it.
 
-    Mirrors the RayJob ``_wrap_for_dash`` heredoc pattern: the script body is
-    base64-encoded so it survives the SSH command line without quoting issues,
-    decoded into ``remote_path`` on the pod, then executed with ``interpreter``
-    (e.g. ``python3`` / ``bash``) and ``script_args`` appended verbatim.
-
-    ``env`` (optional) is prepended as ``KEY=VAL`` assignments before the
-    interpreter so prompt-driven tuning vars (e.g. mori dispatch tokens) reach
-    the SSH-launched framework child. A bare ``ssh host cmd`` does NOT forward
-    the controller's environment, and these keys are not in the pod's container
-    env, so they must be injected explicitly here.
+    The script body is base64-encoded, decoded into ``remote_path`` on the pod,
+    then executed with ``interpreter`` (e.g. ``python3`` / ``bash``) and
+    ``script_args`` appended verbatim. ``env`` (optional) is prepended as
+    ``KEY=VAL`` assignments before the interpreter so tuning vars reach the
+    SSH-launched framework child.
 
     Args:
         host: The target host/IP.
@@ -244,9 +237,8 @@ def ssh_run_bash_with_env(
     """Run ``script_text`` on ``host`` via ``bash -s`` with ``env`` exported.
 
     The env (which may include credentials) is prepended as shell-quoted
-    ``export`` lines and the whole script is piped over SSH **stdin** — so
-    secrets never appear in argv or on the pod's disk. Used by the pod-side
-    tool installs (credentials passed via env).
+    ``export`` lines and the whole script is piped over SSH **stdin**, so
+    secrets never appear in argv or on the pod's disk.
 
     Args:
         host: The target host/IP.

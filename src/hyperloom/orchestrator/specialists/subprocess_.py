@@ -5,9 +5,8 @@
 Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, a
 ``claude --print --output-format stream-json`` subprocess scoped via
 ``--add-dir``, and a ``specialist_done.json`` (+ ``worktree/patches/``) exit
-signal harvested into the final :class:`SpecialistRunResult`. The in-process
-Backend path (``backend_factory``) stays for unit tests; production uses the
-subprocess path.
+signal harvested into the final :class:`SpecialistRunResult`. Production uses
+the subprocess path; the in-process Backend path stays for unit tests.
 """
 
 from __future__ import annotations
@@ -39,9 +38,8 @@ log = logging.getLogger(__name__)
 class SpecialistSubprocessConfig:
     """Static config for spawning claude subprocesses per specialist.
 
-    Captured once at CLI boot; the same instance is reused for every
-    specialist dispatch. Per-task state is passed at run time via
-    :meth:`SpecialistSubprocessDispatcher.run`.
+    Captured once at CLI boot and reused for every dispatch; per-task state is
+    passed at run time via :meth:`SpecialistSubprocessDispatcher.run`.
     """
 
     claude_executable: str = "claude"
@@ -75,9 +73,8 @@ class SpecialistSubprocessConfig:
     per_turn_max_seconds: float = 600.0
     """Per-turn wall-clock fallback.
 
-    Coordinator-dispatched specialists inject an explicit ``wall_budget_sec``
-    (WS1). Only callers that omit that budget fall back to
-    ``max_turns * per_turn_max_seconds`` as a legacy per-task hard timeout.
+    Only callers that omit ``wall_budget_sec`` fall back to
+    ``max_turns * per_turn_max_seconds`` as a per-task hard timeout.
     """
 
     poll_interval_seconds: float = 5.0
@@ -98,9 +95,8 @@ class SpecialistSubprocessResult:
     """
 
     done_payload: dict[str, Any] | None = None
-    """Parsed ``specialist_done.json`` content, or None when the file
-    never appeared. The runner falls back to ``build_empty_specialist_done``
-    in the None case."""
+    """Parsed ``specialist_done.json`` content, or None when the file never
+    appeared (the runner then falls back to ``build_empty_specialist_done``)."""
 
     exit_code: int | None = None
     """Subprocess exit code (None when killed before exit)."""
@@ -110,8 +106,8 @@ class SpecialistSubprocessResult:
     timed_out: bool = False
     """True when the dispatcher killed the subprocess past the wall-clock cap.
 
-    The cap is normally WS1 ``wall_budget_sec``; legacy direct callers fall
-    back to ``max_turns * per_turn_max_seconds`` when no budget is supplied.
+    The cap is normally ``wall_budget_sec``, falling back to
+    ``max_turns * per_turn_max_seconds`` when no budget is supplied.
     """
 
     stale_heartbeat: bool = False
@@ -124,34 +120,27 @@ class SpecialistSubprocessResult:
     ``runs/specialist/<task_id>/worktree/patches/``."""
 
     usage: dict[str, Any] | None = None
-    """Token usage recovered from the Claude CLI ``stream-json`` log
-    (full-trace B1). Carries the four canonical counters
-    (``input_tokens`` / ``output_tokens`` /
-    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the
-    two ``cache_*`` may be ``None``. ``None`` when no result row carried
-    a ``usage`` block (e.g. the subprocess crashed before completing).
-    This is how the *production-default* specialist path's token spend —
-    otherwise invisible to the parent — re-enters the unified ledger."""
+    """Token usage recovered from the Claude CLI ``stream-json`` log. Carries
+    the four canonical counters (``input_tokens`` / ``output_tokens`` /
+    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the two
+    ``cache_*`` may be ``None``. ``None`` when no result row carried a ``usage``
+    block. Re-enters the unified ledger the production specialist's token spend."""
 
     response: str | None = None
-    """Assistant reply text recovered from the same Claude CLI
-    ``stream-json`` log (full-trace B1 conversation). The prompt is held by
-    the parent (the CLI takes it via a prompt file, so it never appears in
-    the stream); pairing the parent-side prompt with this response lands the
+    """Assistant reply text recovered from the same ``stream-json`` log. The
+    prompt is held by the parent; pairing it with this response lands the
     production specialist turn in ``conversations.jsonl``. ``None`` when no
-    response text could be recovered (crash before any reply)."""
+    response text could be recovered."""
 
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     """Intel/tool calls (``{"tool", "query"}``) recovered from the same
-    stream-json log so the trace can surface what the specialist actually
-    read (WebSearch / WebFetch / pr_monitor / cortex_kb / ...). Empty when
-    none were made or the log was missing/truncated."""
+    stream-json log (WebSearch / WebFetch / pr_monitor / cortex_kb / ...).
+    Empty when none were made or the log was missing/truncated."""
 
     turn_usages: list[dict[str, int | None]] = field(default_factory=list)
-    """Per-assistant-turn token usage recovered from the stream-json log so
-    the parent can trace the multi-turn subprocess as one ledger row per
-    model turn instead of a single cumulative ``turn=1`` lump. Empty when no
-    per-message usage was present (parent then falls back to ``usage``)."""
+    """Per-assistant-turn token usage recovered from the stream-json log so the
+    parent can trace the multi-turn subprocess as one ledger row per model turn.
+    Empty when no per-message usage was present (parent falls back to ``usage``)."""
 
     error: str = ""
 
@@ -189,7 +178,7 @@ def _setup_worktree(
     ``base``'s HEAD.
 
     Best-effort: on git error returns ``(None, err)`` so the caller can
-    proceed without isolation (PR-A2 default) or hard-fail.
+    proceed without isolation or hard-fail.
 
     Args:
         base: Git checkout the worktree is branched off of.
@@ -201,7 +190,7 @@ def _setup_worktree(
         git failure.
     """
     if worktree_path.exists():
-        # Resume / retry: reuse an existing worktree (stale ones are rare).
+        # Resume / retry: reuse an existing worktree.
         log.warning(
             "specialist worktree already exists at %s; reusing",
             worktree_path,
@@ -300,27 +289,20 @@ class SpecialistSubprocessDispatcher:
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
         process_log = workspace / "process.log"
-        # specialist_done.json write target is ``worktree or workspace``;
-        # poll worktree first (prompt-advertised path), workspace as
-        # fallback for legacy/test fakes that write at the workspace root.
+        # Poll worktree first (prompt-advertised path), then workspace as fallback.
         done_candidates: list[Path] = []
         if worktree is not None:
             done_candidates.append(worktree / "specialist_done.json")
         done_candidates.append(workspace / "specialist_done.json")
-        # Incremental checkpoint: the agent atomically rewrites this
-        # partial as it accumulates findings (it does NOT trigger reap — only
-        # the final ``specialist_done.json`` does). When a budget kill lands
-        # before the final file is written, we recover the partial as the
-        # run's best-so-far result. Same worktree-first / workspace-fallback
-        # search order as the final file.
+        # Incremental checkpoint recovered as best-so-far on a budget kill; does
+        # NOT trigger reap. Same worktree-first / workspace-fallback order.
         partial_candidates: list[Path] = []
         if worktree is not None:
             partial_candidates.append(worktree / "specialist_done.partial.json")
         partial_candidates.append(workspace / "specialist_done.partial.json")
         heartbeat_file = workspace / "heartbeat.json"
 
-        # Write the prompt file (system + user collapsed into one
-        # --system-prompt-file; -p carries the kickoff).
+        # Write the prompt file (system + user collapsed into one --system-prompt-file).
         combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
         prompt_file.write_text(combined, encoding="utf-8")
 
@@ -333,10 +315,8 @@ class SpecialistSubprocessDispatcher:
 
         # Compose the env (pass through parent so API keys propagate).
         env = os.environ.copy()
-        # Bound the spawned claude CLI's own request transport so a stalled
-        # gateway stream (partial response, stop_reason=None, then no further
-        # chunks) raises client-side instead of hanging forever on socket
-        # read() and freezing the whole optimizer chain.
+        # Bound the spawned claude CLI's request transport so a stalled gateway
+        # stream raises client-side instead of hanging forever.
         from ..roles._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
@@ -373,8 +353,7 @@ class SpecialistSubprocessDispatcher:
             )
 
         # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
-        # WS1: prefer the Coordinator-injected explicit wall budget; fall back
-        # to the legacy ``max_turns × per_turn`` ceiling only when unset.
+        # Prefer the explicit wall budget; fall back to ``max_turns × per_turn``.
         if wall_budget_sec and wall_budget_sec > 0:
             max_seconds = float(wall_budget_sec)
         else:
@@ -402,10 +381,8 @@ class SpecialistSubprocessDispatcher:
                 if done_payload is not None:
                     break
 
-        # WS1: no final done.json (typically a budget kill / stale-heartbeat
-        # reap) — fall back to the most recent incremental partial so a
-        # killed-but-productive specialist still surfaces its best-so-far
-        # findings instead of being discarded as an empty timeout.
+        # No final done.json — fall back to the most recent incremental partial
+        # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
             for cand in partial_candidates:
                 if cand.exists():
@@ -417,25 +394,13 @@ class SpecialistSubprocessDispatcher:
                             outcome["error"] = "recovered_from_partial"
                         break
 
-        # Token usage: the Claude CLI's terminal
-        # ``stream-json`` result row carries the cumulative session
-        # ``usage``. Recover it from process.log so the production
-        # specialist's token spend — which never touches the parent's
-        # memory — re-enters the unified ledger. Best-effort: a missing
-        # / truncated log yields ``None`` (parser swallows its own I/O).
+        # Recover cumulative session token usage from process.log.
         usage = parse_claude_stream_json_usage(process_log)
-        # Conversation sibling of the usage recovery above: the same
-        # stream-json log carries the assistant's reply. Recover it so the
-        # production specialist turn lands in conversations.jsonl (the prompt
-        # is paired in by the parent runner). Best-effort: returns None on a
-        # missing / truncated log.
+        # Recover the assistant's reply so the production turn lands in conversations.jsonl.
         response = parse_claude_stream_json_response(process_log)
-        # Intel/tool calls (WebSearch / WebFetch / pr_monitor / cortex_kb /
-        # Read / Grep / ...) the specialist made — recovered from the same log
-        # so the trace can show what it read, not just its token total.
+        # Intel/tool calls the specialist made, recovered from the same log.
         tool_calls = parse_claude_stream_json_tool_calls(process_log)
-        # Per-turn usage for fine-grained tracing (one ledger row per model
-        # turn); falls back to the cumulative ``usage`` when absent.
+        # Per-turn usage for fine-grained tracing; falls back to ``usage`` when absent.
         turn_usages = parse_claude_stream_json_turn_usages(process_log)
 
         return SpecialistSubprocessResult(
@@ -497,8 +462,7 @@ class SpecialistSubprocessDispatcher:
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])
-        # Drop ``emit_intent``: the subprocess has no in-process MCP server
-        # and exits via writing specialist_done.json instead.
+        # Drop ``emit_intent``: the subprocess exits via writing specialist_done.json.
         tools_filtered = [t for t in allowed_tools if t != "emit_intent"]
         if tools_filtered:
             cmd.extend(["--allowedTools", ",".join(tools_filtered)])
@@ -509,8 +473,7 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
-        # --add-dir order: worktree first (where writes go), workspace
-        # second (where the agent dumps done.json), then framework roots.
+        # --add-dir order: worktree (writes), workspace (done.json), framework roots.
         add_dirs: list[str] = []
         if worktree is not None:
             add_dirs.append(str(worktree))
@@ -562,9 +525,8 @@ class SpecialistSubprocessDispatcher:
             "error": "",
         }
         last_heartbeat_seen: float = started
-        # The subprocess streams stream-json (model tokens / tool calls) to
-        # process.log; its mtime is a reliable "still working" signal even
-        # when the agent never self-writes heartbeat.json.
+        # process.log mtime is a reliable "still working" signal even when the
+        # agent never self-writes heartbeat.json.
         process_log = workspace / "process.log"
 
         while True:
@@ -573,15 +535,12 @@ class SpecialistSubprocessDispatcher:
             elapsed = now - started
             outcome["elapsed"] = elapsed
 
-            # done.json appeared — graceful exit with up to 30s grace for
-            # the agent to terminate cleanly.
+            # done.json appeared — graceful exit with up to 30s grace.
             if any(p.exists() for p in done_files):
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
                     await asyncio.sleep(2.0)
-                # done.json written but the process (or its process-group
-                # children: SDK / curl) is still alive after grace — reap it so
-                # a multi-day run never leaks orphaned specialist subprocesses.
+                # Still alive after grace — reap it so no orphaned subprocess leaks.
                 if proc.poll() is None:
                     self._kill(proc)
                 outcome["exit_code"] = proc.poll()
@@ -594,13 +553,9 @@ class SpecialistSubprocessDispatcher:
                 outcome["elapsed"] = elapsed
                 break
 
-            # Liveness check. The subprocess counts as alive if EITHER the
-            # agent refreshed heartbeat.json OR it is still streaming output
-            # to process.log (model tokens / tool calls). Relying on
-            # heartbeat.json alone reaps productive specialists that stay in
-            # a single long tool-call turn without self-writing a heartbeat
-            # (common under gateway latency). The hard wall-clock
-            # cap below still bounds genuinely hung / runaway subprocesses.
+            # Liveness check: alive if EITHER heartbeat.json was refreshed OR
+            # process.log is still growing. The hard wall-clock cap below still
+            # bounds genuinely hung subprocesses.
             for activity_file in (heartbeat_file, process_log):
                 try:
                     if not activity_file.exists():

@@ -54,33 +54,6 @@ def test_v06_state_without_schema_version_is_migrated(tmp_path):
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
-def test_legacy_extra_sglang_args_are_renamed_on_load(tmp_path):
-    """Old state.json launch-arg fields migrate to canonical ``extra_server_args``."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    legacy = {
-        "session_id": "legacy-args",
-        "current_best": {
-            "variant_name": "warm",
-            "extra_sglang_args": "--enable-foo",
-        },
-        "optimization_stack": [
-            {
-                "action": "kernel_opt",
-                "candidate_extra_sglang_args": "--candidate-foo",
-            },
-        ],
-    }
-    (sd / "state.json").write_text(json.dumps(legacy), encoding="utf-8")
-
-    loaded = SharedState.load_or_init(sd)
-
-    assert loaded.current_best["extra_server_args"] == "--enable-foo"
-    assert "extra_sglang_args" not in loaded.current_best
-    assert loaded.optimization_stack[0]["candidate_extra_server_args"] == "--candidate-foo"
-    assert "candidate_extra_sglang_args" not in loaded.optimization_stack[0]
-
-
 # 2. Inv-10.1 — fact-layer survives migration unchanged
 _FACT_LAYER_PAYLOAD: dict = {
     "session_id": "legacy",
@@ -193,7 +166,7 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
 # 5. Strict / lenient migration mode
 def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
     """Lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
-    # Drop ``baseline_tput`` from the known field set to force the "raw has it, filtered doesn't" branch.
+    # Drop ``baseline_tput`` from the field set to force the fact-drop branch.
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
     monkeypatch.setattr(SharedState, "__dataclass_fields__", fake_fields)

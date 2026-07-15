@@ -8,17 +8,14 @@
 
 Computes ``bound_type`` (compute- vs memory-bound), ``arithmetic_intensity``
 (FLOPs/byte), and efficiency/utilization for EVERY hot kernel whose operand
-shapes allow a FLOP/byte estimate — including vendor kernels (hipBLASLt GEMM,
-MIOpen conv) that the opt-in rocprof enrichment skips. This is the analytical
-half of the roofline (parity with TraceLens' per-op perf-model bound); the
-rocprof enrichment remains the *measured* refinement for rewritable kernels.
+shapes allow a FLOP/byte estimate, including vendor kernels the opt-in rocprof
+enrichment skips. This is the analytical half of the roofline; rocprof enrichment
+remains the measured refinement for rewritable kernels.
 
-Independent + GPU-free: it uses the kernel's real per-launch ``gpu_time_us``
-(from the trace) plus FLOPs/bytes estimated from the captured operand shapes and
-a compact AMD peak-spec table (reimplemented, not imported from the orchestrator
-so the bypass tool stays standalone). ``arithmetic_intensity`` vs the machine
-balance point (peak_flops / peak_bw) gives the bound; ``estimated_flops /
-gpu_time`` vs peak gives efficiency.
+GPU-free: it uses the kernel's real per-launch ``gpu_time_us`` plus FLOPs/bytes
+estimated from the captured operand shapes and a compact AMD peak-spec table.
+``arithmetic_intensity`` vs the machine balance point (peak_flops / peak_bw)
+gives the bound; ``estimated_flops / gpu_time`` vs peak gives efficiency.
 """
 
 from __future__ import annotations
@@ -28,12 +25,8 @@ from typing import Any
 
 from _roofline_source import ANALYTICAL as _RL_ANALYTICAL
 
-# Compact AMD MAX-ACHIEVABLE (sustained) peak specs — the SAME convention as
-# inference_optimizer roofline_ceiling.HW_SPECS_ACHIEVABLE (from TraceLens arch
-# JSON), so per-kernel efficiency% shares ONE peak convention with the session
-# roofline ceiling. Reimplemented here so this tool imports nothing from the
-# orchestrator package. (The vendor dense peak was ~1.85x higher and understated
-# efficiency; using achievable makes efficiency% meaningful and comparable.)
+# Compact AMD MAX-ACHIEVABLE (sustained) peak specs — same convention as the
+# session roofline ceiling.
 _PEAK_TFLOPS_MI300: dict[str, float] = {
     "bf16": 708.0, "bfloat16": 708.0, "f16": 654.0, "fp16": 654.0, "float16": 654.0,
     "fp8": 1273.0, "f8": 1273.0, "float8_e4m3fn": 1273.0, "float8_e5m2": 1273.0,
@@ -107,28 +100,23 @@ def _sdpa_flops_bytes(
     """Attention FLOPs/bytes with operand-layout inference.
 
     Two matmuls (QK^T, A·V) each cost ``B*H*Sq*Skv*D`` mul-adds -> total
-    ``4*B*H*Sq*Skv*D``. B (first) and D (last) dims of Q are layout-invariant.
-    The head count H is the value shared by Q's and K's two middle dims, which
-    resolves the (B,S,H,D) vs (B,H,S,D) ambiguity AND cross-attention exactly
-    (Sq != Skv). When Q/K middle dims coincide (self-attention -> ambiguous),
-    prefer an explicit score/attn operand (B,H,Sq,Skv); else fall back to a
-    heuristic (heads = the smaller middle dim, since num_heads <= seq_len in
-    practice) and flag ``roofline_layout_inferred`` so the estimate is honest.
+    ``4*B*H*Sq*Skv*D``. B (first) and D (last) dims of Q are layout-invariant; the
+    head count H is the value shared by Q's and K's two middle dims, resolving
+    (B,S,H,D) vs (B,H,S,D) and cross-attention. When Q/K middle dims coincide
+    (self-attention), prefer an explicit score operand (B,H,Sq,Skv); else fall
+    back to heads = the smaller middle dim and flag ``roofline_layout_inferred``.
     """
     q = four_d[0]
     b, d = q[0], q[-1]
     meta: dict[str, Any] = {}
-    # Authoritative first: an explicit score/attn-weight tensor (B,H,Sq,Skv). Its
-    # last dim is a key length (not the head dim D), so it is distinguishable from
-    # Q/K/V (all (...,D)) and pins H/Sq/Skv unambiguously — even when Q/K share a
-    # sequence length rather than the head (e.g. equal-seq / grouped-head attn).
+    # Prefer an explicit score/attn-weight tensor (B,H,Sq,Skv): its last dim is a
+    # key length, not the head dim D, so it pins H/Sq/Skv unambiguously.
     score = next((t for t in four_d[1:] if t[0] == b and t[-1] != d), None)
     if score is not None:
         h, sq, skv = score[1], score[2], score[3]
     else:
-        # No score: the head count is the value shared by Q's and K's two middle
-        # dims — this resolves the (B,S,H,D) vs (B,H,S,D) ambiguity and cross-attn
-        # exactly (Sq != Skv).
+        # No score: head count is the value shared by Q's and K's two middle
+        # dims, resolving (B,S,H,D) vs (B,H,S,D) and cross-attn (Sq != Skv).
         k = four_d[1] if len(four_d) >= 2 else q
         qmid, kmid = (q[1], q[2]), (k[1], k[2])
         common = set(qmid) & set(kmid)
@@ -137,8 +125,7 @@ def _sdpa_flops_bytes(
             sq = qmid[1] if qmid[0] == h else qmid[0]
             skv = kmid[1] if kmid[0] == h else kmid[0]
         else:
-            # Ambiguous (self-attn: Q/K middle dims coincide, or no shared dim):
-            # heads = the smaller middle dim (num_heads <= seq_len in practice).
+            # Ambiguous (self-attn or no shared dim): heads = smaller middle dim.
             h, sq = min(qmid), max(qmid)
             skv = sq
             meta["roofline_layout_inferred"] = True
@@ -178,8 +165,7 @@ def _estimate_flops_bytes(
 
     if cat == "convolution":
         # input (N,C,H,W), weight (Cout, Cin/groups, R, S). Assume stride 1 / same
-        # spatial (output HxW ~= input HxW) — a documented approximation
-        # (stride/padding are not in Input Dims). Good enough for a bound class.
+        # spatial (stride/padding are not in Input Dims) — good enough for a bound.
         four_d = [d for d, _ in operands if len(d) == 4]
         if len(four_d) < 2:
             return None
@@ -187,11 +173,9 @@ def _estimate_flops_bytes(
         n, c, h, w = inp
         kk, wc, r, s = wt
         out_hw = h * w
-        # Per output element: wc (= Cin/groups) * R * S mul-adds. Using the
-        # weight's channel dim wc is correct for dense (wc==Cin), grouped, and
-        # depthwise (wc==1) convs; the input channel count c would overcount
-        # grouped/depthwise by the group count (e.g. 11200x for a Cin=11200
-        # depthwise conv).
+        # Per output element: wc (= Cin/groups) * R * S mul-adds. The weight's
+        # channel dim wc is correct for dense/grouped/depthwise convs; the input
+        # channel count c would overcount grouped/depthwise by the group count.
         flops = 2.0 * n * kk * out_hw * wc * r * s
         nbytes = dbytes * (_numel(inp) + _numel(wt) + n * kk * out_hw)
         return flops, nbytes, {}
@@ -254,7 +238,7 @@ def compute_roofline(
     peak_flops = peak_tflops * 1e12
     peak_bw = spec["hbm_bw_gbps"] * 1e9
 
-    ai = flops / nbytes  # arithmetic intensity (FLOPs/byte)
+    ai = flops / nbytes  # FLOPs/byte
     machine_balance = (peak_flops / peak_bw) if peak_bw > 0 else 0.0
     bound_type = "compute_bound" if (machine_balance > 0 and ai >= machine_balance) else "memory_bound"
 
@@ -265,11 +249,9 @@ def compute_roofline(
         "roofline_source": _RL_ANALYTICAL,
         **est_meta,
     }
-    # Per-call achieved throughput from the real measured time -> efficiency.
-    # ``roofline_estimate_capped`` flags when a util exceeds 100% (the FLOP/byte
-    # estimate over-shot, e.g. the Convolution stride-1 approximation) and was
-    # clamped -- so a capped 100% is not mistaken for a real "perfectly efficient"
-    # measurement.
+    # Per-call achieved throughput from measured time -> efficiency.
+    # ``roofline_estimate_capped`` flags when a util exceeds 100% (FLOP/byte
+    # estimate over-shot) and was clamped.
     calls = max(int(call_count or 1), 1)
     per_call_s = (float(gpu_time_us) / calls) / 1e6 if gpu_time_us else 0.0
     if per_call_s > 0 and peak_flops > 0:
@@ -284,10 +266,9 @@ def compute_roofline(
         if raw_bw > 100.0:
             out["roofline_estimate_capped"] = True
     # Roofline attainment = utilization on the BINDING side (compute util when
-    # compute-bound, bandwidth util when memory-bound). This is the cross-route-
-    # comparable "efficiency" (TraceLens reports the same binding-side attainment);
-    # ``efficiency_percent`` stays the compute-side utilization (drives the
-    # optimization-priority ranking) and so reads ~0 for memory-bound kernels.
+    # compute-bound, bandwidth util when memory-bound); cross-route comparable.
+    # ``efficiency_percent`` stays compute-side (drives the priority ranking) and
+    # so reads ~0 for memory-bound kernels.
     _attain = out.get("compute_utilization_pct") if bound_type == "compute_bound" else out.get("bandwidth_utilization_pct")
     if isinstance(_attain, (int, float)):
         out["roofline_attainment_pct"] = _attain

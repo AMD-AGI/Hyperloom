@@ -133,12 +133,12 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v0.8.0 integration (#474): head of
-# release/hyperloom_integration_v0.8.0. The optional internal extension tracks
-# the matching release/hyperloom_integration_v0.8.0 branch of
+# TraceLens v0.9.0 integration (#474): head of
+# release/hyperloom_integration_v0.9.0. The optional internal extension tracks
+# the matching release/hyperloom_integration_v0.9.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"
+TRACELENS_REF="4d6e0d9f03bab0541f04a68952dcf13988475708"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip

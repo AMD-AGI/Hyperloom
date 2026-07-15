@@ -3,9 +3,8 @@
 """Unit tests for aiter op_test harness generation (compiled-kernel step A).
 
 Validates that maybe_generate_harness recognizes the aiter @benchmark/
-run_perftest idiom and emits a Forge-contract harness. Runtime execution of the
-generated harness requires aiter's HIP/CK JIT runtime (image-gated); these tests
-only cover generation + structure.
+run_perftest idiom and emits a Forge-contract harness. These tests cover
+generation + structure only.
 """
 
 from __future__ import annotations
@@ -68,20 +67,15 @@ def test_generates_aiter_harness(tmp_path):
     hr = _gen(tmp_path, {"input_shapes": {"M": 8192, "N": 4096}, "precision": "bf16"})
     assert hr is not None, "expected an aiter harness to be generated"
     code = Path(hr.harness_path).read_text()
-    # Reuses the aiter test fn + emits the Forge benchmark contract.
     assert "test_scaled_silu_and_mul" in code
     assert "GEAK_RESULT_LATENCY_MS" in code
     assert "aiter.scaled_silu_and_mul" in code
-    # Candidate shapes baked into the call.
     assert "8192" in code and "4096" in code
-    # dtype mapped from precision.
     assert "torch.bfloat16" in code
-    # Harness is syntactically valid.
     import ast
     ast.parse(code)
     assert hr.test_command.endswith("--correctness")
-    # Finding 1: event-timing fallback is actually wired (not dead code) for the
-    # us-is-None path.
+    # Event-timing fallback is wired for the us-is-None path.
     assert "_event_time_ms(lambda:" in code
 
 
@@ -96,9 +90,9 @@ def test_non_aiter_file_not_handled_by_aiter_path(tmp_path):
     bench = tmp_path / "bench_triton.py"
     bench.write_text(
         "import torch\n"
-        "from aiter.test_common import benchmark\n"  # has benchmark but...
+        "from aiter.test_common import benchmark\n"
     )
-    # No @benchmark functions -> aiter path returns None (falls through).
+    # No @benchmark functions -> aiter path returns None.
     src = tmp_path / "k.py"
     src.write_text("x=1\n")
     hr = hg.maybe_generate_harness(

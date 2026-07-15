@@ -55,7 +55,7 @@ async def test_kill_message_appends_without_raising(db):
 
 def test_all_coordinator_emitted_topics_are_allowlisted():
     """Every literal topic in ``Message.new(src, dst, "<topic>", ...)`` inside
-    coordinator.py must be in TOPIC_ALLOWLIST (prevents future Issue-1 dupes).
+    coordinator.py must be in TOPIC_ALLOWLIST.
     """
     tree = ast.parse(_COORDINATOR_SRC.read_text(encoding="utf-8"))
     offenders: list[str] = []

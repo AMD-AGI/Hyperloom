@@ -157,7 +157,6 @@ AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform 
 3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-configure-credentials) and [Step 4](#4-install-runtime-dependencies) above to clone Hyperloom and install the runtime.
 
 ---
-
 ## Next Step
 
 After setup, open the Hyperloom checkout in Cursor. Then follow

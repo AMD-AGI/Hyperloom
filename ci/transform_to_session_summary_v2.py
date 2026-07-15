@@ -101,8 +101,15 @@ def _patch_baseline(data: Dict) -> List[str]:
         return notes
 
     if "extra_server_args" not in baseline:
-        baseline["extra_server_args"] = ""
-        notes.append("baseline.extra_server_args=''")
+        # Migrate the retired legacy key so old session_breakdown.json files do
+        # not silently drop their server args; fall back to "" when absent.
+        legacy = baseline.get("extra_sglang_args")
+        if isinstance(legacy, str):
+            baseline["extra_server_args"] = legacy
+            notes.append("baseline.extra_server_args <- baseline.extra_sglang_args")
+        else:
+            baseline["extra_server_args"] = ""
+            notes.append("baseline.extra_server_args=''")
 
     if "extra_envs" not in baseline:
         inv_envs = safe_get(baseline, "invocation", "extra_envs", default=None)
@@ -180,8 +187,7 @@ def _patch_capability_summary(data: Dict) -> List[str]:
 
     vs = cs.get("validate_stack")
     if isinstance(vs, dict) and "best_gain_pct" not in vs:
-        # Mirror last_validated_gain_pct -> best_gain_pct so the frontend can
-        # read either uniformly.
+        # Mirror last_validated_gain_pct -> best_gain_pct.
         v = vs.get("last_validated_gain_pct")
         vs["best_gain_pct"] = float(v) if isinstance(v, (int, float)) else None
         notes.append("capability_summary.validate_stack.best_gain_pct <- last_validated_gain_pct")
@@ -197,8 +203,10 @@ def _patch_capability_summary(data: Dict) -> List[str]:
 def _patch_phase_timeline(data: Dict) -> List[str]:
     """
     Frontend reads one of: `extra_server_args`, `best_extra_server_args`, `sglang_args`.
-    Legacy puts the value under `candidate_extra_server_args`. Add an alias
-    `best_extra_server_args` without removing the original key.
+    Legacy puts the value under `candidate_extra_server_args` (or the older,
+    retired `candidate_extra_sglang_args`). Add an alias `best_extra_server_args`
+    without removing the original key; the modern key takes precedence over the
+    legacy one when both are present.
 
     Args:
         data (Dict): The session breakdown dict, mutated in place.
@@ -219,9 +227,13 @@ def _patch_phase_timeline(data: Dict) -> List[str]:
             continue
         if "best_extra_server_args" not in extras and "extra_server_args" not in extras and "sglang_args" not in extras:
             cand = extras.get("candidate_extra_server_args")
+            if not isinstance(cand, str):
+                # Fall back to the retired legacy key so old breakdowns keep
+                # their per-phase server args.
+                cand = extras.get("candidate_extra_sglang_args")
             if isinstance(cand, str):
                 extras["best_extra_server_args"] = cand
-                notes.append("phase_timeline.extras.best_extra_server_args <- candidate_extra_server_args")
+                notes.append("phase_timeline.extras.best_extra_server_args <- candidate_extra_(server|sglang)_args")
     return notes
 
 
@@ -304,7 +316,6 @@ def _patch_detected_kernels(data: Dict) -> List[str]:
             continue
         kid = k.get("kernel_id") or ""
 
-        # Only fill if missing or null
         if k.get("geak") is None:
             k["geak"] = _aggregate_backend(data, kid, "geak")
             notes.append(f"kernel[{kid}].geak")
@@ -341,7 +352,10 @@ def is_already_v2(data: Dict) -> bool:
     pt_ok = True
     for entry in pt:
         extras = (entry or {}).get("extras") or {}
-        has_candidate = "candidate_extra_server_args" in extras
+        has_candidate = (
+            "candidate_extra_server_args" in extras
+            or "candidate_extra_sglang_args" in extras
+        )
         if has_candidate and not (
             "best_extra_server_args" in extras or "extra_server_args" in extras or "sglang_args" in extras
         ):
@@ -464,7 +478,6 @@ def _output_name_for(input_file: Path, in_dir: Path) -> Path:
 
     if session_id:
         return Path(f"{session_id}.json")
-    # fallback: mirror input layout, force .json
     return rel.with_suffix(".json")
 
 

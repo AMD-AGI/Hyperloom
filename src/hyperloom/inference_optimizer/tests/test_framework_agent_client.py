@@ -38,11 +38,8 @@ def test_repo_url_for_framework_unknown_returns_empty():
 
 
 def test_fac_repo_url_for_framework_is_the_canonical_repo_map():
-    """framework-agent is always importable alongside orchestrator
-    (both live under the single installed ``hyperloom`` distribution), so ``client.py``'s
-    ``repo_url_for_framework`` is a direct re-export of the canonical
-    ``hyperloom.agents.framework.repo_map`` implementation -- no more IO-only ImportError
-    fallback dict to pin via AST introspection."""
+    """``client.py``'s ``repo_url_for_framework`` is a direct re-export of the
+    canonical ``hyperloom.agents.framework.repo_map`` implementation."""
     from hyperloom.agents.framework.repo_map import (
         _FRAMEWORK_TO_REPO_URL,
         repo_url_for_framework,
@@ -50,7 +47,6 @@ def test_fac_repo_url_for_framework_is_the_canonical_repo_map():
 
     assert fac.repo_url_for_framework is repo_url_for_framework
     assert _FRAMEWORK_TO_REPO_URL.get("atom") == "https://github.com/ROCm/ATOM.git"
-    # Pin all keys so a future drift trips this guard.
     assert set(_FRAMEWORK_TO_REPO_URL.keys()) == {"sglang", "vllm", "atom", "xdit"}
 
 

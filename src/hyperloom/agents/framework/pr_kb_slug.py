@@ -3,9 +3,7 @@
 """PR KB slug helpers (consumer side).
 
 Byte-for-byte parity with the writer at
-``Primus-Claw/pr-kb/pr_kb/slug.py``: a mismatch makes every ``get_page``
-miss. ``tests/test_pr_kb.py`` pins the algorithm; update both in
-lock-step when the writer changes.
+``Primus-Claw/pr-kb/pr_kb/slug.py``: a mismatch makes every ``get_page`` miss.
 
 Prefix root defaults to ``pr-kb`` (= ``PR_KB_SLUG_PREFIX``). Files/index
 helpers use ``<prefix>-files/`` and ``<prefix>-index/``; discovery filters

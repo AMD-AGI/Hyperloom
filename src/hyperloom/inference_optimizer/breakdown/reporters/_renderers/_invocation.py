@@ -14,7 +14,7 @@ from typing import Any
 __all__ = ["render_invocation_block"]
 
 
-# Hard cap for the framework_args echo so long commands don't blow the column width.
+# Cap for the framework_args echo so long commands don't blow the column width.
 _FRAMEWORK_ARGS_MAX = 200
 _ENVS_MAX_DISPLAY = 12
 
@@ -91,7 +91,6 @@ def render_invocation_block(
         lines.append(f"- **config**: `{config_path}`")
     if framework_args:
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
-    # Lineage label under ``command`` shows where the echoed string came from.
     if framework_args_source:
         suffix = "  (extraction failed; try server.log or config yaml)" if framework_args_source == "unknown" else ""
         lines.append(f"- **source**: {framework_args_source}{suffix}")
