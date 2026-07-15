@@ -50,6 +50,36 @@ def session_dir(tmp_path: Path) -> Path:
     return sd
 
 
+def _ifx_rows() -> list[dict[str, Any]]:
+    """A minimal InferenceX-shaped benchmark row set for mocking ``fetch_rows``."""
+    return [
+        {
+            "hardware": "b300",
+            "precision": "fp8",
+            "isl": 1024,
+            "osl": 1024,
+            "conc": 64,
+            "decode_tp": 2,
+            "metrics": {
+                "tput_per_gpu": 2781.5,
+                "output_tput_per_gpu": 1390.7,
+                "mean_ttft": 0.094,  # seconds
+                "mean_tpot": 0.022,
+                "mean_e2el": 20.6,
+            },
+            "date": "2026-04-17",
+        }
+    ]
+
+
+def _patch_fetch_rows(monkeypatch, rows: list[dict[str, Any]] | None) -> None:
+    """Patch the ``fetch_rows`` symbol ``analyze`` uses with a stub."""
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.baseline_comparison.target_analyzer.fetch_rows",
+        lambda _name: rows,
+    )
+
+
 # Tests
 @pytest.mark.asyncio
 async def test_no_flag_writes_skipped_marker(session_dir):
@@ -68,8 +98,9 @@ async def test_no_flag_writes_skipped_marker(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_no_competitor_target_graceful(session_dir):
-    """No ``competitor_target.json`` on disk → succeeded + no_match."""
+async def test_no_inferencex_data_graceful(session_dir, monkeypatch):
+    """InferenceX returns no rows for the model → succeeded + no_match."""
+    _patch_fetch_rows(monkeypatch, [])
     executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
     params = {
         "model_path": "MiniMax-M2.5",
@@ -81,7 +112,7 @@ async def test_no_competitor_target_graceful(session_dir):
     result = await executor(_ctx(session_dir, params))
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "no_match"
-    assert result["reason"] == "no_competitor_target"
+    assert result["reason"] == "no_inferencex_data"
     assert (session_dir / "target_analysis" / "target_baseline.json").exists()
 
 
@@ -112,23 +143,9 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_happy_path_writes_files(session_dir):
-    """Full pipeline reading an LLM-authored competitor target."""
-    from hyperloom.orchestrator.knowledge import research_hints
-
-    research_hints.write_competitor_target(
-        session_dir,
-        {
-            "gpu": "b300",
-            "model": "MiniMax-M2.5",
-            "framework": "vllm",
-            "precision": "fp8",
-            "per_conc": [
-                {"conc": 64, "tput_per_gpu": 2781.5, "tpot_ms": 22.0, "source": "https://pr/9"},
-            ],
-            "notes": "scout-authored",
-        },
-    )
+async def test_happy_path_writes_files(session_dir, monkeypatch):
+    """Full pipeline reading live InferenceX-measured rows (mocked)."""
+    _patch_fetch_rows(monkeypatch, _ifx_rows())
 
     executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
     result = await executor(
@@ -161,7 +178,9 @@ async def test_happy_path_writes_files(session_dir):
     assert on_disk["best"]["tput_per_gpu"] == pytest.approx(2781.5)
     assert on_disk["query"]["model"] == "MiniMax-M2.5"
     assert on_disk["query"]["gpu"] == "b300"
-    assert on_disk["source"] == "llm_authored"
+    # Provenance is the live API URL, never the old ``llm_authored`` marker.
+    assert on_disk["source"].startswith("http")
+    assert "llm_authored" not in on_disk["source"]
 
     md_text = md_path.read_text()
     assert "## Reference best" in md_text
@@ -323,6 +342,36 @@ class TestExecutor:
         assert result["status"] == "succeeded"
         assert result["baseline_status"] == "skipped"
         assert result["reason"] == "no_session_dir"
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_no_session_dir_clears_stale_competitor_target(
+        self, tmp_path, monkeypatch,
+    ):
+        from hyperloom.inference_optimizer.session import session_paths
+        from hyperloom.orchestrator.knowledge import research_hints
+
+        sd = tmp_path / "sess"
+        sd.mkdir()
+        research_hints.write_competitor_target(
+            sd,
+            {
+                "gpu": "b300",
+                "model": "MiniMax-M2.5",
+                "per_conc": [{"conc": 64, "tput_per_gpu": 999.0, "source": "scout"}],
+            },
+        )
+        assert session_paths.competitor_target_json(sd).exists()
+
+        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
+        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: None)
+        monkeypatch.setattr(
+            "hyperloom.inference_optimizer.session.paths.session_dir",
+            lambda: sd,
+        )
+        result = await ex(_unit_ctx())
+        assert result["reason"] == "no_session_dir"
+        assert not session_paths.competitor_target_json(sd).exists()
+        assert research_hints.load_competitor_target(sd) is None
 
     @pytest.mark.asyncio
     async def test_writes_skipped_summary_when_no_gpu(self, tmp_path, monkeypatch):
