@@ -14,7 +14,6 @@ from typing import Iterable
 from .errors import RuntimeAdapterError
 
 
-# KB-side ``kind`` enum (kb-critic-integration-contract §2.1).
 KB_KINDS: frozenset[str] = frozenset(
     {
         "pitfall",
@@ -25,8 +24,7 @@ KB_KINDS: frozenset[str] = frozenset(
 )
 
 
-# Critic categories → KB kinds. Categories without an entry are treated as
-# "no KB equivalent" — caller may surface them in ``rejected_candidates``.
+# Critic categories → KB kinds; categories without an entry have no KB equivalent.
 CATEGORY_TO_KIND: dict[str, str] = {
     "pitfall": "pitfall",
     "crash_recovery": "pitfall",

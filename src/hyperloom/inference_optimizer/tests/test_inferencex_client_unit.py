@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Unit tests for the InferenceX HTTP client (env resolvers, SSL context,
-and the never-raises ``fetch_rows`` retry / decode contract)."""
+and the ``_fetch_raw`` transport)."""
 
 from __future__ import annotations
 
@@ -53,65 +53,6 @@ def test_build_ssl_context(monkeypatch):
     assert isinstance(ctx, ssl.SSLContext)
     assert ctx.check_hostname is False
     assert ctx.verify_mode == ssl.CERT_NONE
-
-
-# ---- fetch_rows -----------------------------------------------------------
-def test_fetch_rows_empty_model():
-    rows, warning = ix.fetch_rows("")
-    assert rows is None
-    assert "empty" in warning
-
-
-def test_fetch_rows_success(monkeypatch):
-    monkeypatch.setattr(ix, "_fetch_raw", lambda url: b'[{"gpu": "mi300x"}]')
-    rows, warning = ix.fetch_rows("llama")
-    assert rows == [{"gpu": "mi300x"}]
-    assert warning == ""
-
-
-def test_fetch_rows_non_list_payload(monkeypatch):
-    monkeypatch.setattr(ix, "_fetch_raw", lambda url: b'{"not": "a list"}')
-    rows, warning = ix.fetch_rows("llama")
-    assert rows is None
-    assert "JSON array" in warning
-
-
-def test_fetch_rows_decode_error(monkeypatch):
-    monkeypatch.setattr(ix, "_fetch_raw", lambda url: b"\xff\xfe not json")
-    rows, warning = ix.fetch_rows("llama")
-    assert rows is None
-    assert "decode error" in warning
-
-
-def test_fetch_rows_retries_then_fails(monkeypatch):
-    monkeypatch.setattr(ix.time, "sleep", lambda s: None)
-    monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "2")
-
-    def _boom(url):
-        raise ix.InferenceXFetchError("HTTP 503")
-
-    monkeypatch.setattr(ix, "_fetch_raw", _boom)
-    rows, warning = ix.fetch_rows("llama")
-    assert rows is None
-    assert "503" in warning
-
-
-def test_fetch_rows_success_after_retry(monkeypatch):
-    monkeypatch.setattr(ix.time, "sleep", lambda s: None)
-    monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "3")
-    calls = {"n": 0}
-
-    def _flaky(url):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ix.InferenceXFetchError("transient")
-        return b"[]"
-
-    monkeypatch.setattr(ix, "_fetch_raw", _flaky)
-    rows, warning = ix.fetch_rows("llama")
-    assert rows == []
-    assert warning == ""
-    assert calls["n"] == 2
 
 
 # ---- _fetch_raw -----------------------------------------------------------

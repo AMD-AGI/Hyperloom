@@ -2,7 +2,7 @@
 
 """Coverage for FRAMEWORK agent-ranked selection, semantic-audit routing,
 ranker-client plumbing, config-lever extraction, and the cyclic phase-budget
-dispatch guard added on the framework-enhance branch.
+dispatch guard.
 
 These exercise the pure/sync helpers and the small async helpers directly
 (stubbing the LLM client / fa phase-audit / KB writeback) so no event-loop GPU
@@ -52,9 +52,8 @@ def coord(session_dir) -> Coordinator:
 def test_config_levers_non_dict_and_patch_precedence() -> None:
     f = coord_mod._framework_config_levers_from_done
     assert f(None) == {}
-    # A patch deliverable is NOT a config-only outcome.
+    # A patch deliverable is not a config-only outcome.
     assert f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}) == {}
-    # No proposal_set / wrong type.
     assert f({"proposal_set": "nope"}) == {}
     assert f({}) == {}
 
@@ -97,13 +96,13 @@ def test_audit_skip_confident_paths(coord: Coordinator, monkeypatch) -> None:
     assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.9}) is True
     # Evidence but low confidence -> not.
     assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.5}) is False
-    # Bad confidence value -> treated as 0.0.
+    # Bad confidence value -> 0.0.
     assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": "NaNish"}) is False
 
 
 def test_audit_skip_confident_bad_floor_env(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", "not-a-float")
-    # Floor falls back to 0.8; confidence 0.85 clears it.
+    # Floor falls back to 0.8; 0.85 clears it.
     assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.85}) is True
 
 
@@ -351,7 +350,7 @@ class _FakeStream:
     """Async-iterable stream of completion chunks (mirrors the streaming proxy)."""
 
     def __init__(self, content: str) -> None:
-        # Split the content into a couple of deltas to exercise accumulation.
+        # Split into a couple of deltas to exercise accumulation.
         mid = max(1, len(content) // 2)
         self._chunks = [_FakeChunk(content[:mid]), _FakeChunk(content[mid:])] if content else [_FakeChunk("")]
 
@@ -372,7 +371,7 @@ class _FakeCompletions:
         self._raise = raise_exc
 
     async def create(self, **kwargs):
-        # The ranker now streams; assert the streaming flags are set.
+        # The ranker streams; assert the streaming flag is set.
         assert kwargs.get("stream") is True
         if self._raise:
             raise RuntimeError("llm down")
@@ -461,9 +460,6 @@ async def test_rank_llm_empty_and_unknown_id(coord: Coordinator, monkeypatch) ->
     assert await coord._rank_framework_agent_candidates_llm(cands) is None
 
 
-# --------------------------------------------------------------------------
-# _dispatch_paused_for_phase_budget
-# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 # framework._materialize_pr_diff_via_worktree (scripted _run_git)
 # --------------------------------------------------------------------------

@@ -32,10 +32,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-# Exports we are willing to carry from a recipe. Deliberately an explicit list,
-# NOT a ``VLLM_*`` glob: a glob would drag in path-valued vars like
-# VLLM_CACHE_ROOT that won't exist in our sandbox. Add names here as recipes
-# prove they need them.
+# Exports we are willing to carry from a recipe. An explicit list, not a
+# ``VLLM_*`` glob (which would drag in path-valued vars absent in our sandbox).
 _ENV_WHITELIST = frozenset({
     "VLLM_USE_BREAKABLE_CUDAGRAPH",
     "VLLM_USE_TRITON_FLASH_ATTN",
@@ -234,8 +232,7 @@ def _extract_server_args(
                 start = i + 1
                 break
     else:
-        # ``python3 -m sglang.launch_server ...`` / atom: entrypoint is the
-        # ``-m module`` run; flags follow.
+        # ``python3 -m <module> ...``: flags follow the ``-m module`` run.
         for i, t in enumerate(tokens):
             if t == "-m" and i + 1 < len(tokens):
                 start = i + 2
@@ -328,17 +325,14 @@ def render_reference_script(
 
 # ── discovery ──────────────────────────────────────────────────────────────
 
-# Filename pattern: {model}_{precision}_{gpu}[_{suffix}...].sh
-# Positional fallback only (see _parse_filename): the leading ``[^_]+`` cannot
-# represent a model alias that itself contains ``_`` (e.g. ``qwen3_moe``,
-# ``qwen2_5_vl``), so the GPU-anchored parse below is tried first.
+# Filename pattern: {model}_{precision}_{gpu}[_{suffix}...].sh. Positional
+# fallback only (see _parse_filename): the leading ``[^_]+`` cannot represent a
+# model alias containing ``_``, so the GPU-anchored parse below is tried first.
 _FNAME_RE = re.compile(r"^([^_]+)_([^_]+)_([^_]+?)((?:_[^_]+)*)\.sh$")
 _KNOWN_FW_SUFFIXES = ("atom", "sglang", "vllm")
 
-# GPU segment anchor: the ``{gpu}`` field is drawn from a small, well-formed
-# vocabulary (AMD ``mi3xx``/``mi2xx``, NVIDIA ``b/h/a<NNN>``, ``g[bh]<NNN>``).
-# Anchoring on it lets ``{model}`` keep underscores — everything before the
-# precision token (which sits immediately left of the GPU) is the model alias.
+# GPU segment anchor: the ``{gpu}`` field is drawn from a small vocabulary, so
+# anchoring on it lets ``{model}`` keep underscores.
 _GPU_TOKEN_RE = re.compile(r"^(mi\d{2,4}[a-z]?|[abh]\d{2,4}|g[bh]\d{2,4})$")
 
 
@@ -379,11 +373,10 @@ def _model_tier(file_seg: str, run_model: str) -> str:
 def models_compatible(reference_model: str, run_model: str) -> bool:
     """Whether a reference recipe's model is safe to apply to ``run_model``.
 
-    Single source of truth for the model-gate (shared by discovery and the
-    baseline executor) so the two never drift. Empty ``reference_model`` is
-    treated as ungated (returns True). Uses the same normalized, version-aware
-    tiering as discovery: an ``exact`` or ``fuzzy`` tier is compatible; a
-    trailing-version mismatch (``minimaxm2`` vs ``minimaxm3``) is not.
+    Single source of truth for the model-gate, shared by discovery and the
+    baseline executor. Empty ``reference_model`` is treated as ungated (returns
+    True). Uses the same normalized, version-aware tiering as discovery: an
+    ``exact`` or ``fuzzy`` tier is compatible; a trailing-version mismatch is not.
     """
     ref = str(reference_model or "").strip()
     if not ref:
@@ -394,13 +387,11 @@ def models_compatible(reference_model: str, run_model: str) -> bool:
 def _parse_filename(name: str) -> tuple[str, str, str, set[str]] | None:
     """Return (model_seg, precision, gpu, suffix_set) or None.
 
-    Tries a GPU-anchored parse first so model aliases that contain ``_``
-    (``qwen3_moe``, ``qwen2_5_vl``) are recognised: the GPU token is found by
-    its known shape, the precision is the segment immediately to its left, the
-    model is everything before that, and any segments to its right are
-    suffixes. Falls back to the positional ``{model}_{precision}_{gpu}`` regex
-    when no GPU-shaped segment is present (preserving prior behaviour for
-    unfamiliar GPU names).
+    Tries a GPU-anchored parse first so model aliases that contain ``_`` are
+    recognised: the GPU token is found by its known shape, the precision is the
+    segment immediately to its left, the model is everything before that, and
+    segments to its right are suffixes. Falls back to the positional
+    ``{model}_{precision}_{gpu}`` regex when no GPU-shaped segment is present.
     """
     if not name.endswith(".sh"):
         return None

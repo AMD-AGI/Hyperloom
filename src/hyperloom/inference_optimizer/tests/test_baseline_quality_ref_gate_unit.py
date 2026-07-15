@@ -3,10 +3,7 @@
 """Unit tests for the quality-reference establish gate (R1).
 
 Only a genuine ``baseline`` task may establish/overwrite the image-quality
-reference. ``replay_warm_recipe`` reuses the BaselineExecutor but is an
-optimization candidate, so it must compare against the pure baseline reference
-rather than redefine it -- otherwise the gate would mask the warm recipe's own
-deviation from the baseline output.
+reference; other kinds (e.g. ``replay_warm_recipe``) compare against it.
 """
 
 from __future__ import annotations

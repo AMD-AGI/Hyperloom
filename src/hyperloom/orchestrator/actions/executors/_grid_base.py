@@ -21,14 +21,14 @@ log = logging.getLogger(__name__)
 
 _MAGPIE_CWD_DEFAULT = "/tmp"
 
-_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
+_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 
 @dataclass
 class GridVariant:
     """One row of the grid we're going to test.
 
-    Describes a single server-config candidate: the flags/env overrides to
-    apply on top of the base Magpie config for one benchmark run.
+    A single server-config candidate: the flags/env overrides to apply on top
+    of the base Magpie config for one benchmark run.
 
     Attributes:
         name (str): Human-readable label for the variant.
@@ -40,10 +40,10 @@ class GridVariant:
             Defaults to ``""``.
     """
 
-    name: str  # human-readable label
-    extra_server_args: str = ""  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
+    name: str
+    extra_server_args: str = ""
     extra_envs: dict[str, str] = field(default_factory=dict)
-    note: str = ""  # optional reason / category
+    note: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -112,8 +112,8 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
 class VariantResult:
     """One bench run's parsed result.
 
-    Captures the parsed outcome of a single variant's Magpie run: identity,
-    status, the headline throughput/latency metrics, artifact paths, and
+    The parsed outcome of a single variant's Magpie run: identity, status,
+    headline throughput/latency metrics, artifact paths, and
     failure-classification metadata.
 
     Attributes:
@@ -167,21 +167,15 @@ class VariantResult:
     returncode: int | None = None
     nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
-    # Short failure-classification tag matching ``_write_variant_abort_marker``
-    # (e.g. ``magpie_timeout``, ``yaml_build_error``); empty for successes.
-    # Surfaced in the LLM critic prompt as ``failed_variants[*].error_class``.
+    # Short failure-classification tag; empty for successes.
     error_class: str = ""
     note: str = ""
-    # Wall-clock seconds the Magpie subprocess consumed; populated on
-    # success AND on the ``killed_overtime`` path.
+    # Wall-clock seconds the Magpie subprocess consumed.
     runtime_sec: float | None = None
-    # True iff reaped by the overtime soft deadline; caller demotes to
-    # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
+    # True iff reaped by the overtime soft deadline.
     killed_overtime: bool = False
-    # Rough output tok/s salvaged from the engine's periodic ``server.log``
-    # throughput logs on the killed_overtime path. Informational only: the
-    # variant stays ``failed``/``killed_overtime`` and this never feeds winner
-    # selection (which keys off ``output_throughput``).
+    # Rough output tok/s salvaged from server.log on the killed_overtime path;
+    # informational only, never feeds winner selection.
     estimated_output_throughput: float | None = None
 
     @property

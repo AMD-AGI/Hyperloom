@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-# Naive GEMM FlyDSL fixture (issue #211 §5): text sample for classifier patchability/metadata tests; not executed.
+# Naive GEMM FlyDSL fixture: text sample for classifier patchability/metadata tests; not executed.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx

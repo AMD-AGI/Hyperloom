@@ -9,8 +9,7 @@
 Used by the bypass analysis backend (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``).
 It never imports or shells out to TraceLens.
 
-Design constraints (validated on a 3GB dev box against a 560MB / 2M-event
-trace):
+Design constraints:
 
 * **Streaming**: the ``traceEvents`` array is parsed element-by-element with
   the C-accelerated ``json.JSONDecoder.raw_decode`` so peak memory stays flat
@@ -21,8 +20,8 @@ trace):
   ``cuda_runtime.args["External id"]`` -> ``cpu_op.args["External id"]``.
   Kernels whose op cannot be resolved are aggregated under ``(unlinked)``.
 * **Aggregation scope**: whole trace, ranked by GPU-time share. Steady-state
-  windowing is a separate, optional stage (see the annotation windows returned
-  here); ranking by share is stable regardless of windowing.
+  windowing is a separate, optional stage; ranking by share is stable
+  regardless of windowing.
 """
 
 from __future__ import annotations
@@ -42,9 +41,7 @@ _TRACE_EXTS = (".trace.json.gz", ".pt.trace.json.gz", ".trace.json", ".json.gz",
 
 _DECODER = json.JSONDecoder()
 
-# Per-rank trace filenames from the Magpie xDiT bridge / torch profiler, e.g.
-# ``rank_0.trace.json.gz`` or ``...rank-3...``. Used for deterministic rank
-# selection and multi-rank provenance.
+# Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
 _RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
 
 
@@ -71,15 +68,9 @@ def _trace_candidates(root: Path) -> list[Path]:
     return out
 
 
-# sglang emits CUDA-graph capture shards under a ``capture_traces/`` subdirectory
-# named ``bs_<batch>_rank<n>.json.gz``. Each shard holds only the couple of
-# device kernels captured for one graph batch size: it is rank-tagged yet
-# device-kernel sparse (megabytes of cpu_op/metadata, ~2 kernels). Such shards
-# must never be mistaken for the content-rich main profiler trace (the top-level
-# ``*-TP-<n>.trace.json.gz``); left unfiltered they hijack the lowest-rank
-# selection branch below because the main trace's ``-TP-0`` name is NOT
-# rank-tagged. Genuine xDiT per-rank traces (top-level ``rank_0..N``) are not
-# capture shards and stay eligible.
+# sglang CUDA-graph capture shards (``bs_<batch>_rank<n>.json.gz`` under
+# ``capture_traces/``) are rank-tagged but device-kernel sparse and must not be
+# mistaken for the content-rich main profiler trace.
 _CAPTURE_DIR_NAME = "capture_traces"
 _CAPTURE_FRAGMENT_RE = re.compile(r"^bs_\d+_rank\d+", re.IGNORECASE)
 
@@ -121,12 +112,8 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
     content-rich main trace is never shadowed by a sparse ``bs_*_rank0`` shard.
     Among the remaining main traces the order is: a ``merged-*`` trace (largest,
-    name tie-break) > the **lowest-index rank** trace (``rank_0`` first;
-    representative under sequence/tensor parallel where every rank runs the same
-    kernels on sharded data) > the largest file. Ties always break by name so
-    selection is reproducible across runs (the previous ``max(..., key=size)``
-    was non-deterministic on equal sizes, which is exactly the xDiT TP>1 case of
-    N equal per-rank traces).
+    name tie-break) > the lowest-index rank trace (``rank_0`` first) > the
+    largest file. Ties always break by name so selection is reproducible.
     """
     candidates = _main_trace_candidates(candidates, root)
     merged = [c for c in candidates if c.name.startswith("merged-")]
@@ -166,11 +153,9 @@ def resolve_trace_file(trace_input: str | Path) -> Path | None:
 def _trace_rank_count(trace_input: str | Path) -> int:
     """Count distinct per-rank traces under ``trace_input``.
 
-    Returns the number of distinct ``rank_N`` indices found in a directory
-    (e.g. 8 for xDiT TP=8), or ``1`` when the input is a single file or has no
-    rank-tagged traces. Used only for provenance / the multi-rank warning.
-    Capture shards are excluded so their ``rank0`` tag is not mistaken for a
-    real per-rank workload trace.
+    Returns the number of distinct ``rank_N`` indices found in a directory, or
+    ``1`` when the input is a single file or has no rank-tagged traces. Capture
+    shards are excluded so their ``rank0`` tag is not counted.
     """
     p = Path(trace_input)
     if p.is_file():
@@ -280,8 +265,7 @@ class _Agg:
         self.count += 1
 
 
-# Anchored so real iteration markers (ProfilerStep#N, decode_step, denoise,
-# iteration) match, but substrings like "writer"/"iterator" do not.
+# Anchored so real iteration markers match but substrings like "writer" do not.
 _STEP_MARKER_RE = re.compile(r"(?i)profilerstep|denoise|iteration|(?:^|[^a-z])step|step(?:$|[^a-z])")
 
 
@@ -328,11 +312,8 @@ def select_steady_window(
 
     is_xdit = (framework or "").lower() == "xdit"
     threshold = 2 if is_xdit else min_repeats
-    # Only groups that repeat enough to be a real steady loop qualify; among
-    # those prefer a genuine step/iter marker, then the highest repeat count.
-    # Filtering by threshold *before* ranking is deliberate: otherwise a spurious
-    # low-count step/iter-named annotation (rank (1, 1)) would win over a real
-    # high-count loop (rank (0, N)) and then be rejected, dropping the loop.
+    # Filter by threshold before ranking so a spurious low-count step-named
+    # annotation cannot win over a real high-count loop and then be rejected.
     qualified = [(n, w) for n, w in groups.items() if len(w) >= threshold]
     if not qualified:
         return None
@@ -390,9 +371,8 @@ def _finalize(
         """Clip an interval to the steady window so occupancy math (busy/idle)
         stays within the window span. Returns ``None`` for an empty result.
 
-        Kernel/memcpy *durations* below intentionally stay unclipped: GPU-time
-        share ranks a kernel by its full cost, while wall-clock occupancy must
-        not exceed the window (otherwise busy_pct could top 100%).
+        Kernel/memcpy durations stay unclipped (GPU-time share ranks by full
+        cost) while wall-clock occupancy must not exceed the window.
         """
         if window is None:
             return (a, b)
@@ -428,12 +408,10 @@ def _finalize(
 
     # --- op-level attribution (kernel -> cuda_runtime -> cpu_op) ---
     op_agg: dict[str, _Agg] = {}
-    # Per device-kernel name -> {launching op name -> attributed GPU us}, used
-    # to pick a majority op name for each hot kernel (best-effort; cudagraph
-    # replay leaves many kernels ``(unlinked)`` — see module docstring).
+    # Kernel name -> {launching op name -> attributed GPU us}, to pick a majority
+    # op name for each hot kernel.
     kern_op: dict[str, dict[str, float]] = {}
-    # Per device-kernel name -> {launching op name -> op meta} (first-seen shape/
-    # dtype/kernel_file), so the majority op's meta can enrich the hot kernel.
+    # Kernel name -> {launching op name -> op meta} (first-seen shape/dtype/file).
     kern_op_meta: dict[str, dict[str, dict[str, Any]]] = {}
     attributed_us = 0.0
     attributed_kernels = 0
@@ -484,8 +462,7 @@ def _finalize(
     busy_ms = _union_ms(kernel_intervals + memcpy_intervals)
     if window is not None:
         # Steady scope: total is the representative step's wall span, so idle%
-        # reflects gaps *within* the step rather than just the active-kernel
-        # envelope (a kernel may end just past the window; idle clamps at 0).
+        # reflects gaps within the step rather than the active-kernel envelope.
         total_ms = max(0.0, (window[1] - window[0]) / 1000.0)
     elif gpu_min_ts is not None and gpu_max_end is not None:
         total_ms = (gpu_max_end - gpu_min_ts) / 1000.0
@@ -516,9 +493,8 @@ def _finalize(
         rows.sort(key=lambda r: r["gpu_time_ms"], reverse=True)
         return rows if top_k is None or top_k <= 0 else rows[:top_k]
 
-    # Time-ordered per-launch sequence (opt-in): powers fusion analysis, which
-    # needs kernel adjacency the name-aggregation above discards. Built from the
-    # already-buffered (window-filtered) device events, so no extra trace pass.
+    # Time-ordered per-launch sequence (opt-in) for fusion analysis, which needs
+    # the kernel adjacency the name-aggregation discards.
     kernel_launches: list[dict[str, Any]] = []
     if emit_launches:
         for _name, _dur, _corr, _ts, _e in k_events:
@@ -601,11 +577,10 @@ def analyze_trace(
     # Correlation maps + light buffers (see module docstring for the chain).
     corr_to_extid: dict[int, int] = {}
     extid_to_opname: dict[int, str] = {}
-    # Compact per-op meta (first-seen) for shape + Triton-source enrichment;
-    # only populated for cpu_ops that carry Input Dims / a Triton kernel_file.
+    # Compact per-op meta (first-seen) for shape + Triton-source enrichment.
     extid_to_opmeta: dict[int, dict[str, Any]] = {}
-    # Buffered device events so the same pass can serve full-trace and
-    # steady-window aggregation without re-reading the (possibly 500MB+) trace.
+    # Buffered device events so one pass serves both full-trace and steady-window
+    # aggregation without re-reading the trace.
     k_events: list[tuple[str, float, Any, float, float]] = []
     m_events: list[tuple[float, float, float]] = []
     annotation_windows: list[dict[str, Any]] = []
@@ -678,10 +653,8 @@ def analyze_trace(
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
 
-    # True when the selected trace is a CUDA-graph capture shard, i.e. no main
-    # profiler trace was available (the only-fragments fallback fired). The tool
-    # layer surfaces this as a health warning so the sparse analysis is not
-    # silent. Detection is relative to the input dir (see _is_capture_fragment).
+    # Detect (relative to the input dir) whether the selected trace is a
+    # CUDA-graph capture shard, so the tool layer can surface a health warning.
     _input_root = Path(trace_input)
     _input_root = _input_root if _input_root.is_dir() else None
 

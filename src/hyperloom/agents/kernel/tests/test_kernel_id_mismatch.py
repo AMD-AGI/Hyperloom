@@ -58,18 +58,18 @@ def test_unique_routable_name_match():
 
 
 def test_operator_name_for_skipped_or_non_unique_candidates_returns_none():
-    # Non-unique, non-routable operator name must not resolve to a skipped candidate.
+    # Non-unique operator name must not resolve to a skipped candidate.
     assert ko.find_candidate(SKIPPED_CANDIDATES, "aten::mm") is None
 
 
 def test_normalized_prefix_match():
-    # Fold hallucinated ``kn``/``rn`` prefix back to real ``k`` numbering.
+    # Fold ``kn``/``rn`` prefix back to real ``k`` numbering.
     assert ko.find_candidate(CANDIDATES, "kn001")["kernel_id"] == "k001"
     assert ko.find_candidate(CANDIDATES, "rn010")["kernel_id"] == "k010"
 
 
 def test_unknown_id_returns_none_not_raise():
-    # Pure hallucination that maps to nothing must NOT crash the subprocess.
+    # An id that maps to nothing returns None (must not crash).
     assert ko.find_candidate(CANDIDATES, "aiter.silu_and_mul") is None
     assert ko.find_candidate(CANDIDATES, "framework_sglang_silu_and_mul_m64") is None
 

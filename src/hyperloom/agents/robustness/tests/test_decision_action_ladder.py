@@ -36,9 +36,7 @@ def _sym(
     )
 
 
-# ---------------------------------------------------------------------------
 # Tier mapping
-# ---------------------------------------------------------------------------
 
 
 async def test_low_severity_yields_observation_send_message():
@@ -158,9 +156,7 @@ async def test_repeated_failure_emits_alert_only():
     assert IntentType.PRUNE_BRANCH not in types
 
 
-# ---------------------------------------------------------------------------
-# Wind-down path: recover_unsuccessful / deadline_imminent → delegate(report)
-# ---------------------------------------------------------------------------
+# Wind-down path: recover_unsuccessful / deadline_imminent -> delegate(report)
 
 
 async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
@@ -180,7 +176,7 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
                     "gpureset_attempted": True,
                     "post_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
                 },
-                subject={},  # session-wide
+                subject={},
                 suggestion="delegate(report) to finalize at the last validated gain",
             )
         ],
@@ -311,7 +307,6 @@ async def test_inbox_bloat_low_emits_observation_only():
         now_unix=1.0,
     )
     types = [i.type for i in out.intents]
-    # LOW tier → send_message(observation), not alert / escalate.
     msg_types = {i.payload.get("topic") for i in out.intents if i.type is IntentType.SEND_MESSAGE}
     assert "observation" in msg_types
     assert IntentType.KILL_TASK not in types
@@ -728,7 +723,6 @@ async def test_deadline_warning_medium_only_emits_alert():
         now_unix=1700001000.0,
     )
     types = [i.type for i in out.intents]
-    # MEDIUM falls through _diagnose: alert only, no delegate.
     assert IntentType.ALERT in types
     assert IntentType.DELEGATE not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
@@ -778,7 +772,6 @@ async def test_budget_strategy_drift_falls_to_medium_diagnose():
         now_unix=1.0,
     )
     types = [i.type for i in out.intents]
-    # MEDIUM-only: alert, no destructive action.
     assert IntentType.ALERT in types
     assert IntentType.DELEGATE not in types
     assert IntentType.PRUNE_BRANCH not in types
@@ -964,7 +957,6 @@ async def test_idempotency_replay_falls_to_medium_diagnose_tier():
         now_unix=1.0,
     )
     types = [i.type for i in out.intents]
-    # Medium severity emits only an alert; no destructive action.
     assert IntentType.ALERT in types
     assert IntentType.PRUNE_BRANCH not in types
     assert IntentType.DELEGATE not in types
@@ -987,9 +979,7 @@ async def test_wind_down_idempotency_key_varies_per_tick():
     assert second_keys == ["report-recover-unsuccessful-tick-20"]
 
 
-# ---------------------------------------------------------------------------
 # Cooldown / heartbeat
-# ---------------------------------------------------------------------------
 
 
 async def test_no_symptoms_falls_back_to_heartbeat():
@@ -1007,7 +997,6 @@ async def test_cooldown_suppresses_duplicate_within_window():
     first = await ladder.decide([sym], tick_index=0, now_unix=1.0)
     suppressed = await ladder.decide([sym], tick_index=1, now_unix=2.0)
     assert any(i.type is IntentType.ALERT for i in first.intents)
-    # Suppressed tick: no symptom-derived intent emitted, only heartbeat.
     assert all(i.type is not IntentType.ALERT for i in suppressed.intents)
     assert any(i.payload.get("topic") == "heartbeat" for i in suppressed.intents)
     assert suppressed.findings == []
@@ -1078,9 +1067,7 @@ async def test_rca_provider_failure_does_not_break_ladder():
     assert any(i.type is IntentType.ALERT for i in out.intents)
 
 
-# ---------------------------------------------------------------------------
-# gpu_memory_leaked — Change B contract
-# ---------------------------------------------------------------------------
+# gpu_memory_leaked contract
 
 
 def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
@@ -1094,7 +1081,7 @@ def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
             "per_gpu": [{"gpu_id": i, "free_mb": 108.0} for i in range(4)],
             "owner_patterns": ["EngineCore", "Magpie"],
         },
-        subject={},  # session-wide
+        subject={},
         source="local",
         suggestion="delegate(recover, params={force_gpu_cleanup: true})",
     )

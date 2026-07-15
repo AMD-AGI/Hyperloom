@@ -57,7 +57,7 @@ class LocalHealthConfig:
 # HIGH-severity log patterns; anything else from ``local_log_errors`` falls back to MEDIUM.
 _HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset(
     {
-        # Existing OOM / fatal-signal patterns.
+        # OOM / fatal-signal patterns.
         "CUDA out of memory",
         "hipErrorOutOfMemory",
         "HIP out of memory",
@@ -65,26 +65,26 @@ _HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset(
         "OOMKilled",
         "core dumped",
         "Segmentation fault",
-        # D1 — vLLM v1 EngineCore crashes (you've-seen-this case).
+        # vLLM v1 EngineCore crashes.
         r"Engine core .* died",
         r"RuntimeError: Engine core initialization failed",
-        # D1 — model architecture mismatch.
+        # model architecture mismatch.
         r"MLA.*not supported",
         r"MTP draft .* unavailable",
-        # D1 — aiter / hipcc compilation hard fail.
+        # aiter / hipcc compilation hard fail.
         r"aiter .* compilation failed",
         r"hipcc .* signal",
-        # D1 — accuracy gate / model load — drop here, do not retry.
+        # accuracy gate / model load — terminal, do not retry.
         r"accuracy .* gate failed",
         r"MMLU .* below threshold",
         r"Failed to load checkpoint",
-        # D1 — KFD resource exhaustion (≠ OOM but equally terminal).
+        # KFD resource exhaustion.
         r"cudaErrorOutOfDevice",
         r"HSA_STATUS_ERROR_OUT_OF_RESOURCES",
-        # D1 — matrix library errors.
+        # matrix library errors.
         r"ROCblas.*Status\s*\d+",
         r"hipBLAS.*Error",
-        # E5 — critic-agent runtime stuck → demand operator switch to mock.
+        # critic-agent runtime stuck.
         r"runtime\.cli .* timed out after \d+s",
     }
 )
@@ -404,8 +404,8 @@ def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
     Returns:
         A list with one :class:`Symptom` when unhealthy, else empty.
     """
-    ray_info = getattr(data, "local_ray", None)
-    if not isinstance(ray_info, dict) or not ray_info:
+    ray_info = data.local_ray
+    if not ray_info:
         return []
     healthy = ray_info.get("healthy")
     if healthy is None or healthy:
@@ -447,8 +447,8 @@ def _fd_pressure_symptoms(
     Returns:
         A list with one :class:`Symptom` when FD pressure trips, else empty.
     """
-    fd_info = getattr(data, "local_fd", None)
-    if not isinstance(fd_info, dict) or not fd_info:
+    fd_info = data.local_fd
+    if not fd_info:
         return []
     used_pct = fd_info.get("used_pct")
     if not isinstance(used_pct, (int, float)):

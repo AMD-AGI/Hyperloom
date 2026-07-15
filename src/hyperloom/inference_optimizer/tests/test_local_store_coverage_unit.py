@@ -113,7 +113,6 @@ def test_put_get_history_roundtrip(tmp_path):
     )
     assert r1["version"] == 1
     assert r1["created"] is True
-    # second put archives v1 and writes v2
     r2 = store.put_recipe(canonical_id=cid, model="m", best_throughput=200.0)
     assert r2["version"] == 2
     assert r2["created"] is False
@@ -121,12 +120,9 @@ def test_put_get_history_roundtrip(tmp_path):
     live = store.get_recipe(canonical_id=cid)
     assert live["version"] == 2
 
-    # explicit live version
     assert store.get_recipe(canonical_id=cid, version=2)["version"] == 2
-    # archived version snapshot
     archived = store.get_recipe(canonical_id=cid, version=1)
     assert archived["version"] == 1
-    # unknown version
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
     assert store.get_recipe(canonical_id=cid, version=1)["version"] == 1
@@ -179,7 +175,7 @@ def test_search_filters(tmp_path):
     res = store.search(metric_filters={"throughput": {"min": 200.0}})
     assert len(res) == 1
     assert res[0]["model"] == "b"
-    # metric scalar shorthand (equality-ish min/max)
+    # metric scalar shorthand
     res = store.search(metric_filters={"best_throughput": {"max": 150.0}})
     assert len(res) == 1
     # updated_since far future -> none
@@ -241,7 +237,7 @@ def test_normalisers_skip_uncoercible():
 
 
 def test_matches_metrics_scalar_shorthand_and_bad_bound():
-    # scalar shorthand -> lo == hi == bounds (equality)
+    # scalar shorthand -> lo == hi == bounds
     assert ls._matches_metrics({"best_throughput": 100.0}, {"throughput": 100.0}) is True
     assert ls._matches_metrics({"best_throughput": 100.0}, {"throughput": 50.0}) is False
     # bad bound type -> False

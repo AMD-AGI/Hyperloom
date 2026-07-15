@@ -2,16 +2,13 @@
 
 """Helper that bridges the multi-node CLI state into Magpie subprocesses.
 
-Lives in the executors package (called by ``baseline.py`` / ``_grid_runner.py``
-before they launch Magpie) so the dependency edge stays one-way: executors
-import this; ``multi_node/`` knows nothing about them.
+Lives in the executors package (the dependency edge stays one-way: executors
+import this; ``multi_node/`` knows nothing about them).
 
-Reads ``$INFERENCE_OPTIMIZER_NODES`` + ``$MULTI_NODE_STATE_FILE`` (session-scoped
-under ``<session_dir>/runtime/`` when pinned, else legacy ``/tmp/``). Single
-node (< 2): returns ``{}`` (single-pod path preserved). Multi-node (>= 2) with
-a ``service_url``: returns ``MAGPIE_RUN_PHASE=client`` +
-``BENCHMARK_BASE_URL=<service_url>`` so Magpie skips its own server launch and
-points ``benchmark_serving`` at the head pod. Missing state file: WARN + ``{}``.
+Reads ``$INFERENCE_OPTIMIZER_NODES`` + ``$MULTI_NODE_STATE_FILE``. Single node
+(< 2): returns ``{}``. Multi-node (>= 2) with a ``service_url``: returns
+``MAGPIE_RUN_PHASE=client`` + ``BENCHMARK_BASE_URL=<service_url>`` so Magpie
+skips its own server launch and points ``benchmark_serving`` at the head pod.
 :func:`export_ray_address_to_os` also copies ``ray_address`` into
 ``RAY_ADDRESS`` for kernel-agent ``ray.init``.
 """
@@ -47,12 +44,7 @@ def _read_state() -> dict[str, Any]:
     """
     p = _state_path()
     if not p.is_file():
-        legacy = legacy_state_file()
-        if p != legacy and legacy.is_file() and state_file_safe_to_read(legacy):
-            log.warning("multi_node state file %s missing; reading legacy %s", p, legacy)
-            p = legacy
-        else:
-            return {}
+        return {}
     if not state_file_safe_to_read(p):
         log.warning("multi_node state file %s failed ownership/permission check", p)
         return {}
@@ -84,9 +76,8 @@ def mn_bench_warmup_enabled() -> bool:
 def is_multi_node() -> bool:
     """True iff the optimizer is operating on a >=2-node RayJob cluster.
 
-    State file wins over env so ``--resume`` works (manifest.json doesn't
-    persist ``nodes``): session-scoped ``multi_node_state.json`` ``nodes`` >= 2
-    wins; else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
+    State file wins over env so ``--resume`` works: state ``nodes`` >= 2 wins,
+    else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
 
     Returns:
         True when operating on a >=2-node RayJob cluster, else False.
@@ -511,7 +502,7 @@ def magpie_remote_env() -> dict[str, str]:
 
     state = _read_state()
     service_url = str(state.get("service_url") or "").strip()
-    # Prefer head_pod_ip:port over ClusterIP (sandbox may not reach ClusterIP)
+    # Prefer head_pod_ip:port over ClusterIP (sandbox may not reach ClusterIP).
     head_ip = str(state.get("head_pod_ip") or "").strip()
     if head_ip and ".svc.cluster.local" in service_url:
         import re
@@ -543,11 +534,8 @@ def log_mn_banner(
 ) -> None:
     """Print a one-line ``[MN ...]`` banner when multi-node, no-op single-node.
 
-    Lets an operator tailing the log tell single-pod from multi-node RayJob
-    rounds. No-op (short-circuits via ``is_multi_node()``) when ``nodes < 2``.
-    Multi-node prints ``[MN component=<name> nodes=N head=<ip>
-    service_url=<url> key=value ...]``; ``**extra`` keys are appended for
-    round-specific context (e.g. ``trace_dir=`` / ``variant=``).
+    Prints ``[MN component=<name> nodes=N head=<ip> service_url=<url> key=value
+    ...]``; ``**extra`` keys are appended for round-specific context.
 
     Args:
         component: Name of the component emitting the banner.

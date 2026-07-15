@@ -39,7 +39,6 @@ def _seq_runner(results: list[Any]):
     return _run
 
 
-# -- _git_head_sha ---------------------------------------------------------
 def test_git_head_sha_success(monkeypatch) -> None:
     monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0, "deadbeef\n")]))
     sha, err = fp._git_head_sha(Path("/repo"))
@@ -58,7 +57,6 @@ def test_git_head_sha_nonzero(monkeypatch) -> None:
     assert sha is None and err == "fatal: no head"
 
 
-# -- _git_reset_hard -------------------------------------------------------
 def test_git_reset_hard_success(monkeypatch) -> None:
     monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0), _CP(0)]))
     ok, err = fp._git_reset_hard(Path("/repo"), "sha")
@@ -101,9 +99,7 @@ def test_git_reset_hard_clean_nonzero(monkeypatch) -> None:
     assert ok is False and err == "clean failed"
 
 
-# -- _git_commit_keep ------------------------------------------------------
 def test_git_commit_keep_success(monkeypatch) -> None:
-    # add -A ok, commit ok, rev-parse returns new sha
     monkeypatch.setattr(
         gitmod.subprocess,
         "run",
@@ -152,10 +148,9 @@ def test_git_commit_keep_head_unreadable(monkeypatch) -> None:
         _seq_runner([_CP(0), _CP(0), _CP(1, "", "")]),
     )
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
-    assert sha is None and err  # surfaces the rev-parse error/fallback
+    assert sha is None and err
 
 
-# -- _run_git --------------------------------------------------------------
 def test_run_git_success(monkeypatch) -> None:
     monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0, "out", "")]))
     ok, out, err = fp._run_git(["status"])
@@ -174,7 +169,6 @@ def test_run_git_nonzero(monkeypatch) -> None:
     assert ok is False and out == "partial" and err == "boom"
 
 
-# -- _normalize_repo_id ----------------------------------------------------
 @pytest.mark.parametrize(
     "raw,expected",
     [
@@ -191,9 +185,7 @@ def test_normalize_repo_id(raw: str, expected: str) -> None:
     assert fp._normalize_repo_id(raw) == expected
 
 
-# -- _candidate_is_same_repo ----------------------------------------------
 def test_candidate_is_same_repo_no_candidate_repo() -> None:
-    # missing/invalid candidate repo -> fail open (True)
     assert fp._candidate_is_same_repo({}, Path("/repo")) is True
     assert fp._candidate_is_same_repo({"repo": "noslash"}, Path("/repo")) is True
 

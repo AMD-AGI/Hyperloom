@@ -3,23 +3,18 @@
 """Numeric coercion primitives (canonical ``to_float`` / ``to_int`` / ...).
 
 Single home for the "best-effort coerce a value to a number, tolerate dirty
-input, reject ``bool``, fall back to a default" idiom that was independently
-re-implemented ~20 times across the codebase (``_to_float`` / ``_to_int`` /
-``_coerce_metric`` / ``_first_float`` / ``_coerce_optional_positive_int`` /
-``_fnum`` / ``_coerce_unix`` / ...).
+input, reject ``bool``, fall back to a default" idiom.
 
 Standardised semantics (one clean contract, no per-call flags):
 
 * ``bool`` is always treated as dirty input and coerced to *default* -- never
-  ``float(True) == 1.0``. In Python ``bool`` is an ``int`` subclass, so a stray
-  boolean silently becoming ``1.0`` / ``0`` is almost always a latent bug; the
-  numeric coercers reject it uniformly.
+  ``float(True) == 1.0``, since a stray boolean becoming ``1.0`` / ``0`` is
+  almost always a latent bug.
 * ``None`` and any non-convertible value coerce to *default* (default ``None``).
-* String inputs are ``str(...).strip()``-normalised before parsing, matching the
-  legacy sites that accepted numeric strings with surrounding whitespace.
+* String inputs are ``str(...).strip()``-normalised before parsing.
 
 Zero first-party imports (stdlib only) so any package may depend on it without
-creating an import cycle (anti-cycle rule: no first-party imports).
+creating an import cycle.
 """
 
 from __future__ import annotations

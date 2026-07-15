@@ -2,7 +2,7 @@
 
 """KB client interface + minimal HTTP transport.
 
-The Critic uses only 4 KB endpoints (contract §4):
+The Critic uses only 4 KB endpoints:
 
 * ``POST /api/kb/list``
 * ``POST /api/kb/upsert``
@@ -11,8 +11,7 @@ The Critic uses only 4 KB endpoints (contract §4):
 
 Exposed as methods on the :class:`KBClient` protocol with two
 implementations: :class:`HTTPKBClient` (urllib-based, retry + exponential
-backoff; avoids ``httpx`` so it installs in minimal Codex containers) and
-:class:`InMemoryKBClient` (pure-Python, for tests / dry-runs).
+backoff) and :class:`InMemoryKBClient` (pure-Python, for tests / dry-runs).
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ from .metrics import (
 
 DEFAULT_TIMEOUT_MS = 10_000
 DEFAULT_RETRY_MAX = 3
-DEFAULT_BACKOFF_BASE = 1.0  # seconds; 1, 2, 4 ...
+DEFAULT_BACKOFF_BASE = 1.0  # seconds
 
 
 class KBClient(Protocol):
@@ -111,9 +110,9 @@ class KBClient(Protocol):
 class HTTPKBClient:
     """Minimal HTTP wrapper over ``/api/kb/*``.
 
-    Retry policy mirrors contract §6: exponential backoff on 429 / 5xx /
-    network errors up to ``retry_max`` times. 4xx errors raise
-    :class:`KBValidationError` immediately so the caller can dead-letter.
+    Exponential backoff on 429 / 5xx / network errors up to ``retry_max``
+    times. 4xx errors raise :class:`KBValidationError` immediately so the
+    caller can dead-letter.
     """
 
     def __init__(
@@ -151,9 +150,7 @@ class HTTPKBClient:
         self.backoff_base = backoff_base
         self._sleep = sleep_fn
 
-    # ------------------------------------------------------------------
     # Public API — one method per endpoint.
-    # ------------------------------------------------------------------
     def list(
         self,
         *,
@@ -233,9 +230,7 @@ class HTTPKBClient:
         """
         return self._request("/api/kb/edges/add", {"edges": edges})
 
-    # ------------------------------------------------------------------
     # Internal — request / retry
-    # ------------------------------------------------------------------
     def _request(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """POST ``body`` to ``path`` with retry, backoff, and metrics.
 
@@ -276,7 +271,7 @@ class HTTPKBClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                     payload = resp.read().decode("utf-8") or "{}"
-                    body_obj = json.loads(payload) if payload else {}
+                    body_obj = json.loads(payload)
                     registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
                         {
                             "endpoint": endpoint_label,
@@ -288,7 +283,7 @@ class HTTPKBClient:
                     )
                     return body_obj
             except urllib.error.HTTPError as exc:
-                # 4xx → don't retry; let caller dead-letter.
+                # 4xx → don't retry.
                 status = getattr(exc, "code", 0)
                 err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
                 registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
@@ -321,7 +316,6 @@ class HTTPKBClient:
             float: Seconds to sleep — exponential in ``attempt`` with jitter
             to avoid a thundering herd.
         """
-        # Exponential with optional jitter to avoid thundering herd.
         base = self.backoff_base * (2 ** (attempt - 1))
         return base * (0.9 + 0.2 * random.random())
 

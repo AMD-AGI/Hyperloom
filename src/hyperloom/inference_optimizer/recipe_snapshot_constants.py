@@ -21,15 +21,15 @@ log = logging.getLogger(__name__)
 # No DEFAULT_KB_URL by design: the optimizer never silently connects to a
 # remote KB; a remote source is used only with --cortex-kb-url / $CORTEX_KB_URL.
 
-# Request body field names — PUT /recipes/{canonical_id}. Top-level fields;
-# server validates only authority + provenance (rest are caller-defined).
+# Request body field names — PUT /recipes/{canonical_id}. Server validates
+# only authority + provenance (rest are caller-defined).
 F_AUTHORITY: Final[str] = "authority"
 F_CONFIDENCE: Final[str] = "confidence"
 F_EVIDENCE_REFS: Final[str] = "evidence_refs"
 F_PROVENANCE: Final[str] = "provenance"
 
-# Canonical identity dimensions inside ``labels`` mirroring
-# recipe_canonical_id; stamp them so /recipes/search can filter by dimension.
+# Canonical identity dimensions inside ``labels`` mirroring recipe_canonical_id
+# so /recipes/search can filter by dimension.
 F_LABEL_MODEL: Final[str] = "model"
 F_LABEL_HARDWARE: Final[str] = "hardware"
 F_LABEL_FRAMEWORK_NAME: Final[str] = "framework_name"
@@ -59,9 +59,8 @@ ORDER_BY_UPDATED_AT_ASC: Final[str] = "updated_at ASC"
 ORDER_BY_CREATED_AT_ASC: Final[str] = "created_at ASC"
 
 
-# Defaults — two timeout/retry profiles. Foreground (Coordinator main loop)
-# fails fast (2s + 1 retry) and falls through to NDJSON; background (flusher /
-# CLOSE drain) uses the larger 10s x 3 budget.
+# Two timeout/retry profiles: foreground fails fast and falls through to
+# NDJSON; background (flusher / CLOSE drain) uses the larger budget.
 DEFAULT_HTTP_TIMEOUT_SEC: Final[float] = 10.0  # background / flusher
 FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0  # Coordinator main loop
 
@@ -69,8 +68,7 @@ FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0  # Coordinator main loop
 DEFAULT_CONFIDENCE: Final[float] = 0.85
 
 
-# Canonical id derivation. Default-slug constants for missing identity
-# components, named so the audit log + /search corpus stay grep-stable.
+# Default-slug constants for missing identity components.
 DEFAULT_MODEL_SLUG: Final[str] = "unknown_model"
 DEFAULT_HARDWARE_SLUG: Final[str] = "unknown_hw"
 DEFAULT_FRAMEWORK_SLUG: Final[str] = "unknown_framework"
@@ -130,9 +128,8 @@ def recipe_canonical_id(
     """Build the recipe ``canonical_id``:
     ``inference:{model}:{hardware}:{framework_name}:{model_type}:{architectures}:{framework_version}:{precision}``.
 
-    8 colon-separated segments: 1 prefix + 7 identity dimensions.
-    Dimension order reflects fallback priority: model is dropped first
-    (cross-model same-architecture reuse), then framework_version.
+    8 colon-separated segments: 1 prefix + 7 identity dimensions. Dimension
+    order reflects fallback priority: model is dropped first, then framework_version.
     """
     return (
         f"inference:"
@@ -256,9 +253,8 @@ def canonical_labels(
     }
 
 
-# framework_name slug -> python package whose __version__ is authoritative. Keep
-# narrow: every entry must be safe to import at boot (don't import sglang in a
-# vLLM-only run).
+# framework_name slug -> python package whose __version__ is authoritative.
+# Every entry must be safe to import at boot.
 _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
     "sglang": "sglang",
     "vllm": "vllm",
@@ -297,7 +293,7 @@ def detect_framework_version(framework_name: str) -> str:
         )
         return DEFAULT_FRAMEWORK_VERSION_SLUG
     raw = getattr(mod, "__version__", "") or ""
-    if not raw:  # fall back to VERSION; __version__ (PEP 396) wins
+    if not raw:  # fall back to VERSION
         raw = getattr(mod, "VERSION", "") or ""
     return _slug(str(raw), DEFAULT_FRAMEWORK_VERSION_SLUG)
 

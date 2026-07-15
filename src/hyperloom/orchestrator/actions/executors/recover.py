@@ -122,7 +122,7 @@ def _session_gpu_ids() -> list[int] | None:
         try:
             ids.append(int(tok))
         except ValueError:
-            return None  # UUID / non-int token -> cannot safely scope a reset
+            return None  # non-int token -> cannot safely scope a reset
     return sorted(set(ids)) or None
 
 
@@ -248,8 +248,8 @@ class RecoverExecutor:
         # 3) Probe after kills.
         mid = await asyncio.to_thread(self._probe_gpu_free_mb)
 
-        # 4) Hard cleanup (gpureset) — opt-in env gate + force_cleanup, and
-        # ALWAYS scoped to this session's own GPUs (never implicit --gpu=all).
+        # 4) Hard cleanup (gpureset) — opt-in env gate + force_cleanup, always
+        # scoped to this session's own GPUs (never implicit --gpu=all).
         gpu_ids = _session_gpu_ids()
         gpureset_result: dict[str, Any] | None = None
         gpureset_skipped_reason: str | None = None
@@ -455,7 +455,7 @@ class RecoverExecutor:
             ``free_mb`` is at least :attr:`FREE_MB_HEALTHY`.
         """
         if not gpus:
-            # No probe → can't claim recovery; treat as unhealthy.
+            # No probe -> treat as unhealthy.
             return False
         return all(
             isinstance(snap.get("free_mb"), (int, float)) and snap["free_mb"] >= self.FREE_MB_HEALTHY for snap in gpus
@@ -482,7 +482,7 @@ class RecoverExecutor:
                 killed.append(entry)
         if not killed:
             return []
-        # Wait then SIGKILL survivors of exactly the TERMed set (no re-discover).
+        # Wait then SIGKILL survivors of the TERMed set (no re-discover).
         time.sleep(self.SERVER_KILL_WAIT_S)
         for entry in killed:
             pid = entry["pid"]
@@ -531,8 +531,7 @@ class RecoverExecutor:
                 cmd = parts[1]
                 if pid == own_pid:
                     continue
-                # Defence-in-depth: confirm the pattern via plain substring
-                # (pgrep's regex engine is permissive on some platforms).
+                # Confirm the pattern via plain substring (pgrep's regex is permissive).
                 if pattern not in cmd:
                     continue
                 seen[pid] = {"pid": pid, "cmd": cmd, "pattern": pattern}

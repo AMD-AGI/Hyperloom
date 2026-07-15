@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Pin the Orchestration system prompt's specialist / integrate_patch visibility.
-
-Regression: a run emitted 0 ``kind='specialist'`` tasks because the
-prompt catalogue rendered no entry for the synthetic ``specialist`` action.
-PR-A1 added the yaml/md + emit hints + enabled/phase entries pinned here.
-"""
+"""Pin the Orchestration system prompt's specialist / integrate_patch visibility."""
 
 from __future__ import annotations
 

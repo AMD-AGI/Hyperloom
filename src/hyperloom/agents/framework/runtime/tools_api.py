@@ -234,7 +234,7 @@ def evaluate_candidate_outcome(
 
     bench = coerce_dict(benchmark)
     acc = coerce_dict(accuracy)
-    throughput = _metric_float(bench, ("throughput", "output_throughput", "tput"))
+    throughput = _metric_float(bench, ("throughput", "output_throughput"))
     acc_value = _metric_float(acc, ("accuracy", "gsm8k", "exact_match", "score"))
     completed = str(bench.get("completed") or bench.get("Completed") or "")
 

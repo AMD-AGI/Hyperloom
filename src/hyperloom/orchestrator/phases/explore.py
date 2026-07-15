@@ -194,11 +194,9 @@ class ExplorePhase(PhaseHandler):
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
 
-        Increments ``macro_cycle``, persists the no-gain streak + the per-cycle
-        gain anchor, resets per-cycle counters (including re-opening FRAMEWORK)
-        so the new cycle gets a fresh budget / plateau evaluation. The explore
-        ledger is preserved; its already-KEEP entries stay blocked while
-        sub-threshold ones may unblock as the KEEP bar decays.
+        Increments ``macro_cycle``, persists the no-gain streak + per-cycle gain
+        anchor, and resets per-cycle counters (including re-opening FRAMEWORK) for
+        a fresh budget / plateau evaluation. The explore ledger is preserved.
 
         Args:
             evidence: The loopback evidence dict from ``compute_next_phase``;
@@ -219,7 +217,6 @@ class ExplorePhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — advisory bookkeeping only
             log.exception("Coordinator: cycle_strategy gain_delta backfill failed")
         state.macro_cycle = prior_cycle + 1
-        # Carry the effective no-gain streak computed by should_reloop.
         if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
         # Anchor gain for the cycle we are about to start.
@@ -233,27 +230,17 @@ class ExplorePhase(PhaseHandler):
             state.reset_explore_plateau_proxy()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Re-open FRAMEWORK for the new cycle so the loopback target does not
-        # instantly self-skip as "already done". Already-tested PRs are still
-        # skipped: framework_agent_batches (and the per-candidate progress rows that
-        # dedup within them) are preserved, so a fresh discover only surfaces PRs
-        # merged upstream since, and fast-exits via
-        # ``discover_returned_no_new_candidates`` when there are none.
+        # Re-open FRAMEWORK for the new cycle; preserved batches/progress rows
+        # keep already-tested PRs skipped.
         state.framework_agent_phase_done = False
         state.framework_agent_discover_failures = 0
-        # Reset the config-exploration guard so each macro-cycle re-runs the
-        # framework config lane (default OFF; no-op unless enabled).
+        # Reset the config-exploration guard so each macro-cycle re-runs the lane.
         state.framework_config_lane_state = ""
         state.framework_config_lane_round = 0
         state.framework_config_pending_grid = []
         # Mark a macro-cycle boundary in the preserved progress ledger so the
-        # consecutive-no-keep plateau gate (``_framework_agent_consecutive_no_keep``)
-        # does NOT carry the prior cycle's trailing no-KEEP streak into this
-        # cycle. Without this, FRAMEWORK_AGENT plateaus the instant it re-enters
-        # (the cycle-0 no-KEEP rows already satisfy the streak threshold), so the
-        # new cycle's candidate never gets a fair evaluation. The marker carries
-        # no candidate_id, so candidate dedup (_unprocessed_framework_agent_candidates)
-        # is unaffected; kept=False keeps KEEP-count reporting honest.
+        # consecutive-no-keep plateau gate ignores the prior cycle's trailing
+        # no-KEEP streak.
         try:
             progress = getattr(state, "framework_agent_phase_progress", None)
             if not isinstance(progress, list):
@@ -272,11 +259,8 @@ class ExplorePhase(PhaseHandler):
                 )
         except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
             log.exception("Coordinator: framework_agent cycle_boundary marker append failed")
-        # Clear the per-cycle SWEEP completion markers: exit_normal_sweep keys off
-        # last_sweep / last_conc_sweep status, so a stale "succeeded" from the
-        # prior cycle would make the next cycle's SWEEP exit instantly without
-        # running a fresh sweep. (current_best / optimization_stack are global
-        # and intentionally preserved.)
+        # Clear the per-cycle SWEEP completion markers so the next cycle's SWEEP
+        # runs a fresh sweep instead of exiting on a stale status.
         state.last_sweep = {}
         state.last_conc_sweep = {}
         try:
@@ -299,16 +283,11 @@ class ExplorePhase(PhaseHandler):
     ) -> dict[str, Any] | None:
         """Medium-intensity soft restart at a macro-cycle boundary.
 
-        Brings the single-session run the per-session restart benefits (fresh
-        leases, pruned DB, cleared transient caches, compacted-memory
-        conversation reset) without losing accumulated optimization state.
-        ``current_best`` / ``optimization_stack`` / ``explore_search`` (the
-        negative ledger) are GLOBAL and deliberately preserved here — only
-        transient / per-cycle resources recycle, and the routine is idempotent
-        so a resume mid-restart never double-cleans or replays tasks.
-
-        Best-effort: every step is independently guarded so one failure never
-        aborts the run loop. Returns a summary dict when it ran, else ``None``.
+        Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
+        caches, conversation reset) without losing accumulated optimization state;
+        ``current_best`` / ``optimization_stack`` / ``explore_search`` are
+        preserved. Idempotent and best-effort: every step is independently
+        guarded so one failure never aborts the run loop.
 
         Args:
             prior_cycle: The macro-cycle number that just finished.
@@ -324,9 +303,7 @@ class ExplorePhase(PhaseHandler):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the just-finished cycle's conversation into durable memory
-        #    and reset so the new cycle reseeds from the compressed seed instead
-        #    of dragging the full transcript across the boundary.
+        # 1) Compact the cycle's conversation into durable memory and reset.
         try:
             compacted = await self._maybe_checkpoint_orchestration(
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
@@ -334,14 +311,12 @@ class ExplorePhase(PhaseHandler):
                 force=True,
             )
             summary["memory_compacted"] = bool(compacted)
-            # Reset unconditionally so even a no-op checkpoint (e.g. mock backend)
-            # still reseeds from the latest compacted memory next turn.
+            # Reset unconditionally so a no-op checkpoint still reseeds next turn.
             self._reset_orchestration_conversation()
             summary["conversation_reset"] = True
         except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
             log.exception("cycle soft-restart: conversation reset failed")
-        # 2) Reap TTL-expired serving + GPU leases immediately (don't wait for
-        #    the maintenance cadence) so the new cycle starts on fresh capacity.
+        # 2) Reap TTL-expired serving + GPU leases immediately.
         try:
             reaped = await self.locks.reap_expired()
             summary["leases_reaped"] = len(reaped or [])
@@ -351,8 +326,7 @@ class ExplorePhase(PhaseHandler):
             summary["gpu_leases_reaped"] = await self.gpu_specialist_pool.reap_expired()
         except Exception:  # noqa: BLE001
             log.exception("cycle soft-restart: gpu-lease reap failed")
-        # 2b) Reclaim orphaned running tasks (lease expired) → failed so they
-        #     free their lanes and stay retry-eligible. Idempotent.
+        # 2b) Reclaim orphaned running tasks (lease expired) → failed. Idempotent.
         try:
             reclaimed = await self.tasks.reclaim_expired_running(
                 reason="cycle_soft_restart",
@@ -369,17 +343,14 @@ class ExplorePhase(PhaseHandler):
             summary["tasks_pruned"] = res.tasks_deleted
         except Exception:  # noqa: BLE001
             log.exception("cycle soft-restart: DB retention failed")
-        # 4) Clear transient knowledge-plane caches so the new cycle pulls a
-        #    fresh PR feed instead of reusing the prior cycle's window.
+        # 4) Clear transient knowledge-plane caches for a fresh PR feed.
         try:
             if self.knowledge_plane is not None:
                 self.knowledge_plane.reset_round_caches()
                 summary["caches_cleared"] = True
         except Exception:  # noqa: BLE001
             log.exception("cycle soft-restart: cache clear failed")
-        # 5) Deep-clean any lingering inference-server processes so the next
-        #    cycle's first benchmark starts a fresh server (no stale zmq /
-        #    shared-mem / VRAM held by escaped workers).
+        # 5) Deep-clean any lingering inference-server processes.
         if getattr(self, "_cycle_restart_servers", False):
             try:
                 self._restart_inference_servers()
@@ -403,28 +374,26 @@ class ExplorePhase(PhaseHandler):
         return summary
 
     def _restart_inference_servers(self) -> None:
-        """Deep-clean lingering inference-server processes (used by the macro-cycle soft restart).
+        """Deep-clean lingering inference-server processes (macro-cycle soft restart).
 
         Reuses the grid runner's ``_kill_stale_servers`` /proc sweep, which only
         targets vLLM/SGLang/atom server processes outside our own process group
-        (never our live children) and is a no-op in multi-node mode. Safe at a
-        cycle boundary where no benchmark is in flight.
+        and is a no-op in multi-node mode.
         """
         from ..actions.executors._grid_runner import _kill_stale_servers
 
         _kill_stale_servers()
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """Run EXPLORE-entry housekeeping. Roofline lives in PRELUDE, not here (except the per-cycle forced reprofile below).
+        """Run EXPLORE-entry housekeeping (plus the per-cycle forced reprofile).
 
         Args:
             from_phase: The phase being left; a SWEEP origin in cyclic mode
-                triggers the R3 per-cycle forced reprofile.
+                triggers the per-cycle forced reprofile.
         """
-        # At the start of each macro-cycle (cyclic loopback SWEEP→EXPLORE),
-        # force a fresh roofline/profile so the new cycle re-targets the current
-        # bottleneck instead of reusing the prior cycle's stale picture. The
-        # cycle-scoped idempotency key guarantees a new task each cycle.
+        # At the start of each macro-cycle (SWEEP→EXPLORE loopback), force a
+        # fresh roofline/profile so the new cycle re-targets the current
+        # bottleneck.
         if (
             _phase_state.is_cyclic_phases_enabled()
             and (from_phase or "").upper() == _phase_state.PHASE_SWEEP
@@ -446,19 +415,13 @@ class ExplorePhase(PhaseHandler):
                 )
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
-        """Hard-trigger: force-dispatch a domain specialist for a
-        domain that has gone untouched for too many EXPLORE rounds *and* still
-        has an open gap in the gaps[] ledger.
+        """Force-dispatch a domain specialist for a domain untouched for too many
+        EXPLORE rounds that still has an open gap in the gaps[] ledger.
 
-        This is the L2 supervisor escalation the long-run coverage lower-bound
-        relies on — a real scheduling event (a normal domain delegate routed
-        through PolicyGate + warmup + the GPU specialist pool), not an advisory
-        nudge. Idempotent per ``(anchor, round, macro_cycle)`` so it can't spam
-        the bus yet still re-fires in a later cycle (the cycle suffix keeps a new
-        macro-cycle from dedup-matching a prior cycle's forced task), and it
-        self-throttles by zeroing the per-anchor counter on dispatch. Routes
-        through ``_handle_intent`` exactly as an LLM delegate would; at most one
-        forced dispatch per tick.
+        A real scheduling event (a domain delegate routed through PolicyGate +
+        warmup + the GPU specialist pool). Idempotent per
+        ``(anchor, round, macro_cycle)`` and self-throttling (zeroes the
+        per-anchor counter on dispatch). At most one forced dispatch per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
@@ -489,7 +452,6 @@ class ExplorePhase(PhaseHandler):
         for anchor in stalled:
             gap_cid = state.best_gap_for_anchor(anchor)
             if not gap_cid:
-                # No pending work pinned to this domain → nothing to force.
                 continue
             dom = domain_for_tag(anchor)
             if dom is None:
@@ -510,8 +472,7 @@ class ExplorePhase(PhaseHandler):
                     "idempotency_key": (f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"),
                 },
             )
-            # Zero the counter up-front so a slow enqueue can't re-fire next
-            # tick; the eventual specialist completion resets it again.
+            # Zero the counter up-front so a slow enqueue can't re-fire next tick.
             try:
                 state.note_specialist_dispatched(anchor)
             except Exception:  # noqa: BLE001 — defensive
@@ -542,7 +503,7 @@ class ExplorePhase(PhaseHandler):
                 spec_thr,
                 keep_thr,
             )
-            # One forced dispatch per tick keeps the scheduler calm.
+            # One forced dispatch per tick.
             return None
         return None
 
@@ -594,7 +555,7 @@ class ExplorePhase(PhaseHandler):
         for t in running:
             if (t.kind or "").strip() != "specialist":
                 continue
-            # updated_at on a running task = when the dispatcher promoted it (start of running window).
+            # updated_at on a running task = when the dispatcher promoted it.
             started_unix = _parse_iso_unix(t.updated_at)
             if started_unix <= 0:
                 continue
@@ -618,10 +579,8 @@ class ExplorePhase(PhaseHandler):
         """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
         standard free-form specialist dispatches (scope=freeform, lane=cpu,
         mode=research defaults). Each fanned task is re-dispatched through the
-        normal ``_handle_delegate`` path (warm + idempotency + TaskRegistry +
-        lease + reap), preserving the low-cost wide-net recon the retired
-        dynamic_specialist channel provided. Per-task idempotency keys derive
-        from the wave key; non-dict / empty-description entries are skipped.
+        normal ``_handle_delegate`` path. Per-task idempotency keys derive from
+        the wave key; non-dict / empty-description entries are skipped.
 
         Args:
             source: The agent issuing the wave delegate.
@@ -643,9 +602,8 @@ class ExplorePhase(PhaseHandler):
             summary = str(task.get("task_summary") or "").strip()
             if summary:
                 sub_params["task_summary"] = summary
-            # Per-task dial overrides (a wave task may opt into patch / bench /
-            # gpu) take precedence over the shared params; then fall back to the
-            # freeform recon defaults (research on the cpu lane).
+            # Per-task dial overrides take precedence over the shared params;
+            # then fall back to the freeform recon defaults.
             for carry in (
                 "mode",
                 "bench",
@@ -732,10 +690,8 @@ class ExplorePhase(PhaseHandler):
         retry_params["_auto_retry_attempt"] = next_attempt
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
-        # Mirror _handle_delegate lane/ttl resolution (incl. benchmark_lane for
-        # bench-enabled specialists, gpu_research_lane + GPU-TTL for any
-        # needs_gpu specialist) so the retry task holds the same pools as the
-        # original and cannot run concurrently with serving.
+        # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
+        # same pools as the original and cannot run concurrently with serving.
         lanes, ttl = self._registry_lanes_ttl("specialist")
         from ..specialists.profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
 
@@ -748,8 +704,7 @@ class ExplorePhase(PhaseHandler):
             else bool(needs_gpu_raw)
         )
         if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
-            # bench specialist: needs_gpu defaulted at warm time (_warm_specialist_params);
-            # ensure it is set here too so gpu_research_lane is acquired.
+            # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
             needs_gpu = True
         if needs_gpu:
             lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
@@ -761,9 +716,7 @@ class ExplorePhase(PhaseHandler):
                     "using registry default"
                 )
 
-        # Stable base key across attempts: strip any prior ``-autoretryN``
-        # suffix (distinct from _handle_delegate's ``-retryN`` collision keys
-        # so the two mechanisms never share an idempotency namespace).
+        # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
         if "-autoretry" in base_key:
             head, _, tail = base_key.rpartition("-autoretry")
@@ -779,8 +732,7 @@ class ExplorePhase(PhaseHandler):
             lease_ttl_sec=ttl,
         )
         if was_existing:
-            # Retry slot already taken (e.g. resume replay): let the normal
-            # bookkeeping record this attempt rather than silently dropping it.
+            # Retry slot already taken: let normal bookkeeping record this attempt.
             return False
         await self._record_observation(
             "coordinator",
@@ -805,7 +757,6 @@ class ExplorePhase(PhaseHandler):
         )
         return True
 
-    # specialist pre-dispatch warmup
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty.
 
@@ -819,22 +770,17 @@ class ExplorePhase(PhaseHandler):
         from ..specialists.domains import normalize_dispatch_tags
         from ..specialists.profile import resolve_specialist_profile
 
-        # Bench-capable (mode=patch & bench=true) specialists run a real
-        # serving + benchmark loop on their own cards, so they must hold a GPU
-        # lease: default needs_gpu so the dispatcher routes them through the
-        # gpu_specialist_pool quota + TTL throttle (operator/LLM may still
-        # override explicitly).
+        # Bench-capable specialists run a real serving + benchmark loop, so
+        # default needs_gpu to route them through the gpu_specialist_pool.
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
         domain = str(params.get("domain") or "").strip()
-        # Knowledge-domain tags drive multi-anchor prompt assembly; a single ``domain`` is the legacy single-tag alias.
         normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:
             params["pr_monitor_available"] = bool(plane is not None and getattr(plane, "pr_monitor_enabled", True))
 
-        # kb_subgraph kept defaulted for stable SpecialistPromptInputs.
         params.setdefault("kb_subgraph", {})
 
         # Warm-start recipe + pitfalls + lessons from T0 anchor.
@@ -844,21 +790,19 @@ class ExplorePhase(PhaseHandler):
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
-        # KG graph-recommended knobs (cross-recipe IMPROVES candidates from the
-        # T0 warm-start context); advisory positive priors for the specialist.
+        # KG graph-recommended knobs (advisory positive priors).
         if "kg_recommended_knobs" not in params:
             wsc = getattr(state, "warm_start_context", None) or {}
             kg_knobs = wsc.get("recommended_knobs") if isinstance(wsc, dict) else None
             if kg_knobs:
                 params["kg_recommended_knobs"] = [k for k in kg_knobs if isinstance(k, dict)]
-        # KG graph-guided config knobs (journal KNOB_IMPROVES, runnable args/envs);
-        # only present when GBRAIN_KG_GUIDED enabled the T0 enhancement.
+        # KG graph-guided config knobs (runnable args/envs).
         if "kg_guided_knobs" not in params:
             wsc = getattr(state, "warm_start_context", None) or {}
             guided = wsc.get("graph_guided_knobs") if isinstance(wsc, dict) else None
             if guided:
                 params["kg_guided_knobs"] = [k for k in guided if isinstance(k, dict)]
-        # runtime framework/version so the prompt's _format_version_note annotates version-mismatched lessons.
+        # runtime framework/version for version-mismatch annotation.
         if "framework" not in params:
             fw = str(getattr(state, "framework", "") or "").strip()
             if fw:
@@ -872,7 +816,7 @@ class ExplorePhase(PhaseHandler):
                     if v and v != "unknown":
                         params["framework_version"] = v
 
-        # Local-source navigation hint — same source the Kernel-agent uses for source_file containment.
+        # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
                 from ..framework.paths import resolve_source_file_allowlist
@@ -886,9 +830,9 @@ class ExplorePhase(PhaseHandler):
                     exc,
                 )
 
-        # Hardware + workload hints from SharedState; else dataclass defaults win (e.g. tp=1 self-vetoes comm_specialist).
+        # Hardware + workload hints from SharedState; else dataclass defaults win.
         params.setdefault("gpu_type", state.gpu_type or "")
-        # Active server framework name — switches per-domain hint blocks to atom paths when framework == "atom".
+        # Active server framework name.
         if getattr(state, "framework", "") or "":
             params.setdefault("framework", str(state.framework))
         if int(getattr(state, "tp", 0) or 0) > 0:
@@ -904,7 +848,7 @@ class ExplorePhase(PhaseHandler):
         if int(getattr(state, "max_model_len", 0) or 0) > 0:
             params.setdefault("max_model_len", int(state.max_model_len))
 
-        # Advisory model_arch profile → specialist via arch_notes carrier; prompt-context only, no gating.
+        # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
             from ..state.shared_state import render_model_arch_compact
 
@@ -912,9 +856,8 @@ class ExplorePhase(PhaseHandler):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        # Static-recon specialist extras: structured model_info (machine-parseable
-        # companion to arch_notes) + checklist-derived source-hint directories so
-        # the recon focus block can gate + navigate. Other domains unaffected.
+        # Static-recon specialist extras: structured model_info + checklist-derived
+        # source-hint directories for the recon focus block.
         if domain == "static_recon_specialist":
             if "model_info" not in params:
                 _minfo = getattr(state, "model_info", None)
@@ -958,7 +901,7 @@ class ExplorePhase(PhaseHandler):
             if _hints_block:
                 params["research_hints"] = _hints_block
 
-        # Fill gap-specific anchors from the gaps[] ledger: stamp symptom/layer/domain_hint/attempts onto the task so the prompt has structured context.
+        # Fill gap-specific anchors from the gaps[] ledger.
         gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
         if gap_cid:
             gap = state.find_gap(gap_cid)
@@ -968,7 +911,7 @@ class ExplorePhase(PhaseHandler):
                 if not params.get("gap_layer"):
                     params["gap_layer"] = str(gap.get("layer") or "")
                 if not params.get("domain"):
-                    # LLM omitted domain → gap's domain_hint wins (PolicyGate R2 still validates routing).
+                    # LLM omitted domain → gap's domain_hint wins.
                     hint = str(gap.get("domain_hint") or "")
                     if hint:
                         params["domain"] = hint
@@ -981,7 +924,7 @@ class ExplorePhase(PhaseHandler):
                             "severity": str(gap.get("severity") or ""),
                         }
 
-        # ROOFLINE EVIDENCE — pack bottleneck signals into roofline_evidence + analysis_md_path for the specialist.
+        # Pack bottleneck signals into roofline_evidence for the specialist.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
         if isinstance(last_ta, dict) and last_ta.get("analysis_md_text") and "roofline_evidence" not in params:
             from ..kernel.roofline_snapshot import extract_workload_summary
@@ -1006,18 +949,15 @@ class ExplorePhase(PhaseHandler):
                 "hot_kernels_top15": hot_kernels,
             }
 
-        # PR discovery lives in the FRAMEWORK_AGENT phase pump.
-
-        # proposal_set cap into params so SpecialistRunner reads it; setdefault lets a delegate shrink it.
+        # proposal_set cap into params so SpecialistRunner reads it.
         from hyperloom.orchestrator.policy.gate import (
             DEFAULT_SPECIALIST_MAX_PROPOSALS,
         )
 
         params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
 
-    # gaps[] ledger refresh
     async def _refresh_gaps(self, *, reason: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals (Coordinator is sole writer, Inv-1). Additive upsert deduped by canonical_id; best-effort.
+        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
 
         Args:
             reason: Tag describing the refresh trigger, used only in logging.
@@ -1171,9 +1111,7 @@ class ExplorePhase(PhaseHandler):
             A ``(layer, domain_hint)`` tuple for the action.
         """
         a = str(action or "").strip().lower()
-        if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization"}:
-            return ("kernel_agent", "kernel_switch_specialist")
-        if a in {"profile", "roofline"}:
+        if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization", "profile", "roofline"}:
             return ("kernel_agent", "kernel_switch_specialist")
         if a in {"sweep", "explore"}:
             return ("framework", "serving_specialist")
@@ -1255,26 +1193,13 @@ class ExplorePhase(PhaseHandler):
         benchmarked ``explore`` task automatically.
 
         Single-node is a no-op (``is_multi_node()`` False): there the
-        Orchestration LLM drives ``explore`` directly (local bash +
-        explore delegates), so this deterministic materialisation stays
-        multi-node-scoped and the single-node path is unchanged
-        bit-for-bit.
-
-        Why this exists: in multi-node the GPU cluster lives on remote
-        SSH pods, so the LLM cannot bench proposals via local bash — the
-        only materialisation channel is a structured ``explore`` action.
-        Observation-only surfacing (the default) relies on the LLM
-        emitting that delegate, which it does not do reliably in
-        multi-node, leaving approved proposals un-benchmarked. This
-        helper closes that gap by enqueuing the explore grid itself.
-
-        ``proposal_set`` entries already reuse the explore variant schema
-        (``name`` / ``extra_args`` / ``extra_envs``), so they pass
-        straight through as the grid. The explore executor's
-        ``canonical_fingerprint`` dedup means a later LLM-emitted explore
-        on the same content collapses to the same row (no double-bench),
-        and its per-variant KEEP/REVERT gain gate is the safety net
-        (no critic dependency).
+        Orchestration LLM drives ``explore`` directly. In multi-node the GPU
+        cluster lives on remote SSH pods, so the only materialisation channel is
+        a structured ``explore`` action; this helper enqueues the explore grid
+        itself. ``proposal_set`` entries reuse the explore variant schema
+        (``name`` / ``extra_args`` / ``extra_envs``) and pass straight through;
+        ``canonical_fingerprint`` dedup + the per-variant KEEP/REVERT gain gate
+        are the safety net.
 
         Args:
             task: The completed specialist task whose id seeds the explore
@@ -1283,8 +1208,7 @@ class ExplorePhase(PhaseHandler):
             proposals: The specialist ``proposal_set`` entries materialised into
                 the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
         """
-        # Framework config-generation specialists own their proposal_set via the
-        # config subphase; skip the mn-explore bridge so it is not double-consumed.
+        # Framework config-generation specialists own their proposal_set; skip.
         if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
             return
         from ..actions.executors._multi_node_env import is_multi_node
@@ -1298,8 +1222,7 @@ class ExplorePhase(PhaseHandler):
             args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
             envs_raw = p.get("extra_envs")
             envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
-            # Drop entries with neither a server-arg nor an env override —
-            # nothing for the restart to apply (e.g. research-only items).
+            # Drop entries with neither a server-arg nor an env override.
             if not args and not envs:
                 continue
             name = str(p.get("name") or "").strip() or (f"{domain or 'specialist'}-{task.task_id[:8]}-{i}")
@@ -1377,7 +1300,7 @@ class ExplorePhase(PhaseHandler):
         sid = str(task.task_id or "").strip()
         if not sid:
             return
-        # Resolve patches_written against worktree + workspace; submit only when >=1 real file exists.
+        # Resolve patches_written; submit only when >=1 real file exists.
         from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
         from ..loop.coordinator import _resolvable_artifacts_from_done
 
@@ -1393,10 +1316,8 @@ class ExplorePhase(PhaseHandler):
                 cands.append(base / raw)
             if any(c.is_file() for c in cands):
                 existing_patches.append(str(p))
-        # A non-diff tuned artifact (``artifacts_written`` with a real source
-        # file) is also a routable deliverable: integrate_patch installs it
-        # (backup + gate + REVERT). Route it exactly like a patch. Shared
-        # routable-signal with the empty-outcome bridge (no FRAMEWORK livelock).
+        # A non-diff tuned artifact is also a routable deliverable; route it like
+        # a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
             if patches:
@@ -1435,15 +1356,9 @@ class ExplorePhase(PhaseHandler):
             "provenance": "specialist",
             "patch_name": patch_name,
         }
-        # FRAMEWORK authoring provenance passthrough: a candidate dispatched
-        # to the authoring specialist carries its originating PR candidate/batch
-        # id in the specialist task params. Propagate them onto the synthetic
-        # integrate_patch task so ``_record_framework_agent_authored_outcome`` can
-        # key the progress row on the real candidate id (a PR URL). Without this
-        # the bridge falls back to the integrate_patch task_id, the progress row
-        # never matches ``_select_next_framework_agent_candidate``'s candidate id,
-        # and the FRAMEWORK pump re-dispatches the same candidate forever
-        # (livelock observed in the 84-candidate batch run).
+        # FRAMEWORK authoring provenance passthrough: propagate the PR
+        # candidate/batch id onto the synthetic integrate_patch task so the
+        # authored-outcome bridge keys the progress row on the real candidate id.
         try:
             spec_params = getattr(task, "params", None) or {}
             if bool(spec_params.get("framework_agent_authoring")):
@@ -1461,19 +1376,15 @@ class ExplorePhase(PhaseHandler):
                 probe = str(spec_params.get("launch_probe") or "").strip()
                 if probe:
                     integrate_params["launch_probe"] = probe
-                # Forward the pre-patch failure signature so the runnable gate
-                # can detect the same actionable failure re-appearing post-patch.
+                # Forward the pre-patch failure signature for the runnable gate.
                 before_sig = spec_params.get("enablement_before_signature")
                 if isinstance(before_sig, dict):
                     integrate_params["enablement_before_signature"] = before_sig
-                # Forward the stacked base patches (prior progressing rounds) so
-                # integrate_patch re-applies them before this round's patch.
+                # Forward the stacked base patches for integrate_patch to re-apply.
                 base_patches = spec_params.get("enablement_base_patches")
                 if isinstance(base_patches, list) and base_patches:
                     integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
-                # Forward stacked base setup commands (prior rounds' installs) so
-                # integrate_patch replays them before boot; the current round's
-                # own setup_commands are read from specialist_done directly.
+                # Forward stacked base setup commands to replay before boot.
                 base_setup = spec_params.get("enablement_setup_commands")
                 if isinstance(base_setup, list) and base_setup:
                     integrate_params["enablement_setup_commands"] = [str(c) for c in base_setup]
@@ -1513,8 +1424,7 @@ class ExplorePhase(PhaseHandler):
                 "proposal_msg_id": msg.msg_id,
                 "patch_name": patch_name,
                 "patches": [str(x) for x in patches][:8],
-                # Artifact-only deliverables route with empty ``patches``; record
-                # their install targets so the observation is not silently blank.
+                # Artifact-only deliverables: record their install targets.
                 "artifacts_written": [
                     str((a or {}).get("target") or "")
                     for a in (done_payload.get("artifacts_written") or [])
@@ -1538,15 +1448,12 @@ class ExplorePhase(PhaseHandler):
     ) -> None:
         """Route a FRAMEWORK config-lever deliverable through integrate_patch.
 
-        Companion to :meth:`_maybe_autosubmit_specialist_patches`. That bridge
-        fires only on ``patches_written``; this one fires when a FRAMEWORK
-        *authoring* specialist returns NO source patch but a config-lever
-        ``proposal_set`` (extra_args / extra_envs) — the relaxed FRAMEWORK
-        rule that lets a PR's benefit land as serving flags / env vars (e.g. an
-        MTP toggle) without writing source. The levers go into integrate_patch's
-        existing ``config_changes`` channel (apply + bench + accuracy gate +
-        KEEP/REVERT); integrate_patch owns the terminal FRAMEWORK row via
-        ``_record_framework_agent_authored_outcome``. Idempotent per specialist.
+        Companion to :meth:`_maybe_autosubmit_specialist_patches`: fires when a
+        FRAMEWORK authoring specialist returns NO source patch but a config-lever
+        ``proposal_set`` (extra_args / extra_envs). The levers go into
+        integrate_patch's ``config_changes`` channel (apply + bench + accuracy
+        gate + KEEP/REVERT), which owns the terminal FRAMEWORK row. Idempotent
+        per specialist.
 
         Args:
             task: The completed authoring specialist task.
@@ -1591,8 +1498,7 @@ class ExplorePhase(PhaseHandler):
             "patch_name": patch_name,
             "config_changes": dict(config_changes),
         }
-        # FRAMEWORK authoring provenance passthrough so the authored-outcome
-        # bridge keys the terminal row on the real PR candidate id.
+        # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
         fa_batch = str(spec_params.get("framework_batch_id") or "")
         integrate_params["framework_agent_authoring"] = True
@@ -1672,7 +1578,7 @@ class ExplorePhase(PhaseHandler):
         truncated_from = done_payload.get("proposals_truncated_from")
         from ..specialists.domains import normalize_dispatch_tags
 
-        # Knowledge-domain tags for breakdown attribution; reported tags win over dispatch params.
+        # Knowledge-domain tags; reported tags win over dispatch params.
         tags = normalize_dispatch_tags(done_payload)
         if not tags:
             tags = normalize_dispatch_tags(task.params or {})

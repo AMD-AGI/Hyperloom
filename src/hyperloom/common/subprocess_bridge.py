@@ -4,28 +4,11 @@
 
 Single home for the "read a request JSON file / emit a response JSON to
 stdout and optionally a file / raise a typed adapter error" idiom shared by
-the three sibling-agent runtime CLIs that talk to their host (the
-Coordinator or the SKILL harness) over a subprocess JSON bridge:
-
-* ``hyperloom.agents.critic.runtime.cli`` (``_read_json`` / ``_emit_json``;
-  ``RuntimeAdapterError`` defined in the sibling ``runtime/errors.py`` and
-  subclassed ~12 times there — the subclasses are untouched by this move).
-* ``hyperloom.agents.robustness.runtime.cli`` (``_read_json`` / ``_emit_json`` /
-  ``RuntimeAdapterError``, all three in one file).
-* ``hyperloom.agents.framework.runtime.cli`` (``RuntimeAdapterError`` plus
-  ``_emit_json`` via :func:`emit_json` with ``make_parents=True``).
+the sibling-agent runtime CLIs (critic, robustness, framework) that talk to
+their host (the Coordinator or the SKILL harness) over a subprocess JSON bridge.
 
 Zero first-party imports (stdlib only) so any package may depend on it
-without creating an import cycle (anti-cycle rule: no first-party imports).
-
-Sites intentionally NOT delegated here (kept local by design):
-
-* ``agents/framework/runtime/cli._load_request`` / ``_read_json_request`` —
-  these parse a JSON request file like :func:`read_json` but additionally
-  enforce "file must exist" / "must decode" / "top-level must be an object"
-  and raise :class:`RuntimeAdapterError` with framework-specific messages on
-  violation; they are validating parsers, not a plain "read JSON or None"
-  primitive, so they are a different function shape and not merged.
+without creating an import cycle.
 """
 
 from __future__ import annotations
@@ -41,9 +24,7 @@ class RuntimeAdapterError(RuntimeError):
 
     Raised on contract violations (malformed request, missing
     configuration, etc.) that the subprocess host should surface as a
-    non-zero exit code rather than an uncaught traceback. Critic's
-    ``runtime/errors.py`` subclasses this into ~12 granular error types;
-    Robustness and Framework raise it directly.
+    non-zero exit code rather than an uncaught traceback.
     """
 
 
@@ -72,9 +53,7 @@ def emit_json(obj: Any, out: str | None, *, make_parents: bool = False) -> None:
         out: Output path, or ``"-"``/``None`` for stdout only.
         make_parents: When ``True``, create ``Path(out).parent`` (``parents=True,
             exist_ok=True``) before writing the ``out`` file. Defaults to
-            ``False`` to preserve the Critic/Robustness contract where a missing
-            parent raises ``FileNotFoundError``; the Framework CLI passes
-            ``True`` (see the divergence note in the module docstring).
+            ``False``, so a missing parent raises ``FileNotFoundError``.
     """
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":

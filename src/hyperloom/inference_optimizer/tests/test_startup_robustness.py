@@ -411,7 +411,7 @@ def test_parser_does_not_expose_removed_bypass_flags():
 # clean_stale_aiter_locks
 def _make_aiter_tree(root):
     """Build a minimal aiter jit/build/ layout with mixed lock ages."""
-    stale_mtime = time.time() - 30 * 60  # 30 min ago
+    stale_mtime = time.time() - 30 * 60
 
     (root / "module_moe" / "build").mkdir(parents=True)
     (root / "module_other" / "build").mkdir(parents=True)
@@ -479,7 +479,7 @@ def test_clean_stale_aiter_locks_handles_missing_dir():
 def test_clean_stale_aiter_locks_respects_stale_minutes(tmp_path):
     """Bumping the threshold up keeps moderately-old locks alive."""
     (tmp_path / "lock_module_x").write_text("x")
-    moderately_old = time.time() - 4 * 60  # 4 min ago
+    moderately_old = time.time() - 4 * 60
     os.utime(tmp_path / "lock_module_x", (moderately_old, moderately_old))
     stats = cli.clean_stale_aiter_locks(
         aiter_jit_dir=tmp_path,

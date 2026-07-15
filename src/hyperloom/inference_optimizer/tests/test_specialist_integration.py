@@ -24,7 +24,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
 
-# Fixtures — mocks limited to network surfaces (LLM + KB)
 @dataclass
 class _StubTask:
     """Minimal Task-shaped stub (only ``task_id`` and ``params`` are inspected)."""
@@ -43,7 +42,6 @@ class _FakeKnowledgePlane:
     cortex_enabled = True
 
 
-# 1. cli._build_specialist_executor wiring
 def _build_args(**overrides) -> argparse.Namespace:
     base = dict(
         claude_model="claude-3-5-sonnet-latest",
@@ -51,7 +49,7 @@ def _build_args(**overrides) -> argparse.Namespace:
         specialist_max_turns=4,
         specialist_per_turn_max_seconds=300.0,
         research_lane_capacity=1,
-        # Use the in-process ClaudeBackend path so mocks work end-to-end.
+        # in-process ClaudeBackend path so mocks work end-to-end.
         specialist_dispatch_mode="inprocess",
         specialist_mcp_config=None,
     )
@@ -73,7 +71,6 @@ def test_build_specialist_executor_returns_callable(tmp_path: Path):
     assert callable(executor), "specialist executor must be a callable"
 
 
-# 2. cli._register_executors wires 'specialist' kind end-to-end
 @pytest.mark.asyncio
 async def test_register_executors_registers_specialist_kind(tmp_path: Path):
     """``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
@@ -82,7 +79,7 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
         _register_executors,
     )
 
-    # A tiny stand-in satisfies the `_register_executors` signature; the target is the registry.
+    # A stand-in satisfies the _register_executors signature; target is the registry.
     class _StubSub:
         def __init__(self):
             self.registry: dict[str, Any] = {}
@@ -104,7 +101,7 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
     )
     _register_executors(
         coord,
-        no_kernel=True,  # skip kernel-only kinds (independent path)
+        no_kernel=True,  # skip kernel-only kinds
         session_dir=tmp_path,
         specialist_executor=spec_exec,
     )
@@ -389,8 +386,7 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     )
 
     assert args.specialist_max_turns == DEFAULT_SPECIALIST_MAX_TURNS
-    # WS1: turn cap lifted to "effectively unbounded"; the real stop is the
-    # explicit wall-clock budget, not the turn count.
+    # Turn cap is effectively unbounded; the real stop is the wall-clock budget.
     assert args.specialist_max_turns == 1000
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli falls back to --claude-model.

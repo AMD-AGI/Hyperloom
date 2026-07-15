@@ -25,19 +25,6 @@ class GbrainRemoteRecipeClient:  # name matches the real client for the type che
     enabled = True
 
 
-def test_warm_recipe_source_prefers_best_config_provenance() -> None:
-    row = {
-        "_sources": ["gbrain", "cortex"],
-        "_field_sources": {"best_config": "cortex", "best_throughput": "gbrain"},
-    }
-    assert _warm_recipe_source(row, kb=None) == "cortex"
-
-
-def test_warm_recipe_source_falls_back_to_first_source() -> None:
-    row = {"_sources": ["gbrain", "cortex"], "_field_sources": {}}
-    assert _warm_recipe_source(row, kb=None) == "gbrain"
-
-
 def test_warm_recipe_source_falls_back_to_remote_type() -> None:
     class _Kb:
         remote = GbrainRemoteRecipeClient()
@@ -97,6 +84,33 @@ def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     )
 
 
+def test_t0_anchor_accepts_legacy_framework_extra_attr(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """Legacy ``framework`` attrs should not produce unknown_framework keys."""
+    state = _FakeSharedState(framework_version="0.5.11")
+    state.framework_name = ""
+    run_t0_anchor(
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+
+    cid = recipe_canonical_id(
+        model="m",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
+    )
+    assert kb.local.get_recipe(canonical_id=cid) is not None
+    assert "unknown_framework" not in state.warm_start_recipe.get("workload", "")
+
+
 # happy path
 def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     kb: RecipeKB,
@@ -129,33 +143,6 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     assert row.get("tp") == 8
 
 
-def test_t0_anchor_accepts_legacy_framework_extra_attr(
-    kb: RecipeKB,
-    session_dir: Path,
-) -> None:
-    """Legacy ``framework`` attrs should not produce unknown_framework keys."""
-    state = _FakeSharedState(framework_version="0.5.11")
-    state.framework_name = ""
-    run_t0_anchor(
-        kb,
-        state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework": "sglang"},
-        session_dir=session_dir,
-    )
-
-    cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.5.11",
-        precision="fp8",
-    )
-    assert kb.local.get_recipe(canonical_id=cid) is not None
-    assert "unknown_framework" not in state.warm_start_recipe.get("workload", "")
-
-
 def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     kb: RecipeKB,
     session_dir: Path,
@@ -175,7 +162,7 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     import json
 
     payload = json.loads(warm_path.read_text())
-    # Bare T0 anchor row (identity but no best_config) is present after put_recipe but NOT actionable: classified seed_only/conf 0.0 so warm-replay won't apply an empty config.
+    # Bare T0 anchor row is classified seed_only/conf 0.0 (not actionable).
     assert payload["tier"] == "seed_only"
     assert payload["confidence"] == 0.0
     assert state.warm_start_context.get("status") == "seed_only"

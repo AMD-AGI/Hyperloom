@@ -2,10 +2,9 @@
 
 """Edge-path coverage for the trace parsers and Langfuse mapping helpers.
 
-These exercise the tolerant/degenerate branches (blank lines, malformed JSON,
-non-dict rows, unreadable paths, and non-numeric fields) that the happy-path
-unit tests don't reach, so a parse miss provably degrades to an empty/``None``
-result instead of raising on the best-effort trace path.
+Exercises the tolerant/degenerate branches (blank lines, malformed JSON,
+non-dict rows, unreadable paths, and non-numeric fields) so a parse miss
+degrades to an empty/``None`` result instead of raising.
 """
 
 from __future__ import annotations
@@ -14,9 +13,6 @@ from datetime import datetime, timezone
 
 from hyperloom.orchestrator.trace import langfuse_mapping as lm
 from hyperloom.orchestrator.trace import parse_usage as pu
-
-
-# ---- parse_usage: stream-json usage parser edge paths ----
 
 
 def test_stream_json_usage_skips_blank_and_nondict_lines(tmp_path):
@@ -37,9 +33,6 @@ def test_stream_json_usage_dir_path_is_oserror(tmp_path):
     assert pu.parse_claude_stream_json_usage(tmp_path) is None
 
 
-# ---- parse_usage: stream-json response parser edge paths ----
-
-
 def test_stream_json_response_skips_blank_nondict_and_bad_message(tmp_path):
     p = tmp_path / "process.log"
     p.write_text(
@@ -56,9 +49,6 @@ def test_stream_json_response_dir_path_is_oserror(tmp_path):
     assert pu.parse_claude_stream_json_response(tmp_path) is None
 
 
-# ---- parse_usage: per-turn usage parser edge paths ----
-
-
 def test_stream_json_turn_usages_skips_blank_lines(tmp_path):
     p = tmp_path / "process.log"
     p.write_text(
@@ -71,9 +61,6 @@ def test_stream_json_turn_usages_skips_blank_lines(tmp_path):
 
 def test_stream_json_turn_usages_dir_path_is_oserror(tmp_path):
     assert pu.parse_claude_stream_json_turn_usages(tmp_path) == []
-
-
-# ---- parse_usage: tool-call parser edge paths ----
 
 
 def test_stream_json_tool_calls_skips_blank_bad_message_and_unnamed(tmp_path):
@@ -92,9 +79,6 @@ def test_stream_json_tool_calls_skips_blank_bad_message_and_unnamed(tmp_path):
 
 def test_stream_json_tool_calls_dir_path_is_oserror(tmp_path):
     assert pu.parse_claude_stream_json_tool_calls(tmp_path) == []
-
-
-# ---- parse_usage: tool-input summarizer fallbacks ----
 
 
 def test_summarize_tool_input_unserializable_dict_falls_back_to_str():

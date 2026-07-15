@@ -147,7 +147,6 @@ def test_request_5xx_retries_then_transport(monkeypatch) -> None:
     monkeypatch.setattr("hyperloom.agents.critic.runtime.kb_client.urllib.request.urlopen", boom)
     with pytest.raises(KBTransportError):
         client.upsert({"topic": "t"})
-    # retry_max=2 -> two backoff sleeps before giving up.
     assert len(slept) == 2
 
 
