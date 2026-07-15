@@ -535,20 +535,35 @@ def test_git_toplevel_handles_subprocess_error(monkeypatch):
     assert forge_fusion._git_toplevel("/x") == ""
 
 
-def test_as_text_decodes_bytes():
-    assert forge_fusion._as_text(b"abc") == "abc"
+def test_terminate_process_tree_windows_uses_terminate(monkeypatch):
+    terminated: list[bool] = []
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            terminated.append(True)
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(forge_fusion.os, "name", "nt")
+    forge_fusion._terminate_process_tree(FakeProc())
+    assert terminated == [True]
 
 
-def test_relay_streams_writes_stdout_and_stderr(capsys):
-    forge_fusion._relay_streams("hello", "err")
-    captured = capsys.readouterr()
-    assert captured.out == "hello"
-    assert captured.err == "err"
+def test_run_with_tree_timeout_clears_output_when_reap_times_out(monkeypatch):
+    class FakeProc:
+        def communicate(self, timeout=None):
+            if timeout == 1.0:
+                raise forge_fusion.subprocess.TimeoutExpired("cmd", 1)
+            raise forge_fusion.subprocess.TimeoutExpired("cmd", 30)
 
+    monkeypatch.setattr(forge_fusion.subprocess, "Popen", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr(forge_fusion, "_terminate_process_tree", lambda _proc: None)
 
-def test_git_toplevel_handles_subprocess_error(monkeypatch):
-    def fake_run(*_args, **_kwargs):
-        raise forge_fusion.subprocess.SubprocessError("boom")
+    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+        forge_fusion._run_with_tree_timeout(["echo"], timeout_sec=30)
 
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel("/x") == ""
+    assert excinfo.value.output == ""
