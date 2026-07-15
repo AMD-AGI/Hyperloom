@@ -393,8 +393,7 @@ class TestAtomPathPresentInAllThreeLocations:
             )
             assert spec is not None and spec.loader is not None
             mod = _ilu.module_from_spec(spec)
-            # Register before exec so self-referential dataclass annotations
-            # (OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
+            # Register before exec so self-referential dataclass annotations resolve.
             _sys.modules[spec.name] = mod
             spec.loader.exec_module(mod)
             ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
@@ -426,7 +425,7 @@ class TestRocmHipSourceRoots:
         assert any("/aiter/" in r for r in fp._DEFAULT_SOURCE_ROOTS)
 
 
-# Source-root resolution + prompt injection (was test_framework_source_roots.py)
+# Source-root resolution + prompt injection
 def test_resolve_source_file_allowlist_unions_env_override(monkeypatch):
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
@@ -465,7 +464,7 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     assert str(ws) in out or (str(ws) + "/") in out
 
 
-# apply_kernel_patch known-target roots (was test_apply_kernel_patch_roots.py)
+# apply_kernel_patch known-target roots
 _APPLY_TOOL_PATH = (
     Path(__file__).resolve().parents[4]
     / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"

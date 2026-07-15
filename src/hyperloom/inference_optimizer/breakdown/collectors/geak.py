@@ -30,13 +30,10 @@ def _geak_accepted_kernels_from_journey(
 ) -> list[dict[str, Any]]:
     """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``.
 
-    GEAK e2e's ``result.json`` carries the aggregate win but can ship an empty
-    ``accepted_kernels`` (e.g. a recovered/intermediate flush after a budget
-    SIGTERM). The sibling ``kernel_journey.json`` still records the per-kernel
-    end-to-end outcome, so this reads it and projects each kernel whose ``e2e``
-    sub-object was integrated (or decided ``KEEP``/``ADOPTED``) into a compact
-    accepted-kernel descriptor. Best-effort: a missing/partial file yields ``[]``
-    and never raises.
+    Projects each kernel whose ``e2e`` sub-object was integrated (or decided
+    ``KEEP``/``ADOPTED``) into a compact accepted-kernel descriptor. Used to
+    back-fill an empty ``accepted_kernels`` in ``result.json``. Best-effort: a
+    missing/partial file yields ``[]`` and never raises.
 
     Args:
         result (dict[str, Any]): The normalized ``result.json`` (carries
@@ -86,10 +83,6 @@ def _geak_accepted_kernels_from_journey(
             or (dispatch.get("backends") or [None])[0]
             or ""
         )
-        # The e2e optimizer's own kernel backend is the canonical ``geak`` (this
-        # whole-pipeline optimizer, formerly labelled ``geak_v4`` / perfskills).
-        # kernel_journey.json already labels it ``geak``, so it is kept verbatim;
-        # kernel_journey.json already labels it ``geak``, so it is kept verbatim.
         accepted.append(
             {
                 "kernel_id": kid,
@@ -116,16 +109,11 @@ def _geak_reconstruct_from_disk(
 ) -> dict[str, Any] | None:
     """Best-effort reconstruction of a GEAK run from on-disk survivors.
 
-    When ``state.geak_result`` is empty/missing — typically because the
-    coordinator was killed (external SIGKILL / OOM / budget) AFTER the e2e
-    runner produced artifacts but BEFORE the tick-boundary ``state.save`` — the
-    normalized result never lands in state and, on resume past KERNEL, the
-    section would otherwise be a bare ``status=missing`` black hole. The
-    runner's working tree under ``<session>/geak/`` survives on the shared
-    FS, so this scans it to recover WHAT actually ran: the handoff (proves HL
-    handed off), the e2e ``exp_root`` and the stages it reached (baseline /
-    kernels / opbench / strategy), any flushed-but-unpromoted ``result.json``
-    status, and the per-kernel ``kernel_journey`` accepted kernels.
+    Scans the runner's working tree under ``<session>/geak/`` to recover what
+    actually ran when ``state.geak_result`` is empty/missing: the handoff, the
+    e2e ``exp_root`` and the stages it reached (baseline / kernels / opbench /
+    strategy), any flushed-but-unpromoted ``result.json`` status, and the
+    per-kernel ``kernel_journey`` accepted kernels.
 
     Returns ``None`` when nothing usable is on disk (caller keeps the legacy
     ``missing`` section). Never raises — failures append to ``warnings``.
@@ -173,9 +161,7 @@ def _geak_reconstruct_from_disk(
             "raw_baseline_tput": _to_float(handoff.get("raw_baseline_tput")),
         }
 
-    # 2) a flushed-but-unpromoted result.json. A status==ok result.json is
-    #    promoted by the coordinator's crash-recovery; reaching here means the
-    #    file is absent or carried a non-ok status — record it for the audit.
+    # 2) a flushed-but-unpromoted result.json (absent or non-ok status).
     flushed = _load_json(pf / "result.json")
     if flushed:
         stages.append("result_json")
@@ -236,8 +222,7 @@ def _geak_reconstruct_from_disk(
             warnings.append(f"geak: accepted kernels journey unreadable: {exc}")
 
     # 5) newest-artifact timestamp (how far the run got in wall-clock). Bounded
-    #    to a handful of key paths — the exp_root tree can hold thousands of
-    #    profiler CSVs and a full rglob at every CLOSE would be wasteful.
+    #    to a handful of key paths to avoid a full rglob of the exp_root tree.
     candidates = [pf / "handoff.json", pf / "result.json"]
     if exp_root is not None:
         candidates += [
@@ -258,12 +243,10 @@ def _geak_reconstruct_from_disk(
             newest, tz=timezone.utc
         ).isoformat()
 
-    # 6) op-bench verdicts — the direct "上报缺口现场" evidence. Each per-kernel
-    #    ``opbench_result.json`` records whether the backend bake-off found a
-    #    deployable winner (``winner_editable`` + ``isolated_speedup`` > 1). Their
-    #    presence proves the e2e DID kernel work; an all-non-editable / ≤1.0x set
-    #    explains WHY there was no win to flush (vs an outright kill). Bounded to
-    #    the top-level per-task files (the deep ``_exp`` tree is skipped).
+    # 6) op-bench verdicts — each per-kernel ``opbench_result.json`` records
+    #    whether the backend bake-off found a deployable winner
+    #    (``winner_editable`` + ``isolated_speedup`` > 1). Bounded to the
+    #    top-level per-task files (the deep ``_exp`` tree is skipped).
     opbench_results: list[dict[str, Any]] = []
     if exp_root is not None:
         try:
@@ -286,11 +269,9 @@ def _geak_reconstruct_from_disk(
     if opbench_results:
         recon["opbench_results"] = opbench_results
 
-    # 7) runner log tails — the run_e2e stdout/stderr survivors under
-    #    ``exp_root/logs/``. The normalized returncode/stdout_tail/stderr_tail the
-    #    coordinator would have folded into ``geak_result`` died with the
-    #    killed process; these on-disk logs are the closest recoverable proxy for
-    #    "how far / why". Bounded to the newest handful, tail-only.
+    # 7) runner log tails — run_e2e stdout/stderr survivors under
+    #    ``exp_root/logs/``, the recoverable proxy for how far / why the run
+    #    got. Bounded to the newest handful, tail-only.
     log_tails: dict[str, str] = {}
     if exp_root is not None:
         logs_dir = exp_root / "logs"
@@ -338,8 +319,7 @@ def _geak_reconstruct_from_disk(
     recon["likely_cause"] = likely_cause
 
     recon["stages_reached"] = stages
-    # Nothing meaningful recovered (e.g. an empty ``geak/`` dir) → let the
-    # caller emit the legacy ``missing`` section.
+    # Nothing meaningful recovered → let the caller emit ``missing``.
     if not (handoff or flushed or exp_root):
         return None
     return recon
@@ -352,16 +332,12 @@ def collect_geak(
 ) -> dict[str, Any]:
     """Collect the GEAK/GEAK e2e KERNEL-phase section.
 
-    When the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer
-    (``KERNEL_OPT_BACKEND_ORDER=geak``), the native kernel lifecycle is bypassed
-    and the only structured record is ``state.geak_result`` (the normalized
-    ``result.json`` plus runner metadata). This collector maps that into the
-    session-breakdown's data contract so the run is auditable: what the optimizer
-    did (per-kernel / per-head), the accepted config, the validated regimes, the
+    Maps ``state.geak_result`` (the normalized ``result.json`` plus runner
+    metadata) into the session-breakdown data contract: what the optimizer did
+    (per-kernel / per-head), the accepted config, the validated regimes, the
     gain attribution, and — on a miss — the normalized failure reason.
 
-    Returns an empty ``{}`` when GEAK was never engaged, so native sessions
-    are byte-for-byte unaffected (the dashboard hides the section).
+    Returns an empty ``{}`` when GEAK was never engaged.
 
     Args:
         session_dir (Path): Absolute session root (used to relativize paths).
@@ -373,20 +349,15 @@ def collect_geak(
     """
     optimizer = str(state.get("kernel_optimizer") or "").strip().lower()
     result = state.get("geak_result")
-    # ``geak_result`` defaults to ``{}`` in SharedState, so an empty dict
-    # must NOT count as engaged — otherwise every native session would emit a
-    # spurious geak section. Engage only when the optimizer flag selected
-    # geak, or a non-empty result was actually recorded.
+    # An empty ``geak_result`` dict must NOT count as engaged; engage only when
+    # the optimizer flag selected geak or a non-empty result was recorded.
     has_result = isinstance(result, dict) and bool(result)
     engaged = optimizer == "geak" or has_result
     if not engaged:
         return {}
     if not has_result:
-        # Engaged via the optimizer flag but no result recorded yet/at all.
-        # Before surfacing a bare ``missing`` black hole, try to reconstruct the
-        # run from the on-disk ``geak/`` working tree — it survives an
-        # external kill that lost the in-memory result before the tick-boundary
-        # ``state.save`` (the exact gap behind the empty ``geak_result``).
+        # Engaged via the flag but no result recorded; reconstruct from the
+        # on-disk ``geak/`` working tree before surfacing ``missing``.
         recon = _geak_reconstruct_from_disk(session_dir, warnings)
         if recon is None:
             return {
@@ -441,8 +412,7 @@ def collect_geak(
             if pp.is_absolute() and str(pp).startswith(str(session_dir)):
                 return _rel(pp, session_dir)
         except (ValueError, OSError) as exc:
-            # Relativizing is cosmetic: keep the absolute path on failure and
-            # record the reason per the collector's warnings contract.
+            # Relativizing is cosmetic: keep the absolute path on failure.
             warnings.append(f"geak: failed to relativize path {p!r}: {exc}")
         return p
 
@@ -464,13 +434,10 @@ def collect_geak(
     if not isinstance(accepted_heads, list):
         accepted_heads = []
 
-    # Back-fill per-kernel attribution when ``result.json`` shipped the aggregate
-    # win but an empty ``accepted_kernels`` (e.g. a recovered/intermediate flush
-    # after a budget SIGTERM). The sibling ``kernel_journey.json`` still records
-    # the integrated/KEEP kernels, so derive them here to keep the geak
-    # section's ``accepted_kernels`` / ``kernels_optimized`` consistent with the
-    # assembled ``kernel_journey``. Only fires on a successful run with an empty
-    # list; a producer-populated list is always preserved verbatim.
+    # Back-fill per-kernel attribution from ``kernel_journey.json`` when
+    # ``result.json`` shipped the aggregate win but an empty ``accepted_kernels``.
+    # Only fires on a successful run with an empty list; a producer-populated
+    # list is always preserved verbatim.
     accepted_kernels_source = "result" if accepted_kernels else None
     if not accepted_kernels and status == "ok":
         backfilled = _geak_accepted_kernels_from_journey(result, warnings)
@@ -481,26 +448,25 @@ def collect_geak(
     section: dict[str, Any] = {
         "engaged": True,
         "status": status,
-        # Failure provenance (None on success) — answers "why did the e2e miss?".
+        # Failure provenance (None on success).
         "error_class": result.get("error_class"),
         "error": result.get("error"),
         "returncode": result.get("returncode"),
-        # Throughput / gain attribution (口径: aggregate output tok/s).
+        # Throughput / gain attribution (aggregate output tok/s).
         "baseline_throughput_tok_s": base,
         "final_throughput_tok_s": final,
         "throughput_speedup": speedup,
         "gain_pct": gain_pct,
         "metric_basis": result.get("metric_basis"),
         "bench_client": result.get("bench_client"),
-        # Latency 口径 (median ms), aligned field names with the native sweep.
+        # Latency (median ms), field names aligned with the native sweep.
         "ttft_mean_ms": _to_float(result.get("ttft_ms")),
         "tpot_mean_ms": _to_float(result.get("tpot_ms")),
         "output_parity": result.get("output_parity"),
         # What the optimizer actually changed (per-kernel / head / config).
         "accepted_kernels": accepted_kernels,
-        # Provenance of ``accepted_kernels``: ``result`` (producer-populated),
-        # ``kernel_journey_backfill`` (derived from the journey on an empty
-        # result list), or ``None`` (no accepted kernels at all).
+        # Provenance of ``accepted_kernels``: ``result``,
+        # ``kernel_journey_backfill``, or ``None``.
         "accepted_kernels_source": accepted_kernels_source,
         "accepted_heads": accepted_heads,
         "kernels_optimized": len(accepted_kernels),

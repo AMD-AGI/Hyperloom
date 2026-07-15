@@ -2,22 +2,15 @@
 
 """Pure mapping helpers shared by the Langfuse live emitter and backfill CLI.
 
-The trace subsystem persists three local JSONL streams under
-``reports/trace/`` (``llm_calls.jsonl`` token ledger, ``conversations.jsonl``
-full text, ``decision_trace.jsonl`` KEEP/REVERT journal). Both the *live*
-emitter (:mod:`.langfuse_emitter`) and the *offline* backfill
-(``hyperloom.inference_optimizer.tools.backfill_langfuse``) project those rows onto
-the same Langfuse object model:
+Projects the local JSONL trace streams under ``reports/trace/`` onto the
+Langfuse object model, shared by the live emitter and offline backfill:
 
 * session            -> Trace      (``trace_id`` derived from ``session_id``)
 * phase              -> Span
 * one LLM call       -> Generation (model + token usage + prompt/response)
 * one decision       -> Score      (gain_pct NUMERIC / outcome CATEGORICAL)
 
-Keeping the projection here -- as pure, SDK-free functions -- means the two
-producers can never drift on how a token row becomes a Generation or how a
-session id becomes a trace id. Nothing in this module imports ``langfuse``;
-it only reshapes dicts and parses timestamps.
+These are pure, SDK-free functions; nothing here imports ``langfuse``.
 """
 
 from __future__ import annotations
@@ -30,10 +23,8 @@ from typing import Any
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
 
-# Env-var name fragments whose *value* is redacted before the environment
-# snapshot is attached to the session_start marker. The key name is kept (so
-# you still see the variable existed), but the secret value never leaves the
-# sandbox. Matched case-insensitively as a substring.
+# Env-var name fragments whose value is redacted before the environment
+# snapshot is attached to session_start. Matched case-insensitively as a substring.
 _SENSITIVE_ENV_MARKERS: tuple[str, ...] = (
     "SECRET",
     "TOKEN",
@@ -56,11 +47,9 @@ _REDACTED = "***redacted***"
 def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
     """Pick the Langfuse correlation seed for a session.
 
-    Prefers the PrimusClaw session id (``claw_session_id``) so every trace
-    produced for one hosted sandbox session -- live push, offline backfill,
-    and any future claw-side upload -- collapses onto the same Langfuse trace
-    / session view. Falls back to the internal session id (e.g. the session
-    dir name) for standalone/local runs where no claw id exists.
+    Prefers the PrimusClaw session id (``claw_session_id``) so every trace for
+    one hosted sandbox session collapses onto the same Langfuse trace/session
+    view. Falls back to the internal session id for standalone/local runs.
 
     Args:
         manifest: Session manifest dict carrying id fields.
@@ -88,10 +77,8 @@ hashed form.
 def agent_of(row: dict[str, Any]) -> str:
     """The agent that produced a row: its ``component`` (role fallback).
 
-    ``component`` is the closed producer vocabulary (orchestration / kernel /
-    specialist / critic / geak / forge / robustness / proposal_scorer /
-    tracelens / breakdown); it is the "which agent did this" axis used for the
-    per-agent span layer.
+    ``component`` is the closed producer vocabulary used as the "which agent
+    did this" axis for the per-agent span layer.
 
     Args:
         row: A trace row dict.
@@ -117,9 +104,8 @@ def phase_of(row: dict[str, Any]) -> str:
 def derive_trace_id(seed: str) -> str:
     """Map a session id (or any seed) to a stable 32-char lowercase hex id.
 
-    Langfuse trace ids must be 32-char lowercase hex; deriving from the
-    session id keeps re-runs / live+backfill of the same session writing to
-    one trace instead of duplicating it.
+    Langfuse trace ids must be 32-char lowercase hex; deriving from the session
+    id keeps re-runs / live+backfill of the same session on one trace.
 
     Args:
         seed: Session id or any seed string to hash.
@@ -153,10 +139,8 @@ def parse_ts(ts: str | None) -> datetime | None:
 def generation_start(end: datetime | None, latency_ms: Any) -> datetime | None:
     """Backdate a generation's start by its measured call latency.
 
-    ``end`` is the call's write-time ``ts`` (≈ when the model reply landed);
-    ``latency_ms`` is the wall-clock the call took. Returns ``end - latency``
-    so the Langfuse generation shows a real duration. Falls back to ``end``
-    (zero-width, legacy behaviour) when either input is missing/unparseable
+    Returns ``end - latency`` so the Langfuse generation shows a real duration.
+    Falls back to ``end`` (zero-width) when either input is missing/unparseable
     or the latency is non-positive.
     """
     if end is None:
@@ -177,8 +161,7 @@ def utc_second_key(ts: str | None) -> str:
     """Truncate a ts to whole UTC seconds, for cross-file pairing.
 
     ``llm_calls.jsonl`` and ``conversations.jsonl`` stamp their own ``ts`` a
-    few milliseconds apart for the same logical call, so pairing is done at
-    whole-second resolution.
+    few ms apart for the same call, so pairing is done at whole-second resolution.
 
     Args:
         ts: Timestamp string, or ``None``.
@@ -195,17 +178,11 @@ def utc_second_key(ts: str | None) -> str:
 def pair_key(row: dict[str, Any]) -> tuple:
     """Stable join key pairing a token row with its conversation row.
 
-    Both streams (``llm_calls.jsonl`` / ``conversations.jsonl``) share the
-    same closed schema, so we key on every per-call identity field they
-    carry -- (component, task_id, dyn_id, tick, turn, role, model) -- and
-    fall back to the UTC-second of ``ts`` only to disambiguate. ``turn`` /
-    ``task_id`` / ``dyn_id`` keep a *burst* of calls in the same UTC second
-    and same (component, tick, role) -- e.g. multi-turn specialist/critic
-    within one tick -- from cross-pairing. ``model`` keeps concurrently
-    scored proposals apart: ``ProposalScorer.score`` fires several models via
-    ``asyncio.gather``, so multiple rows land in the same second with
-    otherwise identical keys. Older rows that predate any field carry
-    ``None``, so the key degrades gracefully to the previous behaviour.
+    Keys on every per-call identity field both streams carry --
+    (component, task_id, dyn_id, tick, turn, role, model) -- falling back to
+    the UTC-second of ``ts`` to disambiguate. ``turn`` / ``task_id`` / ``dyn_id``
+    keep a burst of calls in the same second from cross-pairing; ``model`` keeps
+    concurrently scored proposals apart. Missing fields degrade to ``None``.
 
     Args:
         row: A token or conversation trace row dict.
@@ -228,9 +205,7 @@ def pair_key(row: dict[str, Any]) -> tuple:
 def usage_details(row: dict[str, Any]) -> dict[str, int]:
     """Project a token row's four counters onto Langfuse ``usage_details``.
 
-    Drops ``None`` counters (so an unreported counter is absent rather than
-    a misleading zero) and maps our canonical names onto the short Langfuse
-    keys.
+    Drops ``None`` counters and maps canonical names onto the short Langfuse keys.
 
     Args:
         row: A token trace row dict.
@@ -317,10 +292,9 @@ def trace_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
 def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
     """Snapshot the process environment with secret values redacted.
 
-    Keeps every variable name (so debuggers can see what was set) but replaces
-    the value of anything whose name looks like a credential (see
-    :data:`_SENSITIVE_ENV_MARKERS`) with a placeholder, so the session_start
-    marker never ships secrets to Langfuse.
+    Keeps every variable name but replaces the value of anything whose name
+    looks like a credential (see :data:`_SENSITIVE_ENV_MARKERS`) with a
+    placeholder, so session_start never ships secrets to Langfuse.
 
     Args:
         environ: The process environment mapping (e.g. ``os.environ``).
@@ -346,11 +320,9 @@ def session_start_payload(
 ) -> dict[str, Any]:
     """Assemble the one-shot session-start document.
 
-    Carries the *entire* ``manifest.json`` (identity, provenance, workload,
-    dependency commits, stack fingerprint, host/image/pid, ...) plus the
-    WekaFS user-data root and a redacted environment snapshot, so a run that
-    aborts in pre-flight or is killed before producing a breakdown still leaves
-    a fully self-describing Langfuse trace.
+    Carries the entire ``manifest.json`` plus the WekaFS user-data root and a
+    redacted environment snapshot, so a run that aborts before producing a
+    breakdown still leaves a self-describing Langfuse trace.
 
     Args:
         manifest: Parsed ``manifest.json`` dict (copied verbatim into the
@@ -392,8 +364,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
         "change": dec.get("change"),
         "component": dec.get("component"),
         "task_id": dec.get("task_id"),
-        # Proposer attribution + filter label so a trace can be sliced by
-        # "what this step did" (operation_kind) and "who proposed it".
+        # Proposer attribution + filter label for slicing a trace.
         "operation_kind": dec.get("operation_kind"),
         "proposer": dec.get("component"),
         "provenance": dec.get("provenance"),
@@ -404,7 +375,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
         "proposal_scores": dec.get("proposal_scores"),
         "predicted_gain_pct": dec.get("predicted_gain_pct"),
     }
-    # Drop keys the decision didn't carry so the score metadata stays compact.
+    # Drop keys the decision didn't carry.
     meta = {k: v for k, v in meta.items() if v is not None}
     comment = str(dec.get("change") or "")
     scores: list[dict[str, Any]] = [
@@ -429,11 +400,8 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         except (TypeError, ValueError):
-            # Malformed metric payload; skip this event.
             pass
-    # Calibration signal: the proposer's predicted gain emitted as its own
-    # NUMERIC score on the SAME decision so a trace can compute the
-    # predicted-vs-realized error directly against ``gain_pct``.
+    # Calibration signal: the proposer's predicted gain as its own NUMERIC score.
     predicted = dec.get("predicted_gain_pct")
     if predicted is not None:
         try:
@@ -445,11 +413,9 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
                 "metadata": meta,
             })
         except (TypeError, ValueError):
-            # Malformed metric payload; skip this event.
             pass
-    # Calibration signal: the proposal_scorer's pre-decision rating (mean
-    # across raters) emitted as its own NUMERIC score on the SAME decision so
-    # a trace can compare predicted score vs realized ``gain_pct`` directly.
+    # Calibration signal: the proposal_scorer's pre-decision rating (mean across
+    # raters) as its own NUMERIC score.
     pred = _mean_proposal_score(dec.get("proposal_scores"))
     if pred is not None:
         scores.append({
@@ -465,9 +431,8 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
 def _mean_proposal_score(proposal_scores: Any) -> float | None:
     """Mean of the per-rater ``score`` values in a decision's proposal_scores.
 
-    ``proposal_scores`` is the ``[{"rater", "score", "reason"}, ...]`` list the
-    collector attaches from the proposal_scorer ensemble. Returns the mean
-    rater score (0-10), or ``None`` when there are no numeric scores.
+    Returns the mean rater score (0-10), or ``None`` when there are no numeric
+    scores.
     """
     if not isinstance(proposal_scores, list):
         return None

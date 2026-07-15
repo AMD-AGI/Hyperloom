@@ -21,20 +21,15 @@ from hyperloom.common.timeutil import now_iso
 # threshold.
 DEFAULT_CHECKPOINT_EVERY_TICKS: int = 20
 DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
-# Char budget over which we force a checkpoint regardless of cadence. Retained as
-# a fallback signal for backends that do not report token usage; the authoritative
-# trigger on long runs is the context-token budget below.
+# Char budget forcing a checkpoint regardless of cadence; fallback signal for
+# backends that do not report token usage.
 DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
-# Context-token guardrail. The real conversation size is read from
-# the backend's reported usage (input + cache_read + cache_creation tokens). A
-# soft trigger compacts proactively; the hard fraction is the overflow backstop
-# that compacts even when the LLM summary is degenerate (see
-# ``deterministic_memory_fallback`` + the Coordinator's hard path).
+# Context-token guardrail (usage = input + cache_read + cache_creation tokens).
+# Soft trigger compacts proactively; hard fraction is the overflow backstop.
 DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION: float = 0.70
 DEFAULT_CONTEXT_TOKEN_HARD_FRACTION: float = 0.85
-# Conservative fallback window for an unknown model id. Claude 4.x models on the
-# AMD gateway are 200k; env fractions tune the trigger without editing this map.
+# Conservative fallback window for an unknown model id.
 DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-8": 200_000,
@@ -57,8 +52,8 @@ def context_window_for_model(model: str) -> int:
     """
     return MODEL_CONTEXT_WINDOWS.get((model or "").strip(), DEFAULT_MODEL_CONTEXT_WINDOW)
 
-# Content fields that carry forward when a checkpoint reply omits them:
-# scalar plan + list threads. ``learnings`` accumulates separately.
+# List threads that carry forward when a checkpoint reply omits them
+# (``learnings`` accumulates separately).
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
 
 
@@ -73,11 +68,10 @@ class CheckpointPolicy:
     every_ticks: int = DEFAULT_CHECKPOINT_EVERY_TICKS
     every_minutes: float = DEFAULT_CHECKPOINT_EVERY_MINUTES
     char_budget: int = DEFAULT_CHECKPOINT_CHAR_BUDGET
-    # Context-token soft/hard budgets (absolute token counts; 0 disables). The
-    # Coordinator derives these from the orchestration model's window × fraction.
+    # Context-token soft/hard budgets (absolute token counts; 0 disables).
     context_token_soft: int = 0
     context_token_hard: int = 0
-    # Always checkpoint on a phase boundary (cheap + a natural seam).
+    # Always checkpoint on a phase boundary.
     on_phase_boundary: bool = True
 
     def should_checkpoint(
@@ -119,7 +113,7 @@ class CheckpointPolicy:
         """True when context is near the window and a compaction MUST happen now.
 
         The hard path compacts even when the LLM summary is degenerate (using the
-        deterministic fallback), so the conversation never overflows the window.
+        deterministic fallback), so the conversation never overflows.
 
         Args:
             context_tokens_now: Current context size in tokens.
@@ -130,8 +124,7 @@ class CheckpointPolicy:
         return self.context_token_hard > 0 and context_tokens_now >= self.context_token_hard
 
 
-# Appended as the next user turn on the SAME conversation to elicit the
-# compact summary. The agent answers in-band; we parse the JSON block.
+# Appended as the next user turn to elicit the compact summary (parsed as JSON).
 CHECKPOINT_REQUEST_PROMPT: str = """\
 === CHECKPOINT (compaction) ===
 We are about to compact this conversation to keep it bounded. Summarise
@@ -266,7 +259,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidate = fence.group(1) if fence else None
     if candidate is None:
-        # Fall back to the first balanced-looking { ... } span.
+        # Fall back to the first balanced-looking span.
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -311,8 +304,7 @@ def build_memory_record(
         if item not in learnings:
             learnings.append(item)
     learnings = learnings[-50:]  # cap so state.json stays bounded
-    # Non-empty-wins: a new value replaces the prior one only when it carries
-    # content; an empty field inherits the previous record's value.
+    # Non-empty-wins: an empty field inherits the previous record's value.
     plan = str(parsed.get("current_plan") or "").strip() or prev.get("current_plan", "")
     record: dict[str, Any] = {
         "current_plan": plan,
@@ -380,8 +372,8 @@ class CheckpointTracker:
     last_minute_mark: float = 0.0
     chars_since_last: int = 0
     last_phase: str = ""
-    # Authoritative current context size (tokens) from the latest backend turn.
-    # An absolute water level, NOT an increment — set each turn, never accumulated.
+    # Current context size (tokens) from the latest backend turn: an absolute
+    # water level, set each turn, never accumulated.
     context_tokens_now: int = 0
 
     def chars_add(self, n: int) -> None:

@@ -23,10 +23,9 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
-    # atom's editable-install layout; site-packages path picked up via the
-    # VIRTUAL_ENV glob in ``probe_framework_source_roots_for_env``.
+    # atom's editable-install layout.
     "/app/ATOM/atom/",
-    # xDiT editable install (pure-Python; git apply takes immediate effect).
+    # xDiT editable install (pure-Python).
     "/app/xDiT/",
 )
 
@@ -282,8 +281,6 @@ def probe_framework_source_roots_for_env() -> str:
             found.append(_normalize_root(str(p)))
     return ":".join(found)
 
-
-# Discovery summary — operator-facing log helper (install.sh greps; keep format stable).
 
 # Ordered for deterministic substring matching (atom before vllm/sglang).
 _FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit")

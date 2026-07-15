@@ -56,15 +56,13 @@ def test_build_candidates_routing():
     gemm = by_name["aten::mm"]
     assert gemm["kernel_category"] == "GEMM"
     assert gemm["reusable_native_kernel"] is False
-    # Non-reusable vendor GEMM is always skipped (membership check: skipped is now
-    # the full complement of routable within hot, so position is not guaranteed).
+    # Non-reusable vendor GEMM is always skipped.
     assert any(c["name"] == "aten::mm" for c in cands["skipped_kernels"])
 
 
 def test_build_workload_roofline_totals_covers_all_kernels():
-    # 20 kernels > any top-k cap: the workload totals must sum EVERY device
-    # kernel (Q2), not just the top-k candidate list the diffusion roofline
-    # used to aggregate.
+    # 20 kernels > any top-k cap: the workload totals must sum every device
+    # kernel, not just the top-k candidate list.
     kernels = [
         {"name": "aten::mm", "op_name": "aten::mm", "gpu_time_us": float(100 - i), "count": 1}
         for i in range(20)
@@ -98,8 +96,8 @@ def test_build_workload_roofline_totals_splits_compute_and_memory():
 
 
 def test_build_candidates_exposes_routable_subset():
-    # Contract alignment (P0): hot_kernels stays the FULL ranked set; the reusable
-    # dispatch subset is exposed separately as routable_kernels.
+    # hot_kernels stays the full ranked set; the reusable dispatch subset is
+    # exposed separately as routable_kernels.
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot = cands["hot_kernels"]
     routable = cands["routable_kernels"]
@@ -110,13 +108,10 @@ def test_build_candidates_exposes_routable_subset():
 
 
 def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
-    # Repro (P0 partition): a reusable kernel whose source is UNRESOLVED is
-    # reusable-in-principle but NOT dispatchable, so it must land on the
-    # ``skipped_kernels`` side of the partition -- never in neither bucket.
-    # Before the fix it fell outside routable + skipped, hiding the #1 hotspot
-    # (e.g. paged_attention with no resolved source) from partition consumers.
-    # Force source resolution to fail so the reusable SDPA kernel is guaranteed
-    # source-less regardless of the ambient op_to_source table.
+    # A reusable kernel whose source is unresolved is not dispatchable, so it must
+    # land on the ``skipped_kernels`` side of the partition, never in neither
+    # bucket. Force source resolution to fail so the reusable SDPA kernel is
+    # guaranteed source-less regardless of the ambient op_to_source table.
     monkeypatch.setattr(report, "editable_trace_source", lambda *a, **k: "")
     monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
     cands = report.build_candidates(
@@ -147,9 +142,8 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
 
 def test_build_summary_counts(monkeypatch):
     # summary.json mirrors kernel_candidates.json's routable/skipped partition:
-    # tasks == routable (dispatchable), skipped == the rest. Resolve the reusable
-    # SDPA kernel's source so it is a task; the non-reusable GEMM stays skipped.
-    # Monkeypatched to stay hermetic wrt the ambient op_to_source table.
+    # tasks == routable, skipped == the rest. Resolve the reusable SDPA kernel's
+    # source so it is a task; the non-reusable GEMM stays skipped.
     monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("/src/paged_attn.py", "op_to_source"))
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     summ = report.build_summary(cands, framework="vllm", target_platform="MI300X", generated_at="2026-01-01T00:00:00")
@@ -170,7 +164,7 @@ def test_build_kernel_roofline_shape():
     assert len(rows) == 2
     assert all("kernel_id" in r for r in rows)
     assert all(r["rocprof_roofline"] is None for r in rows)
-    # F5: rows are a superset of the TraceLens kernel_roofline row schema.
+    # rows are a superset of the TraceLens kernel_roofline row schema.
     tracelens_row_keys = {
         "kernel_id", "name", "gpu_pct", "duration_us", "call_count", "kernel_category",
         "source_file", "bottleneck", "bound_type", "arithmetic_intensity", "flops_per_byte",
@@ -190,8 +184,7 @@ def test_build_kernel_roofline_shape():
 
 def test_build_candidates_fills_analytical_roofline_incl_vendor():
     # A vendor GEMM (Cijk_, non-reusable) with captured shapes gets an analytical
-    # bound purely from shapes + measured time -- the xDiT/vendor gap fix (rocprof
-    # skips vendor kernels). Not the "—" placeholder.
+    # bound purely from shapes + measured time, not the "—" placeholder.
     kernels = [{
         "name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm",
         "gpu_time_us": 500.0, "count": 1,
@@ -372,7 +365,7 @@ def test_render_empty_kernels_is_valid():
     assert "_No rewritable compute-kernel candidates identified._" in md
 
 
-# ── source resolution + shape population (B/C) ───────────────────────────────
+# ── source resolution + shape population ─────────────────────────────────────
 
 
 def test_source_file_from_trace_kernel_file_wins(monkeypatch):
@@ -397,13 +390,9 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
 
 
 def test_routable_candidate_carries_shapes_for_orchestrator_gate():
-    # Regression: the orchestrator kernel-opt shape gate
-    # (_validate_kernel_shape_and_paths in kernel_request_handlers.py) reads
-    # candidate["shapes"] and rejects dispatch with error_class
-    # "empty_kernel_shape" when it is missing/empty — even if input_shapes was
-    # captured. A routable candidate with real trace-captured dims MUST expose a
-    # non-empty "shapes" list (trusted provenance), or bypass candidates can
-    # never reach GEAK optimization.
+    # The orchestrator shape gate reads candidate["shapes"] and rejects dispatch
+    # with "empty_kernel_shape" when empty, so a routable candidate with real
+    # trace-captured dims must expose a non-empty "shapes" list.
     kernels = [{
         "name": "triton_silu", "op_name": "aten::silu", "gpu_time_us": 100.0, "count": 1,
         "op_kernel_file": "/repo/aiter/triton/silu.py", "op_kernel_backend": "triton",
@@ -474,7 +463,7 @@ def test_inductor_kernel_file_rejected_falls_through(monkeypatch):
     assert cand["source_resolution_method"] == "unresolved"
 
 
-# ── task_groups (M3) ─────────────────────────────────────────────────────────
+# ── task_groups ──────────────────────────────────────────────────────────────
 
 
 def _cand(kernel_id, name, source_file, *, reusable=True, dur=100.0, gpu_pct=10.0, shapes=None, count=1):

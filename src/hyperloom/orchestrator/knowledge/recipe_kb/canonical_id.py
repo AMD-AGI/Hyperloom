@@ -3,11 +3,8 @@
 """Canonical id helpers for the local recipe-snapshot KB store.
 
 Re-exports the 7-tuple builder + auto-detect helper from
-:mod:`hyperloom.inference_optimizer.recipe_snapshot_constants` (Commit 1) so
-the ``recipe_kb`` package presents a self-contained surface — callers
-of ``recipe_kb`` should never need to know about
-``recipe_snapshot_constants`` (it gets retired in Commit 3 alongside
-the legacy NDJSON pending-queue plumbing).
+:mod:`hyperloom.inference_optimizer.recipe_snapshot_constants` so the
+``recipe_kb`` package presents a self-contained surface.
 
 Adds two local-store-specific helpers:
 
@@ -18,9 +15,7 @@ Adds two local-store-specific helpers:
   ``recipe_canonical_id`` → ``cid_to_path_components`` →
   ``Path(*components)`` must be lossless.
 * :func:`canonical_id_for_path` — given a path under the store root,
-  derive the canonical id of the recipe that lives there. Used by
-  ``search`` so a tree-walk result can produce the same cid string the
-  caller would have built from a 7-tuple.
+  derive the canonical id of the recipe that lives there.
 """
 
 from __future__ import annotations
@@ -41,25 +36,22 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
 )
 
 
-# ``inference:`` is the documented prefix for recipe-snapshot v2 ids.
-# It is a fixed literal here — bumping it is a
-# compatibility break that has to be coordinated with the central
-# kb-service, not silently forked by the local store.
+# Documented prefix for recipe-snapshot v2 ids; bumping it is a compatibility
+# break coordinated with the central kb-service.
 CANONICAL_ID_PREFIX: str = "inference"
 
 
-# Number of identity dimensions encoded in the canonical id. Eight
-# colon-separated segments total: 1 prefix + 7 dimensions.
+# Number of identity dimensions encoded in the canonical id (8 colon-separated
+# segments total: 1 prefix + 7 dimensions).
 CANONICAL_ID_DIMENSIONS: int = 7
 
 
 class InvalidCanonicalIdError(ValueError):
     """Raised when a string cannot be parsed as a 7-tuple canonical id.
 
-    Carries the offending string and the parse-failure reason so
-    callers (the local store's ``walk`` -> ``canonical_id_for_path``
-    path, in particular) can log a structured warning rather than
-    a bare exception when filesystem garbage drifts into the tree.
+    Carries the offending string and the parse-failure reason so callers can
+    log a structured warning rather than a bare exception when filesystem
+    garbage drifts into the tree.
     """
 
     def __init__(self, raw: str, reason: str) -> None:
@@ -117,7 +109,6 @@ def cid_to_path_components(
             raw,
             f"prefix must be {CANONICAL_ID_PREFIX!r}, got {parts[0]!r}",
         )
-    # Order: model, hardware, framework_name, model_type, architectures, framework_version, precision
     model, hardware, framework_name, model_type, architectures, framework_version, precision = parts[1:]
     if any(not seg for seg in parts[1:]):
         raise InvalidCanonicalIdError(
@@ -140,9 +131,6 @@ def canonical_id_from_components(
     """Inverse of :func:`cid_to_path_components` — pass-through to
     :func:`recipe_canonical_id` for symmetry / discoverability.
 
-    Kept here (rather than inlining the upstream helper at every
-    call-site) so the recipe_kb package remains self-contained.
-
     Returns:
         str: The canonical id built from the seven slugs.
     """
@@ -160,12 +148,8 @@ def canonical_id_from_components(
 def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
     """Build the canonical id for the recipe directory at ``recipe_dir``.
 
-    ``recipe_dir`` MUST be exactly seven levels below ``root`` —
-    one level per dimension.
-
-    The directory names ARE the canonical_id slugs (no extra slugging
-    is applied — they were already slug-clean when
-    :func:`recipe_canonical_id` produced them).
+    ``recipe_dir`` MUST be exactly seven levels below ``root`` — one level
+    per dimension. The directory names ARE the canonical_id slugs.
 
     Args:
         root (Path): Store root the recipe directory lives under.
@@ -191,7 +175,6 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
             str(recipe_dir),
             f"expected {CANONICAL_ID_DIMENSIONS} levels under root, got {len(parts)}: {parts!r}",
         )
-    # Directory order matches canonical_id: model/hw/fw/model_type/arch/fwv/precision
     model, hardware, framework_name, model_type, architectures, framework_version, precision = parts
     return canonical_id_from_components(
         model=model,

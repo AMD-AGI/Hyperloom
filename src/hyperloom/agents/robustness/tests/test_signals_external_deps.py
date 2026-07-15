@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for J1 / J2 / J3 external-dependency signals."""
+"""Unit tests for external-dependency signals."""
 
 from __future__ import annotations
 
@@ -26,9 +26,7 @@ def _ctx() -> ReactorContext:
     )
 
 
-# ---------------------------------------------------------------------------
 # gateway_auth_outage
-# ---------------------------------------------------------------------------
 
 
 def test_j1_gateway_401_fires_high():
@@ -97,9 +95,7 @@ def test_j1_silent_when_gateway_connect_error():
     assert all(s.name != "gateway_auth_outage" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # wekafs_degraded
-# ---------------------------------------------------------------------------
 
 
 def test_j2_wekafs_unreachable_fires_high():
@@ -166,7 +162,7 @@ def test_j2_fires_per_mount():
             "mounts": [
                 {"env_name": "TRACELENS_ROOT", "path": "/a", "ok": False, "error": "not_found", "latency_ms": 1.0},
                 {"env_name": "INFERENCEX_PATH", "path": "/b", "ok": True, "error": None, "latency_ms": 20000.0},
-                {"env_name": "LEGACY_BACKEND_SRC", "path": "/c", "ok": True, "error": None, "latency_ms": 50.0},  # healthy
+                {"env_name": "LEGACY_BACKEND_SRC", "path": "/c", "ok": True, "error": None, "latency_ms": 50.0},
             ],
         }
     )
@@ -195,9 +191,7 @@ def test_j2_custom_thresholds_apply():
     assert sym.severity is SymptomSeverity.MEDIUM
 
 
-# ---------------------------------------------------------------------------
 # tracelens_cli_missing (one-shot latch)
-# ---------------------------------------------------------------------------
 
 
 def test_j3_fires_once_when_neither_cli_present():
@@ -247,9 +241,7 @@ def test_j3_silent_without_latch_passed():
     assert out == []
 
 
-# ---------------------------------------------------------------------------
 # Empty / disabled cases
-# ---------------------------------------------------------------------------
 
 
 def test_silent_when_no_data():

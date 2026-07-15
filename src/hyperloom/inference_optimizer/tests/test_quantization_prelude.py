@@ -30,12 +30,10 @@ from hyperloom.orchestrator.phases import quantization_schemes as qs
 
 @pytest.fixture(autouse=True)
 def _enable_quant_by_default(monkeypatch):
-    """Default the deterministic master switch ON for prelude tests.
+    """Default the deterministic master switch ON so CLI-hook tests reach the adapter.
 
-    Most CLI-hook tests exercise the path AFTER the
-    ``$HYPERLOOM_QUANTIZE_ENABLED`` gate, so default it ON to reach the adapter.
-    The dedicated gate tests override this. No-op / resume / scheme-mismatch
-    tests return before the gate, so this is harmless for them.
+    Dedicated gate tests override this; no-op / resume / scheme-mismatch tests
+    return before the gate, so this is harmless for them.
     """
     monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", "1")
 
@@ -56,8 +54,7 @@ def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
 
 
 def _patch_quantize(monkeypatch: pytest.MonkeyPatch, result):
-    """Replace hyperloom.agents.quantization.quantize_via_prompt with an async
-    stub that records its call (prompt + kwargs) and returns ``result``."""
+    """Replace quantize_via_prompt with an async stub that records its call and returns ``result``."""
     import hyperloom.agents.quantization as quantization_agent
 
     calls: list[dict] = []
@@ -115,8 +112,7 @@ def test_resolve_scheme_known_returns_prompt():
 
 
 def test_resolve_scheme_has_no_hardcoded_defaults():
-    # The agent must not bake in kv_cache / exclude_layers
-    # defaults — Quark's intake + plan skill supplies those.
+    # The agent must not bake in kv_cache / exclude_layers defaults.
     p = qs.resolve_scheme_prompt("fp8")
     assert "lm_head" not in p
     assert "kv_cache" not in p
@@ -131,7 +127,6 @@ def test_resolve_scheme_unknown_raises():
 
 def test_scheme_choices_match_supported_set():
     assert qs.QUANT_SCHEME_CHOICES == ["none", "fp8", "ptpc_fp8", "mxfp4", "mxfp4_fp8"]
-    # int8 / int4 are no longer supported choices.
     assert "int8" not in qs.QUANT_SCHEME_CHOICES
 
 
@@ -162,7 +157,7 @@ def test_validate_scheme_mxfp4_on_mi355x_ok():
 
 
 def test_validate_scheme_mxfp4_unknown_gpu_not_enforced():
-    # GPU resolved later via probe; can't enforce without a concrete target.
+    # GPU resolved later via probe; not enforceable without a concrete target.
     qs.validate_scheme("mxfp4", "")
     qs.validate_scheme("mxfp4", None)
 
@@ -191,7 +186,7 @@ def test_build_prompt_minimal_only_strategy():
     cfg = qs.QuantizationConfig(global_scheme="fp8")
     p = qs.build_quantization_prompt(cfg)
     assert "Apply fp8 as the global quantization scheme." in p
-    # Unset optional fields are omitted (no Quark-default literals baked in).
+    # Unset optional fields are omitted.
     assert "Calibration" not in p
     assert "Evaluation" not in p
     assert "kv_cache" not in p
@@ -252,7 +247,7 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q"), final=None, eval_gap=0.01))
     out = asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/models/src", workspace=tmp_path))
     assert out == str(tmp_path / "q")
-    # source model + export dir folded into the effective prompt; NL request kept.
+    # source model + export dir folded into the effective prompt.
     assert "/models/src" in calls[0]["prompt"]
     assert str(tmp_path / "quantized") in calls[0]["prompt"]
     assert "fp8" in calls[0]["prompt"]
@@ -367,14 +362,13 @@ def test_prelude_uses_scheme_enum_when_no_freetext(tmp_path, monkeypatch):
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
     args = _Args(model="/models/src", quantize=None, quantize_scheme="fp8")
     asyncio.run(cli_quantization._run_quantization_prelude(args))
-    # the fp8 enum resolved to its curated prompt
+    # the fp8 enum resolved to its curated prompt.
     assert "fp8" in seen["prompt"]
     assert str(args.model) == str(tmp_path / "q")
 
 
 def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
-    # mxfp4 on mi300x is unsupported: report the error, skip quantization,
-    # and continue (model unchanged) rather than aborting the run.
+    # mxfp4 on mi300x is unsupported: report, skip quantization, continue.
     called = {"n": 0}
 
     async def _should_not_run(**kwargs):  # pragma: no cover - asserts non-call
@@ -383,15 +377,14 @@ def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    # monkeypatch.setenv registers the key for restoration so the marker the
-    # prelude writes does not leak into other tests.
+    # Register the key so the marker the prelude writes does not leak into other tests.
     monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
     args = _Args(model="/models/src", quantize_scheme="mxfp4", gpu_type="mi300x")
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged -> downstream un-quantized
     captured = capsys.readouterr()
-    # Skip is detectable: stdout marker + env var, both naming the GPU reason.
+    # Skip is detectable via stdout marker + env var.
     assert "QUANTIZATION_SKIPPED" in captured.out
     assert "MI355X" in (captured.out + captured.err)
     assert os.environ.get("HYPERLOOM_QUANTIZATION_SKIPPED")
@@ -432,19 +425,16 @@ def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
 
 
 def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
-    """Regression: the quantize prelude rewrites args.model to the generic
-    ``<workspace>/quantization/<model>/quantized`` export dir (basename is always
-    ``quantized``). The session / display model identity must NOT collapse to
-    ``quantized`` — otherwise every quantized run lands under
-    ``<root>/quantized/<ts>`` and the report only shows ``Model: quantized``,
-    losing the real model name and colliding across models.
+    """The prelude rewrites args.model to the generic ``.../quantized`` export dir,
+    but the session / display model identity must NOT collapse to ``quantized``
+    (else runs collide and the report loses the real model name).
     """
     import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
 
     async def _fake_async(*, prompt, source_model, workspace):
-        # Mirror the real adapter: the export dir basename is always "quantized".
+        # Mirror the real adapter: export dir basename is always "quantized".
         return str(tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized")
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
@@ -453,7 +443,7 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
     args = _Args(model="/wekafs/models/google-gemma-4-26B-A4B-it", quantize="fp8")
     asyncio.run(cli_quantization._run_quantization_prelude(args))
 
-    # The model path is rewritten to the generic quantized export dir ...
+    # Model path is rewritten to the generic quantized export dir ...
     assert str(args.model).endswith("/quantized")
     # ... but the identity used for session_dir / state / manifest is preserved.
     name = cli_bootstrap.resolve_model_display_name(args)
@@ -463,8 +453,7 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
 
 def test_prelude_no_display_name_without_quantization(monkeypatch):
     """Without quantization the prelude leaves args untouched, so the identity
-    resolver falls back to the plain model-path basename (no collapse, no
-    spurious suffix)."""
+    resolver falls back to the plain model-path basename."""
     args = _Args(model="/models/Qwen3-32B", quantize=None)
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert getattr(args, "model_display_name", None) in (None, "")
@@ -478,7 +467,7 @@ def test_prelude_no_display_name_without_quantization(monkeypatch):
 
 def test_prelude_env_gate_skips_when_disabled(monkeypatch, capsys):
     """With $HYPERLOOM_QUANTIZE_ENABLED off, the prelude skips quantization even
-    when --quantize is present (deterministic OFF; prevents mis-quantization)."""
+    when --quantize is present."""
     monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", "0")
     monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
     called = {"n": 0}
@@ -499,7 +488,7 @@ def test_prelude_env_gate_skips_when_disabled(monkeypatch, capsys):
 
 
 def test_prelude_env_gate_skips_when_unset(monkeypatch):
-    """Unset env => disabled (strict gate): quantization does not run."""
+    """Unset env => disabled: quantization does not run."""
     monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
     called = {"n": 0}
 

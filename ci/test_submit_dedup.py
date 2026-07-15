@@ -2,9 +2,8 @@
 
 """Unit tests for SafeOptimizeClient submit-retry de-duplication.
 
-POST /optimization/tasks is not idempotent: a slow/dropped response can hide a
-task the backend actually created. The retry path must look the task up by
-modelId+workspace and reuse it instead of creating a duplicate Claw session.
+The retry path must look a task up by modelId+workspace and reuse it instead
+of creating a duplicate Claw session.
 """
 
 from __future__ import annotations

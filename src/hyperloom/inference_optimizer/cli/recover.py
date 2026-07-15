@@ -120,8 +120,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001
         log.exception("recover-session: langfuse push failed (non-fatal)")
 
-    # 3) Optional full generation replay (off by default; duplicates if the
-    #    live emitter already ran for this session).
+    # 3) Optional full generation replay (off by default).
     if args.backfill_trace:
         try:
             from ..tools.backfill_langfuse import build_plan, ingest

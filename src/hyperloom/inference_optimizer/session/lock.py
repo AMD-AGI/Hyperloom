@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Single-optimizer session lock (issue #592).
+"""Single-optimizer session lock.
 
 A long ``inference_optimizer optimize`` run is guarded by a robustness monitor
 that re-launches the optimizer via ``--resume`` if it judges the process dead.
@@ -148,9 +148,8 @@ class SessionLock:
                 session.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # os.open returns a non-inheritable fd by default (PEP 446), so spawned
-        # serving subprocesses never keep the lock alive past the optimizer.
-        # 0o600: owner-only (the lock body carries pid/host metadata).
+        # Non-inheritable fd (PEP 446) so serving subprocesses don't keep the
+        # lock alive past the optimizer. 0o600: owner-only.
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         if fcntl is not None:
             try:

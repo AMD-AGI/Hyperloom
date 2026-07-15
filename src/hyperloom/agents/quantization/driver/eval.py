@@ -16,13 +16,12 @@ agent-owned ``eval_report.json`` wrapper:
     }
 
 This module reads that file, resolves the acceptance threshold, and decides
-whether the gap is within budget. It does **not** parse the raw Markdown — the
-LLM is responsible for normalizing scores into the schema above. We trust the
-schema and validate keys; if anything is missing the classifier maps the
-attempt to ``eval_env_unavailable`` (the closest "eval didn't really finish"
-bucket) rather than silently treating absent fields as zero.
+whether the gap is within budget. It does not parse the raw Markdown — the LLM
+normalizes scores into the schema above. Keys are validated; if anything is
+missing the classifier maps the attempt to ``eval_env_unavailable`` rather than
+treating absent fields as zero.
 
-Threshold resolution priority (§3.1):
+Threshold resolution priority:
 
     1. ``acceptable_eval_gap`` Python arg (caller-supplied; not None)
     2. ``<workspace>/eval_gap_threshold.txt`` (LLM writes this when the
@@ -87,8 +86,7 @@ def resolve_threshold(
             try:
                 return float(raw), "file"
             except ValueError:
-                # Malformed file falls through to default rather than raising —
-                # SKILL.md may have written a stray comment; default is safe.
+                # Malformed file falls through to the safe default.
                 pass
     return DEFAULT_ACCEPTABLE_GAP, "default"
 

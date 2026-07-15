@@ -13,9 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# MCP URL passed to specialist LLM backend; trailing slash mandatory. This is
-# the in-cluster fallback used only when --pr-monitor-mcp-url is not supplied;
-# the URL is a CLI-flag concern (no env fallback), matching --pr-monitor-url.
+# MCP URL passed to specialist LLM backend; trailing slash mandatory. In-cluster
+# fallback used only when --pr-monitor-mcp-url is not supplied.
 DEFAULT_PR_MONITOR_MCP_URL: str = "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/mcp/"
 
 

@@ -4,15 +4,10 @@ from __future__ import annotations
 
 """Focused unit tests for roofline executor guard/branch/fallback paths.
 
-These target the residual uncovered lines in
-``src/hyperloom/orchestrator/actions/executors/roofline.py``:
-non-dict / bad-shape guards in the pure helpers, the exception-path
-cuda-graph escalation, the ``close_post_opt`` output-name branch, the
-retry-returns-non-dict path, the session-dir save fast-paths (success +
-defensive except), and the ``_resolve_framework`` params fast-path.
-
-All tests are hermetic: profile / trace_analyze boundaries are stubbed,
-filesystem uses ``tmp_path`` only, no GPU / subprocess / network.
+Target guard/branch/fallback paths in
+``src/hyperloom/orchestrator/actions/executors/roofline.py``. All tests are
+hermetic: profile / trace_analyze boundaries are stubbed, filesystem uses
+``tmp_path`` only, no GPU / subprocess / network.
 """
 
 from pathlib import Path
@@ -33,9 +28,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
 
-# --------------------------------------------------------------------------
 # Shared helpers
-# --------------------------------------------------------------------------
 def _state() -> SharedState:
     s = SharedState()
     s.baseline_tput = 100.0
@@ -103,18 +96,15 @@ def _seed_session_dir(session_dir: Path, state: SharedState) -> None:
     assert (session_dir / "state.json").exists()
 
 
-# --------------------------------------------------------------------------
-# _extract_steady_state_retry_mode guards (lines 75, 78, 85)
-# --------------------------------------------------------------------------
+# _extract_steady_state_retry_mode guards
 def test_extract_returns_none_when_warnings_not_a_list():
-    # line 75: trace_health_warnings present but not a list.
     res = {"status": "failed", "trace_health_warnings": {"code": "x"}}
     assert _extract_steady_state_retry_mode(res) is None
 
 
 def test_extract_skips_non_dict_warning_entries():
-    # line 78: a non-dict entry in the warnings list is skipped; a valid
-    # entry after it is still honoured.
+    # A non-dict entry in the warnings list is skipped; a valid entry after it
+    # is still honoured.
     res = {
         "status": "failed",
         "trace_health_warnings": [
@@ -132,8 +122,8 @@ def test_extract_skips_non_dict_warning_entries():
 
 
 def test_extract_skips_warning_when_modes_not_a_list():
-    # line 85: the recovery warning names an alternate field that is NOT a
-    # list -> skip it; a later well-formed warning still matches.
+    # The recovery warning names an alternate field that is not a list -> skip
+    # it; a later well-formed warning still matches.
     res = {
         "status": "failed",
         "trace_health_warnings": [
@@ -153,18 +143,15 @@ def test_extract_skips_warning_when_modes_not_a_list():
     assert out[1]["code"] == "steady_state_chunk_low_quality"
 
 
-# --------------------------------------------------------------------------
-# _profile_err_text (lines 163, 170)
-# --------------------------------------------------------------------------
+# _profile_err_text
 def test_profile_err_text_non_dict_returns_empty():
-    # line 163
     assert _profile_err_text(None) == ""
     assert _profile_err_text("garbage") == ""
     assert _profile_err_text(42) == ""
 
 
 def test_profile_err_text_includes_sub_result_fields():
-    # line 170: a dict sub_result contributes its error / error_class.
+    # A dict sub_result contributes its error / error_class.
     blob = _profile_err_text(
         {
             "error": "top-level err",
@@ -187,11 +174,8 @@ def test_profile_err_text_ignores_non_dict_sub_result():
     assert "not-a-dict" not in blob
 
 
-# --------------------------------------------------------------------------
-# _profile_server_log_tail (lines 182, 193-194)
-# --------------------------------------------------------------------------
+# _profile_server_log_tail
 def test_profile_server_log_tail_non_dict_returns_empty():
-    # line 182
     assert _profile_server_log_tail(None) == ""
     assert _profile_server_log_tail("garbage") == ""
 
@@ -210,8 +194,8 @@ def test_profile_server_log_tail_reads_newest_log(tmp_path):
 
 
 def test_profile_server_log_tail_swallows_oserror(monkeypatch, tmp_path):
-    # lines 193-194: _find_server_logs succeeds but read_bytes raises OSError
-    # -> best-effort "" instead of propagating.
+    # _find_server_logs succeeds but read_bytes raises OSError -> best-effort
+    # "" instead of propagating.
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     log = trace_dir / "server.log"
@@ -229,8 +213,7 @@ def test_profile_server_log_tail_swallows_oserror(monkeypatch, tmp_path):
 
 
 def test_profile_server_log_tail_swallows_importerror(monkeypatch):
-    # lines 193-194 via ImportError branch: patch the lazy import target so
-    # importing _find_server_logs raises.
+    # Patch the lazy import target so importing _find_server_logs raises.
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
     def boom(_slot):
@@ -241,19 +224,16 @@ def test_profile_server_log_tail_swallows_importerror(monkeypatch):
 
 
 def test_profile_server_log_tail_empty_when_no_logs(tmp_path):
-    # base resolves but _find_server_logs returns [] -> "".
     empty = tmp_path / "empty_ws"
     empty.mkdir()
     assert _profile_server_log_tail({"workspace": str(empty)}) == ""
 
 
-# --------------------------------------------------------------------------
-# Exception-path cuda-graph escalation (lines 311-312)
-# --------------------------------------------------------------------------
+# Exception-path cuda-graph escalation
 @pytest.mark.asyncio
 async def test_profile_exception_with_capture_signature_escalates_eager(tmp_path):
-    """profile_executor RAISES an exception whose repr carries the cuda-graph
-    capture signature -> next attempt boots eager (lines 308-312)."""
+    """profile_executor raises an exception whose repr carries the cuda-graph
+    capture signature -> next attempt boots eager."""
     seen: list[dict] = []
     calls = {"n": 0}
 
@@ -292,12 +272,10 @@ async def test_profile_exception_with_capture_signature_escalates_eager(tmp_path
     assert "--disable-cuda-graph" in str(seen[1].get("base_extra_args", ""))
 
 
-# --------------------------------------------------------------------------
-# close_post_opt output-name branch (line 446)
-# --------------------------------------------------------------------------
+# close_post_opt output-name branch
 @pytest.mark.asyncio
 async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
-    """reason=close_post_opt routes to kernel_roofline_opt.json (line 446)."""
+    """reason=close_post_opt routes to kernel_roofline_opt.json."""
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
     captured: dict = {}
@@ -326,13 +304,11 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
     assert captured["payload"].get("roofline_arm") == "current_best"
 
 
-# --------------------------------------------------------------------------
-# Auto-retry returns non-dict (lines 505-506)
-# --------------------------------------------------------------------------
+# Auto-retry returns non-dict
 @pytest.mark.asyncio
 async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
     """First trace_analyze fails with a recovery hint; the auto-retry then
-    returns a non-dict -> fail with cleared cache (lines 504-513)."""
+    returns a non-dict -> fail with cleared cache."""
     fail = {
         "status": "failed",
         "error": "steady_state_chunk_empty",
@@ -376,13 +352,11 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
     assert state.last_trace_analyze == {}
 
 
-# --------------------------------------------------------------------------
-# Lifecycle save fast-paths: START (line 262) and END (line 587)
-# --------------------------------------------------------------------------
+# Lifecycle save fast-paths: START and END
 @pytest.mark.asyncio
 async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
     """A real session dir with state.json present triggers both the START
-    save (line 262) and the END save (line 587)."""
+    save and the END save."""
     session_dir = tmp_path / "sess"
     state = _state()
     _seed_session_dir(session_dir, state)
@@ -405,17 +379,14 @@ async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
         result = await executor(_ctx(session_dir))
 
     assert result["status"] == "succeeded"
-    # START save + END save both hit the real session dir.
     assert saves.count(str(session_dir)) >= 2
 
 
-# --------------------------------------------------------------------------
-# Lifecycle START defensive except (lines 263-264)
-# --------------------------------------------------------------------------
+# Lifecycle START defensive except
 @pytest.mark.asyncio
 async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
     """record_lifecycle_event raising on the START emit must not abort the
-    run (defensive except, lines 263-264)."""
+    run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -425,7 +396,7 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
-        if calls["n"] == 1:  # START emit
+        if calls["n"] == 1:
             raise RuntimeError("lifecycle START boom")
         return real_evt(*args, **kwargs)
 
@@ -439,13 +410,10 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
     assert result["status"] == "succeeded"
 
 
-# --------------------------------------------------------------------------
-# Lifecycle END defensive except (lines 588-589)
-# --------------------------------------------------------------------------
+# Lifecycle END defensive except
 @pytest.mark.asyncio
 async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
-    """record_lifecycle_event raising on the END emit must not fail the run
-    (defensive except, lines 588-589)."""
+    """record_lifecycle_event raising on the END emit must not fail the run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -455,7 +423,6 @@ async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
-        # First call = START (succeeds), second call = END (raises).
         if kwargs.get("status") == "END":
             raise RuntimeError("lifecycle END boom")
         return real_evt(*args, **kwargs)
@@ -471,11 +438,9 @@ async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
     assert calls["n"] >= 2
 
 
-# --------------------------------------------------------------------------
-# _resolve_framework params fast-path (line 634)
-# --------------------------------------------------------------------------
+# _resolve_framework params fast-path
 def test_resolve_framework_prefers_params(monkeypatch):
-    # line 634: params["framework"] wins over env / shared_state.
+    # params["framework"] wins over env / shared_state.
     monkeypatch.setenv("FRAMEWORK", "vllm")
     state = _state()
     state.framework = "atom"
@@ -507,5 +472,4 @@ def test_make_roofline_executor_returns_instance():
     exe = make_roofline_executor(shared_state=state)
     assert isinstance(exe, RooflineExecutor)
     assert exe.shared_state is state
-    # module import sanity (silence unused import lint on rf)
     assert rf.RooflineExecutor is RooflineExecutor

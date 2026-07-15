@@ -32,8 +32,7 @@ log = get_logger(__name__)
 
 _DISK_MIN_GB_ENV = "FRAMEWORK_EXPLORER_DISK_MIN_GB"
 _DEFAULT_DISK_MIN_GB = 20.0
-# Per-candidate disk budget: sglang/vllm worktree (~700MB) + venv with
-# --system-site-packages (~50MB) + build-artefact headroom.
+# Per-candidate disk budget (worktree + venv + build headroom).
 PER_CANDIDATE_GB = 1.5
 
 
@@ -347,8 +346,7 @@ def cleanup_workspace(
     if not keep_winner_only or is_winner:
         return
     if repo_dir is not None:
-        # Detach the worktree from the mirror so `git worktree list` in the
-        # repo cache does not point at a now-missing directory.
+        # Detach the worktree from the mirror before removing it.
         try:
             _run_git(
                 ["git", "worktree", "remove", "--force", str(workspace.worktree_dir)],

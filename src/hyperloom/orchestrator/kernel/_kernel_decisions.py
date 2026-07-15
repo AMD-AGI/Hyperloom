@@ -2,13 +2,11 @@
 
 """Kernel-decision write-owner functions.
 
-Extracted from :mod:`.request_handlers`. SharedState is a passive persisted
-record; the functions that *own kernel decisions*
-(recording kernel-opt / integrate / gemm-tuning outcomes, kernel-patch
-identity, pending-keep bookkeeping, hot-kernel reuse) live here. They take
-``state`` as their first argument and read/mutate it; SharedState keeps thin
-forwarding shims so existing callers (``state.record_kernel_opt(...)`` etc.)
-keep working.
+SharedState is a passive persisted record; the functions that *own kernel
+decisions* (recording kernel-opt / integrate / gemm-tuning outcomes,
+kernel-patch identity, pending-keep bookkeeping, hot-kernel reuse) live here.
+They take ``state`` as their first argument and read/mutate it; SharedState
+keeps thin forwarding shims so existing callers keep working.
 
 Also carries the "honest E2E" hardening-flag helper (``_honest_flag`` + its
 constants), shared by both this cluster and the request handlers that stayed
@@ -41,13 +39,9 @@ from ..trace.trace_env import env_flag
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# "Honest E2E" hardening flags (v4-parity). Every behavior below is OFF by
-# default, so with no env set this module is byte-identical to before. The
-# umbrella flag ``HL_HONEST_E2E`` turns the whole cohesive mode on; each fix
-# also has a per-fix override that wins over the umbrella (set it to an
-# explicit falsey value to opt a single fix back out of the umbrella).
-# ---------------------------------------------------------------------------
+# "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
+# whole mode on; each fix also has a per-fix override that wins over the umbrella
+# (set it to an explicit falsey value to opt a single fix out of the umbrella).
 _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
 def _honest_flag(specific_env: str) -> bool:
@@ -55,11 +49,9 @@ def _honest_flag(specific_env: str) -> bool:
 
     Returns ``True`` when the per-fix env ``specific_env`` is truthy, OR when it
     is unset and the umbrella ``HL_HONEST_E2E`` is truthy. An explicit falsey
-    per-fix value always wins (lets one fix opt out of the umbrella). The umbrella
-    now defaults ON: E2E-faithful verdicts (paired same-config A/B, engagement
-    gate, verified-micro promotion) are the default so a GEAK kernel win is judged
-    by real serving throughput, not a stored-scalar gain. Opt the whole cohort
-    back out with ``HL_HONEST_E2E=0`` (or a single fix via its per-fix env).
+    per-fix value always wins (lets one fix opt out of the umbrella). The
+    umbrella defaults ON. Opt the whole cohort back out with ``HL_HONEST_E2E=0``
+    (or a single fix via its per-fix env).
 
     The per-fix layer uses :func:`trace_env.env_flag` (the canonical superset
     vocabulary that recognizes ``0/false/no/off`` as an *explicit* False and
@@ -301,8 +293,8 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    # Record the end-to-end integrate outcome into the breakdown recorder,
-    # idempotent per kernel_id, best-effort.
+    # Record the integrate outcome into the breakdown recorder (idempotent per
+    # kernel_id, best-effort).
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
@@ -325,9 +317,8 @@ def record_kernel_integrate_result(
     if result.get("decision") == "KEEP":
         return entry
 
-    # Integration fault: never measured fairly. Don't burn the REVERT quota
-    # — retry on its own budget and let the pending-integrate driver pick it
-    # back up, only rejecting once the fault budget is exhausted.
+    # Integration fault: never measured fairly. Retry on its own budget instead
+    # of burning the REVERT quota, only rejecting once that budget is exhausted.
     if is_fault:
         if fault_count < max_fault_attempts:
             entry["retryable"] = True
@@ -336,7 +327,7 @@ def record_kernel_integrate_result(
         reason = f"fault_attempts_exhausted_{max_fault_attempts}"
     else:
         # Gate verdict path: a genuine REVERT, or too many non-fault attempts
-        # without a KEEP. Faults never count toward this quota.
+        # without a KEEP.
         should_reject = (
             result.get("decision") == "REVERT"
             or verdict_attempt_count >= max_attempts
@@ -383,11 +374,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     """
     if not isinstance(result, dict):
         return
-    # Capture an empty-queue skip (no eligible kernels, no named kernel) as a
-    # non-failure breadcrumb. The result carries no kernel_id, so the per-kernel
-    # bookkeeping below early-returns and the skip is otherwise invisible in the
-    # breakdown (no backend, no kernel_id). Stash it so the summary can surface
-    # it honestly.
+    # Capture an empty-queue skip (no eligible kernels) as a non-failure
+    # breadcrumb so the summary can surface it.
     is_no_eligible_dispatch_skip = (
         str(result.get("status") or "").lower() == "skipped"
         and str(result.get("reason") or "") == "no_eligible_kernels"
@@ -401,15 +389,13 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         }
     elif str(result.get("kernel_id") or ""):
         state.last_kernel_opt_dispatch_skip = {}
-    # Author-time breakdown capture: record geak/forge invocations (incl.
-    # backend + pre-dispatch failures) before the metadata-less early
-    # return so no failed attempt becomes invisible in the geak/forge view.
+    # Author-time breakdown capture: record geak/forge invocations before the
+    # metadata-less early return so no failed attempt becomes invisible.
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
         instrument.record_kernel_invocations(sdir, result)
-        # Record dispatch and per-backend attempts. Distinct from the
-        # geak/forge view above and never overlaps it.
+        # Record dispatch and per-backend attempts.
         _kid = str(result.get("kernel_id") or "")
         if sdir and _kid:
             _attempts = result.get("attempts")
@@ -424,11 +410,10 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 _sel = result.get("selected_backends") or result.get("backends")
                 if isinstance(_sel, list):
                     _backends = [str(b).lower() for b in _sel if b]
-            # A backend that failed before dispatching attempts (e.g. geak
-            # rejecting an empty/non-reusable kernel shape) still counts as
-            # dispatched: the backend was invoked. Mirror the failure-detect
-            # used by record_kernel_backend_result so the synthetic FAILED
-            # attempt and the dispatch flag stay consistent.
+            # A backend that failed before dispatching attempts still counts as
+            # dispatched. Mirror record_kernel_backend_result's failure-detect
+            # so the synthetic FAILED attempt and the dispatch flag stay
+            # consistent.
             _status = str(result.get("status") or "").lower()
             _err_class = str(result.get("error_class") or "")
             _decision = str(
@@ -438,10 +423,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 or (_decision == "REVERT" and bool(_err_class))
             )
             if _failed_predispatch and not _backends:
-                # Never default an unattributable failure to GEAK — the backend
-                # that ran is stamped on the result upstream when known; only a
-                # genuine pre-dispatch gating failure (no backend launched)
-                # falls through, and "unknown" reflects that honestly.
+                # Never default an unattributable failure to GEAK; "unknown"
+                # reflects a pre-dispatch gating failure with no backend launched.
                 _b = str(result.get("backend") or "").lower() or "unknown"
                 _backends = [_b]
             _dispatched = bool(_attempts) or _failed_predispatch
@@ -481,7 +464,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         or ""
     )
     # Extract test_command from the first attempt that recorded one so
-    # after_kernel_opt rocprof can reuse it without re-deriving from scratch.
+    # after_kernel_opt rocprof can reuse it.
     test_command = ""
     for _attempt in (result.get("attempts") or []):
         if isinstance(_attempt, dict):
@@ -491,7 +474,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 break
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
-    # Pure infra failure = backend ladder with no verdict; kept distinct from REVERT/PARTIAL so retirement counters don't double-count.
+    # Pure infra failure = backend ladder with no verdict; kept distinct from
+    # REVERT/PARTIAL so retirement counters don't double-count.
     is_infra_failure = (
         decision == ""
         and (
@@ -515,7 +499,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     })
     history = history[-10:]
     entry["attempts"] = int(entry.get("attempts", 0)) + 1
-    # Per-source attempts so a Python wrapper and its device file don't share a retry quota.
+    # Per-source attempts so a Python wrapper and its device file don't share a
+    # retry quota.
     per_source = dict(entry.get("attempts_per_source") or {})
     src_key = source_file or ""
     per_source[src_key] = int(per_source.get(src_key, 0)) + 1
@@ -523,7 +508,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     if decision == "PARTIAL":
         entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
     elif decision == "KEEP":
-        # Success resets streaks so a future regression isn't auto-retired on stale history.
+        # Success resets streaks so a future regression isn't auto-retired on
+        # stale history.
         entry["partial_count"] = 0
         entry["failure_count"] = 0
     if is_infra_failure:
@@ -537,9 +523,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_deploy_patch_path"] = deploy_patch_path
     entry["last_deploy_repo_root"] = deploy_repo_root
     entry["last_source_file"] = source_file
-    # Record backend + correctness so the GEAK-only verified-NEEDS_REVIEW promotion gate
-    # (next_pending_keep_kernel_id) can identify a correctness-verified GEAK win. Additive;
-    # consumed only when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled.
+    # Record backend + correctness so the GEAK-only verified-NEEDS_REVIEW
+    # promotion gate can identify a correctness-verified GEAK win (consumed only
+    # when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled).
     entry["last_backend"] = str(verification.get("best_backend") or "")
     entry["last_correctness_passed"] = verification.get("correctness_passed")
     entry["last_ts"] = ts
@@ -547,7 +533,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     if test_command:
         entry["test_command"] = test_command
 
-    # last_kernel_opt overwrite policy: KEEP always wins; non-KEEP writes only when no pending KEEP to protect.
+    # last_kernel_opt overwrite policy: KEEP always wins; non-KEEP writes only
+    # when there is no pending KEEP to protect.
     prev = state.last_kernel_opt or {}
     prev_decision = str(prev.get("decision", "")).upper()
     prev_kid = str(prev.get("kernel_id", ""))
@@ -581,29 +568,24 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         try:
             max_partial = max(1, int(env_v))
         except (TypeError, ValueError):
-            # Malformed env override → keep the default partial-attempt cap.
+            # Malformed env override -> keep the default partial-attempt cap.
             pass
 
-    # Backend ladder failures are often transient infra/backend faults; real
-    # REVERT still retires immediately below, but infra failures get a retry.
+    # Backend ladder failures are often transient infra faults; real REVERT
+    # still retires immediately below, but infra failures get a retry.
     max_failures = resolve_kernel_opt_max_failures()
 
     # High-impact infra-retry (flag-gated, default off). An infra non-finish
-    # (timeout / preprocess / agent-crash; no verdict) means the attempt "didn't
-    # finish", NOT that the kernel "can't be improved" — evidence: the same FP8
-    # blockscale GEMM that infra-failed-then-was-retired on one workload won 2.9x
-    # on another once GEAK completed. So a high-GPU%-share kernel should not be
-    # permanently retired after only ``max_failures`` non-finishes the way a
-    # REVERT is; give it more attempts to COMPLETE (pairs with GEAK adaptive
-    # budget). REVERT / partial retirement is unchanged; off => byte-identical.
+    # (timeout / preprocess / agent-crash; no verdict) means the attempt didn't
+    # finish, not that the kernel can't be improved. Give a high-GPU%-share
+    # kernel more attempts to COMPLETE rather than retiring it as a REVERT would.
     infra_failure_cap = max_failures
     if _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
         try:
             _impact_pct = float(_kernel_trace_impact_pct(state, kernel_id) or 0.0)
         except Exception:  # noqa: BLE001 - impact is best-effort
             _impact_pct = 0.0
-        # Stamp impact so the dispatch-side cap (_kernel_dispatch_attempt_cap)
-        # widens consistently from the same record.
+        # Stamp impact so the dispatch-side cap widens from the same record.
         entry["last_gpu_pct"] = _impact_pct
         try:
             _min_gpu = float(os.environ.get("HL_INFRA_RETRY_MIN_GPU_PCT", "5.0") or 5.0)
@@ -801,16 +783,17 @@ def pending_keep_kernel_ids(state) -> list[str]:
     integrated_sources = _source_files_in_optimization_stack(state)
     attempted_ids = _kernel_ids_with_integrate_attempts(state)
     rejected = set(state.rejected_kernel_ids or [])
-    # Mirror next_pending_keep_kernel_id same-file guard: only strongest KEEP per source_file is queueable.
+    # Mirror next_pending_keep_kernel_id same-file guard: only the strongest
+    # KEEP per source_file is queueable.
     claimed_sources: set[str] = set()
     ranked: list[tuple[float, float, str, str]] = []
     for kid, entry in (state.kernel_opt_attempts or {}).items():
         if not isinstance(entry, dict):
             continue
         _dec = str(entry.get("last_decision", "")).upper()
-        # GEAK-only verified-NEEDS_REVIEW promotion (flag-gated, default off): admit a
-        # correctness-verified, high-micro GEAK NEEDS_REVIEW into the integrate queue so its
-        # win is actually E2E-measured. Off => only KEEP queues (today's behavior, byte-identical).
+        # GEAK-only verified-NEEDS_REVIEW promotion (flag-gated): admit a
+        # correctness-verified, high-micro GEAK NEEDS_REVIEW into the integrate
+        # queue so its win is E2E-measured. Off => only KEEP queues.
         _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
         try:
             _thr = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
@@ -921,7 +904,8 @@ def untried_hot_reusable_kernels(
     rejected = set(state.rejected_kernel_ids or [])
     attempts = state.kernel_opt_attempts or {}
 
-    # Sort by gpu_pct desc so dedup picks the strongest member of each task_group.
+    # Sort by gpu_pct desc so dedup picks the strongest member of each
+    # task_group.
     rows: list[tuple[float, str, str, list[str]]] = []
     for k in hot:
         if not isinstance(k, dict):

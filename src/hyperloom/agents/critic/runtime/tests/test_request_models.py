@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Schema validation for :mod:`critic-agent.runtime.request_models` (exhaustive edge cases)."""
+"""Schema validation for :mod:`critic-agent.runtime.request_models`."""
 
 from __future__ import annotations
 

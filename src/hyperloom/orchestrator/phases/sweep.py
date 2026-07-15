@@ -18,19 +18,17 @@ class SweepPhase(PhaseHandler):
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``conc_sweep`` task on SWEEP entry.
 
-        The historical full workload ``sweep`` remains available as a manual
-        executor, but the automatic phase path now runs the baseline-vs-current
-        concurrency curve directly.
+        The automatic phase path runs the baseline-vs-current concurrency curve
+        directly; the full workload ``sweep`` remains a manual executor.
 
         Args:
             from_phase: The phase being left, used only for logging.
         """
         state = self.shared_state
-        # Drain pending KEEP integrates from prior KERNEL so sweep measures full current_best.
+        # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
-        # Always attempt stack validation for positive NEEDS_REVIEW kernels,
-        # regardless of whether there were pending KEEPs to drain.
+        # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._maybe_validate_positive_needs_review_stack()
         if not getattr(state, "conc_sweep_enabled", False):
             log.info(
@@ -102,7 +100,9 @@ class SweepPhase(PhaseHandler):
         *,
         reason: str,
     ) -> Task | None:
-        """Build + enqueue a Coordinator-internal ``conc_sweep`` task (caller checks conc_sweep_enabled). Idempotency key + PolicyGate singleton ensure ≤1 per SWEEP; returns None on error.
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task; returns None on error.
+
+        Idempotency key + PolicyGate singleton ensure at most one per SWEEP.
 
         Args:
             reason: Tag used in the task's idempotency key and logging.
@@ -124,7 +124,7 @@ class SweepPhase(PhaseHandler):
                 kind="conc_sweep",
                 params=params,
                 idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                # lease_ttl matches total_budget_sec so a multi-hour conc_sweep doesn't expire mid-flight.
+                # lease_ttl matches total_budget_sec so a long conc_sweep doesn't expire mid-flight.
                 lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
             )
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -173,7 +173,9 @@ class SweepPhase(PhaseHandler):
         *,
         reason: str,
     ) -> Task:
-        """Build + enqueue a Coordinator-internal ``sweep`` task. Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults. Idempotency key internal-sweep-<reason>.
+        """Build + enqueue a Coordinator-internal ``sweep`` task.
+
+        Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults.
 
         Args:
             reason: Tag used in the task's idempotency key and logging.
@@ -192,8 +194,8 @@ class SweepPhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        # GEAK-owned KERNEL: hand the e2e result to the sweep so it reuses
-        # GEAK's bench_e2e.sh + overlay instead of relaunching via Magpie.
+        # Hand the GEAK e2e result to the sweep so it reuses GEAK's bench_e2e.sh
+        # + overlay instead of relaunching via Magpie.
         ps_result = getattr(state, "geak_result", None) or {}
         if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
                 and ps_result.get("bench_script"):
@@ -224,7 +226,7 @@ class SweepPhase(PhaseHandler):
 
     @staticmethod
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
-        """Pick a sweep grid: warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor.
+        """Pick a sweep grid: warm_start_recipe.sweep_grid over SKILL.md defaults, per-field.
 
         Args:
             state: The session SharedState whose ``warm_start_recipe`` may carry
@@ -284,7 +286,6 @@ class SweepPhase(PhaseHandler):
                 return None
             out: list[str] = []
             for v in value:
-                # Accept either "<ISL>:<OSL>" strings or [isl, osl] pairs.
                 if isinstance(v, str) and ":" in v:
                     out.append(v)
                     continue

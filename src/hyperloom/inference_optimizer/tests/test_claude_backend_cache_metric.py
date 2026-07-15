@@ -11,7 +11,6 @@ from hyperloom.inference_optimizer.protocol.intent import IntentType
 from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
 
-# Fake SDK plumbing
 class _FakeBlock:
     """Mimics claude_agent_sdk's ToolUseBlock with name + input."""
 
@@ -64,13 +63,12 @@ def _make_backend(messages: list[_FakeMessage]) -> ClaudeBackend:
     backend = ClaudeBackend(
         sdk_query_factory=fake_query,
         sdk_options_cls=_FakeOptions,
-        # Disable MCP wiring so we don't trigger real Claude Code setup
+        # Disable MCP wiring.
         enable_mcp_emit_intent=False,
     )
     return backend
 
 
-# Happy path — usage propagates to calls + metadata
 @pytest.mark.asyncio
 async def test_cache_metrics_extracted_from_result_message_usage():
     """Happy path: the 4 token counters land on both `backend.calls[-1]` and `BackendTurnResult.metadata`."""
@@ -89,13 +87,11 @@ async def test_cache_metrics_extracted_from_result_message_usage():
     backend = _make_backend(messages)
     result = await backend.run(prompt="hello")
 
-    # backend.calls log
     call = backend.calls[-1]
     assert call["cache_creation_input_tokens"] == 5000
     assert call["cache_read_input_tokens"] == 12000
     assert call["input_tokens"] == 100
     assert call["output_tokens"] == 50
-    # BackendTurnResult metadata
     assert result.metadata["cache_creation_input_tokens"] == 5000
     assert result.metadata["cache_read_input_tokens"] == 12000
     assert result.metadata["input_tokens"] == 100
@@ -142,7 +138,6 @@ async def test_cache_creation_only_means_first_miss():
     assert result.metadata["cache_read_input_tokens"] == 0
 
 
-# Degraded paths — usage missing / non-dict / SDK silent on cache
 @pytest.mark.asyncio
 async def test_no_usage_field_zero_metrics():
     """SDK silent on usage → metrics default to 0, no crash."""
@@ -203,7 +198,6 @@ async def test_usage_non_numeric_value_coerced_to_zero():
     assert result.metadata["output_tokens"] == 50
 
 
-# Multiple ResultMessages — last usage wins
 @pytest.mark.asyncio
 async def test_last_usage_wins_when_multiple_result_messages():
     """Only the terminal ResultMessage carries cumulative usage; earlier ones must NOT clobber it."""
@@ -221,14 +215,12 @@ async def test_last_usage_wins_when_multiple_result_messages():
     ]
     backend = _make_backend(messages)
     result = await backend.run(prompt="hello")
-    # Last usage wins (cumulative)
     assert result.metadata["input_tokens"] == 200
     assert result.metadata["cache_read_input_tokens"] == 15000
     assert result.metadata["cache_creation_input_tokens"] == 5000
     assert result.metadata["output_tokens"] == 100
 
 
-# safe_int helper
 def test_safe_int_coerces_ints_strings_and_falsy():
     assert ClaudeBackend._safe_int(42) == 42
     assert ClaudeBackend._safe_int("100") == 100
@@ -239,7 +231,6 @@ def test_safe_int_coerces_ints_strings_and_falsy():
     assert ClaudeBackend._safe_int(False) == 0  # bool → int(False) == 0
 
 
-# Pre-existing fields preserved
 @pytest.mark.asyncio
 async def test_existing_metadata_fields_still_present():
     """N6 adds cache fields without removing tool_blocks / model."""
@@ -264,10 +255,8 @@ async def test_existing_backend_calls_fields_preserved():
     backend = _make_backend(messages)
     await backend.run(prompt="hello")
     call = backend.calls[-1]
-    # Pre-existing keys
     assert "prompt_chars" in call
     assert "tool_blocks" in call
     assert "intents" in call
     assert "max_turns" in call
-    # N6 keys
     assert call["cache_read_input_tokens"] == 5000

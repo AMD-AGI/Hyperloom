@@ -34,8 +34,7 @@ HF_TIMEOUT = 30
 HF_LIST_WORKERS = 10
 HF_LIMIT = 500  # HF list endpoint hard-caps a single sort at 500 rows.
 
-# Sort × direction combinations. Each one returns up to 500 rows in a
-# distinct ranking; their union covers ~3× a single sort's row count.
+# Sort × direction combinations; their union covers ~3× a single sort's rows.
 SORT_VARIANTS = [
     ("downloads", -1),
     ("downloads", 1),
@@ -49,8 +48,7 @@ SORT_VARIANTS = [
     ("createdAt", 1),
 ]
 
-# Author slices pick up models that don't make any of the global
-# top-500 leaderboards (long-tail Qwen variants, unsloth fine-tunes, etc.).
+# Author slices pick up long-tail models absent from the global top-500 lists.
 DEFAULT_AUTHOR_SLICES = [
     "Qwen",
     "meta-llama",
@@ -295,7 +293,6 @@ def build_candidates(
             continue
         params = _params_total(m)
         if threshold and params == 0:
-            # Defensive: HF min: filter should have removed these already.
             stats["models_without_safetensors"] += 1
             continue
         if threshold and params < threshold:
@@ -315,8 +312,7 @@ def build_candidates(
                 "trending_score": m.get("trendingScore"),
                 "last_modified": m.get("lastModified"),
                 "pipeline_tag": m.get("pipeline_tag") or "text-generation",
-                # Stub fields the legacy schema expects; filled by the results
-                # service after the first optimization run.
+                # Stub fields the schema expects; filled by the results service later.
                 "data_quality": "hf_inference_listed",
                 "framework": None,
                 "precision": None,
@@ -337,7 +333,7 @@ def build_candidates(
 
     if sort_mode == "model":
         candidates.sort(key=lambda x: str(x["repo_id"]).lower())
-    else:  # downloads (default)
+    else:  # downloads
         candidates.sort(
             key=lambda x: (-(x.get("downloads") or 0), str(x["repo_id"]).lower()),
         )

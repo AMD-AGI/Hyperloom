@@ -23,9 +23,7 @@ TOPIC_ALLOWLIST = frozenset({
     "do_postmortem", "do_strategic_review", "do_emergency_rca",
     "synthesize_for_kb", "graceful_stop", "heartbeat",
     "delegated_result", "intent_emitted", "rca_done",
-    # Robustness KILL_TASK audit broadcast (write-only; no consumer keys off
-    # it, but it must be allow-listed or ``append_and_seq`` rejects it as an
-    # unknown topic — sibling prune_branch rides "event").
+    # Robustness KILL_TASK audit broadcast (write-only; must be allow-listed).
     "kill",
     # Storage-layer events
     "lease_expired", "lease_acquire_failed",
@@ -33,18 +31,12 @@ TOPIC_ALLOWLIST = frozenset({
     "request", "response",
     # Critic Review Protocol verdict broadcast.
     "review_verdict", "advice", "strategy_change",
-    # Dynamic-specialist dispatch audit trail (free-form CPU-only
-    # specialist dispatch via dynamic_dispatch_tools). These are
-    # write-only observation-style records the Coordinator emits so the
-    # dispatch / poll / collect lifecycle is visible in the bus; no
-    # consumer keys off them, but they must be allow-listed or
-    # ``append_and_seq`` rejects them with ``unknown topic``.
+    # Dynamic-specialist dispatch audit trail (write-only; must be allow-listed).
     "dynamic_specialist_dispatched", "dynamic_specialist_status",
     "dynamic_specialist_results", "dynamic_specialist_error",
 })
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
 
 
@@ -72,7 +64,7 @@ class Message:
     priority: int = 1
     in_reply_to: str | None = None
     ts: str = field(default_factory=_now_iso)
-    seq: int | None = None  # filled in by the bus on insert
+    seq: int | None = None  # DB-assigned on insert
 
     @classmethod
     def new(
@@ -149,7 +141,6 @@ class Message:
         )
 
 
-# ---------------------------------------------------------------------------
 class MessageBus:
     """Append-only message log backed by the ``events`` table.
 

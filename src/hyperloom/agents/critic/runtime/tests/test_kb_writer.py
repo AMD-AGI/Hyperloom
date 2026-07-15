@@ -16,11 +16,6 @@ from hyperloom.agents.critic.runtime.kb_writer import KBWriter, WriteContext, sl
 from hyperloom.agents.critic.runtime.session_memory import SessionMemory
 
 
-# ---------------------------------------------------------------------------
-# KBWriter happy-path / dead-letter
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def packet_context():
     return {
@@ -79,7 +74,7 @@ def test_write_verdict_reject_creates_pitfall(writer, packet_context):
 def test_write_verdict_skipped_when_disabled(monkeypatch, writer, packet_context):
     w, kb, _, _ = writer
     monkeypatch.setenv("KB_WRITE_ENABLED", "false")
-    w.write_enabled = False  # honour env at runtime
+    w.write_enabled = False
     res = w.write_verdict(
         verdict={"verdict": "reject", "reasoning": "x"},
         packet_context=packet_context,
@@ -210,11 +205,6 @@ def test_write_verdict_with_missing_critical_scope_skipped(writer):
     assert "scope_construction_failed" in res.detail.get("reason", "")
 
 
-# ===========================================================================
-# Circuit-breaker behaviour (formerly test_kb_breaker.py)
-# ===========================================================================
-
-
 class _FlakyKBClient(InMemoryKBClient):
     """InMemoryKBClient with deterministic transport failure injection."""
 
@@ -279,7 +269,7 @@ def test_list_priors_short_circuits_after_first_transport_error(breaker_writer):
 
     out2 = w.list_priors(scope=_scope())
     assert out2["cache"] == "kb_unreachable"
-    assert "error" not in out2  # no transport call made
+    assert "error" not in out2
     assert out2["breaker"]["open"] is True
 
 

@@ -3,19 +3,15 @@
 """Idempotent run-time patcher for vLLM and SGLang server installs.
 
 The TraceLens profiling skill needs flags that exist only in TraceLens-patched
-vLLM / SGLang builds (``--profiler-config.capture_torch_profiler_dir`` /
-``detailed_trace_annotation``; ``--enable-shape-discovery-for-cuda-graph-
-profile``); without the patch the server fails to start. As a fallback to
-rebuilding the docker image, this runtime-patches the in-container install at
+vLLM / SGLang builds; without the patch the server fails to start. As a fallback
+to rebuilding the docker image, this runtime-patches the in-container install at
 the start of each profile run.
 
 Contract: per-framework independent patchers; fail-soft (any failure returns
 ``False`` and callers skip the TraceLens flags); idempotent via a sentinel
 substring; concurrency-safe via ``fcntl.flock``; all-or-nothing for the
-multi-patch SGLang set (``--check`` all, rollback on mid-apply failure).
-Patches are TraceLens's responsibility (filenames/dirs are discovered, never
-hardcoded) and backward-compatible, so they're safe to leave applied (no
-revert path).
+multi-patch SGLang set (``--check`` all, rollback on mid-apply failure). Patches
+are backward-compatible, so they're safe to leave applied (no revert path).
 """
 
 from __future__ import annotations
@@ -34,24 +30,20 @@ from ._file_lock import best_effort_file_lock
 log = logging.getLogger(__name__)
 
 
-# System-wide lock file (``/tmp`` is writable; cross-reboot persistence not
-# needed).
+# System-wide lock file.
 _LOCK_PATH = "/tmp/hyperloom_server_patcher.lock"
 
 # Per-``git`` invocation timeout (defensive against hung NFS).
 _GIT_TIMEOUT_SEC = 30
 
-# SGLang version gate: a minor-version allowlist (not an exact pin) so the fuzzy
-# fallback can apply TraceLens patches against a freshly bumped point release.
-# Widening is safe — a real context conflict fail-softs anyway. Override via
+# SGLang version gate: a minor-version allowlist (not an exact pin). Override via
 # ``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (csv) or, for exact pins,
 # ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv, wins over minors).
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 
-# TraceLens-shipped manifest filename(s). When present in the SGLang patches
-# dir, the manifest is the source of truth for supported versions,
-# bypassing the hardcoded default; operator env pins still win. Format: one
-# version per line, ``#`` comments, blank lines ignored.
+# TraceLens-shipped manifest filename(s). When present, the manifest is the
+# source of truth for supported versions (operator env pins still win). Format:
+# one version per line, ``#`` comments, blank lines ignored.
 _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
     "SUPPORTED_VERSIONS.txt",
     "SUPPORTED_VERSIONS",
@@ -136,8 +128,7 @@ def _sglang_version_accepted(
     if minors_env:
         minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
         return any(text == minor or text.startswith(f"{minor}.") for minor in minors)
-    # Vendor manifest, when present, fully replaces the hardcoded default;
-    # absent -> fall through to the default below.
+    # Vendor manifest, when present, fully replaces the hardcoded default.
     if patches_dir is not None:
         manifest_versions = _load_sglang_supported_versions_from_manifest(
             patches_dir,
@@ -497,8 +488,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
             version, patch_file.name,
         )
 
-    # Apply root for the ``a/vllm/...`` prefix is site-packages (parent of the
-    # ``vllm/`` package dir).
+    # Apply root for the ``a/vllm/...`` prefix is site-packages.
     install_root = Path(vllm.__file__).resolve().parent.parent
     sentinel = install_root / "vllm" / "config" / "profiler.py"
     if not sentinel.is_file():
@@ -508,8 +498,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    # Both substrings live in the dataclass body the TraceLens patch adds;
-    # requiring both collapses the false-positive surface to ~zero.
+    # Requiring both substrings collapses the false-positive surface to ~zero.
     return _PatchPlan(
         framework="vllm",
         version=version,
@@ -562,8 +551,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    # Per-version subdir layout required (pre-v0.3.1 flat checkouts must be
-    # upgraded — see README "Prepare Source Trees").
+    # Per-version subdir layout required.
     patches_dir = _resolve_sglang_patches_dir(patches_root, version)
     if patches_dir is None:
         log.warning(
@@ -593,25 +581,21 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    # Support both layouts: editable (``-p1`` from repo root) and wheel
-    # (``-p3`` from inside the wheel sglang/ dir). See
-    # :func:`_resolve_sglang_apply_root`.
+    # Support both editable and wheel layouts (see _resolve_sglang_apply_root).
     sglang_module = Path(sglang.__file__).resolve()
     apply_resolution = _resolve_sglang_apply_root(sglang_module)
     if apply_resolution is None:
         return None
     apply_root, apply_strip = apply_resolution
 
-    # The per-version subdir ships a complete set authored for this release.
     filtered_patches: list[Path] = list(patches)
 
     # Sentinel: the kernel_shape_profiler patch creates a new file at
     # ``sglang/srt/utils/kernel_shape_profiler.py`` in both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
-    # Always verify the annotation pipeline sentinels, not just the main
-    # kernel_shape_profiler file, so a partial apply that leaves the main
-    # sentinel present but annotations missing is still detected.
+    # Also verify the annotation pipeline sentinels so a partial apply (main
+    # sentinel present but annotations missing) is still detected.
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = (
         (
             sglang_pkg / "srt" / "managers" / "scheduler.py",
@@ -636,8 +620,8 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         apply_root=apply_root,
         patches=tuple(filtered_patches),
         sentinel_file=sentinel,
-        # Sentinel file alone is insufficient (a partial apply leaves it
-        # present); the extra_sentinels below require the annotation pipeline.
+        # Sentinel file alone is insufficient; extra_sentinels require the
+        # annotation pipeline.
         sentinel_text=("kernel_shape_profiler",),
         extra_sentinels=extra_sentinels,
         apply_strip=apply_strip,
@@ -671,8 +655,7 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
-# KernelForge root env aliases, in the precedence used by
-# ``src/hyperloom/inference_optimizer/assets/install.sh`` ``_forge_gemm_tune_candidates``.
+# KernelForge root env aliases, in install.sh's precedence order.
 _KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = (
     "FORGE_PATH",
     "KERNEL_FORGE_ROOT",
@@ -753,9 +736,8 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     version = (getattr(sglang, "__version__", "") or "").strip()
 
-    # KernelForge layout contract: ``<root>/serving_patches/sglang/`` holds the
-    # per-version subdirs (``sglang_0_5_12/`` ...) plus the SUPPORTED_VERSIONS
-    # manifest.
+    # KernelForge layout: ``<root>/serving_patches/sglang/`` holds the
+    # per-version subdirs plus the SUPPORTED_VERSIONS manifest.
     patches_root = kernelforge_root / "serving_patches" / "sglang"
     if not patches_root.is_dir():
         log.warning(
@@ -776,9 +758,8 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    # KernelForge ships the manifest at the patches_root (serving_patches/
-    # sglang/SUPPORTED_VERSIONS.txt), one level above the per-version subdir,
-    # so consult patches_root for the version gate.
+    # KernelForge ships the manifest at patches_root (one level above the
+    # per-version subdir), so consult patches_root for the version gate.
     if not _sglang_version_accepted(version, patches_dir=patches_root):
         log.warning(
             "_server_patcher: SGLang %s not in supported version list "
@@ -804,7 +785,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
     apply_root, apply_strip = apply_resolution
 
-    # Sentinel: the patch edits the installed
+    # Sentinel: the patch edits
     # ``sglang/srt/layers/quantization/fp8_utils.py`` in place (both layouts).
     sentinel = (
         sglang_module.parent
@@ -910,8 +891,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     patch_bin = shutil.which("patch")  # may be ``None`` — fuzzy fallback then disabled
 
     # Per-patch precheck: each must pass ``git apply --check`` (strict) OR the
-    # fuzzy ``patch --fuzz=2 --dry-run`` fallback (minor context drift); if
-    # neither accepts a patch the whole set fail-softs.
+    # fuzzy ``patch --fuzz=2 --dry-run`` fallback; if neither accepts a patch the
+    # whole set fail-softs.
     strip_arg = f"-p{plan.apply_strip}"
 
     apply_modes: dict[Path, str] = {}
@@ -932,18 +913,11 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             )
             apply_modes[p] = "patch"
             continue
-        # Forward apply fails. Before fail-softing the *whole* atomic set,
-        # check whether this individual patch is in fact ALREADY APPLIED: a
-        # clean reverse apply (``git apply -R --check``) succeeds iff the
-        # working tree already contains exactly this patch's post-image. The
-        # common trigger is a "new file" patch (e.g. kernel_shape_profiler.py)
-        # whose target file is pre-baked into the image — ``git apply --check``
-        # refuses with "already exists in working directory" and the fuzzy
-        # fallback fails the same way, even though the file content is
-        # byte-identical. Skipping the already-applied member lets the
-        # remaining annotation patches still apply atomically instead of the
-        # entire set fail-softing (which silently disabled per-step kernel-shape
-        # annotations -> empty kernel shape -> kernel-opt/GEAK never dispatched).
+        # Forward apply fails: check whether this patch is ALREADY APPLIED (a
+        # clean ``git apply -R --check`` succeeds iff the tree already contains
+        # its post-image). Common trigger: a "new file" patch whose target is
+        # pre-baked into the image. Skipping the already-applied member lets the
+        # remaining patches still apply atomically.
         if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
             log.info(
                 "_server_patcher: %s patch %s already applied (reverse "
@@ -987,8 +961,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     for p in plan.patches:
         mode = apply_modes[p]
         if mode == "skip":
-            # Already applied (verified by the reverse-check above); nothing
-            # to do and nothing to roll back.
+            # Already applied; nothing to do and nothing to roll back.
             skipped += 1
             continue
         if mode == "git":
@@ -1026,11 +999,9 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         fuzzy_count,
         skipped,
     )
-    # Post-apply sentinel verification: confirm the patched install actually
-    # has all sentinel markers present. Catches edge cases where all members
-    # were skipped, fuzzy apply was semantically wrong, or extra_sentinels
-    # (annotation pipeline markers) are missing despite the main sentinel
-    # existing.
+    # Post-apply sentinel verification: confirm all sentinel markers are present
+    # (catches all-skipped, semantically-wrong fuzzy apply, or missing
+    # annotation-pipeline markers).
     if not _is_patched(plan):
         log.error(
             "_server_patcher: post-apply sentinel check FAILED for %s %s — "
@@ -1094,10 +1065,8 @@ def _rollback_applied(
             )
 
 
-# fuzz=2 (GNU patch's default), not 10: fuzz=10 could silently apply change
-# lines to a semantically wrong location (misleading profile data); fuzz=2
-# tolerates whitespace / single-line drift but rejects multi-line drift hard.
-# Kept explicit so it's grep-discoverable and survives a GNU default change.
+# fuzz=2 tolerates whitespace / single-line drift but rejects multi-line drift
+# hard (a higher fuzz could apply hunks to a semantically wrong location).
 _FUZZ = 2
 
 

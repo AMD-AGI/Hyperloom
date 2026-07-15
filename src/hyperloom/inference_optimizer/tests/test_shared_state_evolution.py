@@ -166,7 +166,7 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
 # 5. Strict / lenient migration mode
 def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
     """Lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
-    # Drop ``baseline_tput`` from the known field set to force the "raw has it, filtered doesn't" branch.
+    # Drop ``baseline_tput`` from the field set to force the fact-drop branch.
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
     monkeypatch.setattr(SharedState, "__dataclass_fields__", fake_fields)

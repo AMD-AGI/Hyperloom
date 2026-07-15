@@ -2,7 +2,7 @@
 
 """Intent envelope contract.
 
-Mirrors the wire shape of ``src/hyperloom/inference_optimizer/protocol/intent.py`` so the
+Mirrors the wire shape of the inference_optimizer intent protocol so the
 reactor can build intents the Coordinator's ``PolicyGate`` accepts unchanged.
 Transport-agnostic; avoids importing inference_optimizer to stay independent.
 A contract test cross-checks ``IntentType`` / ``_PAYLOAD_REQUIRED`` against the
@@ -39,7 +39,7 @@ class IntentType(str, Enum):
     KILL_TASK = "kill_task"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # Robustness never emits this; kept in the mirror for the upstream-contract test.
+    # Robustness never emits this; kept in the mirror for the contract test.
     SPECIALIST_DONE = "specialist_done"
 
 
@@ -54,8 +54,7 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
 )
 
 
-# Intents the robustness role may emit. Mirrors ``_ROBUSTNESS_INTENTS`` in
-# upstream agent_role.py; other roles' intents are excluded to fail fast.
+# Intents the robustness role may emit; other roles' intents are excluded to fail fast.
 ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.SEND_MESSAGE,
@@ -69,18 +68,16 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
 )
 
 
-# Severities accepted by ``alert`` and ``escalate_strategy_change``.
-# ``high`` raises priority 0 broadcasts.
+# Severities accepted by ``alert`` and ``escalate_strategy_change``; ``high`` raises priority 0 broadcasts.
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
-# Allowed kill_task scopes per upstream ``KILL_TASK_ALLOWED_SCOPES``.
+# Allowed kill_task scopes.
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 
-# Handle actions robustness may delegate; ``report`` is the Orchestration-owned
-# session-finalize action, allowed only as a last-resort wind-down lever (guard
-# conditions live in action-ladder ``_recommend``; here we only enforce the allowlist).
+# Handle actions robustness may delegate; ``report`` is allowed only as a last-resort
+# wind-down lever. Here we only enforce the allowlist.
 ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset(
     {
         "accuracy_gate",
@@ -91,8 +88,7 @@ ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Core SharedState fields the robustness role must not write via
-# ``update_state``. Mirrors upstream ``policy.CORE_STATE_FIELDS``;
+# Core SharedState fields the robustness role must not write via ``update_state``;
 # kept in lock-step by ``tests/test_role_contract.py``.
 CORE_STATE_FIELDS: frozenset[str] = frozenset(
     {
@@ -100,7 +96,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "stop_reason",
         "last_tick_exception",
         "cumulative_gain",
-        # Coordinator-owned validated cumulative gain trio.
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
@@ -114,10 +109,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "model_class",
         "start_ts",
         "max_minutes",
-        # fact-layer KEEP ledger (Coordinator-only writer).
         "optimization_stack",
         "gain_per_stack_entry",
-        # schema migration breadcrumb.
         "schema_version",
         # Cortex KB integration.
         "cortex_session_id",
@@ -127,22 +120,20 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_lessons",
         "warm_start_ts",
         "warm_start_context",
-        # KB tag completeness.
         "stack_fingerprint_meta",
         "baseline_workload_extra",
         # warm-recipe replay.
         "warm_replay_attempted",
         "warm_replay_outcome",
         "warm_history_injected",
-        # phase state machine (Coordinator-only writer).
+        # phase state machine.
         "phase",
         "phase_started_ts",
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
-        # R1/R2/R7 cyclic phase-machine state (Coordinator-only writers); mirrors
-        # upstream. Locked so an LLM update_state cannot forge macro-cycle /
-        # convergence / per-cycle budget state.
+        # Cyclic phase-machine state; locked so an LLM update_state cannot forge
+        # macro-cycle / convergence / per-cycle budget state.
         "macro_cycle",
         "cycle_minutes",
         "gain_at_cycle_start",
@@ -152,12 +143,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "saturated_directions",
         "bottleneck_shift",
         "cycle_strategy_log",
-        # operator-facing lifecycle event log (#266); Coordinator-only writer.
+        # operator-facing lifecycle event log.
         "lifecycle",
         # specialist sub-agent ledger.
         "specialist_rounds",
         "specialist_domain_empty_streak",
-        # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+        # per-kb_anchor coverage counters.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
         "last_specialist",
@@ -176,22 +167,20 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "gaps",
         # Orchestration working-memory checkpoint (Coordinator-authored).
         "orchestration_memory",
-        # Bounded rollback ring of prior good orchestration_memory records
-        # (Coordinator-only writer); mirrors upstream, locked with its parent.
+        # Bounded rollback ring of prior good orchestration_memory records.
         "orchestration_memory_history",
-        # FRAMEWORK per-repo discovery budget (Coordinator-controlled).
+        # FRAMEWORK per-repo discovery budget.
         "framework_max_candidates",
-        # Advisory model-architecture profile (launcher / state.json owned).
+        # Advisory model-architecture profile.
         "model_arch",
-        # Architecture-identity tags from config.json; mirrors upstream.
+        # Architecture-identity tags from config.json.
         "model_architectures",
         "model_type",
-        # Multimodal text-fallback degraded-run markers (preflight-authored);
-        # locked so an LLM update_state can't forge/clear the degraded verdict.
+        # Multimodal text-fallback degraded-run markers; locked so an LLM
+        # update_state can't forge/clear the degraded verdict.
         "degraded_mode",
         "model_warnings",
-        # Kernel-opt ledgers + Critic patch-verdict store (Coordinator/kernel-agent
-        # only writers); mirrors upstream, locked against LLM update_state.
+        # Kernel-opt ledgers + Critic patch-verdict store; locked against LLM update_state.
         "specialist_patch_verdicts",
         "last_trace_analyze",
         "last_kernel_opt",
@@ -290,8 +279,8 @@ def build_send_message(
 ) -> Intent:
     """Generic send_message builder.
 
-    The Coordinator soft-degrades unknown topics to ``observation`` per
-    DESIGN v0.6 13.2; callers should still use a known topic.
+    The Coordinator soft-degrades unknown topics to ``observation``;
+    callers should still use a known topic.
 
     Args:
         topic (str): Message topic.
@@ -357,8 +346,7 @@ def build_escalate(
 ) -> Intent:
     """Construct an ``escalate_strategy_change`` intent.
 
-    Robustness-only. Non-destructive priority-0 broadcast hint per
-    DESIGN v0.6 19.3.4.
+    Robustness-only. Non-destructive priority-0 broadcast hint.
 
     Args:
         reason (str): Non-empty reason for the escalation.
@@ -391,9 +379,9 @@ def build_escalate(
 def build_kill_task(task_id: str, reason: str) -> Intent:
     """Construct a ``kill_task`` intent.
 
-    Robustness-only. ``scope`` is hardcoded to ``"task"`` because the
-    upstream PolicyGate v0.6 rejects any other value (server / process
-    kills go through delegate(server_lifecycle) under IR-5).
+    Robustness-only. ``scope`` is hardcoded to ``"task"`` because
+    PolicyGate rejects any other value (server / process kills go
+    through delegate(server_lifecycle) under IR-5).
 
     Args:
         task_id (str): Non-empty id of the task to kill.
@@ -779,10 +767,10 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
 def build_envelope_dict(intents: list[Intent]) -> dict[str, Any]:
     """Serialise a list of intents into a single envelope dict.
 
-    Matches upstream ``INTENT_ENVELOPE_SCHEMA``. Used by the runtime
-    CLI's ``tick`` command to populate ``emit.json.intent_envelope`` —
-    identical to ``critic-agent``'s ``commit-review`` output, so the
-    same ``validate_envelope`` host-side check accepts both.
+    Used by the runtime CLI's ``tick`` command to populate
+    ``emit.json.intent_envelope`` — identical to ``critic-agent``'s
+    ``commit-review`` output, so the same ``validate_envelope``
+    host-side check accepts both.
 
     Args:
         intents (list[Intent]): Intents to serialise into the envelope.

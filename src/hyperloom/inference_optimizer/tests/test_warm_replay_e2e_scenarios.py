@@ -1,11 +1,7 @@
 """E2E integration tests for warm-replay uncovered scenarios.
 
-Covers:
-  C3: Same patch both KEEP and REVERT → REVERT wins (block)
-  C4: Anti-pattern from gbrain remote → blocklist correctly populated
-  D1: Framework KEEP → writes prs_tested[KEEP] entry
-  D2: Framework REVERT → writes prs_tested[REVERT] entry
-  D3: Write-back includes applicable_arch + error_class
+Covers KEEP/REVERT patch precedence, gbrain anti-pattern deserialization into
+the blocklist, and framework write-back into prs_tested.
 """
 from __future__ import annotations
 
@@ -18,9 +14,6 @@ from hyperloom.orchestrator.knowledge.cortex_t0 import (
     _extract_patches_from_prs_tested,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import _json_list
-
-
-# ─── C3: KEEP + REVERT same patch → REVERT wins ─────────────────────────
 
 
 def _recipe_with_prs(prs_tested):
@@ -56,22 +49,17 @@ def test_c3_keep_and_revert_same_patch_revert_wins():
     ctx = {}
     _extract_patches_from_prs_tested(ctx, recipe, ["DeepseekReasonerModel"])
 
-    # Both KEEP patches and blocked should be populated
     patches = (ctx.get("recommended_replay") or {}).get("patches") or []
     blocked = ctx.get("blocked_patches") or []
 
-    # REVERT should block the patch
     assert len(blocked) == 1
     assert blocked[0]["patch_file"] == "vllm/attention/rocm_flash_attn.py"
     assert blocked[0]["error_class"] == "perf_regression"
 
-    # KEEP is also extracted (the executor filters it at apply time via blocklist)
+    # KEEP is also extracted (the executor filters it at apply time via blocklist).
     assert len(patches) == 1
 
-    # Verify that _apply_warm_patches would skip it:
-    # blocked_patches uses patch_file as the key, apply checks against it
     blocked_files = {b["patch_file"] for b in blocked}
-    # The patch_file in patches matches the blocked one
     assert patches[0]["patch_file"] in blocked_files
 
 
@@ -107,23 +95,17 @@ def test_c3_multiple_patches_partial_block():
     patches = ctx["recommended_replay"]["patches"]
     blocked = ctx["blocked_patches"]
 
-    # 2 KEEP patches extracted, 1 blocked
     assert len(patches) == 2
     assert len(blocked) == 1
     assert blocked[0]["patch_file"] == "vllm/attention/rocm_flash_attn.py"
 
-    # sglang/radix_cache.py is NOT blocked
     blocked_files = {b["patch_file"] for b in blocked}
     assert "sglang/radix_cache.py" not in blocked_files
 
 
-# ─── C4: Anti-pattern from gbrain remote → correctly deserialized ────────
-
-
 def test_c4_gbrain_prs_tested_roundtrip():
-    """C4: prs_tested stored as JSON string in gbrain page → correctly decoded
-    and used by cortex_t0 to produce blocked_patches."""
-    # Simulate what gbrain stores: prs_tested as a JSON-encoded string in attrs
+    """prs_tested stored as JSON string in gbrain page is decoded and used by
+    cortex_t0 to produce blocked_patches."""
     prs_data = [
         {
             "outcome": "REVERT",
@@ -144,16 +126,13 @@ def test_c4_gbrain_prs_tested_roundtrip():
         },
     ]
 
-    # Simulate gbrain attrs (stored as JSON string by ingest).
     stored_json = json.dumps(prs_data)
 
-    # Read-side deserialization (gbrain_remote_client._json_list).
     decoded = _json_list(stored_json)
     assert len(decoded) == 2
     assert decoded[0]["outcome"] == "REVERT"
     assert decoded[1]["outcome"] == "KEEP"
 
-    # Build recipe as if from gbrain remote (body.prs_tested populated).
     recipe = {
         "canonical_id": "inference:llama3.3-70b:mi300x:sglang:llm:llamaforcausallm:0.5.11:fp8",
         "best_config": {"extra_server_args": "--tp 8"},
@@ -161,7 +140,6 @@ def test_c4_gbrain_prs_tested_roundtrip():
         "prs_tested": decoded,
     }
 
-    # cortex_t0 extracts patches and blocklist.
     ctx = {}
     _extract_patches_from_prs_tested(ctx, recipe, ["LlamaForCausalLM"])
 
@@ -178,13 +156,10 @@ def test_c4_gbrain_prs_tested_roundtrip():
 
 
 def test_c4_gbrain_empty_prs_tested_is_safe():
-    """C4 edge: gbrain returns empty/null prs_tested → no crash."""
+    """Gbrain returns empty/null prs_tested without crashing."""
     for value in (None, "", "[]", [], "null"):
         decoded = _json_list(value)
         assert decoded == [] or decoded is None or decoded == []
-
-
-# ─── D1/D2/D3: Framework write-back to prs_tested ────────────────────
 
 
 @dataclass
@@ -222,8 +197,7 @@ def _build_framework_entry(
     repo: str = "ROCm/vllm",
     error_class: str = "",
 ) -> dict:
-    """Simulate the framework result → prs_tested entry construction
-    (mirrors coordinator.py L3077-3115 logic)."""
+    """Simulate the framework result -> prs_tested entry construction."""
     from datetime import datetime, timezone
 
     outcome = "KEEP" if status == "kept" else "REVERT"
@@ -243,7 +217,6 @@ def _build_framework_entry(
         "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
-    # Simulate read-modify-write
     existing_prs = list(coord._local_recipe_row.get("prs_tested") or [])
     existing_prs.append(entry)
     coord._kb_amend_recipe(recipe_overrides={"prs_tested": existing_prs})
@@ -343,14 +316,10 @@ def test_d3_append_to_existing_prs_tested():
     assert written[1]["patch_file"] == "new_patch.py"
 
 
-# ─── Full integration: gbrain → cortex_t0 → coordinator → executor ──────
-
-
 def test_full_chain_gbrain_revert_blocks_at_executor():
     """Integration: REVERT from gbrain blocks patch at executor apply phase."""
     import subprocess
 
-    # Simulate gbrain page data (REVERT stored as JSON string).
     gbrain_prs = json.dumps([{
         "outcome": "REVERT",
         "patch_file": "vllm/fp8.py",
@@ -366,10 +335,8 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
         "applicable_arch": ["LlamaForCausalLM"],
     }])
 
-    # gbrain_remote_client decodes.
     decoded_prs = _json_list(gbrain_prs)
 
-    # cortex_t0 extracts.
     recipe = {
         "canonical_id": "test:llama:mi300x:sglang:llm:llamaforcausallm:0.5.11:fp8",
         "best_config": {},
@@ -381,13 +348,11 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
     patches = ctx["recommended_replay"]["patches"]
     blocked = ctx["blocked_patches"]
 
-    # Coordinator would pass these to task params.
     params = {
         "patches": patches,
         "blocked_patches": blocked,
     }
 
-    # Executor _apply_warm_patches filters.
     from hyperloom.orchestrator.actions.executors.baseline import (
         _apply_warm_patches,
     )
@@ -395,14 +360,13 @@ def test_full_chain_gbrain_revert_blocks_at_executor():
     with tempfile.TemporaryDirectory() as td:
         output_dir = Path(td) / "output"
         output_dir.mkdir()
-        # target_repo empty → returns [] (no actual git apply needed)
+        # target_repo empty -> returns [] (no actual git apply needed)
         result = _apply_warm_patches(params, "", output_dir)
         assert result == []
 
-        # With a fake repo, the blocked patch would be skipped
         fake_repo = Path(td) / "repo"
         fake_repo.mkdir()
         subprocess.run(["git", "init"], cwd=str(fake_repo), capture_output=True)
         result = _apply_warm_patches(params, str(fake_repo), output_dir)
-        # patch should be skipped due to blocklist (patch_file matches)
+        # patch skipped due to blocklist (patch_file matches)
         assert result == []

@@ -1,10 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """--no-explore fail-closed gate: when ``explore_enabled=False`` KERNEL must
-not propose/delegate an ``explore`` grid. The denial is independent of
-``strict_phase`` (always fail-closed).
-``specialist`` / ``integrate_patch`` stay allowed in KERNEL because they serve
-kernel work (specialist research + patch integration)."""
+not propose/delegate an ``explore`` grid, independent of ``strict_phase``.
+``specialist`` / ``integrate_patch`` stay allowed in KERNEL."""
 
 from __future__ import annotations
 
@@ -41,21 +39,18 @@ def test_kernel_explore_denied_when_explore_disabled(strict_phase):
     gate = _gate(state, strict_phase=strict_phase)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", _delegate_explore())
-    # Always fail-closed: the dedicated rule fires regardless of strict_phase.
     assert exc.value.rule == "explore_disabled"
 
 
 def test_kernel_explore_allowed_when_explore_enabled():
     state = SharedState(phase=PHASE_KERNEL_AGENT, explore_enabled=True)
     gate = _gate(state, strict_phase=False)
-    # strict_phase=False disables R1, so the dedicated explore_disabled guard is absent.
     gate.validate_intent("orchestration", _delegate_explore())
 
 
 def test_kernel_specialist_and_integrate_patch_still_allowed_when_no_explore():
     state = SharedState(phase=PHASE_KERNEL_AGENT, explore_enabled=False)
     gate = _gate(state, strict_phase=False)
-    # specialist stays allowed (research feeds kernel patches).
     gate.validate_intent(
         "orchestration",
         Intent(

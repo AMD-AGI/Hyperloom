@@ -75,18 +75,14 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         )
 
         scheme = getattr(args, "quantize_scheme", None)
-        # Constrain the scheme by the target GPU. The real GPU is probed later;
-        # use the --gpu-type / $GPU_TYPE hint here (empty => no enforcement).
+        # Constrain the scheme by the target GPU via the --gpu-type / $GPU_TYPE
+        # hint (empty => no enforcement).
         gpu_hint = (getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")).strip().lower()
         try:
             validate_scheme(scheme, gpu_hint)
         except SchemeNotSupportedError as exc:
-            # Pre-flight config error (caught before any Quark work): per the
-            # documented contract we SKIP quantization and continue on the
-            # un-quantized model rather than hard-stopping. Make the skip
-            # explicit + machine-detectable (stdout marker + env var) so a
-            # launcher / UI surfaces "requested quantization was skipped"
-            # instead of silently believing the run is quantized.
+            # Pre-flight config error: skip quantization and continue on the
+            # un-quantized model, made machine-detectable via a stdout marker + env var.
             reason = str(exc)
             os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
             print(
@@ -104,12 +100,9 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         return
 
     # Deterministic master switch: quantization runs ONLY when
-    # $HYPERLOOM_QUANTIZE_ENABLED is explicitly truthy. This decouples the
-    # on/off decision from any agent's natural-language judgement — even if a
-    # --quantize / --quantize-scheme flag reached us (e.g. an in-sandbox agent
-    # added it from the prompt), we refuse to quantize unless the env switch is
-    # on. Absent / false => skip and continue on the un-quantized model, made
-    # detectable via the QUANTIZATION_SKIPPED marker + $HYPERLOOM_QUANTIZATION_SKIPPED.
+    # $HYPERLOOM_QUANTIZE_ENABLED is truthy, regardless of the flags. Absent /
+    # false => skip and continue on the un-quantized model (detectable via the
+    # QUANTIZATION_SKIPPED marker + $HYPERLOOM_QUANTIZATION_SKIPPED).
     if not _quantization_enabled_via_env():
         reason = "HYPERLOOM_QUANTIZE_ENABLED is not set to a truthy value"
         os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
@@ -125,10 +118,9 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     workspace = workspace_root() / "quantization" / Path(source_model).name
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # Adapter lives in the orchestrator package; lazy-import so the CLI keeps
-    # importing cleanly even in environments without the quantization deps.
-    # _run_optimize already runs under asyncio.run, so await the async form
-    # directly (the sync wrapper would call asyncio.run inside a live loop).
+    # Adapter lives in the orchestrator package; lazy-import so the CLI imports
+    # cleanly without the quantization deps. Await the async form directly since
+    # _run_optimize already runs under asyncio.run.
     from hyperloom.orchestrator.phases.quantization_request_handlers import (
         run_quantization_prelude_async,
     )
@@ -141,10 +133,8 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
     args.model = Path(quantized_model_dir)
     os.environ["MODEL_PATH"] = str(quantized_model_dir)
-    # Preserve the SOURCE model identity for session naming / display. The export
-    # dir basename is always "quantized" (see quantization_request_handlers), so
-    # deriving the model name from args.model would collapse every quantized run
-    # to "quantized". Pin "<source>-quantized" so the session dir, SharedState,
-    # and manifest carry the real model name and quantized runs stay distinct.
+    # Preserve the SOURCE model identity for session naming / display: the export
+    # dir basename is always "quantized", so pin "<source>-quantized" to keep
+    # the real model name in the session dir, SharedState, and manifest.
     args.model_display_name = f"{Path(source_model).name}-quantized"
     print(f"Quantization prelude: model -> {quantized_model_dir}")

@@ -12,7 +12,6 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir
 
 
 def test_bumps_stale_state_json_up_to_live_value(tmp_path):
-    # Disk recorded only 0; the live coordinator object saw 3 crashes.
     on_disk = SharedState(session_id="s", crash_count=0)
     on_disk.save(tmp_path)
 
@@ -38,12 +37,10 @@ def test_patches_final_json_in_place(tmp_path):
 
     data = json.loads(final_json.read_text(encoding="utf-8"))
     assert data["crash_count"] == 2
-    # Unrelated fields are preserved.
     assert data["stop_reason"] == "time_exhausted"
 
 
 def test_never_lowers_a_higher_disk_count(tmp_path):
-    # Disk somehow recorded more than memory — never regress it.
     SharedState(session_id="s", crash_count=5).save(tmp_path)
 
     live = SharedState(session_id="s", crash_count=2)
@@ -56,6 +53,6 @@ def test_never_lowers_a_higher_disk_count(tmp_path):
 def test_no_final_json_is_non_fatal(tmp_path):
     SharedState(session_id="s", crash_count=0).save(tmp_path)
     live = SharedState(session_id="s", crash_count=1)
-    # No reports/final.json on disk — must not raise.
+    # No reports/final.json on disk must not raise.
     _reconcile_crash_count(live, tmp_path)
     assert SharedState.load_or_init(tmp_path).crash_count == 1

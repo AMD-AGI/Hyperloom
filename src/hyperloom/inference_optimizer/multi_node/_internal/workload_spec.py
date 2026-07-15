@@ -13,7 +13,7 @@ Pure (no I/O / env); the CLI feeds inputs in. Non-overridable decisions:
   head role, since only the head pod serves.
 * ``entryPoints`` default ``["", ""]`` (optional per-role install payloads;
   must exit if used). The submitter long-run driver is only
-  ``env.RAY_JOB_ENTRYPOINT`` (base64 ``tail -f /dev/null``), not entryPoints.
+  ``env.RAY_JOB_ENTRYPOINT`` (base64 ``tail -f /dev/null``).
 * ``env`` merges user ``extra_env`` (reserved keys stripped); inject debug
   knobs via ``--extra-env``. ``RAY_JOB_ENTRYPOINT`` can't be overridden.
 * ``labels`` strip Brain-managed prefixes; ``primus-claw/session-id`` is
@@ -143,7 +143,7 @@ def build_rayjob_workload_body(
     if not image:
         raise ValueError("image is required")
 
-    # head replica is 1; worker is N-1, clamped to >=1 (SaFE requires every resources[] replica >=1).
+    # head replica is 1; worker is N-1, clamped to >=1 (SaFE requires replica >=1).
     worker_replica = max(1, nodes - 1)
 
     head_resource = {
@@ -164,12 +164,12 @@ def build_rayjob_workload_body(
     # entryPoints: optional per-role install payloads (base64); empty = none.
     entry_points: list[str] = ["", ""]
 
-    # env: user extra_env (reserved keys stripped); no debug knobs injected here.
+    # env: user extra_env (reserved keys stripped).
     env: dict[str, str] = _sanitize_extra_env(extra_env)
     env["RAY_JOB_ENTRYPOINT"] = _b64(_SUBMITTER_BLOCK_ENTRYPOINT)
 
     # labels: sanitized caller labels + injected ``primus-claw/session-id`` for
-    # Brain correlation. (SaFE strips ``primus-safe.amd.com/*``, verified May 2026.)
+    # Brain correlation.
     labels = _sanitize_extra_labels(extra_labels)
     if session_id:
         labels["primus-claw/session-id"] = session_id
@@ -213,31 +213,19 @@ def build_rayjob_workload_body(
 
 
 # ---------------------------------------------------------------------------
-# Dynamo (DynamoDeployment) idle-pod body
-#
-# The Dynamo backend reuses the RayJob "long-lived pod + external server
-# restart" pattern, but with a SaFE DynamoDeployment (LeaderWorkerSet-backed
-# multi-node worker) instead of a RayJob, and SSH instead of the Ray Dashboard
-# control plane. The worker pods are deployed IDLE (entryPoint =
-# ``/usr/local/bin/mn-idle.sh``, which starts sshd then blocks) so the
-# optimizer can SSH in and (re)launch sglang/vllm with per-round flags without
-# redeploying the workload (preserving the aiter JIT cache across restarts).
-#
-# See multi_node/SKILL.md (Dynamo section) and docs/apis/dynamo-options-design.md.
+# Dynamo (DynamoDeployment) idle-pod body: worker pods deployed IDLE
+# (mn-idle.sh starts sshd then blocks) so the optimizer can SSH in and relaunch
+# sglang/vllm with per-round flags without redeploying the workload.
 
 # Frontend HTTP port — dynamo.frontend listens here; benchmarks target this
-# (NOT sglang rank-0 :8888) so the OpenAI-compatible router fronts every
-# worker registration. Matches the SaFE Dynamo fixtures.
+# (NOT sglang rank-0 :8888) so the OpenAI-compatible router fronts every worker.
 _DYNAMO_FRONTEND_PORT = 8000
 
-# Idle worker entrypoint baked into the sshd image layer (docker/dynamo/
-# mn-idle.sh). Starts the SSH control plane then `tail -f /dev/null`; it
-# ignores positional args so the dispatcher's appended sglang multi-node
-# flags (--nnodes/--node-rank/--dist-init-addr) are inert in idle mode.
+# Idle worker entrypoint (starts the SSH control plane then blocks); ignores
+# positional args so appended sglang multi-node flags are inert in idle mode.
 _DYNAMO_IDLE_WORKER_ENTRYPOINT = "/usr/local/bin/mn-idle.sh"
 
-# Frontend launch command (role 0). round-robin router is the simplest mode;
-# the optimizer benchmarks through this OpenAI-compatible endpoint.
+# Frontend launch command (role 0); benchmarks hit this OpenAI-compatible endpoint.
 _DYNAMO_FRONTEND_ENTRYPOINT_TMPL = "python3 -m dynamo.frontend --http-port {port} --router-mode round-robin"
 
 # Valid enum values mirrored from the webhook (validateDynamoDeployment).
@@ -306,8 +294,9 @@ def build_dynamo_workload_body(
     }
 
     def _gpu_resource(replica: int, *, multinode: bool) -> dict[str, Any]:
-        """One GPU pod slot (worker / prefill / decode). RDMA only when the
-        role spans nodes (a single-node role has no cross-node NCCL/KV).
+        """Build the resource dict for one GPU pod slot (worker / prefill / decode).
+
+        RDMA is added only when the role spans nodes.
 
         Args:
             replica: The replica count for this pod role.
@@ -333,29 +322,19 @@ def build_dynamo_workload_body(
 
     is_pd = (pd_mode or "aggregated").lower() == "disaggregated"
     if is_pd:
-        # PD disaggregation: roles = [frontend, prefill, decode]. A role spans
-        # nodes (LeaderWorkerSet) when its TP exceeds one pod's GPUs; otherwise
-        # its replica is an independent single-node instance count. Both pod
-        # roles deploy IDLE (mn-idle.sh) — restart-server SSH-launches
-        # dynamo.sglang with --disaggregation-mode prefill/decode per group.
+        # PD disaggregation: roles = [frontend, prefill, decode].
         pn = max(1, int(pd_prefill_nodes or 0))
         dn = max(1, int(pd_decode_nodes or 0))
         ptp = int(pd_prefill_tp or 0)
         dtp = int(pd_decode_tp or 0)
-        # A role spans nodes (LeaderWorkerSet) ONLY when its TP exceeds one
-        # pod's GPUs. Otherwise its replica is an independent single-node
-        # instance count (matches the canonical PD body: replica=2, TP=8, no
-        # multinodeRoles -> 2 standalone prefill + 2 standalone decode).
+        # A role spans nodes (LeaderWorkerSet) only when its TP exceeds one pod's
+        # GPUs; otherwise its replica is an independent single-node instance count.
         prefill_mn = ptp > gpus_per_node
         decode_mn = dtp > gpus_per_node
         prefill_res = _gpu_resource(pn, multinode=prefill_mn)
         decode_res = _gpu_resource(dn, multinode=decode_mn)
-        # PD disaggregation streams the KV cache prefill->decode ACROSS pods, so
-        # both GPU roles need an RDMA device even when each role is single-node
-        # (TP <= gpus_per_node and thus not flagged multinode above). Without
-        # rdmaResource the mori/nixl/mooncake KV transfer plane cannot register
-        # RDMA queue pairs, the handoff silently no-ops (#transfer-req=0) and
-        # decode generates garbage. Mirror the native SaFE dispatcher's "1k".
+        # Both GPU roles need an RDMA device to stream the KV cache across pods,
+        # even when single-node; without it the KV transfer plane silently no-ops.
         pd_rdma = rdma_resource if (rdma_resource and rdma_resource != "1") else "1k"
         prefill_res["rdmaResource"] = pd_rdma
         decode_res["rdmaResource"] = pd_rdma
@@ -365,8 +344,7 @@ def build_dynamo_workload_body(
         service_roles = ["frontend", "prefill", "decode"]
         multinode_roles = (["prefill"] if prefill_mn else []) + (["decode"] if decode_mn else [])
     else:
-        # Aggregated: [frontend, worker]. worker.replica == node count; the
-        # dispatcher sets multinode.numberOfNodes and forces replicas=1.
+        # Aggregated: [frontend, worker]; worker.replica == node count.
         resources = [frontend_resource, _gpu_resource(nodes, multinode=nodes > 1)]
         images = [image, image]
         entry_points = [frontend_ep, idle_ep]
@@ -377,12 +355,9 @@ def build_dynamo_workload_body(
     env: dict[str, str] = _sanitize_extra_env(extra_env)
     env["MN_SSH_AUTHORIZED_KEY"] = ssh_authorized_key.strip()
     env["MN_SSH_PORT"] = str(ssh_port)
-    # Enable the Dynamo system status server (hosts /engine/start_profile)
-    # on every worker so the controller can trigger torch profiling for
-    # roofline rounds. Set at the DGD pod-spec level (lands in pid1 env) so
-    # it is inherited regardless of which launcher starts dynamo.sglang
-    # (launch_dynamo_node.py recovers it from pid1; native launches inherit
-    # directly). User extra_env may override via DYN_SYSTEM_PORT.
+    # Enable the Dynamo system status server (hosts /engine/start_profile) on
+    # every worker so the controller can trigger torch profiling. User extra_env
+    # may override via DYN_SYSTEM_PORT.
     env.setdefault("DYN_SYSTEM_PORT", "9090")
 
     labels = _sanitize_extra_labels(extra_labels)

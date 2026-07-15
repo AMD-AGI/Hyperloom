@@ -9,6 +9,6 @@ bootstrap the toolchain, restart servers without recreating pods (so the
 aiter JIT cache survives), and stop the RayJob at session end.
 
 Control channels: sandbox↔SaFE via REST; sandbox↔inference RayJob via Ray
-Dashboard REST (port 8265). Per ADDENDUM-02, this package must not
-``import ray`` / ``ray.init(address=...)`` for that cluster.
+Dashboard REST (port 8265). This package must not ``import ray`` /
+``ray.init(address=...)`` for that cluster.
 """

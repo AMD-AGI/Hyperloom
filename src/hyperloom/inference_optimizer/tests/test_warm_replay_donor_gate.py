@@ -57,7 +57,7 @@ def test_trustworthy_donor_accepted() -> None:
 
 
 def test_zero_gain_donor_rejected() -> None:
-    # RC1: zero validated gain is a "reproduce baseline" no-op.
+    # Zero validated gain is a "reproduce baseline" no-op.
     assert _donor_is_trustworthy(_donor(gain=0.0), **_TARGET) is False
 
 
@@ -66,12 +66,12 @@ def test_negative_gain_donor_rejected() -> None:
 
 
 def test_cross_arch_donor_rejected() -> None:
-    # RC2: a llama config must not be borrowed for a qwen2 target.
+    # A llama config must not be borrowed for a qwen2 target.
     assert _donor_is_trustworthy(_donor(arch=["LlamaForCausalLM"]), **_TARGET) is False
 
 
 def test_unknown_arch_donor_rejected() -> None:
-    # RC2: empty/unknown architecture cannot be vetted → reject.
+    # Empty/unknown architecture cannot be vetted.
     assert _donor_is_trustworthy(_donor(arch=[]), **_TARGET) is False
 
 
@@ -80,7 +80,7 @@ def test_mismatched_model_type_rejected() -> None:
 
 
 def test_shape_conflict_conc_rejected() -> None:
-    # RC3: a config tuned for conc=256 should not replay onto a conc=64 target.
+    # A config tuned for conc=256 should not replay onto a conc=64 target.
     assert _donor_is_trustworthy(_donor(conc=256), **_TARGET) is False
 
 
@@ -89,7 +89,7 @@ def test_shape_conflict_isl_rejected() -> None:
 
 
 def test_missing_shape_is_lenient() -> None:
-    # Unknown shape on either side is NOT a conflict (avoid over-blocking).
+    # Unknown shape on either side is NOT a conflict.
     donor = _donor(conc=None, isl=None, osl=None)
     assert _donor_is_trustworthy(donor, **_TARGET) is True
 
@@ -126,7 +126,6 @@ def _find_kwargs(**over: Any) -> dict[str, Any]:
 
 
 def test_find_config_donor_skips_untrustworthy() -> None:
-    # Only the trustworthy sibling (not the zero-gain one) is borrowed.
     kb = _StubKB([_donor(gain=0.0), _donor(gain=20.0)])
     donor, tier, conf = _find_config_donor(kb, **_find_kwargs())
     assert donor is not None
