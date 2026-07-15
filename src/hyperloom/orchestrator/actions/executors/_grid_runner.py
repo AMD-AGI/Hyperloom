@@ -45,6 +45,7 @@ from ._grid_base import (
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
+    variant_fingerprint as variant_fingerprint,
 )
 from ._grid_server_args import (
     server_args_env_name as server_args_env_name,
@@ -1786,7 +1787,6 @@ __all__ = [
     "inject_sglang_watchdog_timeout",
     "merge_server_args",
     "remove_server_args",
-    "pick_winners",
     "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",

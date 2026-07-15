@@ -3421,7 +3421,11 @@ class WritebackCollaborator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            if self._geak_legacy_promote():
+            coord = object.__getattribute__(self, "_coord")
+            phase_kernel = coord.phase_kernel
+            legacy_promote_fn = type(phase_kernel).__dict__.get("_geak_legacy_promote")
+            legacy_promote = bool(legacy_promote_fn(phase_kernel)) if callable(legacy_promote_fn) else False
+            if legacy_promote:
                 # Legacy: current_best/stack were written up front; stamp the
                 # same-harness validated watermark from GEAK's OWN headline speedup.
                 self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
