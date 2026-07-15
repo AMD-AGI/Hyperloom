@@ -807,9 +807,8 @@ def _preflight(
                     os.environ[alias] = gateway_url
                     print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
-        # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
-        # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
-        # resolved GEAK_BASE_URL above actually reaches the kernel agent.
+        # Legacy / explicitly supplied GEAK_CONFIG yaml may still carry its own
+        # endpoint. Sync it so an operator GEAK_BASE_URL override reaches GEAK.
         geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
         geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
         if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):

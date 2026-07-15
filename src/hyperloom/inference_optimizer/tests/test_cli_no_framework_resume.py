@@ -1,37 +1,26 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cover the --no-framework-agent env default + resume write-back semantics."""
+"""Cover the --no-framework-agent CLI default + resume write-back semantics."""
 
 from __future__ import annotations
 
 
-import pytest
-
 from hyperloom.inference_optimizer import cli
 
 
-# Parser default — env honored when flag not passed.
+# Parser default — only the explicit flag disables the framework agent.
 def _parse_optimize(argv: list[str]) -> object:
     """Helper: run the cli parser, return the parsed args namespace."""
     parser = cli._build_parser()
     return parser.parse_args(["optimize", "--model", "/tmp/m", *argv])
 
 
-def test_no_framework_agent_default_false_when_env_unset(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", raising=False)
-    # Default is captured at add_argument time, so build the parser fresh with env absent.
+def test_no_framework_agent_default_false():
     args = _parse_optimize([])
     assert getattr(args, "no_framework_agent") is False
 
 
-def test_no_framework_agent_env_default_true_when_env_set(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", "1")
-    args = _parse_optimize([])
-    assert getattr(args, "no_framework_agent") is True
-
-
-def test_no_framework_agent_explicit_flag_overrides_env_unset(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", raising=False)
+def test_no_framework_agent_explicit_flag_disables():
     args = _parse_optimize(["--no-framework-agent"])
     assert getattr(args, "no_framework_agent") is True
 

@@ -498,8 +498,8 @@ export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; install.sh of kernel-agent writes geak-config /
-# kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
+# under MAGPIE_PATH; kernel-agent install.sh writes kernel-agent.env.sh into
+# HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
@@ -535,14 +535,27 @@ fi
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
 ensure_inference_optimizer() {
   if [ "$HYPERLOOM_PACKAGED_INSTALL" -eq 1 ]; then
-    log "ensuring inference_optimizer package + claude_agent_sdk extras (packaged install)"
+    log "ensuring inference_optimizer runtime deps (packaged install)"
+    # The bare wheel ships with empty base deps (pip --target stays clean), so
+    # the runtime deps are installed here. The parent package imports with no
+    # third-party dep, so this import check runs before the pip install below.
     "$PYTHON" - <<'PY' || die "hyperloom.inference_optimizer not importable from installed wheel"
 import hyperloom.inference_optimizer  # noqa: F401
 PY
+    if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+      # PyYAML: hard import-time dep of the CLI startup path. llm extra
+      # (claude-agent-sdk/openai/httpx): Coordinator backends.
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+        "PyYAML>=6.0" "claude-agent-sdk>=0.2.110" "openai>=1.50" "httpx>=0.27"
+      # web extra only when critic web tools are enabled (off by default).
+      if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
+        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "markdownify>=0.11" "cachetools>=5.3"
+      fi
+    fi
     if "$PYTHON" -c "import claude_agent_sdk" >/dev/null 2>&1; then
       log "claude_agent_sdk OK"
     else
-      warn "claude_agent_sdk not importable after wheel install (Coordinator will fail)"
+      warn "claude_agent_sdk not importable after runtime dep install (Coordinator will fail)"
       [ "$CHECK_ONLY" -eq 1 ] || die "claude_agent_sdk missing"
     fi
     return 0

@@ -26,14 +26,9 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture(autouse=True)
-def _interleave_off(monkeypatch):
-    """These tests assert the strict (non-interleave) IR-6 thresholds.
-
-    Interleave is now ON by default, which narrows the EXPLORE force-exit
-    gate (fix B). Pin it OFF here so the strict-mode contract tests stay
-    deterministic; the interleave-aware behavior has its own tests below.
-    """
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
+def _interleave_off():
+    """These tests assert the strict non-interleave IR-6 thresholds."""
+    assert phase_state.is_phase_interleave_enabled() is False
 
 
 def _make_explore_state(
@@ -245,30 +240,26 @@ def test_force_exit_thresholds_routed_through_overrides():
 # ---------------------------------------------------------------------------
 # Fix B: interleave-aware IR-6 narrowing
 # ---------------------------------------------------------------------------
-def test_interleave_narrows_force_exit_hours(monkeypatch):
-    """With interleave ON, the default 3h gate collapses to the 1h
-    CLOSE-buffer: 2.5h remaining no longer force-exits EXPLORE (kernel
-    work runs inside EXPLORE, so the 3h KERNEL reservation is moot)."""
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
-    # 7.5h elapsed of 10h -> 2.5h remaining. Strict mode (3h) would fire;
-    # interleave mode (1h) must NOT.
+def test_interleave_env_no_longer_narrows_force_exit_hours(monkeypatch):
+    """The retired interleave env no longer narrows the strict 3h gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    # 7.5h elapsed of 10h -> 2.5h remaining; strict mode fires.
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=7.5,
         phase_started_hours_ago=4.0,
     )
     fired, evidence = phase_state.should_force_exit_explore(state)
-    assert fired is False
-    assert evidence["hours_remaining_threshold"] == (phase_state.DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE)
-    assert evidence["budget_pct_threshold"] == (phase_state.DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE)
-    assert evidence["interleave_aware_ir6"] is True
+    assert fired is True
+    assert evidence["hours_remaining_threshold"] == phase_state.DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING
+    assert evidence["budget_pct_threshold"] == phase_state.DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT
+    assert evidence["interleave_aware_ir6"] is False
 
 
 def test_interleave_still_fires_inside_close_buffer(monkeypatch):
-    """Interleave keeps the CLOSE-buffer safety net: < 1h remaining still
-    force-exits so SWEEP -> CLOSE + report can finish."""
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
-    # 9.5h elapsed of 10h -> 0.5h remaining < 1h interleave threshold.
+    """The retired interleave env does not disable the strict close buffer."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    # 9.5h elapsed of 10h -> 0.5h remaining, so strict mode fires.
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=9.5,
@@ -277,21 +268,21 @@ def test_interleave_still_fires_inside_close_buffer(monkeypatch):
     fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is True
     assert "session_remaining" in evidence["fired_reasons"]
+    assert evidence["interleave_aware_ir6"] is False
 
 
 def test_interleave_respects_explicit_override(monkeypatch):
-    """An explicit non-default threshold from the caller wins over the
-    interleave narrowing."""
-    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
+    """An explicit non-default threshold from the caller still wins."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=7.5,
         phase_started_hours_ago=4.0,
     )
-    # Operator explicitly wants the 3h reservation even under interleave.
     fired, evidence = phase_state.should_force_exit_explore(
         state,
         hours_remaining_threshold=3.0001,
     )
     assert fired is True  # 2.5h remaining < 3.0001h explicit threshold
     assert evidence["hours_remaining_threshold"] == 3.0001
+    assert evidence["interleave_aware_ir6"] is False

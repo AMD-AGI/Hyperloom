@@ -717,17 +717,35 @@ def _claude_model_should_follow_codex() -> bool:
     return has_openai and not has_anthropic
 
 
-def _critic_agent_runtime_needed(critic_choice: str) -> bool:
-    """Whether the selected critic path will instantiate the critic-agent runtime.
+def _custom_orch_model_allowed() -> bool:
+    """Whether orchestration may use a model outside the AMD Claude allowlist.
 
-    The critic-agent now runs in every provider mode: with an OpenAI-compatible
-    gateway it reasons over Codex; in provider-only (Anthropic / DeepSeek) mode
-    it reasons over the native provider endpoint (Anthropic ``/v1/messages`` or
-    the DeepSeek OpenAI-compatible API). The KB prepare/commit runtime is
-    therefore required whenever ``critic_choice == "agent"``, regardless of
-    which provider is configured.
+    Custom orchestration models are enabled by default so provider-specific
+    model IDs (for example DeepSeek) can run when they are present in the
+    configured gateway catalog. Operators can set
+    ``INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`` (or false/no/off) to
+    restore the stricter AMD Claude allowlist.
     """
-    return critic_choice == "agent"
+    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _critic_agent_runtime_needed(
+    critic_choice: str,
+    *,
+    codex_follows_claude: bool = False,
+) -> bool:
+    """Whether the selected critic path will actually instantiate critic-agent.
+
+    Provider-only setups (including Anthropic-only) still run the full
+    critic-agent — its KB two-phase runtime is protocol-independent, and the
+    review inference is driven over the native provider endpoint. The runtime is
+    only skipped when the caller explicitly signals a plain Claude fallback via
+    ``codex_follows_claude``.
+    """
+    return critic_choice == "agent" and not codex_follows_claude
 
 
 def _validate_and_resolve_claude_model(
@@ -755,15 +773,12 @@ def _validate_and_resolve_claude_model(
     """
     chosen = (args.claude_model or "").strip()
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
-    # may not serve the AMD-blessed opus ids. The static allowlist is
-    # an AMD-network safety default; an operator can opt out via
-    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
-    # catalog probe below is the sole gate (a typo still fails because the id
-    # won't be in the catalog). Default behavior is unchanged.
-    allow_custom = os.environ.get(
-        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL",
-        "",
-    ).strip().lower() in ("1", "true", "yes", "on") or _claude_model_should_follow_codex()
+    # may not serve the AMD-blessed opus ids. Custom orchestration models are
+    # enabled by default; the gateway catalog probe below is the sole gate (a
+    # typo still fails because the id won't be in the catalog). Operators can
+    # set INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0 to restore the stricter
+    # AMD Claude allowlist.
+    allow_custom = _custom_orch_model_allowed() or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -779,8 +794,8 @@ def _validate_and_resolve_claude_model(
     if allow_custom and not chosen:
         print(
             "ERROR: --claude-model is empty but "
-            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
-            "orchestration model id. Refusing to start.",
+            "custom orchestration model support is enabled; pass an explicit "
+            "model id. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -866,8 +881,8 @@ def _validate_and_resolve_claude_model(
         if allow_custom:
             print(
                 f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
-                f"--claude-model={chosen!r}. Proceeding under "
-                f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 (trusting the operator id)."
+                f"--claude-model={chosen!r}. Proceeding with custom orchestration "
+                f"model support enabled (trusting the operator id)."
             )
             return None
         print(
@@ -881,14 +896,15 @@ def _validate_and_resolve_claude_model(
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
 
-    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
-    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
-    # catalog miss so the operator fixes the id rather than silently running a
-    # model their gateway doesn't serve.
-    if allow_custom:
+    # #340: for non-allowlisted custom ids the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a catalog
+    # miss so the operator fixes the id rather than silently running a model
+    # their gateway doesn't serve. Preserve the legacy fallback path for
+    # allowlisted Claude ids below.
+    if allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
-            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"(custom orchestration model support enabled; catalog has "
             f"{sorted(catalog_ids)[:20]}). Refusing to start.",
             file=sys.stderr,
         )
@@ -1255,17 +1271,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     nodes_resolved = max(1, int(args.nodes))
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node with the same CLI > env > 8 chain _provision_multi_node_rayjob_stack uses.
+    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
     gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
     if gpn_attr is not None:
         gpus_per_node_resolved = int(gpn_attr)
     else:
-        try:
-            gpus_per_node_resolved = int(
-                os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8,
-            )
-        except ValueError:
-            gpus_per_node_resolved = 8
+        gpus_per_node_resolved = 8
     total_gpus = nodes_resolved * gpus_per_node_resolved
 
     # Topology sanity gates — multi-node only (nodes>=2); fail fast vs a cryptic launcher crash mid-cold-start.
@@ -1443,7 +1454,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        state = SharedState.load_or_init(session_dir)
+        legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+        migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
+        state = SharedState.load_or_init(
+            session_dir,
+            legacy_action_scores=legacy_mode,
+            migration_mode=migration_mode,
+        )
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1851,11 +1868,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
     else:
         print("Recipe sediment : DISABLED (--no-recipe-sediment)")
-    if bool(getattr(args, "allow_empty_kernel_shape", False)):
-        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+    from hyperloom.orchestrator.kernel.request_handlers import set_allow_empty_kernel_shape
+
+    allow_empty_kernel_shape = bool(getattr(args, "allow_empty_kernel_shape", False))
+    set_allow_empty_kernel_shape(allow_empty_kernel_shape)
+    if allow_empty_kernel_shape:
         print("Kernel shape    : empty-shape dispatch ALLOWED (--allow-empty-kernel-shape)")
     else:
-        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
         print("Kernel shape    : non-empty trace shape REQUIRED for kernel-opt dispatch")
 
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
@@ -1868,7 +1887,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if _critic_agent_runtime_needed(critic_choice):
+    if _critic_agent_runtime_needed(
+        critic_choice,
+        codex_follows_claude=codex_follows_claude,
+    ):
         critic_agent_root = _resolve_critic_agent_root()
         if critic_agent_root is None:
             print(
@@ -1925,6 +1947,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         no_kernel=no_kernel,
+        codex_follows_claude=codex_follows_claude,
     )
     # Expose active session_dir to in-process executors via the canonical
     # pin env var (read by paths.session_dir() -> report.py, sweep.py, etc.).
@@ -1941,49 +1964,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
-    # Propagate --legacy-action-scores so SharedState.from_dict handles drop/warn uniformly (default drop).
-    legacy_mode = (
-        str(
-            getattr(args, "legacy_action_scores", "drop") or "drop",
-        )
-        .strip()
-        .lower()
-    )
-    if legacy_mode == "warn":
-        os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
-    # Propagate --migration-mode: SharedState.from_dict treats fact-layer discrepancy as fatal (strict) or WARN (lenient).
-    migration_mode = (
-        str(
-            getattr(args, "migration_mode", "strict") or "strict",
-        )
-        .strip()
-        .lower()
-    )
-    if migration_mode == "lenient":
-        os.environ["INFERENCE_OPTIMIZER_MIGRATION_MODE"] = "lenient"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_MIGRATION_MODE", None)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)
-    # Propagate --breakdown-include-transcripts (inline / path-only choice) to end-of-session breakdown.
-    transcripts_flag = (
-        str(
-            getattr(args, "breakdown_include_transcripts", "false") or "false",
-        )
-        .strip()
-        .lower()
-    )
-    if transcripts_flag == "true":
-        os.environ["INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS"] = "1"
-    else:
-        os.environ.pop(
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
-            None,
-        )
+    from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
 
+    legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+    migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
+    transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
+    set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
@@ -2002,6 +1991,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
+        legacy_action_scores=legacy_mode,
+        migration_mode=migration_mode,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer. Disabled by
