@@ -777,7 +777,7 @@ class PolicyGate:
         )
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
-        """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read).
+        """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
 
         Args:
             agent_name (str): the name of the agent whose tool list is
@@ -798,6 +798,7 @@ class PolicyGate:
 
             tools.extend(CONTEXT_TOOL_NAMES)
             tools.append("Read")
+            tools.extend(["WebSearch", "WebFetch"])
         return tools
 
     # Per-intent validators

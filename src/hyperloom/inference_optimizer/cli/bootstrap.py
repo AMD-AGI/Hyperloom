@@ -493,10 +493,10 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
-    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]; non-integers warned+dropped, empty -> 1..128 ladder."""
+    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
     raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
     if not raw:
-        return [1, 2, 4, 8, 16, 32, 64, 128]
+        return [256, 128, 64, 32, 16, 8, 4, 2]
     out: list[int] = []
     for tok in raw.split(","):
         t = tok.strip()
@@ -506,7 +506,7 @@ def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
             out.append(int(t))
         except ValueError:
             log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
-    return out or [1, 2, 4, 8, 16, 32, 64, 128]
+    return out or [256, 128, 64, 32, 16, 8, 4, 2]
 
 def _read_failure_summary(session_dir: Path) -> dict | None:
     """Read ``reports/final.json``'s ``failure_summary`` block, if present.

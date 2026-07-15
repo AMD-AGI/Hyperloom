@@ -151,7 +151,7 @@ gaps (quantized > source) → write 0.0.
 
 The Python runner already resolves the threshold per `_eval.resolve_threshold`.
 You don't need to compare — Python will. But: if the user prompt says
-something like "接受 5% gap" / "ok to lose up to 0.05 accuracy", write the
+something like "accept a 5% gap" / "ok to lose up to 0.05 accuracy", write the
 parsed numeric to `<workspace>/eval_gap_threshold.txt` (single float, one line)
 BEFORE eval runs. The Python runner will read it.
 

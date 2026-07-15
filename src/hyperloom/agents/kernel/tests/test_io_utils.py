@@ -51,10 +51,10 @@ def test_append_log_creates_parents_and_appends(tmp_path):
 def test_append_jsonl_creates_parents_and_appends_sorted(tmp_path):
     path = tmp_path / "logs" / "rows.jsonl"
     io.append_jsonl(path, {"b": 2, "a": 1})
-    io.append_jsonl(path, {"c": "你好"}, ensure_ascii=False)
+    io.append_jsonl(path, {"c": "café"}, ensure_ascii=False)
     assert path.read_text(encoding="utf-8").splitlines() == [
         '{"a": 1, "b": 2}',
-        '{"c": "你好"}',
+        '{"c": "café"}',
     ]
 
 

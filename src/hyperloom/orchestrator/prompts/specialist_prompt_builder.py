@@ -480,9 +480,11 @@ def _focus_research_scout_specialist(
         "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
-        "**Gap computation** — where you find a reference throughput,",
-        "compute the gap versus our current baseline and let the gap size",
-        "drive each hint's priority.",
+        "**Gap computation** — where you find a reference throughput, use",
+        "the gap versus our current baseline only to prioritise your hints",
+        "(a bigger gap means a higher-priority hint). Do NOT emit competitor",
+        "numbers as a structured target: measured competitor baselines are",
+        "sourced from InferenceX, never authored by this scout.",
         "",
         "**Output protocol** — emit ONE ``specialist_done`` carrying a",
         "``research`` block:",
@@ -490,10 +492,6 @@ def _focus_research_scout_specialist(
         "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
         "  / MLPerf row / reference script path); a hint without a source",
         "  is dropped.",
-        "- optional ``competitor_target``: ``{gpu, model, framework,",
-        "  precision, per_conc:[{conc, tput_per_gpu, tpot_ms,",
-        "  interactivity, source}], notes}`` — every per-conc number MUST",
-        "  carry its own ``source`` or it is discarded.",
         "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
         "  ids you actually inspected (feeds exploration-depth tracking).",
         "",
@@ -1669,6 +1667,14 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     rows.append(
         "These trees are read-only. Use Read / Grep / Glob to navigate. "
         "Do NOT attempt Edit / Write / git apply (PolicyGate R4)."
+    )
+    rows.append("")
+    rows.append(
+        "Use ``WebSearch`` to look up the latest upstream version of the local "
+        "repo and compare the implementation you intend to modify against what "
+        "is there now. Use ``WebFetch`` to read the relevant file or PR "
+        "directly — before authoring a patch, confirm whether the upstream "
+        "repo already contains the fix or optimization you are about to write."
     )
     return rows
 
