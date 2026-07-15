@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -128,7 +129,72 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
 def _timeout_sec(args: dict[str, Any]) -> int:
     """Resolve the forge-fusion subprocess wall-clock timeout."""
     raw = args.get("timeout") or args.get("timeout_sec") or os.environ.get("FORGE_FUSION_TIMEOUT")
-    return max(1, int(raw or DEFAULT_TIMEOUT_SEC))
+    try:
+        return max(1, int(raw or DEFAULT_TIMEOUT_SEC))
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SEC
+
+
+def _new_session_kwargs() -> dict[str, bool]:
+    """Popen kwargs that isolate the child into its own killable session."""
+    return {"start_new_session": True} if os.name == "posix" else {}
+
+
+def _terminate_process_tree(proc: subprocess.Popen, *, grace_seconds: float = 5.0) -> None:
+    """Best-effort teardown for the forge-fusion subprocess and descendants."""
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            pgid = os.getpgid(proc.pid)
+            own_pgid = os.getpgid(0)
+        except OSError:
+            pgid = None
+            own_pgid = None
+        if pgid is not None and pgid != own_pgid:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=grace_seconds)
+                return
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+                return
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.CompletedProcess:
+    """Run forge-fusion in a killable process group and reap it on timeout."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **_new_session_kwargs(),
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            stdout = ""
+            stderr = ""
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout, stderr=stderr)
 
 
 def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
@@ -262,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = str(payload.get("output_dir") or "")
     timeout_sec = _timeout_sec(payload)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        proc = _run_with_tree_timeout(cmd, timeout_sec)
     except subprocess.TimeoutExpired as exc:
         _relay_streams(getattr(exc, "stdout", None), getattr(exc, "stderr", None))
         result = _timeout_result(output_dir, timeout_sec, exc)

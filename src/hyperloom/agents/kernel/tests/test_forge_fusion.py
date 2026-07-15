@@ -76,7 +76,7 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
     assert "API_TIMEOUT_MS" not in os.environ
 
 
-def test_main_passes_timeout_to_subprocess(tmp_path, monkeypatch, capsys):
+def test_main_passes_timeout_to_tree_runner(tmp_path, monkeypatch, capsys):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -97,14 +97,12 @@ def test_main_passes_timeout_to_subprocess(tmp_path, monkeypatch, capsys):
         stdout = "OUT\n"
         stderr = "ERR\n"
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, timeout):
         captured["cmd"] = cmd
-        captured["capture_output"] = capture_output
-        captured["text"] = text
         captured["timeout"] = timeout
         return Proc()
 
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
 
     rc = forge_fusion.main(["--input-json", str(input_json)])
 
@@ -113,11 +111,15 @@ def test_main_passes_timeout_to_subprocess(tmp_path, monkeypatch, capsys):
     assert out.out.startswith("OUT\n")
     assert out.err == "ERR\n"
     assert captured["timeout"] == 9
-    assert captured["capture_output"] is True
-    assert captured["text"] is True
     result = _sentinel_payload(out.out)
     assert result["decision"] == "REVERT"
     assert result["kept"] is False
+
+
+def test_timeout_sec_invalid_value_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+
+    assert forge_fusion._timeout_sec({}) == forge_fusion.DEFAULT_TIMEOUT_SEC
 
 
 def test_main_timeout_emits_revert_result(tmp_path, monkeypatch, capsys):
@@ -126,7 +128,7 @@ def test_main_timeout_emits_revert_result(tmp_path, monkeypatch, capsys):
     input_json = tmp_path / "input.json"
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, timeout):
         raise subprocess.TimeoutExpired(
             cmd,
             timeout,
@@ -134,7 +136,7 @@ def test_main_timeout_emits_revert_result(tmp_path, monkeypatch, capsys):
             stderr=b"PARTIAL ERR\n",
         )
 
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
 
     rc = forge_fusion.main(["--input-json", str(input_json)])
 
