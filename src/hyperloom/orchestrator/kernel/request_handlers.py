@@ -240,6 +240,7 @@ _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
+_FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 
 def _visible_gpu_count() -> int | None:
@@ -1370,6 +1371,11 @@ def _forge_fusion_timeout_sec(payload: dict) -> int:
     return max(1, value)
 
 
+def _forge_fusion_wrapper_timeout_sec(timeout_sec: int) -> int:
+    """Give the wrapper time to reap its child tree and emit the timeout sentinel."""
+    return max(1, int(timeout_sec)) + _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC
+
+
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
@@ -2462,8 +2468,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
 
+    wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
     try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=wrapper_timeout)
         result = _parse_forge_fusion_sentinel(stdout)
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
@@ -2471,7 +2478,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {"status": "failed", "backend": "forge", "engine": "forge_fusion",
                   "error_class": "subprocess_timeout",
-                  "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+                  "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
                   "decision": "REVERT", "kept": False}
 
     result.setdefault("backend", "forge")

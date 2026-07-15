@@ -350,6 +350,12 @@ def test_timeout_sec_prefers_timeout_sec_key():
     assert forge_fusion._timeout_sec({"timeout_sec": 42}) == 42
 
 
+def test_timeout_sec_accepts_float_strings(monkeypatch):
+    monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "42.9")
+
+    assert forge_fusion._timeout_sec({}) == 42
+
+
 def test_terminate_process_tree_uses_process_group_on_posix(monkeypatch):
     killed: list[tuple[int, int]] = []
 

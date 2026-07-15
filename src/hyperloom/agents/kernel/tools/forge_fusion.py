@@ -124,7 +124,7 @@ def _timeout_sec(args: dict[str, Any]) -> int:
     """Resolve the forge-fusion subprocess wall-clock timeout."""
     raw = args.get("timeout") or args.get("timeout_sec") or os.environ.get("FORGE_FUSION_TIMEOUT")
     try:
-        return max(1, int(raw or DEFAULT_TIMEOUT_SEC))
+        return max(1, int(float(raw or DEFAULT_TIMEOUT_SEC)))
     except (TypeError, ValueError):
         return DEFAULT_TIMEOUT_SEC
 

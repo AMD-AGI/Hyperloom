@@ -619,7 +619,7 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
         assert result["engine"] == "forge_fusion"
         assert result["workspace"] == str(tmp_path / "runs" / "fusion" / "fusion_task")
-        assert calls[0][1] == 123
+        assert calls[0][1] == krh._forge_fusion_wrapper_timeout_sec(123)
         input_payload = json.loads(
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
             .read_text(encoding="utf-8")
@@ -633,6 +633,9 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
 
         assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    def test_forge_fusion_wrapper_timeout_adds_reap_grace(self):
+        assert krh._forge_fusion_wrapper_timeout_sec(123) == 153
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_invalid_timeout_env_uses_default(
@@ -666,7 +669,7 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
-        assert calls == [7200]
+        assert calls == [krh._forge_fusion_wrapper_timeout_sec(7200)]
         input_payload = json.loads(
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
             .read_text(encoding="utf-8")
