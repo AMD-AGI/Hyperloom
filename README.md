@@ -39,22 +39,6 @@ Hyperloom combines:
 
 ---
 
-## Key Results
-
-### Inference Optimization — InferenceX Challenge
-
-Hyperloom optimized 5 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or beating NVIDIA B200 on all reported workloads.
-
-| Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
-|-------|---------------:|:------------------:|:--------------:|
-| DeepSeek-R1-0528 (671B MoE) | **1,476** | — | **+97% ahead** |
-| GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
-| Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
-| MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
-| gpt-oss-120b (120B MoE, mxfp4) | **11,643** | — | **+34% ahead** |
-
-All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
-
 ## Hosted Tier — Limits & Pricing
 
 The hosted [Hyperloom UI / PrimusClaw](https://crusoe.primus-safe.amd.com/hyperloom/)

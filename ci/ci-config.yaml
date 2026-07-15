@@ -80,34 +80,10 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8) old single-node attempt — DISABLED 2026-05-11 ──
-  # The original disabled block below kept the MI355X inferenceX_key as a
-  # fallback for amd-master.yaml lookup. That approach surfaced the wrong
-  # benchmark script (MI355X --mem-fraction-static 0.85 + TP=16 single-
-  # instance) and OOM'd on MI300X 192GB. Replaced 2026-05-26 by the
-  # self-contained multi-node entry below; this block is kept only as a
-  # historical "do not re-enable" marker.
-  # - inferenceX_key: glm5-fp8-mi355x-sglang
-  #   inferenceX_api_name: GLM-5
-  #   model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
-  #   optimization_depth: full
-  #   kernel_opt_backends: claude
-  #   target_gpu: mi300x
-  #   tp: 16
-  #   mode: remote
-  #   rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202604290707
-
   # ── GLM 5 (FP8, MoE+MLA+NSA) multi-node — TP=16 across 2 MI300X nodes ──
-  # Pure Hyperloom-internal entry: InferenceX has no MI300X baseline for GLM-5,
-  # so this entry is self-contained (carries model_hf / image / framework /
-  # precision / conc / isl_osl_configs directly). orchestrator.py picks up the
-  # `synthesize_entry_from_ci_config()` path when inferenceX_key is absent.
-  # Multi-node TP=16 spreads the ~1.4TB FP8 weights to ~88GB/GPU, leaving
-  # ~75GB/GPU headroom for KV cache on MI300X 192GB cards (single-node TP=8
-  # OOMs — see the historical block above).
-  # Validated 2026-05-22 (session zai-org-GLM-5_20260522T070305Z_525d8a89):
-  #   baseline 527.50 → optimized 690.89 tok/s (+30.97%)
-  #   winning backend: --decode-attention-backend aiter
+  # Standalone entry: carries model_hf / image / framework / precision / conc /
+  # isl_osl_configs directly. orchestrator.py uses the
+  # synthesize_entry_from_ci_config() path when inferenceX_key is absent.
   - key: glm5-multinode-fp8-mi300x-sglang
     model_hf: zai-org/GLM-5
     model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
@@ -127,23 +103,18 @@ models:
     mode: remote
     # Multi-node knobs — see prompt_template.md "Task submission" block.
     # nodes=2 triggers the RayJob 2-node multi-node prompt path.
-    # target_gain=30 / max_hours=24 match weilei's validated 5/22 run config:
-    # GLM-5 multi-node typically needs 2-3 h cold-start + benchmark, and a
-    # single-backend +30% is the established expectation before kernel-opt.
+    # GLM-5 multi-node typically needs 2-3 h cold-start + benchmark before
+    # kernel-opt; target_gain / max_hours are sized accordingly.
     nodes: 2
     target_gain: 30
     max_hours: 24
     random_range_ratio: 0.8
     rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202605190643
-    # NOTE: do NOT set `claw_plugin_id: null` here. We tried it in
-    # commit 3f14eee thinking weilei's manual GLM-5 run "didn't go through
-    # plugin" — but a Claw GUI manual session also defaults to plugin_id=4,
-    # so weilei was always using the Hyperloom plugin. Without a pluginId
-    # the sandbox doesn't load the Hyperloom plugin's tool bundle
-    # (Bash/Read/Write/Grep/etc.); the agent receives the prompt but has
-    # no tools to invoke, sits idle ~10 min, then the session times out
-    # with "agent=failed, 0 tool calls" (runs 26431077434 / 26431116688).
-    # Leave the field absent → inherits the legacy default plugin_id=4.
+    # NOTE: do NOT set `claw_plugin_id: null` here. A Claw GUI manual session
+    # defaults to plugin_id=4; without a pluginId the sandbox doesn't load the
+    # plugin tool bundle (Bash/Read/Write/Grep/etc.), so the agent receives the
+    # prompt but has no tools to invoke and the session times out with 0 tool
+    # calls. Leave the field absent → inherits the default plugin_id=4.
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang

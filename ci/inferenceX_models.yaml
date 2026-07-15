@@ -18,17 +18,6 @@ models:
     model_prefix: qwen3.5
     verified_count: 178
 
-  # ── GLM 5 — DISABLED 2026-05-11 (paired with ci-config.yaml entry) ──
-  # Re-enable when InferenceX adds an MI300X baseline for GLM-5 (or when CI
-  # injects MI300X memory/topology adjustments before the prompt reaches the
-  # agent). Keeping the mapping commented so build_summary doesn't surface
-  # GLM-5 results against a wrong (MI355X) baseline.
-  # - display_name: GLM 5
-  #   api_name: GLM-5
-  #   hf_model: zai-org/GLM-5-FP8
-  #   model_prefix: glm5
-  #   verified_count: 58
-
   - display_name: Kimi K2.5 1T
     api_name: Kimi-K2.5
     hf_model: moonshotai/Kimi-K2.5
