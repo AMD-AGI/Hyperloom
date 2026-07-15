@@ -182,7 +182,7 @@ def magpie_remote_env() -> dict[str, str]:
             "INFERENCE_OPTIMIZER_NODES=%s but %s has no service_url; "
             "Magpie will try to launch a local server and likely fail. "
             "Run `python3 -m hyperloom.inference_optimizer.multi_node create-rayjob` "
-            "before `inference_optimizer optimize` in multi-node mode.",
+            "before `python -m hyperloom.inference_optimizer.cli optimize` in multi-node mode.",
             os.environ.get("INFERENCE_OPTIMIZER_NODES"),
             _state_path(),
         )

@@ -79,7 +79,7 @@ Paste this prompt into Cursor Chat to resume an existing session:
 Resume the existing Hyperloom optimization session.
 
 Requirements:
-1. Launch `inference_optimizer optimize --resume`; do not start a new session.
+1. Launch `python -m hyperloom.inference_optimizer.cli optimize --resume`; do not start a new session.
 2. Do not pass `--model`; read the model and workload from the saved manifest.
 3. Before launching, verify `manifest.json` and `state.json` exist.
 4. Report the log path, PID, health check, current phase, cumulative gain, and best config.

@@ -923,7 +923,7 @@ write_env_file() {
     [ -n "${_openai_key}" ] && echo "export OPENAI_API_KEY='${_openai_key}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
-    # setsid nohup inference_optimizer optimize →
+    # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
     # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"

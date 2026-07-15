@@ -125,7 +125,7 @@ ray status
 ```
 
 > **Note**: `inference_optimizer.cli` does *not* auto-start Ray.
-> Always start it before launching `inference_optimizer optimize`.
+> Always start it before launching `python -m hyperloom.inference_optimizer.cli optimize`.
 
 ---
 
@@ -295,7 +295,7 @@ auto-re-cloned and fails fast once `/tmp` is reaped.
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `inference_optimizer optimize --resume` exits with
+**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume` exits with
 `manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
@@ -314,7 +314,7 @@ original session, or the session never reached the point of writing
 2. If you used a custom path the first time, pass the actual session
    directory explicitly:
    ```bash
-   inference_optimizer optimize --resume --resume-from "$SESSION_DIR"
+   python3 -m hyperloom.inference_optimizer.cli optimize --resume --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.
@@ -361,7 +361,7 @@ action no longer derives this automatically.
 **Fix**: Add the flag at launch:
 
 ```bash
-inference_optimizer optimize ... --compare-against-gpu B200
+python3 -m hyperloom.inference_optimizer.cli optimize ... --compare-against-gpu B200
 ```
 
 The marker is informational, not a failure — the optimisation still

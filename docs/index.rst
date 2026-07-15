@@ -27,11 +27,9 @@ Provide your workload, and the agent works toward an optimized configuration: pr
 hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on
 AMD GPUs.
 
-=====================
-The optimization loop
-=====================
+## The optimization loop
 
-.. image:: ../images/Hyperloom_architecture.png
+![Hyperloom optimization loop](../images/Hyperloom_architecture.png)
 
 - **Workload understanding and profiling** — Submit your inference workload; the agent profiles it with
    TraceLens (trace collection using Magpie), capturing bottlenecks and roofline targets.

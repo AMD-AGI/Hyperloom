@@ -11,7 +11,7 @@ Per-version migration steps. This page is a companion to
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
-[quickstart](../install/quickstart.md).
+[setup and examples guide](../../examples/README.md).
 
 ---
 
@@ -58,7 +58,7 @@ when possible, but launchers that know the class should pass it explicitly to
 avoid a generic fallback:
 
 ```diff
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
     --model /path/to/GLM-5-FP8 \
     --framework sglang \
     --gpu-type mi355x \
@@ -90,15 +90,15 @@ the "vs B200" comparison number).
 
 Earlier launchers may have waited for the Coordinator to emit a
 `setup` action. Move all setup work to **before** the
-`inference_optimizer optimize` call:
+`python -m hyperloom.inference_optimizer.cli optimize` call:
 
 ```diff
 # launcher.sh
-- inference_optimizer optimize ... # expects setup as first action
+- python3 -m hyperloom.inference_optimizer.cli optimize ... # expects setup as first action
 + bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-+ inference_optimizer optimize ...
++ python3 -m hyperloom.inference_optimizer.cli optimize ...
 ```
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
@@ -156,7 +156,7 @@ training-mode build:
   accepted by `install.sh`. Use the `_inference` variant.
 * Training and MLPerf-training skills have been removed from this
   repo. There is no in-place migration; switch to the inference flow
-  documented in the [quickstart](../install/quickstart.md).
+  documented in the [setup and examples guide](../../examples/README.md).
 
 ---
 
@@ -174,7 +174,7 @@ For any minor or patch upgrade:
    ```
 4. If you have ongoing sessions you want to resume across the upgrade,
    verify `manifest.json` and `state.json` are intact, then run
-   `inference_optimizer optimize --resume`.
+   `python -m hyperloom.inference_optimizer.cli optimize --resume`.
 
 Upgrades **do not** touch `HYPERLOOM_LOCAL_KB_ROOT` or `$USER_DATA_PATH`.
 Your local KB and historical sessions are preserved.

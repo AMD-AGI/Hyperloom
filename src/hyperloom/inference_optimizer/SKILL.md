@@ -148,11 +148,11 @@ Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 
 SKILL-level constraints the launcher MUST satisfy before `Coordinator`
 is allowed to boot. These IronRULEs are the gate
-that runs **before** `inference_optimizer optimize` is even spawned.
+that runs **before** `python -m hyperloom.inference_optimizer.cli optimize` is even spawned.
 
 ### IR-1 — GPU MUST be unoccupied before every launch
 
-Before every `inference_optimizer optimize` invocation (fresh start OR
+Before every `python -m hyperloom.inference_optimizer.cli optimize` invocation (fresh start OR
 `--resume`), verify that every visible GPU on this pod has **zero
 foreign serving PIDs and ≲ 500 MiB VRAM in use**. A leftover
 `sglang.launch_server` / `vllm.entrypoints` / `Magpie` from a previous
@@ -169,7 +169,7 @@ pollution after the fact.
 Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and
 source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
-in the **same shell** that will spawn `inference_optimizer optimize`.
+in the **same shell** that will spawn `python -m hyperloom.inference_optimizer.cli optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
 TraceLens/GEAK → `trace_analyze` / `kernel_opt` fail; no live
 Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
@@ -436,7 +436,7 @@ when the file is absent, invalid, or stale.
 **Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
 
 ```bash
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom / xdit
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
@@ -468,7 +468,7 @@ prompt, then rewrites `--model` to the exported quantized model so the entire
 optimization loop runs on the quantized model.
 
 ```bash
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head; accept up to 5% relative eval gap" \
@@ -601,7 +601,7 @@ Implements **IR-1**. Run order is always **IR-2 → IR-1 → launch**:
 without IR-2 the script below has no `torch` to import. Verify the
 model path, GPU visibility, and that no stale serving process holds
 VRAM; exit non-zero on any violation so the calling shell aborts
-before `inference_optimizer optimize` is spawned. Never print tokens.
+before `python -m hyperloom.inference_optimizer.cli optimize` is spawned. Never print tokens.
 
 ```bash
 export MODEL_PATH=/path/to/model
@@ -762,9 +762,9 @@ A session is single-framework. Pick `sglang` (default), `vllm`, or
 `atom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
-inference_optimizer optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
-FRAMEWORK=vllm inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
-inference_optimizer optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
+python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
@@ -812,8 +812,8 @@ either, the optimizer auto-detects via `rocm-smi --showproductname`
 (falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
-inference_optimizer optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
-GPU_TYPE=mi300x inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
@@ -886,7 +886,7 @@ export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 mkdir -p "$RUN_DIR"
 
-setsid nohup inference_optimizer --verbose optimize \
+setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \

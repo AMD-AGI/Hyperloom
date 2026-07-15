@@ -16,7 +16,7 @@ loop runs alongside the agentic kernel optimizer.
 
 ## Runtime contract
 
-The optimizer is launched through `inference_optimizer optimize`. A run
+The optimizer is launched through `python -m hyperloom.inference_optimizer.cli optimize`. A run
 must be able to:
 
 - Create or resume a session directory,

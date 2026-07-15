@@ -55,7 +55,7 @@ Hyperloom combines:
 
 - Runtime package: `src/hyperloom/`
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `inference_optimizer optimize`
+- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
 - Documentation source: `docs/`
 
