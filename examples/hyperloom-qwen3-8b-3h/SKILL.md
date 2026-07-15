@@ -62,11 +62,13 @@ docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 - `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-8B from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
-- `TP=1`
-- `CONC=64`
-- `ISL=1024`
-- `OSL=1024`
-- `PRECISION=fp8`
+Required optimize CLI flags:
+
+- `--tp 1`
+- `--conc 64`
+- `--isl 1024`
+- `--osl 1024`
+- `--precision fp8`
 - `--target-gain 30`
 - `--max-hours 3`
 - `--no-kernel`
@@ -97,9 +99,10 @@ export MODEL_PATH="$(pwd)/.cache/hyperloom-models/Qwen3-8B"
 
 1. Install packages and save artifacts to a writable folder.
 2. Run in background with `setsid nohup`.
-3. Include `--no-kernel` in the `inference_optimizer optimize` command so the Kernel Agent phase is skipped.
-4. Include `--no-enable-conc-sweep` in the `inference_optimizer optimize` command so the SWEEP-phase post-optimization concurrency sweep is skipped.
-5. Report the session ID, log path, PID, and initial health check result.
-6. Monitor the process every 300 seconds until work is done.
-7. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-8. If `stop_reason` in the current session `state.json` is final, stop and exit.
+3. Pass all required optimize CLI flags in the `inference_optimizer optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+4. Include `--no-kernel` in the `inference_optimizer optimize` command so the Kernel Agent phase is skipped.
+5. Include `--no-enable-conc-sweep` in the `inference_optimizer optimize` command so the SWEEP-phase post-optimization concurrency sweep is skipped.
+6. Report the session ID, log path, PID, and initial health check result.
+7. Monitor the process every 300 seconds until work is done.
+8. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+9. If `stop_reason` in the current session `state.json` is final, stop and exit.

@@ -71,11 +71,13 @@ Current Hyperloom treats `--max-hours 24` as a long-horizon run. Long-horizon cy
 - `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-8B from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
-- `TP=1`
-- `CONC=64`
-- `ISL=1024`
-- `OSL=1024`
-- `PRECISION=fp8`
+Required optimize CLI flags:
+
+- `--tp 1`
+- `--conc 64`
+- `--isl 1024`
+- `--osl 1024`
+- `--precision fp8`
 - `INFERENCE_OPTIMIZER_CYCLIC_PHASES=1`
 - `--target-gain 30`
 - `--max-hours 24`
@@ -105,7 +107,8 @@ export MODEL_PATH="$(pwd)/.cache/hyperloom-models/Qwen3-8B"
 
 1. Install packages and save artifacts to a writable folder.
 2. Run in background with `setsid nohup`.
-3. Report the session ID, log path, PID, and initial health check result.
-4. Monitor the process every 300 seconds until work is done.
-5. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-6. If `stop_reason` in the current session `state.json` is final, stop and exit.
+3. Pass all required optimize CLI flags in the `inference_optimizer optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+4. Report the session ID, log path, PID, and initial health check result.
+5. Monitor the process every 300 seconds until work is done.
+6. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+7. If `stop_reason` in the current session `state.json` is final, stop and exit.
