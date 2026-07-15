@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""WS2: a ``needs_gpu`` specialist delegate acquires gpu_research_lane and gets a
+"""A ``needs_gpu`` specialist delegate acquires gpu_research_lane and gets a
 budget-sourced lease TTL (so the lane never expires mid-run and lets serving
 grab the cards). CPU specialists are unchanged (research_lane only)."""
 
@@ -75,7 +75,7 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     assert "gpu_research_lane" in task.requires_lanes
     # research_lane is kept for LLM-concurrency accounting.
     assert "research_lane" in task.requires_lanes
-    # TTL re-sourced to the WS1 GPU wall budget (60min) × (1 + grace).
+    # TTL re-sourced to the GPU wall budget × (1 + grace).
     budget = coord._specialist_wall_budget_sec(needs_gpu=True)
     assert task.lease_ttl_sec == max(
         1800, int(budget * (1.0 + GPU_LEASE_TTL_GRACE))

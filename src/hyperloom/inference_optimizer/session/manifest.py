@@ -4,11 +4,10 @@
 ``make_session_dir()`` and the canonical session-resume tag (atomic write
 via tmp + ``os.replace``).
 
-Schema v3 records: identity (session_id, claw_session_id, sandbox_user_id),
-host/image, model + workload + objective, code_revision, ``dependencies``
-(per-tree Magpie/InferenceX path+commit+remote, best-effort), and
-``stack_fingerprint``. All provenance fields degrade to empty/null on
-lookup failure — manifest writing never fails on missing provenance.
+Records identity, host/image, model + workload + objective, code_revision,
+``dependencies``, and ``stack_fingerprint``. All provenance fields degrade to
+empty/null on lookup failure — manifest writing never fails on missing
+provenance.
 """
 
 from __future__ import annotations
@@ -32,8 +31,6 @@ from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-# v3 adds stack_fingerprint + the dependencies provenance block (additive;
-# v2 readers stay compatible).
 SCHEMA_VERSION = 3
 
 
@@ -70,9 +67,9 @@ def _read_first_line(path: Path) -> str:
 
 
 def _detect_stack_fingerprint() -> dict[str, str]:
-    """Best-effort ``stack_fingerprint`` (KB_design §3.6.5.1). Per component,
-    first non-empty wins: env var -> /opt/rocm marker (rocm only) -> package
-    __version__/__commit__. Missing components map to ``"unknown"``.
+    """Best-effort ``stack_fingerprint``. Per component, first non-empty wins:
+    env var -> /opt/rocm marker (rocm only) -> package __version__/__commit__.
+    Missing components map to ``"unknown"``.
 
     Returns:
         Mapping of component name to detected version/commit (``"unknown"``
@@ -115,13 +112,10 @@ def _detect_stack_fingerprint() -> dict[str, str]:
 def _git_revision() -> str:
     """Best-effort source revision of the repo containing this package.
 
-    Prefers the live git SHA (dev checkouts). Deployed container images install
-    the package without a ``.git`` tree, so the git lookup returns ``""`` and
-    ``code_revision`` shows up empty in every trace/breakdown — which makes
-    "which build introduced this regression?" impossible to answer at a glance.
-    Fall back to a build-time-baked revision from the environment
-    (``HYPERLOOM_CODE_REVISION`` / ``HYPERLOOM_GIT_SHA``, set in the image
-    Dockerfile) so the field identifies the source commit even in deployment.
+    Prefers the live git SHA (dev checkouts). Falls back to a build-time-baked
+    revision from the environment (``HYPERLOOM_CODE_REVISION`` /
+    ``HYPERLOOM_GIT_SHA``) so the field identifies the source commit even in a
+    deployed image with no ``.git`` tree.
 
     Returns:
         str: Short HEAD SHA, else the baked env revision, else ``""``.
@@ -187,14 +181,12 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
         path.resolve(strict=False).relative_to(root.resolve(strict=False))
         return True
     except (OSError, ValueError, RuntimeError):
-        # ELOOP symlink loop -> RuntimeError, broken mount -> OSError; treat
-        # as "not provably inside root" rather than crashing manifest gen.
+        # Treat resolution failures as "not provably inside root".
         return False
 
 
 # Pod-local, non-persistent roots: a dependency checkout under one of these is
-# erased on pod recycle (the "artefacts disappeared" failure mode). A shared
-# checkout elsewhere (WekaFS mirror) is legitimate and must NOT warn.
+# erased on pod recycle. A shared checkout elsewhere is legitimate.
 _POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")
 
 
@@ -216,8 +208,7 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
     try:
         resolved = str(dep_path.resolve(strict=False))
     except (OSError, RuntimeError):
-        # Unresolvable path can't be proven pod-local; skip the warning
-        # rather than crash (provenance capture must never raise).
+        # Unresolvable path can't be proven pod-local; skip the warning.
         return
     is_pod_local = any(resolved == p or resolved.startswith(p + "/") for p in _POD_LOCAL_PREFIXES)
     if not is_pod_local:
@@ -237,10 +228,9 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
 
 def _describe_dep(*env_vars: str) -> dict[str, str]:
     """Build a ``{path, commit, remote}`` provenance dict for one dependency
-    pointed at by the first set env var among ``env_vars`` (in priority
-    order). All fields
-    default to empty string when no env var is set, the directory is missing,
-    or git is unhappy — we never raise out of here.
+    pointed at by the first set env var among ``env_vars`` (in priority order).
+    All fields default to empty string when no env var is set, the directory is
+    missing, or git is unhappy — we never raise out of here.
 
     Returns:
         dict[str, str]: Mapping with ``path``, ``commit``, and ``remote`` keys;
@@ -303,7 +293,6 @@ def _detect_image() -> str | None:
             for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
                 if "docker" not in line and "containerd" not in line:
                     continue
-                # e.g. ``12:devices:/docker/<sha256>`` — pull a 12+ hex token.
                 import re as _re
 
                 m = _re.search(r"([0-9a-f]{12,64})", line)
@@ -353,8 +342,8 @@ def build_session_id(model_name: str = "") -> str:
 def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
     """Return the session-locked GPU specialist capacity.
 
-    WS2 defaults GPU specialists to whole-machine capacity. The parsed CLI arg
-    normally carries that detected value, but manifest helpers are also used in
+    Defaults GPU specialists to whole-machine capacity. The parsed CLI arg
+    normally carries that detected value; manifest helpers are also used in
     tests and direct-call paths where ``args`` can be missing or incomplete.
     """
     raw = getattr(args, "gpu_specialist_capacity", None) if args is not None else None
@@ -407,10 +396,8 @@ def build_manifest(
     if args is not None:
         if getattr(args, "model", None):
             model_path = str(args.model)
-            # Prefer the quantize prelude's pinned source identity; the rewritten
-            # export-dir basename is the generic "quantized" (would collapse the
-            # name). Mirrors cli_bootstrap.resolve_model_display_name (kept inline
-            # to avoid a manifest -> cli_bootstrap import cycle).
+            # Prefer the quantize prelude's pinned source identity over the
+            # generic "quantized" export-dir basename.
             model_name = (
                 (getattr(args, "model_display_name", "") or "").strip()
                 or Path(model_path).name
@@ -434,9 +421,8 @@ def build_manifest(
         "sandbox_user_id": sandbox_user_id,
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
-        # USER_DATA_PATH root snapshotted at session start so a trace-based
-        # consumer can locate the on-disk artifacts (session_dir nests under it
-        # in per_model_ts layout). Falls back to the resolved workspace_root().
+        # USER_DATA_PATH root snapshotted so a trace-based consumer can locate
+        # the on-disk artifacts. Falls back to the resolved workspace_root().
         "user_data_path": (os.environ.get("USER_DATA_PATH") or "").strip() or str(_paths.workspace_root()),
         "model_path": model_path,
         "model_name": model_name,
@@ -451,18 +437,17 @@ def build_manifest(
         "pid": os.getpid(),
         "host": platform.node() or socket.gethostname() or "",
         "image": _detect_image(),
-        # Snapshotted so resume-after-redeploy can detect drift
-        # (--cortex-strict-fingerprint).
+        # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _detect_stack_fingerprint(),
         # Locked at session start; resume reads it back so a restart can't
         # change concurrency semantics.
         "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
         "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
-        # IR-3 soft-degrade audit
+        # IR-3 soft-degrade audit.
         "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
         "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
         # Warm-recipe replay flags; persisted so resume picks up the same gate
-        # thresholds. warm_replay_enabled is the inverted --no-warm-replay.
+        # thresholds.
         "warm_replay_enabled": (not bool(getattr(args, "no_warm_replay", False)) if args is not None else True),
         "warm_replay_min_confidence": (
             float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7) if args is not None else 0.7
@@ -470,9 +455,8 @@ def build_manifest(
         "warm_replay_min_reproduce_pct": (
             float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8) if args is not None else 0.8
         ),
-        # Operator-supplied reference recipe source (audit only). The resolved
-        # server_args / envs / model are authoritative in state.json's
-        # reference_* fact-layer fields (discovery runs after manifest write).
+        # Operator-supplied reference recipe source (audit only); the resolved
+        # server_args / envs / model are authoritative in state.json.
         "reference_script": (
             getattr(args, "reference_script", None) if args is not None else None
         ),

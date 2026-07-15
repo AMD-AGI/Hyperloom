@@ -16,7 +16,6 @@ def _ns(**kw) -> argparse.Namespace:
     return argparse.Namespace(**kw)
 
 
-# _resume_safe_flag
 def test_resume_safe_flag_explicit_disable_wins_over_manifest():
     """Explicit current-launch ``--no-foo`` wins over an enabled manifest."""
     args = _ns(no_foo=True)
@@ -29,13 +28,12 @@ def test_resume_safe_flag_explicit_disable_wins_over_manifest():
         default=True,
         invert=True,
     )
-    # invert=True means args.no_foo=True → disabled.
     assert result is False
 
 
 def test_resume_safe_flag_falls_back_to_manifest_when_arg_default():
     """When ``--no-foo`` isn't re-passed on resume, honor the persisted manifest value over the argparse default."""
-    args = _ns(no_foo=False)  # argparse default for store_true
+    args = _ns(no_foo=False)
     manifest = {"foo_enabled": False}
     result = _resume_safe_flag(
         args,
@@ -77,7 +75,6 @@ def test_resume_safe_flag_handles_none_manifest():
     assert result is True
 
 
-# _resume_safe_numeric
 def test_resume_safe_numeric_explicit_override_wins():
     """Explicit ``--threshold 0.5`` wins over a manifest value of 0.7."""
     args = _ns(threshold=0.5)
@@ -94,7 +91,7 @@ def test_resume_safe_numeric_explicit_override_wins():
 
 def test_resume_safe_numeric_falls_back_to_manifest():
     """With no explicit value on resume, use the manifest's 0.7 over the argparse default."""
-    args = _ns(threshold=0.8)  # argparse default
+    args = _ns(threshold=0.8)
     manifest = {"threshold": 0.7}
     result = _resume_safe_numeric(
         args,

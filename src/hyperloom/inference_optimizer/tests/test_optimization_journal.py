@@ -54,7 +54,7 @@ def test_load_or_create_mints_new_when_absent(session_dir: Path):
     expected = session_dir / "reports" / JOURNAL_FILENAME
     assert j.path == expected
     assert expected.parent.exists()
-    assert not expected.exists()  # flushes only when something is appended
+    assert not expected.exists()
 
 
 def test_load_or_create_round_trips_existing_file(session_dir: Path):
@@ -162,7 +162,7 @@ def test_append_entry_flushes_to_disk(session_dir: Path):
     blob = json.loads(j.path.read_text(encoding="utf-8"))
     assert blob["entries"][0]["change"] == "X"
     assert blob["entries"][0]["gain_pct"] == 10.0
-    assert blob["entries"][0]["ts"]  # auto-stamped
+    assert blob["entries"][0]["ts"]
 
 
 def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
@@ -181,7 +181,7 @@ def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
         gain_pct=10.0,
     )
     assert j.append_entry(e) is True
-    assert j.append_entry(e) is False  # dedupe
+    assert j.append_entry(e) is False
     assert len(j.entries) == 1
 
 
@@ -227,7 +227,7 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
     assert j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
     assert j.append_entry(JournalEntry(task_id="task-2", **base_kwargs))
     assert len(j.entries) == 2
-    # Re-appending an identical (task_id) row is treated as resume replay.
+    # Re-appending an identical (task_id) row is deduped as resume replay.
     assert not j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
     assert len(j.entries) == 2
 
@@ -308,7 +308,7 @@ def test_to_dict_strips_none_in_entries(session_dir: Path):
     )
     blob = json.loads(j.path.read_text(encoding="utf-8"))
     e = blob["entries"][0]
-    # error_class / reason were None → stripped.
+    # None-valued error_class / reason are stripped.
     assert "error_class" not in e
     assert "reason" not in e
     assert e["gain_pct"] == 10.0
@@ -359,10 +359,10 @@ def test_summarize_change_falls_back_to_task_kind():
     assert summarize_change("") == "(unknown)"
 
 
-# derive_journal_outcome: fix the "fake KEEP" bug.
+# derive_journal_outcome
 def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
-    """The core bug: a reverted integrate_patch is promotable (status != failed)
-    but must journal as REVERT, not KEEP."""
+    """A reverted integrate_patch is promotable (status != failed) but must
+    journal as REVERT, not KEEP."""
     out = derive_journal_outcome(
         "integrate_patch", {"status": "reverted", "delta_pct": -0.44}, promotable=True,
     )
@@ -386,8 +386,7 @@ def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
 
 
 def test_derive_journal_outcome_patch_failures_are_no_promote():
-    # A patch that never reached a KEEP/REVERT measurement is no_promote, even
-    # though the dispatcher may flag some of these promotable.
+    # A patch that never reached a KEEP/REVERT measurement is no_promote.
     for status in ("apply_failed", "no_patch", "no_patches", "failed", "applied_no_bench", "rejected_by_critic", "skipped"):
         out = derive_journal_outcome("integrate_patch", {"status": status}, promotable=True)
         assert out == OUTCOME_NO_PROMOTE, status
@@ -400,7 +399,7 @@ def test_derive_journal_outcome_framework_agent_follows_status():
 
 
 def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
-    # Non-patch kinds preserve the historical promotable→KEEP / else→REVERT map.
+    # Non-patch kinds use the promotable->KEEP / else->REVERT map.
     assert derive_journal_outcome("baseline", {"status": "succeeded"}, promotable=True) == OUTCOME_KEEP
     assert derive_journal_outcome("explore", {}, promotable=False) == OUTCOME_REVERT
     assert derive_journal_outcome("profile", {"status": "reverted"}, promotable=True) == OUTCOME_KEEP
@@ -415,7 +414,7 @@ def test_operation_kind_for_maps_kind_and_action():
     assert operation_kind_for("explore", "backend") == "backend"
     assert operation_kind_for("explore", "param") == "param"
     assert operation_kind_for("explore", "env") == "env"
-    # Kernel kinds rename to the action labels dashboards filter on.
+    # Kernel kinds rename to the action labels.
     assert operation_kind_for("kernel_opt", "kernel_file") == "kernel_opt"
     assert operation_kind_for("integrate", "integrate") == "kernel_integrate"
     # No / other kind falls back to the action.
@@ -478,7 +477,7 @@ def test_journal_entry_roundtrips_predicted_gain():
     d = e.to_dict()
     assert d["predicted_gain_pct"] == 9.0
     assert JournalEntry.from_dict(d).predicted_gain_pct == 9.0
-    # Unset prediction is stripped (distinguish "no prediction" from "0").
+    # Unset prediction is stripped.
     assert "predicted_gain_pct" not in JournalEntry(
         phase="P", iter=0, kind="baseline", change="b", outcome="KEEP",
     ).to_dict()

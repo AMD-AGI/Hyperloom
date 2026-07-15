@@ -25,10 +25,9 @@ from ._subprocess_kill import _process_group_alive, _signal_group
 log = logging.getLogger(__name__)
 
 
-# Magpie built-in benchmark scripts that honour ``MAGPIE_RUN_PHASE`` and
-# support the server_lifecycle reuse protocol. Mirrors Magpie's
-# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated to avoid an import-time
-# Magpie dependency).
+# Magpie built-in benchmark scripts that support the server_lifecycle reuse
+# protocol. Mirrors Magpie's ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated
+# to avoid an import-time Magpie dependency).
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
@@ -85,6 +84,15 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["port"] = int(envs.get("PORT", REUSE_PORT_DEFAULT))
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
+
+    # Backend delegation: a non-Magpie backend (e.g. bypass) decides its
+    # own server_lifecycle eligibility. Magpie returns None here so the
+    # historical script-name-based path below runs unchanged.
+    from .benchmark_backend import resolve_backend
+
+    backend_verdict = resolve_backend().lifecycle_eligibility(bench)
+    if backend_verdict is not None:
+        return backend_verdict
 
     # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
     # persistent server, so the reuse protocol does not apply. Bail out before

@@ -1,8 +1,8 @@
 """Unit tests for TraceLens arch JSON pre-report benchmarking.
 
-These cover both the TraceLens-internal (extension-enabled) and external
+Cover both the TraceLens-internal (extension-enabled) and external
 (open-source-only) paths so the MAF backfill gate is validated for both
-deployments , plus the microbenchmark mechanics themselves .
+deployments, plus the microbenchmark mechanics themselves.
 """
 
 from __future__ import annotations
@@ -36,8 +36,7 @@ def tla():
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    # Register before exec so self-referential dataclass annotations
-    # (OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
+    # Register before exec so self-referential dataclass annotations resolve.
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod

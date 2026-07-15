@@ -22,7 +22,6 @@ def test_atomic_write_json_fsync(tmp_path):
     p = tmp_path / "f.json"
     atomic_write_json(p, {"b": 1, "a": 2}, fsync=True)
     assert json.loads(p.read_text()) == {"a": 2, "b": 1}
-    # sort_keys default True
     assert p.read_text().index('"a"') < p.read_text().index('"b"')
 
 
@@ -36,7 +35,7 @@ def test_atomic_write_json_ensure_ascii_false_and_mode(tmp_path):
         mode=0o640,
     )
     assert p.read_text(encoding="utf-8") == '{\n  "msg": "你好"\n}'
-    # Group/other bits are stripped: a requested 0o640 is clamped to owner-only.
+    # Group/other bits stripped: 0o640 clamped to owner-only.
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
 

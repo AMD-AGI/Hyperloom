@@ -64,9 +64,7 @@ from ._kernel_decisions import (
 
 log = logging.getLogger(__name__)
 
-# Recognized trace-analysis routes: the TraceLens ``agent`` (default) / ``deterministic``
-# routes and the independent, TraceLens-free ``bypass`` backend (explicit). An unknown
-# value (e.g. an LLM typo) must not silently mis-route — it falls back to ``agent``.
+# Recognized trace-analysis routes; an unknown value falls back to ``agent``.
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
@@ -78,13 +76,10 @@ KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 def _vram_guarded_server_args(extra_args: str) -> str:
     """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
 
-    v4-parity VRAM barrier: when ``HL_INTEGRATE_VRAM_GUARD`` (or the umbrella)
-    is on and the caller has NOT already pinned ``--gpu-memory-utilization``,
-    append a conservative cap (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a
-    re-baseline server launched on a node with less headroom than the original
-    roofline cannot OOM. Deterministic (no live VRAM probe), additive, and a
-    strict no-op when the flag is off or a util is already specified — so the
-    returned string is byte-identical to the input on the legacy path.
+    When ``HL_INTEGRATE_VRAM_GUARD`` is on and the caller has not already pinned
+    ``--gpu-memory-utilization``, append a conservative cap
+    (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a re-baseline server cannot
+    OOM. A strict no-op when the flag is off or a util is already specified.
 
     Args:
         extra_args: The resolved ``extra_server_args`` string for the server.
@@ -94,11 +89,7 @@ def _vram_guarded_server_args(extra_args: str) -> str:
     """
     if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
         return extra_args
-    # ``--gpu-memory-utilization`` is a vLLM-only flag; sglang REJECTS it
-    # ("unrecognized arguments") and the server exits immediately, failing the
-    # integrate re-baseline for EVERY sglang workload. sglang caps memory via
-    # ``--mem-fraction-static`` (set by its launcher), so it needs no guard here.
-    # Apply the cap only for vLLM; sglang/unknown framework -> strict no-op.
+    # ``--gpu-memory-utilization`` is vLLM-only; apply the cap only for vLLM.
     framework = (os.environ.get("FRAMEWORK") or "").strip().lower()
     if framework != "vllm":
         return extra_args
@@ -116,10 +107,9 @@ def _vram_guarded_server_args(extra_args: str) -> str:
 def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> bool | None:
     """Best-effort confirm the patched source was actually imported/compiled.
 
-    v4-parity import-grep: greps the re-baseline server log for evidence the
-    patched module's basename was imported/loaded/compiled by the served
-    process, so a measured E2E delta is attributed to code the workload really
-    ran (not a phantom win on an un-imported patch). Returns a *tri-state*:
+    Greps the re-baseline server log for evidence the patched module's basename
+    was imported/loaded/compiled, so a measured E2E delta is attributed to code
+    the workload really ran. Returns a tri-state:
 
     * ``True``  — the module basename appears in import/load/compile context.
     * ``False`` — the server log is readable and the basename never appears
@@ -157,26 +147,23 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     for line in text.splitlines():
         if stem in line and re.search(r"import|load|compil|build|\.py", line, re.IGNORECASE):
             return True
-    # Basename present but not in an obvious import context — treat as unknown
-    # rather than penalize (avoids false negatives on terse logs).
+    # Present but not in an obvious import context.
     return None
 
 
-# kernel_optimization attempt backends whose stdout log we mine for token
-# usage. ``forge`` prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
-# its claude-agent-sdk ResultMessages.
+# Backends whose stdout log we mine for token usage.
 _TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
 
-# Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
+# Kernel-agent shell tools root; read lazily so late env injection wins.
 _KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
 
 
 def _kernel_agent_root_from_env() -> Path | None:
     """Read the kernel-agent install root from the environment at call time.
 
-    Resolved lazily on every call (rather than snapshotted at import) so a
-    late ``os.environ`` injection by the CLI preflight still wins.
+    Resolved lazily on every call so a late ``os.environ`` injection by the CLI
+    preflight still wins.
 
     Returns:
         Path | None: The kernel-agent root as a :class:`~pathlib.Path`, or
@@ -205,12 +192,14 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-# Shape sources trusted for kernel-opt dispatch (``torch_trace`` from TraceLens; ``tuning_csv`` reserved for a profiled sweep).
+# Shape sources trusted for kernel-opt dispatch.
 _ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv"})
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
-    """Framework install roots for patchability checks (from :func:`framework_paths.resolve_patch_target_roots`; emits a lower-case variant per root for case-insensitive matching).
+    """Framework install roots for patchability checks.
+
+    Emits a lower-case variant per root for case-insensitive matching.
 
     Returns:
         The de-duplicated framework install roots (each with a lower-case
@@ -226,7 +215,7 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if variant and variant not in seen:
                 seen.add(variant)
                 out.append(variant)
-    # Add FlyDSL kernel checkout roots for moe_flydsl_* candidates.
+    # FlyDSL kernel checkout roots for moe_flydsl_* candidates.
     for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
         val = (os.environ.get(env_key, "") or "").strip()
         if val:
@@ -242,19 +231,13 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Explicit per-kernel fallback ladder used only for the legacy native path;
-# forge is the only per-kernel backend. The default phase-level backend is the
-# whole-pipeline GEAK delegate (``geak``), so this ladder is not used unless
-# selected explicitly.
+# Per-kernel fallback ladder (forge only); the phase-level default is the GEAK delegate.
 _DEFAULT_KERNEL_BACKEND_ORDER = ("forge",)
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
-# Minimum wall-clock a fallback backend needs to do anything useful (and still
-# salvage partial artifacts). When less than this remains in the per-kernel
-# ladder budget, the ladder stops instead of launching a backend it cannot
-# finish. Mirrors the +180s wrapper grace.
+# Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
@@ -271,7 +254,7 @@ def _visible_gpu_count() -> int | None:
         driver init fails.
     """
     try:
-        import torch  # local import: torch driver init can be expensive
+        import torch  # local import: torch driver init is expensive
 
         return int(torch.cuda.device_count() or 0)
     except Exception:  # noqa: BLE001 -- torch missing / driver init failure
@@ -298,24 +281,13 @@ def _per_task_gpus() -> int:
 def _default_kernel_batch_parallel() -> int:
     """Adaptive batch fanout: ``min(cap, visible_gpus // per_task_gpus)``.
 
-    The legacy hard-coded 8 assumed a full MI300X / MI355X node. On
-    smaller pods it lets the asyncio semaphore admit more concurrent
-    sibling attempts than Ray can schedule, so they stack against the
-    GPU lock and one fast kernel waits behind a stuck GEAK for many
-    minutes. We use ``torch.cuda.device_count()`` for the visible-GPU
-    count (works for both ROCm and CUDA backends) and
-    ``$KERNEL_AGENT_NUM_GPUS`` for the per-attempt GPU reservation
-    (set by the kernel-agent submitter). Falls back to the legacy
-    ``_DEFAULT_KERNEL_BATCH_PARALLEL`` when torch can't tell us
-    (CI / mocks / pre-driver init). Operators can still pin via
-    ``KERNEL_OPT_MAX_PARALLEL``.
+    Uses ``torch.cuda.device_count()`` for the visible-GPU count and
+    ``$KERNEL_AGENT_NUM_GPUS`` for the per-attempt reservation, falling back to
+    ``_DEFAULT_KERNEL_BATCH_PARALLEL`` when torch can't tell us. Operators can
+    pin via ``KERNEL_OPT_MAX_PARALLEL``.
 
-    Cached: visible GPU count and ``$KERNEL_AGENT_NUM_GPUS`` are fixed
-    at process start; ``torch.cuda.device_count()`` is a driver query
-    we don't want to re-issue on every batch dispatch. Tests that
-    monkeypatch torch / env must call ``cache_clear()``; the
-    ``src/hyperloom/inference_optimizer/tests/conftest.py`` autouse fixture handles
-    this for every test.
+    Cached (driver query); tests that monkeypatch torch / env must call
+    ``cache_clear()`` (the conftest autouse fixture handles this).
 
     Returns:
         int: The adaptive maximum number of concurrent sibling kernel
@@ -413,9 +385,8 @@ def _resolve_tracelens_root() -> Path:
 def _tracelens_root_error(root: Path) -> str | None:
     """Validate that the resolved TraceLens root is a usable git checkout.
 
-    A directory that exists but lacks ``.git`` (e.g. an installer's half-done
-    clone) is NOT usable and must be reported so a non-default override fails
-    fast and a default path is self-healed (#722/PR#789).
+    A directory that exists but lacks ``.git`` is not usable and must be reported
+    so a non-default override fails fast and a default path is self-healed.
 
     Returns:
         str | None: A human-readable error when the checkout is missing or
@@ -437,18 +408,11 @@ def _tracelens_root_error(root: Path) -> str | None:
 
 
 def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
-    """Rebuild the pod-local TraceLens checkout if it vanished mid-run (#722).
+    """Rebuild the pod-local TraceLens checkout if it vanished mid-run.
 
     Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override pointing elsewhere is operator-maintained and
-    must fail fast when missing (mirrors
-    src/hyperloom/agents/kernel/scripts/install.sh).
-    Best-effort: any failure is swallowed so the caller's normal validation
-    produces the user-facing error.
-
-    NB: the default path is itself persisted as ``TRACELENS_ROOT`` in
-    kernel-agent.env.sh, so "env is set" is NOT a reliable override signal —
-    compare the resolved path against the installer default instead.
+    ``TRACELENS_ROOT`` override must fail fast when missing. Best-effort: any
+    failure is swallowed so the caller's validation produces the error.
     """
     from hyperloom.inference_optimizer.session import paths
 
@@ -458,7 +422,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     except OSError:
         is_default = False
     if not is_default:
-        return  # explicit operator override at a non-default path: never auto-clone
+        return  # explicit non-default override: never auto-clone
     try:
         tool = _kernel_agent_tool_path("tracelens_analysis.py")
         tools_dir = str(tool.parent)
@@ -653,7 +617,7 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
-    # Route through the per-framework env-name source of truth so atom reads ``EXTRA_ATOM_ARGS`` instead of dropping flags via a sglang/vllm default.
+    # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
     from ..actions.executors._grid_runner import server_args_env_name
 
     server_key = server_args_env_name(framework)
@@ -888,7 +852,7 @@ def _validate_kernel_shape_and_paths(
     *,
     session_dir: Path,
 ) -> HandlerResult | None:
-    """Reject a kernel-opt dispatch with no trace-anchored shape or a missing source/workspace path (would burn budget with no anchor; guides back to ``trace_analyze``).
+    """Reject a kernel-opt dispatch with no trace-anchored shape or a missing source/workspace path.
 
     Args:
         payload: Kernel-opt dispatch payload to validate.
@@ -898,7 +862,7 @@ def _validate_kernel_shape_and_paths(
         A failure ``HandlerResult`` describing the rejection, or ``None`` when
         the dispatch is valid.
     """
-    # ``dry_run`` exercises the plumbing without a backend, so no GPU budget and fake fixture paths need not exist.
+    # ``dry_run`` exercises the plumbing without a backend.
     if bool(payload.get("dry_run")):
         return None
     candidate = _load_candidate_metadata(payload)
@@ -1038,8 +1002,7 @@ def _maybe_apply_kernel_patch(
     kid = str(kernel_id or payload.get("kernel_id") or "")
     backup_root = payload.get("backup_root") or (patches_dir(session_dir, kid or "anon") / "backup")
     tool = _load_apply_tool()
-    # Snapshot mode (content-addressed deploy): when a snapshot dir of byte-exact
-    # final files is present, the patch lands atomically across all its files.
+    # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
     return tool.apply_kernel_patch(
@@ -1066,10 +1029,9 @@ def materialize_unified_patch_snapshot(
 ) -> str:
     """Materialize final file contents for apply_kernel_patch snapshot mode.
 
-    ``forge-fusion`` exports a normal unified diff. ``apply_kernel_patch`` can
-    apply such diffs only in snapshot mode, where the diff is a manifest and the
-    final bytes live under ``snapshot_dir``. This helper applies the diff to a
-    minimal throwaway mirror of the touched files and returns that mirror path.
+    Applies a ``forge-fusion`` unified diff to a minimal throwaway mirror of the
+    touched files and returns that mirror path (snapshot mode treats the diff as
+    a manifest with final bytes under ``snapshot_dir``).
     """
     patch = Path(patch_path).resolve()
     root = Path(repo_root).resolve()
@@ -1240,8 +1202,8 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     last_kernel = state.last_kernel_opt or {}
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
-        # Snapshot deploy: prefer the original patch (manifest) + its byte-exact
-        # snapshot dir so the WHOLE multi-file patch lands atomically.
+        # Snapshot deploy: prefer the original patch + snapshot dir so the whole
+        # multi-file patch lands atomically.
         _fill_integrate_snapshot_from_bundle(resolved, last_kernel.get("best_artifact_bundle"))
         if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
             resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
@@ -1260,7 +1222,8 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
 
-    # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
+    # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
+    # ledger for KEEPs other than the strongest pending one.
     if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
         _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
@@ -1320,16 +1283,11 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
     def _run() -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
 
-        Copies the current environment, injects the Ray GCS address when running
-        in multi-node mode, and prepends the venv ``bin`` directory to ``PATH``
-        before invoking the command with output capture and the timeout.
-
-        Launches the child in its own POSIX session and, on timeout, reaps the
-        WHOLE process group so a hung grandchild (the claude CLI / curl
-        holding a stalled LLM streaming socket) dies with the wrapper instead of
-        being orphaned — the Sandbox-hang RCA left such grandchildren running,
-        keeping the pod alive and the GPU idle. Mirrors ``subprocess.run``'s
-        contract: captures stdout/stderr and re-raises ``TimeoutExpired``.
+        Copies the environment, injects the Ray GCS address in multi-node mode,
+        and prepends the venv ``bin`` to ``PATH``. Launches the child in its own
+        POSIX session and, on timeout, reaps the whole process group so a hung
+        grandchild dies with the wrapper. Mirrors ``subprocess.run``: captures
+        stdout/stderr and re-raises ``TimeoutExpired``.
 
         Returns:
             tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -1346,9 +1304,8 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         from ..actions.executors._subprocess_kill import run_with_session_kill
 
         if is_multi_node():
-            # Dynamo backend: route GEAK GPU work to a pod over SSH (no Ray).
-            # dynamo_ssh_env_from_state() returns {} for RayJob/single-node, so
-            # the RAY_ADDRESS path below is unchanged for those.
+            # Dynamo backend: route GEAK GPU work to a pod over SSH (no Ray);
+            # returns {} for RayJob/single-node.
             ssh_env = dynamo_ssh_env_from_state()
             if ssh_env:
                 env.update(ssh_env)
@@ -1356,10 +1313,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # run_with_session_kill launches the child in its own POSIX session and
-        # reaps the whole descendant tree on every exit path (incl. on timeout,
-        # where it re-raises TimeoutExpired) — the same contract this wrapper
-        # used to hand-roll with Popen + kill_my_spawned_server.
+        # run_with_session_kill reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(cmd, env=env, timeout=timeout_sec, text=True)
         return cp.returncode, cp.stdout or "", cp.stderr or ""
 
@@ -1543,7 +1497,6 @@ def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except (OSError, json.JSONDecodeError, ValueError):
-        # Config file missing/corrupt; return the empty dict below.
         pass
     return {}
 
@@ -1588,7 +1541,6 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """
     from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
-    # Explicit override from payload
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
@@ -1602,8 +1554,6 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         server_args = ""
         if isinstance(current_best, dict):
             server_args = str(current_best.get("extra_server_args") or "")
-    # Check all env sources for per-token signal: current_best.extra_envs,
-    # reference_envs, and baseline yaml envs.
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = (
@@ -1615,11 +1565,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     if quantization_arg == "fp8":
         precision = "fp8"
-        # Hand forge the fp8 GEMM path the model actually runs instead of letting
-        # it fall back to its internal blockscale default. Explicit per-token env
-        # wins; otherwise derive from the checkpoint's static format (config.json
-        # quantization_config). Unreadable config -> "auto" so forge sniffs the
-        # kernel_signature_log (keeps the legacy no-config behaviour unchanged).
+        # Hand forge the fp8 GEMM path the model runs: explicit per-token env wins,
+        # else the checkpoint's static format, else "auto".
         if per_token_signal:
             quant_type = "per_token"
         else:
@@ -1632,7 +1579,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if quantization_arg in ("fp4", "mxfp4"):
         return quantization_arg, "fp4"
 
-    # Fall back to session precision
+    # Fall back to session precision.
     precision = _normalize_precision(state.precision)
     if not precision:
         precision = "bf16"
@@ -1646,7 +1593,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
     Priority: current_best workspace (matches the resolved server args)
     → baseline workspace → most recent server.log under runs/.
     """
-    # 1. current_best workspace — matches the runtime args we resolved precision from.
+    # current_best workspace — matches the resolved runtime args.
     current_best = getattr(state, "current_best", None) or {}
     if isinstance(current_best, dict):
         cb_workspace = str(current_best.get("workspace") or "").strip()
@@ -1655,7 +1602,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             if log_path.is_file():
                 return str(log_path)
 
-    # 2. Baseline workspace — the initial server run.
+    # Baseline workspace — the initial server run.
     last_baseline = getattr(state, "last_baseline", None) or {}
     if isinstance(last_baseline, dict):
         bl_workspace = last_baseline.get("workspace") or ""
@@ -1664,7 +1611,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             if log_path.is_file():
                 return str(log_path)
 
-    # 3. Fallback: check known run subdirs (bounded, not recursive glob).
+    # Fallback: check known run subdirs (bounded, not recursive glob).
     runs_dir = session_dir / "runs"
     if runs_dir.is_dir():
         best: Path | None = None
@@ -1702,7 +1649,7 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         sample = data[0]
         if not isinstance(sample, dict):
             return False
-        # Must have M/N/K keys (case-insensitive check)
+        # Must have M/N/K keys (case-insensitive).
         keys = {k.upper() for k in sample}
         return {"M", "N", "K"}.issubset(keys)
     except (json.JSONDecodeError, OSError, TypeError):
@@ -1722,7 +1669,7 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
 
     candidates: list[str] = []
 
-    # Prefer explicit artifact fields when newer TraceLens versions expose them.
+    # Prefer explicit artifact fields when TraceLens exposes them.
     for key in ("shapes_json", "shapes_path"):
         raw = str(last_trace.get(key) or "").strip()
         if raw:
@@ -1749,9 +1696,8 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
     return ""
 
 
-# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV that
-# the specialist phase already records under each worktree. fp8 "auto" resolves
-# to blockscale to match forge's own _resolve_quant_type default.
+# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV the
+# specialist phase records; fp8 "auto" resolves to blockscale (forge default).
 _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
     "auto": "a8w8_blockscale_untuned_gemm.csv",
     "blockscale": "a8w8_blockscale_untuned_gemm.csv",
@@ -1881,16 +1827,12 @@ def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
     """Return True when an untuned CSV plausibly belongs to ``model_path``.
 
     A real per-model dense untuned CSV always contains GEMMs whose ``K`` equals
-    the model ``hidden_size`` (QKV / gate-up / o-proj are column-parallel, so
-    their contraction dim stays ``hidden_size`` regardless of TP). When the
-    model's ``hidden_size`` is known and absent from the CSV's ``K`` column, the
-    CSV was recorded for a different model (e.g. AITER's checked-in DeepSeek
-    default with ``K=7168``) and must be rejected so forge derives shapes from
-    the model config instead of "tuning" mismatched shapes to a 1.0x no-op.
+    the model ``hidden_size``. When ``hidden_size`` is known and absent from the
+    CSV's ``K`` column, the CSV was recorded for a different model and is
+    rejected so forge derives shapes from the model config instead.
 
     Returns True when validation is not possible (``hidden_size`` unreadable or
-    the CSV exposes no ``K`` column) to preserve existing behaviour and avoid
-    false rejections.
+    the CSV exposes no ``K`` column) to avoid false rejections.
     """
     hidden = _model_hidden_size(model_path)
     if hidden is None:
@@ -1906,20 +1848,14 @@ def _resolve_forge_untuned_csv(
 ) -> str:
     """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
 
-    Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
-    shapes are supplied. Hyperloom's specialist runs already write these shapes
-    to ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv`` in
-    forge's ``M,N,K`` format. This resolver picks the newest non-empty CSV
-    matching the resolved quant type and wires it into the forge tuners.
+    Dense fp8/fp4 forge tuners skip themselves unless real GEMM shapes are
+    supplied. Specialist runs write these to
+    ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv``; this
+    resolver picks the newest non-empty CSV matching the resolved quant type.
 
     When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
-    the model (the AITER repo default carries fixed DeepSeek shapes, ``K=7168``,
-    regardless of the model under test) are rejected. Returning "" then lets
-    forge derive correct per-model shapes from ``config.json`` rather than
-    tuning mismatched shapes that always yield ``improved=0/0, 1.0x``.
-
-    Returns the CSV path, or "" when none is available (bf16 derives shapes from
-    config.json and needs no CSV).
+    the model are rejected so forge derives per-model shapes from ``config.json``.
+    Returns the CSV path, or "" when none is available.
     """
     precision = (precision or "").strip().lower()
     quant_type = (quant_type or "").strip().lower()
@@ -1960,10 +1896,9 @@ def _resolve_forge_untuned_csv(
 def _path_is_existing_file(value: str) -> bool:
     """Safe ``Path.is_file()`` that never raises on an over-long pathname.
 
-    A caller can hand us inline JSON content instead of a path. ``Path(...)``
-    accepts any string, but ``is_file()`` raises ``OSError(ENAMETOOLONG)`` when
-    a path component exceeds the filesystem limit, which previously crashed the
-    forge dense tuner instantly. Treat that (and any OSError) as "not a file".
+    A caller may hand us inline JSON content instead of a path; ``is_file()``
+    raises ``OSError(ENAMETOOLONG)`` on such input. Treat any OSError as
+    "not a file".
     """
     try:
         return Path(value).is_file()
@@ -1974,10 +1909,8 @@ def _path_is_existing_file(value: str) -> bool:
 def _normalize_tokens(value: Any) -> str:
     """Return a clean comma-separated token string for forge's ``--tokens``.
 
-    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``. A caller
-    that passes a list (or its string form ``"[4, 8, 64]"``) makes forge choke
-    with ``Invalid --tokens value: invalid literal for int(): '[64]'``. Accept
-    lists and bracketed strings; emit a bare comma-separated list.
+    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``, so accept
+    lists and bracketed strings and emit a bare comma-separated list.
     """
     if value in (None, ""):
         return ""
@@ -2003,10 +1936,8 @@ def _normalize_tokens(value: Any) -> str:
 def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
     """Return a usable shapes-JSON *file path*, materializing inline content.
 
-    The orchestration layer sometimes passes the GEMM shapes as inline JSON
-    (a list/dict, or its string form) in ``shapes_json`` instead of a file
-    path. forge treats ``shapes_json`` strictly as a path and crashes with
-    ``OSError(ENAMETOOLONG)`` on the long pseudo-path. Normalize here:
+    Callers sometimes pass GEMM shapes as inline JSON in ``shapes_json`` instead
+    of a file path; forge treats it strictly as a path. Normalize here:
 
     - existing file path -> returned unchanged
     - list/dict, or a string that parses as JSON -> written to
@@ -2023,7 +1954,6 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         text = str(value).strip()
         if not text:
             return ""
-        # A real, existing path wins.
         if _path_is_existing_file(text):
             return text
         # Inline JSON content (possibly Python-repr with single quotes).
@@ -2038,7 +1968,7 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
                 except (ValueError, SyntaxError):
                     return ""
         else:
-            # Non-JSON string that is not an existing file: unusable.
+            # Non-JSON string that is not an existing file.
             return ""
 
     try:
@@ -2077,7 +2007,7 @@ async def _run_forge_gemm_tuning(
             "backend": "forge",
         }
 
-    # Resolve precision from actual runtime (not just session-level state)
+    # Resolve precision from actual runtime, not just session-level state.
     precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
 
@@ -2096,30 +2026,27 @@ async def _run_forge_gemm_tuning(
         payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
     ).strip().lower()
     tokens = _normalize_tokens(payload.get("tokens"))
-    # Default mp = all visible GPUs (server is stopped during tuning).
+    # Default mp = all visible GPUs.
     from ..policy.gate import detect_gpu_count
 
     detected_gpus = detect_gpu_count() or tp
     mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
 
-    # Resolve server log for 1-stage ASM detection
+    # Resolve server log for 1-stage ASM detection.
     kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
     if not kernel_sig_log:
         kernel_sig_log = _resolve_forge_server_log(state, session_dir)
 
-    # Resolve TraceLens shapes if available. Normalize first: callers sometimes
-    # pass inline JSON content instead of a path, which makes forge crash with
-    # OSError(ENAMETOOLONG); materialize it to a real file (or drop it).
+    # Resolve TraceLens shapes if available (normalize inline JSON to a real file).
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
     if not shapes_json:
         shapes_json = _resolve_forge_shapes(state, session_dir)
 
-    # Dense fp8/fp4 tuners need real GEMM shapes. When TraceLens exposes no
-    # shapes JSON, fall back to the aiter untuned-GEMM CSVs the specialist phase
-    # already recorded; without this the dense tuner skips itself.
+    # Dense fp8/fp4 tuners need real GEMM shapes; without a shapes JSON fall back
+    # to the aiter untuned-GEMM CSVs the specialist phase recorded.
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
     if untuned_csv and not _path_is_existing_file(untuned_csv):
-        # Guard against inline content / stale paths handed in as untuned_csv.
+        # Guard against inline content / stale paths.
         untuned_csv = ""
     if not untuned_csv and not shapes_json:
         untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
@@ -2137,8 +2064,7 @@ async def _run_forge_gemm_tuning(
         "mp": mp,
         "output_dir": str(workspace),
         "timeout": timeout,
-        # Global timeout ensures the whole session (all tuners combined) stays
-        # within the budget. Forge skips lower-priority tuners if time runs out.
+        # Bounds the whole session across all tuners.
         "global_timeout": timeout,
         "skip_gpu_check": True,
         "tokens": tokens,
@@ -2147,8 +2073,7 @@ async def _run_forge_gemm_tuning(
         "tunableop_input": str(payload.get("tunableop_input") or ""),
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
-        # Thorough mode: exhaustive search when session budget allows (>= 24h)
-        # and enough GPUs are available (>= 4) to parallelize the sweep.
+        # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
     input_json = workspace / "forge_gemm_tuning_input.json"
@@ -2166,8 +2091,7 @@ async def _run_forge_gemm_tuning(
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        # Reaped by the process-group kill in _run_subprocess; shape a failed
-        # result instead of letting TimeoutExpired stall the coordinator tick.
+        # Reaped by the process-group kill in _run_subprocess; shape a failed result.
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
@@ -2176,20 +2100,15 @@ async def _run_forge_gemm_tuning(
         }
 
     result.setdefault("backend", "forge")
-    # Tag the tuning engine so the breakdown's ``collect_gemm_tuning`` attributes
-    # this run to forge instead of falling back to its ``geak`` default (the
-    # GEAK path sets ``engine`` too). Without this, forge runs recorded into
-    # ``gemm_tuning_attempts`` are mis-counted as the GEAK source.
+    # Tag the tuning engine so the breakdown attributes this run to forge.
     result.setdefault("engine", "forge")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
     result.setdefault("model_path", model_path)
 
-    # Surface why forge skipped: forge records per-tuner skip reasons in its
-    # on-disk result.json, but the stdout sentinel can omit them, leaving the
-    # session state with an unexplained "skipped". Merge from disk and derive a
-    # concise top-level skip_reason so state + breakdown show the cause.
+    # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
+    # result.json and derive a top-level skip_reason.
     if not result.get("tuners_skipped"):
         disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
         if disk_skipped:
@@ -2199,14 +2118,13 @@ async def _run_forge_gemm_tuning(
         if reason:
             result["skip_reason"] = reason
 
-    # Bridge forge schema → coordinator-consumable schema:
-    # forge returns micro_decision="candidate" with recommended_env;
-    # translate to decision="KEEP" + extra_envs for the promote path.
+    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
+    # recommended_env becomes decision="KEEP" + extra_envs.
     micro = str(result.get("micro_decision") or "").strip().lower()
     if micro == "candidate" and result.get("recommended_env"):
         result.setdefault("decision", "KEEP")
         result.setdefault("extra_envs", dict(result["recommended_env"]))
-        # Derive best_speedup from tuners_run if not already set.
+        # Derive best_speedup from tuners_run when absent.
         if "best_speedup" not in result:
             best = 1.0
             for t in result.get("tuners_run") or []:
@@ -2216,7 +2134,7 @@ async def _run_forge_gemm_tuning(
                         best = sp
             if best > 1.0:
                 result["best_speedup"] = best
-        # Flag that E2E validation is still needed (micro-only).
+        # Micro-only result: E2E validation still needed.
         result.setdefault("requires_e2e_validation", True)
     elif micro in ("no_improvement", "skipped"):
         result.setdefault("decision", "REVERT")
@@ -2331,8 +2249,6 @@ async def _run_geak_gemm_tuning(
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_timeout)
         result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        # Reaped by the process-group kill in _run_subprocess; shape a failed
-        # result instead of letting TimeoutExpired stall the coordinator tick.
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
@@ -2375,14 +2291,11 @@ async def run_gemm_tuning_handler(
         result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
     else:
         result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
-    # Full-trace: record this run as a gemm_tuning audit row, backfilled into the
-    # trace as a ``gemm_tuning:<engine>`` span so the deterministic tuner is
-    # attributed to its own source. Best-effort; never breaks the run.
     _trace_gemm_tuning_run(result, session_dir=session_dir)
     return result
 
 
-# ──────────────────────── forge-fusion (autonomous kernel fusion) ────────────
+# forge-fusion (autonomous kernel fusion)
 _FORGE_FUSION_RESULT_RE = re.compile(
     r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORGE_FUSION_RESULT_END", re.DOTALL)
 
@@ -2411,9 +2324,9 @@ def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
 def _resolve_fusion_decode_trace(state, payload: dict) -> str:
     """Reuse the PRELUDE/roofline decode trace for fusion discovery.
 
-    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto
-    trace. Hyperloom already captured one in PRELUDE (``state.last_profile_trace``),
-    so reuse it instead of re-profiling. Explicit ``payload['trace_path']`` wins.
+    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
+    already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
+    re-profiling. Explicit ``payload['trace_path']`` wins.
     """
     def _trace_file(path_str: str) -> str:
         path = Path(path_str)
@@ -2470,12 +2383,10 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
-    Mirrors ``_run_forge_gemm_tuning``: builds an input-json, shells out to the
-    ``forge_fusion.py`` wrapper (which drives ``forge-fusion run``: discover ->
-    author(few-shot) -> kernel-validate -> serving-smoke -> keep), and parses the
-    normalized result sentinel. A KEPT fusion carries a source patch + env flags
-    and ``requires_e2e_validation`` so the integrate/re-baseline gate confirms the
-    end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
+    Builds an input-json, shells out to the ``forge_fusion.py`` wrapper, and parses
+    the result sentinel. A KEPT fusion carries a source patch + env flags and
+    ``requires_e2e_validation`` so the integrate gate confirms the end-to-end gain.
+    Reuses the PRELUDE decode trace (no re-profiling).
     """
     from ..state.shared_state import SharedState
 
@@ -2575,10 +2486,8 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Run autonomous kernel fusion via forge-fusion (serving-validated).
 
-    Registered as the ``run_fusion`` kernel request. Sits between GEMM tuning and
-    generic kernel-opt in the KERNEL phase: authors serving-safe fused kernels and
-    returns a source patch + env flags for the integrate gate to adopt on an
-    end-to-end win.
+    Registered as the ``run_fusion`` kernel request. Authors serving-safe fused
+    kernels and returns a source patch + env flags for the integrate gate.
     """
     return await _run_forge_fusion(payload, session_dir=session_dir)
 
@@ -2586,12 +2495,9 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
-    Mirrors :func:`_trace_kernel_attempt_steps`: distils the run result into a
-    compact source-attribution row (engine, decision, speedup, per-tuner
-    summary) and appends it to ``reports/trace/gemm_tuning.jsonl``. The Langfuse
-    emitter backfills it as a ``gemm_tuning:<engine>`` span under the
-    ``gemm_tuning`` agent. Best-effort end to end: any read/serialise/write
-    failure degrades to a debug log and is swallowed.
+    Distils the run result into a compact source-attribution row (engine,
+    decision, speedup, per-tuner summary) appended to
+    ``reports/trace/gemm_tuning.jsonl``. Best-effort; any failure is swallowed.
 
     Args:
         result: The GEMM-tuning handler result envelope.
@@ -2664,10 +2570,7 @@ async def trace_analyze_handler(
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
-    # Backfill workload context from SharedState so the tool gets the right
-    # framework/platform/model/analysis_mode when Orchestration omits them.
-    # Resolved up-front because the framework decides the default analysis route
-    # (bypass needs no TraceLens root; that resolution is gated + done below).
+    # Backfill workload context from SharedState when Orchestration omits it.
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -2678,19 +2581,13 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # Analysis route: the DEFAULT for all frameworks (text-gen + xDiT) is the
-    # TraceLens ``agent`` route (the shipped/production default). The independent,
-    # TraceLens-free ``bypass`` backend stays available as an explicit route
-    # (``bypass`` via payload ``analysis_route`` or ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``)
-    # — that is how development/validation exercises it. ``deterministic`` is the
-    # no-LLM TraceLens variant. An explicit route always wins; the value is coerced
-    # to str first so a non-string payload value cannot raise AttributeError.
+    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
+    # and ``deterministic`` (no-LLM TraceLens) are explicit routes via payload
+    # ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
     explicit_route = (
         str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
     )
-    # Reject an unknown route rather than silently mis-routing: an LLM typo like
-    # ``"foobar"`` would otherwise be truthy and quietly change routing. Warn +
-    # fall back to the default ``agent`` route instead.
+    # Reject an unknown route: warn and fall back to the default ``agent`` route.
     route_health_warnings: list[dict[str, Any]] = []
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
         log.warning(
@@ -2710,41 +2607,33 @@ async def trace_analyze_handler(
         explicit_route = ""
     analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
-    # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
-    # vanished mid-run (#722), self-heal it before the fail-fast validation.
-    # Skipped entirely on the bypass route, which never touches TraceLens.
+    # Resolve TraceLens root independently of inherited env, self-healing a
+    # vanished checkout before validation. Skipped on bypass.
     tracelens_root: Path | None = None
     if not is_bypass:
         tracelens_root = _resolve_tracelens_root()
-        # Self-heal when the checkout is missing OR incomplete (exists but no
-        # .git, e.g. a concurrent install's half-done clone). Gating only on
-        # is_dir() would let an incomplete default checkout bypass self-heal
-        # (#722/PR#789).
+        # Self-heal when the checkout is missing or incomplete (no .git).
         if not (tracelens_root / ".git").exists():
             _maybe_selfheal_tracelens_root(tracelens_root, log=log)
         tl_err = _tracelens_root_error(tracelens_root)
         if tl_err:
             return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
 
-    # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
+    # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
     workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
-    # Scriptable image frameworks (xDiT diffusion) are server-less and have no
-    # LLM decode steady-state window, so the TraceLens steady-state splitter
-    # cannot produce chunks and hard-fails (trace_split_no_steady_state). Feed
-    # the raw trace to TraceLens directly and drop the (LLM-only) --split-* hints.
+    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
+    # raw trace and drop the --split-* hints.
     from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
     scriptable = is_scriptable(framework)
 
-    # Load materialized baseline workload metadata once: feeds splitter CLI flags (--split-*) so the steady-state window is correct, and enriches hot_kernels downstream.
+    # Load materialized baseline workload metadata once.
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
     workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
 
-    # Bypass runs the independent TraceLens-free backend; both tools share the
-    # same CLI surface below except ``--tracelens-root`` (TraceLens-only).
+    # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
         "python3",
@@ -2757,14 +2646,9 @@ async def trace_analyze_handler(
         workspace_path,
     ]
     if not is_bypass:
-        # Pass the resolved root explicitly so the tool never depends on the
-        # subprocess inheriting TRACELENS_ROOT from the coordinator env.
+        # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
-    # Kernel-candidate POOL size (issue #667): only forward --top-k when the
-    # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
-    # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
-    # candidate-build cap and the dispatch-side budget (source-fn grouping + op
-    # dedup + attempt cap) stay decoupled and share a single source of truth.
+    # Only forward --top-k on an explicit override; else the tool applies its own default.
     if payload.get("top_k") is not None:
         cmd += ["--top-k", str(payload.get("top_k"))]
     if model_name:
@@ -2777,28 +2661,20 @@ async def trace_analyze_handler(
         cmd += ["--analysis-mode", str(analysis_mode)]
 
     if scriptable:
-        # --skip-split is a TraceLens-only splitter control; the bypass backend
-        # has its own steady-state windowing (ProfilerStep anchoring) and does not
-        # define this flag, so route-converge it (sending it to bypass would crash
-        # argparse -> trace_analyze_failed -> degraded roofline).
+        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
         if not is_bypass:
             cmd += ["--skip-split"]
-        # Forward the denoise-step count to BOTH routes so the diffusion workload
-        # roofline can emit per-denoise-step timings (bypass consumes it too).
-        # Priority: payload override (steps in the profiled window) > baseline
-        # workload metadata (full schedule).
+        # Forward the denoise-step count for per-step roofline timings.
+        # Priority: payload override > baseline workload metadata.
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
                 if int(num_denoise) > 0:
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
-                # Invalid num-denoise value; omit the flag.
                 pass
-        # Forward the local model dir + precision so the diffusion roofline
-        # sidecar can emit an a-priori analytic compute ceiling (approach-a),
-        # which the session breakdown surfaces as roofline_ideal_ms. Best-effort:
-        # the tool falls back to resolving --model-name when --model-path is absent.
+        # Forward model dir + precision so the diffusion roofline sidecar can emit
+        # an analytic compute ceiling (roofline_ideal_ms).
         model_path = (payload.get("model_path") or state.model_path or "").strip()
         if model_path:
             cmd += ["--model-path", str(model_path)]
@@ -2806,7 +2682,8 @@ async def trace_analyze_handler(
         if precision:
             cmd += ["--precision", str(precision)]
     else:
-        # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
+        # Splitter workload hints. Priority: payload override > baseline metadata
+        # > drop the flag.
         split_conc = payload.get("split_conc") or workload.get("conc")
         if split_conc not in (None, ""):
             cmd += ["--split-conc", str(split_conc).strip()]
@@ -2822,22 +2699,19 @@ async def trace_analyze_handler(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode (mixed/decode_only/prefilldecode) via payload or env.
+    # Forward TraceLens splitter steady-state mode via payload or env.
     steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent) to the
-    # TraceLens tool. ``analysis_route`` was resolved above; the bypass tool
-    # takes no ``--analysis-route`` flag so it is intentionally excluded here.
+    # Forward the analysis route (bypass takes no such flag).
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json; the chart diffs the two snapshots.
+    # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     if roofline_output_name:
         cmd += ["--roofline-output-name", roofline_output_name]
-    # A stale ``--roofline-json`` payload key is silently ignored.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
@@ -2847,9 +2721,6 @@ async def trace_analyze_handler(
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
         result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        # Reaped by the process-group kill in _run_subprocess (an in-process
-        # TraceLens SDK stream that stalled is now also bounded client-side);
-        # shape a failed result instead of stalling the coordinator tick.
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
@@ -2860,7 +2731,7 @@ async def trace_analyze_handler(
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
         result["candidates_path"] = artifacts["kernel_candidates"]
-    # Surface analysis.md path at the handler boundary so the Coordinator forwards it to GEAK without digging through artifact_paths.
+    # Surface analysis.md path at the handler boundary for the Coordinator.
     if isinstance(result, dict):
         report_path = result.get("trace_report_path")
         if not report_path and isinstance(artifacts, dict):
@@ -2871,13 +2742,13 @@ async def trace_analyze_handler(
                 result.get("hot_kernels"),
                 str(report_path),
             )
-        # Surface tracelens/summary.json — the per-run audit sidecar of reusable vs skipped kernels.
+        # Surface the reusable-vs-skipped audit sidecar.
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
         if isinstance(artifacts, dict) and artifacts.get("kernel_roofline"):
             result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
 
-        # A failed TraceLens run is a hard failure, not "empty candidates"; keep status=failed and attach a structured warning.
+        # A failed TraceLens run is a hard failure, not "empty candidates".
         if result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error") or ""):
             failure_warning: dict[str, Any] = {
                 "code": "tracelens_analysis_failed",
@@ -2897,9 +2768,7 @@ async def trace_analyze_handler(
             result["hot_kernels"] = []
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
-        # Guarantee ``trace_health_warnings`` is always a list (empty = nothing wrong).
-        # Prepend any route-validation warning (e.g. an unknown analysis_route that
-        # fell back to bypass) so it is surfaced to record_trace_analyze / the LLM.
+        # Prepend any route-validation warning so it reaches the LLM.
         result["trace_health_warnings"] = route_health_warnings + list(result.get("trace_health_warnings") or [])
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
@@ -2911,19 +2780,13 @@ async def trace_analyze_handler(
                 trace_report_path=str(report_path or ""),
             )
 
-        # Record hot-kernel discovery provenance (best-effort): the discovery
-        # run + its hot-kernel list + tool provenance, so the journey can thread
-        # discovery -> dispatch -> backends -> e2e.
+        # Record hot-kernel discovery provenance (best-effort).
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
-            # Discovery source = the route that actually ran. The tool reports
-            # the authoritative mode (``orchestrator_mode``). The TraceLens
-            # deterministic (no-LLM) route is surfaced as ``bypass`` while the
-            # TraceLens LLM route stays ``tracelens``. The independent bypass
-            # route (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``) is its own
-            # source and does not touch TraceLens, so its ``tool`` is ``bypass``.
+            # Discovery source = the route that ran; deterministic maps to
+            # ``bypass``, the TraceLens LLM route to ``tracelens``.
             _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
             _independent_bypass = _orch_mode == "bypass" or is_bypass
             _is_bypass = _independent_bypass or _orch_mode == "deterministic" or analysis_route == "deterministic"
@@ -2942,9 +2805,6 @@ async def trace_analyze_handler(
                     "trace_report_path": str(result.get("trace_report_path") or ""),
                     "analysis_route": _disc_source,
                 },
-                # tracelens version/commit is read from $TRACELENS_ROOT (its
-                # own checkout), resolved by the recorder's tool registry; we
-                # don't pin it to the kernel-agent root here.
                 duration_sec=_disc_duration_sec,
                 error=(str(result.get("error") or "") or None if str(result.get("status") or "") == "failed" else None),
             )
@@ -2961,10 +2821,8 @@ def _exists_with_retry(
 ) -> bool:
     """Check ``path`` existence, retrying briefly to absorb storage latency.
 
-    On shared/network filesystems (e.g. wekafs) a file that was just written can
-    take a moment to become visible to another client, so a single
-    :meth:`Path.exists` immediately after the write may spuriously report
-    missing. Retry a handful of times with a short pause before giving up.
+    On shared/network filesystems a just-written file can take a moment to become
+    visible, so retry a few times with a short pause before giving up.
 
     Args:
         path: Filesystem path to check.
@@ -3066,13 +2924,13 @@ async def run_optimization_handler(
     if len(candidates) <= 1:
         single_payload = dict(payload)
         if candidates:
-            # Reconcile the (often hallucinated) LLM kernel_id against the real candidate id so the CLI doesn't KeyError.
+            # Reconcile the (possibly hallucinated) LLM kernel_id against the real id.
             single_payload["kernel_id"] = _reconcile_kernel_id(
                 single_payload.get("kernel_id"),
                 candidates,
             )
         else:
-            # No routable hot candidate: canonicalize an aliased id against the full set so the rejection lands on the real k00x, not a hallucinated alias.
+            # No routable candidate: canonicalize an aliased id against the full set.
             canon = _resolve_candidate_id(
                 single_payload.get("kernel_id"),
                 _all_kernel_candidates(payload),
@@ -3080,15 +2938,8 @@ async def run_optimization_handler(
             if canon:
                 single_payload["kernel_id"] = canon
             elif not _names_specific_kernel(single_payload):
-                # Empty eligible queue and the request named no specific target
-                # (e.g. the post-GEMM auto pass dispatches a batch with no id).
-                # All candidates are already tried/rejected, below the size
-                # cutoff, or not reusable. Finish cleanly instead of falling
-                # into the single-kernel path, which would surface
-                # "missing 'kernel_id'" and mis-report an empty work queue as a
-                # GEAK failure. A "skipped" status (no error_class / REVERT
-                # decision) is not counted as a failure by the breakdown
-                # recorder.
+                # Empty eligible queue and no specific target (e.g. the post-GEMM
+                # auto pass): finish cleanly as "skipped", not a failure.
                 return {
                     "status": "skipped",
                     "reason": "no_eligible_kernels",
@@ -3132,7 +2983,6 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
     Returns:
         int: The subprocess timeout in seconds.
     """
-    # +180s grace so kernel_optimization.py can salvage partial artifacts.
     return int(_optimization_budget_minutes(payload) * 60) + 180
 
 
@@ -3185,20 +3035,14 @@ def geak_selected(payload: dict | None = None) -> bool:
 def _kernel_ladder_budget_sec(payload: dict) -> int:
     """Total wall-clock budget for one kernel's whole backend ladder.
 
-    The ladder runs the forge backend as a subprocess with its own timeout.
-    Without a shared ceiling a
-    backend that hangs to its hard timeout followed by a fallback running its
-    full budget could roughly double a kernel's wall clock and overshoot the
-    KERNEL-phase budget cap (which is only re-checked between orchestration
-    turns, never mid-``run_optimization``). This budget bounds the whole ladder
-    so a fallback only runs within the time left and an exhausted budget exits
-    the ladder cleanly.
+    Bounds the whole ladder so a fallback only runs within the time left and an
+    exhausted budget exits cleanly, keeping the ladder from overshooting the
+    KERNEL-phase budget cap.
 
     Priority: payload ``kernel_budget_min`` > env
-    ``KERNEL_OPT_KERNEL_BUDGET_MIN`` > the single-backend wall-clock budget from
-    :func:`_optimization_budget_minutes` (the ladder shares roughly one
-    backend's budget). A +180s grace mirrors the per-subprocess wrapper so the
-    first backend is never capped below its own timeout.
+    ``KERNEL_OPT_KERNEL_BUDGET_MIN`` > the single-backend budget from
+    :func:`_optimization_budget_minutes`. A +180s grace mirrors the per-subprocess
+    wrapper so the first backend is never capped below its own timeout.
 
     Args:
         payload (dict): Request payload carrying optional ``kernel_budget_min``.
@@ -3237,10 +3081,7 @@ def _backend_order(payload: dict) -> list[str]:
             ``{"forge"}``).
     """
     order = _raw_kernel_backend_order(payload)
-    # `forge` (Kernel-Forge autonomous-loop backend) is the only per-kernel
-    # backend. Bare ``geak`` (the whole-pipeline e2e delegate) is intentionally
-    # absent: it is a phase-level delegate (see ``geak_selected``), not a
-    # per-kernel backend.
+    # `forge` is the only per-kernel backend; bare ``geak`` is a phase-level delegate.
     allowed = {"forge"}
     filtered = [backend for backend in order if backend in allowed]
     if filtered:
@@ -3470,9 +3311,7 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     if failure_count < max_failures and is_retryable_infra:
         return max_failures
     # High-impact infra-retry (flag-gated, default off): a high-GPU%-share kernel
-    # that keeps infra-failing ("didn't finish") gets extra attempts to COMPLETE
-    # before retirement, mirroring the retirement-side cap in record_kernel_opt so
-    # dispatch / record / kernel_work_pending agree. Off => unchanged.
+    # that keeps infra-failing gets extra attempts before retirement.
     if is_retryable_infra and _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
         try:
             impact_pct = float(entry.get("last_gpu_pct") or 0.0)
@@ -3530,7 +3369,7 @@ def _batch_kernel_candidates(
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
 
-    # Build the "live" exclusion sets up front for both passes (empty without session_dir).
+    # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
@@ -3540,7 +3379,7 @@ def _batch_kernel_candidates(
     )
 
     max_failures = resolve_kernel_opt_max_failures()
-    # min_gpu_pct must mirror SharedState.untried_hot_reusable_kernels' 3.0 default so the two layers agree and tiny kernels don't eat ladder wall-clock.
+    # min_gpu_pct mirrors SharedState.untried_hot_reusable_kernels' default.
     try:
         min_gpu_pct = float(
             os.environ.get(
@@ -3589,7 +3428,8 @@ def _batch_kernel_candidates(
             return False
         return True
 
-    # Collapse kernels sharing a source function into one dispatch via ``task_groups[]`` (keyed off ``primary_kernel_id``); unparseable kernels fall through to the legacy per-kernel pass.
+    # Collapse kernels sharing a source function into one dispatch via
+    # ``task_groups[]``; ungrouped kernels fall through below.
     task_groups = data.get("task_groups") or []
     if not isinstance(task_groups, list):
         task_groups = []
@@ -3607,7 +3447,8 @@ def _batch_kernel_candidates(
             continue
         # Mark all members so the legacy loop never re-picks them.
         grouped_kernel_ids.update(member_ids)
-        # Only reusable_native members survive; fall back to the next live reusable member when the primary is rejected, else skip the whole group.
+        # Only reusable_native members survive; fall back to the next live one
+        # when the primary is rejected, else skip the group.
         primary = str(group.get("primary_kernel_id") or "")
         primary_cand = kernel_by_id.get(primary)
         primary_live = (
@@ -3629,7 +3470,7 @@ def _batch_kernel_candidates(
                 None,
             )
             if primary_cand is None:
-                # Every reusable member exhausted -> nothing to dispatch this round.
+                # Every reusable member exhausted -> nothing to dispatch.
                 for m in member_ids:
                     skipped.setdefault(m, "group_exhausted")
                 continue
@@ -3643,15 +3484,14 @@ def _batch_kernel_candidates(
             for m in member_ids:
                 skipped.setdefault(m, f"below_min_gpu_pct={min_gpu_pct}")
             continue
-        # Shallow copy + attach group so the subprocess sees ``candidate["task_group"]``.
+        # Shallow copy + attach group so the subprocess sees the task_group.
         item = dict(primary_cand)
         item["task_group"] = group
         selected.append(item)
 
-    # Legacy per-kernel pass for reusable kernels not absorbed into a task_group.
-    # Collect the eligible (live, reusable, source-resolved) ungrouped rows first;
-    # the per-row min_gpu_pct gate / selection is applied below so the optional
-    # op-fanout de-dup can sum sibling GPU% before gating.
+    # Legacy per-kernel pass for ungrouped reusable kernels. Collect eligible rows
+    # first; the min_gpu_pct gate is applied below so op-fanout de-dup can sum
+    # sibling GPU% before gating.
     legacy_eligible: list[tuple[str, dict[str, Any], float]] = []
     for item in kernels:
         if not isinstance(item, dict):
@@ -3677,13 +3517,8 @@ def _batch_kernel_candidates(
         legacy_eligible.append((kernel_id, item, row_pct))
 
     if _honest_flag("HL_KERNEL_OPFANOUT_DEDUP"):
-        # Op-fanout de-dup (flag-gated): one logical kernel (same source_file)
-        # often shows up as many op-instance rows, so each would dispatch
-        # separately and its trace impact would be split across rows. Collapse
-        # same-source rows into a single representative (the highest-GPU% row)
-        # carrying the SUMMED GPU% of the fanned siblings, so the min_gpu_pct
-        # gate and downstream impact ranking see the kernel's true aggregate
-        # share. Off => the per-row loop below is byte-identical to legacy.
+        # Op-fanout de-dup (flag-gated): collapse same-source rows into the
+        # highest-GPU% representative carrying the siblings' summed GPU%.
         by_source: dict[str, list[tuple[str, dict[str, Any], float]]] = {}
         order: list[str] = []
         for kid, item, row_pct in legacy_eligible:
@@ -3792,8 +3627,7 @@ async def _run_backend_ladder(
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= _KERNEL_LADDER_MIN_BACKEND_SEC:
-                # Not enough of the per-kernel budget left to run another
-                # backend usefully; stop instead of overshooting it.
+                # Not enough budget left for another backend.
                 log.info(
                     "kernel %s: per-kernel ladder budget exhausted (%.0fs left); "
                     "skipping remaining backends %s",
@@ -3853,8 +3687,8 @@ async def _run_kernel_backend_sequence(
     kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
     order = _backend_order(base_payload)
 
-    # Bound the backend to one wall-clock budget so a hang cannot overshoot the
-    # KERNEL-phase cap (which is only re-checked between orchestration turns).
+    # Bound the backend to one wall-clock budget so a hang cannot overshoot
+    # the KERNEL-phase cap.
     ladder_deadline = time.monotonic() + _kernel_ladder_budget_sec(base_payload)
 
     best, attempts = await _run_backend_ladder(
@@ -3875,7 +3709,7 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
-    # Preserve source_file on the aggregated best so the streaming callback can group by file without re-reading the candidates artifact.
+    # Preserve source_file so the streaming callback can group by file.
     if not best.get("source_file"):
         cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
         if cand_src:
@@ -3906,19 +3740,14 @@ async def _run_optimization_batch(
         payload.get("max_parallel") or os.environ.get("KERNEL_OPT_MAX_PARALLEL") or _default_kernel_batch_parallel()
     )
     max_parallel = max(1, max_parallel)
-    # Forge edits framework sources in-place. The per-repo lock protects one
-    # forge run, but if multiple kernels are processed concurrently a second
-    # kernel can miss the lock, skip forge, and race another backend against the
-    # first kernel's live-tree edits. Keep the whole kernel batch serial whenever
-    # forge is in the backend ladder.
+    # Forge edits framework sources in-place; concurrent kernels could race the
+    # per-repo lock, so keep the batch serial whenever forge is in the ladder.
     if "forge" in _backend_order(payload):
         max_parallel = 1
-    # parallel_backends is off by default now that the ladder is a single
-    # forge backend; only an explicit override enables it (see
-    # :func:`_should_parallelize_backends`).
+    # parallel_backends is off by default (single forge backend); only an
+    # explicit override enables it.
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
-    # When forced on, keep the legacy GPU-budget halving so pre-Ray backend
-    # setup stays within the real GPU budget.
+    # When forced on, halve the GPU budget so pre-Ray backend setup fits.
     if parallel_backends:
         n_gpus = _visible_gpu_count()
         per_task = _per_task_gpus()
@@ -3953,7 +3782,8 @@ async def _run_optimization_batch(
                     parallel_backends=parallel_backends,
                 )
             except Exception as exc:  # noqa: BLE001
-                # Wrap a sub-task failure as a structured result so gather stays wait-all (a raised exception would unblock mid-batch and collide with running siblings on the GPU).
+                # Wrap a sub-task failure as a structured result so gather stays
+                # wait-all (a raised exception would unblock mid-batch).
                 log.exception(
                     "kernel-opt sub-task crashed for kernel_id=%s; wrapping as failed result so gather wait-all holds",
                     cand_kid or "?",
@@ -3965,14 +3795,16 @@ async def _run_optimization_batch(
                     "error_class": "subtask_exception",
                     "error": repr(exc),
                 }
-        # Re-stamp source_file onto the sub-result so the same-source-file conflict guard can detect two KEEPs on one file (defensive; the sequence already preserves it).
+        # Re-stamp source_file so the same-file conflict guard can detect two
+        # KEEPs on one file (defensive; the sequence already preserves it).
         if isinstance(result, dict) and not result.get("source_file") and cand_src:
             result["source_file"] = cand_src
         if record_partial is not None:
             try:
                 record_partial(result)
             except Exception:  # noqa: BLE001
-                # Callback failure must not abort the batch; the post-gather record path recovers the lost streaming write.
+                # Callback failure must not abort the batch; the post-gather
+                # record path recovers the lost streaming write.
                 log.exception(
                     "record_partial callback failed for kernel_id=%s",
                     (result or {}).get("kernel_id") if isinstance(result, dict) else None,
@@ -4054,7 +3886,7 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    # Pass the session root (same convention as trace_analyze_handler) so artefacts land under ``<session_dir>/kernel-agent/runs/...``.
+    # Pass the session root so artefacts land under ``<session_dir>/kernel-agent/runs/...``.
     workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
@@ -4111,11 +3943,10 @@ async def _run_optimization_single(
         cmd += ["--dry-run"]
     if payload.get("budget_minutes") is not None:
         cmd += ["--budget-minutes", str(payload["budget_minutes"])]
-    # Allow the tool to handle its own backend timeout and salvage partial artifacts.
+    # Let the tool handle its own backend timeout and salvage partial artifacts.
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
     if timeout_override_sec is not None:
-        # The backend ladder caps each subprocess to the time left in the
-        # per-kernel budget so a fallback never overshoots it.
+        # Cap each subprocess to the time left in the per-kernel budget.
         timeout_sec = max(1, min(timeout_sec, int(timeout_override_sec)))
 
     from ..actions.executors._multi_node_env import is_multi_node
@@ -4131,27 +3962,24 @@ async def _run_optimization_single(
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
         result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        # The kernel-agent subprocess overran the hard outer timeout. Shape a
-        # failed result here instead of letting TimeoutExpired propagate to the
-        # batch wrapper — that wrapper produces a backend-less result, so the
-        # failure was silently bucketed as a GEAK invocation even when a
-        # different optimizer (e.g. forge) actually ran.
+        # Shape a failed result here instead of letting TimeoutExpired propagate
+        # to the batch wrapper (which would drop the real backend attribution).
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
             "error_class": "subprocess_timeout",
             "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
         }
-    # Stamp source_file / kernel_id from the payload onto the result so the multi-KEEP integrate queue can group same-file KEEPs (the tool may omit them on timeout/crash).
+    # Stamp source_file / kernel_id from the payload onto the result so the
+    # multi-KEEP integrate queue can group same-file KEEPs (the tool may omit
+    # them on timeout/crash).
     if isinstance(result, dict):
         if not result.get("kernel_id") and payload.get("kernel_id"):
             result["kernel_id"] = str(payload["kernel_id"])
         if not result.get("source_file") and payload.get("source_file"):
             result["source_file"] = str(payload["source_file"])
-        # Attribute a result that carries no per-backend attempt ladder
-        # (pre-dispatch / infra / timeout) to the backend that actually ran, so
-        # downstream recorders never fall back to a silent GEAK default. Only
-        # when this run dispatched a single, unambiguous backend.
+        # Attribute a result with no per-backend attempt ladder to the backend
+        # that ran, but only when a single unambiguous backend was dispatched.
         dispatched_backend = backends_arg.lower()
         if (
             dispatched_backend
@@ -4160,13 +3988,11 @@ async def _run_optimization_single(
             and not result.get("attempts")
         ):
             result["backend"] = dispatched_backend
-    # Full-trace: mine each forge attempt's stdout log for token usage
-    # and append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the
-    # backend emits no usage block.
+    # Full-trace: mine each forge attempt's stdout for token usage and append an
+    # ``llm_calls.jsonl`` row. Best-effort; no-op without a usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
-    # Full-trace: record each forge attempt's key-step timeline (rationale /
-    # validation / keep-revert + summary) as a forge_steps audit, backfilled
-    # into the trace as forge:* spans. Best-effort; no-op without a step marker.
+    # Full-trace: record each forge attempt's key-step timeline as a forge_steps
+    # audit. Best-effort; no-op without a step marker.
     _trace_kernel_attempt_steps(result, session_dir=session_dir)
     return result
 
@@ -4309,7 +4135,7 @@ def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
     """
     parsed = _parse_tool_stdout(stdout)
     if parsed:
-        # Trust the tool's own status; otherwise infer from rc.
+        # Trust the tool's own status; else infer from rc.
         if "status" not in parsed:
             parsed["status"] = "ok" if rc == 0 else "failed"
         if rc != 0:
@@ -4347,7 +4173,7 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
         data = None
     if isinstance(data, dict):
         return data
-    # Fall back: scan for the last JSON object on its own line.
+    # Fallback: scan for the last JSON object on its own line.
     for line in reversed(text.splitlines()):
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):
@@ -4360,7 +4186,6 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
     return {"raw_stdout_tail": text[-2000:]}
 
 
-# ---------------------------------------------------------------------------
 def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
     """Transcribe ``reports/kernel_roofline.json`` (written by the external
     kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
@@ -4444,7 +4269,8 @@ async def integrate_handler(
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
 
-    # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare {kernel_id} payload isn't failed with a phantom "missing base_tput".
+    # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare
+    # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
     base_tput = float(payload.get("base_tput", 0.0))
@@ -4481,9 +4307,8 @@ async def integrate_handler(
         }
     log.info("integrate_handler: apply_result=%s", apply_result)
     if apply_result.get("status") == "failed":
-        # Apply crash: the patch was never measured. Stamp a fault error_class
-        # (top-level, not just nested in apply_result) so SharedState routes
-        # this through the fault retry budget instead of the REVERT quota.
+        # Apply crash: the patch was never measured. Stamp a top-level fault
+        # error_class so SharedState routes this through the fault retry budget.
         return {
             "status": "failed",
             "error_class": "apply_failed",
@@ -4508,10 +4333,10 @@ async def integrate_handler(
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     extra_args = str(payload.get("extra_server_args") or "").strip()
     # VRAM barrier (flag-gated, default off): cap re-baseline util so the
-    # integrate server cannot OOM on a tighter node. No-op when off.
+    # integrate server cannot OOM on a tighter node.
     extra_args = _vram_guarded_server_args(extra_args)
 
-    # Wrap BaselineExecutor in a Task/RunnerContext; extra_server_args goes via task params (forward compat).
+    # Wrap BaselineExecutor in a Task/RunnerContext.
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
@@ -4532,7 +4357,9 @@ async def integrate_handler(
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
-    # GH #458: aiter cpp_itfs / runtime-compiled kernels recompile at runtime (cache dir hashes params not source, so pristine+patched collide). Set AITER_REBUILD=1 for the re-baseline server so aiter wipes its BUILD_DIR and recompiles the patched kernel. Scoped to cpp_itfs applies and ALWAYS restored.
+    # aiter cpp_itfs kernels recompile at runtime and its cache hashes params not
+    # source, so set AITER_REBUILD=1 for the re-baseline server to force a rebuild
+    # of the patched kernel. Scoped to cpp_itfs applies and always restored.
     cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
     force_aiter_rebuild = bool(cpp_itfs_backup.get("is_cpp_itfs"))
     _prev_aiter_rebuild = os.environ.get("AITER_REBUILD")
@@ -4542,8 +4369,7 @@ async def integrate_handler(
     def _restore_aiter_rebuild_env() -> None:
         """Restore the ``AITER_REBUILD`` env var to its prior value.
 
-        No-op unless a forced rebuild was applied for this re-baseline;
-        otherwise pops or restores the original value (GH #458).
+        No-op unless a forced rebuild was applied for this re-baseline.
         """
         if not force_aiter_rebuild:
             return
@@ -4552,7 +4378,9 @@ async def integrate_handler(
         else:
             os.environ["AITER_REBUILD"] = _prev_aiter_rebuild
 
-    # Multi-node: force a FULL sglang restart so it re-imports the patched modules (a resume would measure the pre-patch process); ctx.extra["mn_round_restarted"] stops a double restart in BaselineExecutor, force_full_restart scopes MULTI_NODE_RESTART_RESUME_RUNNING=0 to this call only.
+    # Multi-node: force a FULL sglang restart so it re-imports the patched
+    # modules (a resume would measure the pre-patch process). mn_round_restarted
+    # stops a double restart; force_full_restart scopes the resume override here.
     from ..actions.executors._multi_node_env import is_multi_node
 
     if is_multi_node():
@@ -4599,17 +4427,15 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
     finally:
-        # Restore AITER_REBUILD on every path once the re-baseline server has
-        # been launched, so the env override never leaks past this integrate.
+        # Restore AITER_REBUILD on every path so the override never leaks past
+        # this integrate.
         _restore_aiter_rebuild_env()
 
     if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
-        # The re-baseline server crashed / timed out / produced no usable
-        # measurement, so the patch was never fairly scored. Surface a fault
-        # error_class at the top level — propagating the re-baseline's own
-        # error_class when present (e.g. subprocess_timeout) and otherwise
-        # defaulting to bench_exception — so this routes through the fault
+        # The re-baseline produced no usable measurement, so the patch was never
+        # fairly scored. Surface a top-level fault error_class (the re-baseline's
+        # own when present, else bench_exception) so this routes through the fault
         # retry budget rather than being discarded as a genuine REVERT.
         rebaseline_error_class = (
             str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
@@ -4626,20 +4452,15 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
 
-    # GH #458 (point 2): don't score a stale binary. For cpp_itfs targets the
-    # served kernel is runtime-compiled, so a re-baseline that reused a stale
-    # params-hashed lib.so would silently measure the PRE-patch kernel (the
-    # observed -0.17% on a real +2.5% paged_attention win). Before trusting
-    # gain_pct, assert a real rebuild landed: apply moved the cache aside, so
-    # a fresh <build_dir>/<md_name>_*/lib.so newer than the invalidation is
-    # proof the patched kernel was (re)compiled and served. If not, flag for
-    # review instead of emitting a KEEP/REVERT on a possibly-stale measure.
+    # Don't score a stale binary: for cpp_itfs targets the served kernel is
+    # runtime-compiled, so a reused params-hashed lib.so would measure the
+    # PRE-patch kernel. Assert a fresh lib.so (newer than the invalidation) landed
+    # before trusting gain_pct; otherwise flag for review.
     #
-    # Single-node only: in multi-node the served cache lives on the serving
-    # pod, not this sandbox, so AITER_REBUILD=1 on the pod restart is the
-    # mechanism and the sandbox-local check is skipped to avoid false aborts.
-    # verify_cpp_itfs_rebuilt() returns verified=True for non-cpp_itfs targets
-    # so this gate is a strict no-op off the cpp_itfs path.
+    # Single-node only: in multi-node the served cache lives on the serving pod,
+    # so AITER_REBUILD=1 on the pod restart is the mechanism and this local check
+    # is skipped. verify_cpp_itfs_rebuilt() returns verified=True off the
+    # cpp_itfs path, so this gate is a strict no-op there.
     rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
     if force_aiter_rebuild and not is_multi_node():
         rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
@@ -4664,7 +4485,6 @@ async def integrate_handler(
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
 
-    # base_tput > 0 already guaranteed by the early guard above.
     gain_pct = gain_pct_or_zero(new_tput, base_tput)
     stack_positive_keep = False
     stack_incremental_gain_pct: float | None = None
@@ -4690,11 +4510,10 @@ async def integrate_handler(
         else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
     )
 
-    # import-grep source confirmation (flag-gated, default off). Advisory by
-    # default: annotate whether the served process actually imported/compiled the
-    # patched source. Only the *strict* sub-flag enforces it, and only on
-    # positive non-import evidence (confirmed is False) — an "unknown" (None)
-    # never penalizes a real win. Off => no annotation, decision unchanged.
+    # import-grep source confirmation (flag-gated, default off). Advisory:
+    # annotate whether the served process imported/compiled the patched source.
+    # Only the strict sub-flag enforces it, and only on positive non-import
+    # evidence (confirmed is False); an "unknown" (None) never penalizes.
     source_import_confirmed: bool | None = None
     source_not_imported_downgrade = False
     if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
@@ -4708,16 +4527,13 @@ async def integrate_handler(
             decision = "NEEDS_REVIEW"
             source_not_imported_downgrade = True
 
-    # Paired same-config A/B confirmation (Tier-2; opt-in via its OWN explicit
-    # flag, deliberately NOT enabled by the HL_HONEST_E2E umbrella — it does a
-    # second server launch and revert/re-apply, so it stays opt-in until a full
-    # workload run validates it). The gain above is vs a STORED base_tput scalar
-    # (possibly a different config/run). When a candidate clears KEEP against the
-    # stored scalar, re-confirm it against a PAIRED pristine baseline measured
-    # under the *same* config in this call: revert -> measure pristine ->
-    # recompute gain. A confirmed KEEP is re-applied; a disconfirmed KEEP drops
-    # to NEEDS_REVIEW (never a false KEEP). ANY failure restores the applied
-    # state and falls back to the stored-scalar decision, so it never breaks a run.
+    # Paired same-config A/B confirmation (opt-in via its own flag; does a second
+    # server launch + revert/re-apply). When a candidate clears KEEP against the
+    # stored base_tput scalar, re-confirm it against a paired pristine baseline
+    # measured under the same config: revert -> measure pristine -> recompute
+    # gain. A confirmed KEEP is re-applied; a disconfirmed KEEP drops to
+    # NEEDS_REVIEW. Any failure restores the applied state and keeps the stored
+    # decision, so it never breaks a run.
     paired_ab: dict[str, Any] | None = None
     paired_pristine_revert: HandlerResult | None = None
     if (
@@ -4761,7 +4577,7 @@ async def integrate_handler(
                     reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
                     if reapply.get("status") == "ok":
                         apply_result = reapply
-                        paired_pristine_revert = None  # patch is back; normal revert logic applies
+                        paired_pristine_revert = None  # patch is back
                         base_tput = paired_base_tput
                         gain_pct = paired_gain
                         paired_ab["confirmed"] = True
@@ -4775,7 +4591,7 @@ async def integrate_handler(
                     decision = "NEEDS_REVIEW"
                     paired_ab["confirmed"] = False
             else:
-                # Paired measurement failed: restore applied state, keep stored decision.
+                # Paired measurement failed: restore applied state, keep decision.
                 reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
                 if reapply.get("status") == "ok":
                     apply_result = reapply
@@ -4795,8 +4611,8 @@ async def integrate_handler(
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
         if decision == "KEEP"
-        # If the paired pass already reverted (disconfirmed KEEP), reuse that
-        # result instead of double-reverting an already-reverted manifest.
+        # If the paired pass already reverted, reuse that result instead of
+        # double-reverting an already-reverted manifest.
         else (
             paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
         )
@@ -4834,7 +4650,7 @@ async def integrate_handler(
     return result
 
 
-# Kernel-agent programmatic dispatch table (LLM-driven requests routed via ``Coordinator._handle_request``).
+# Kernel-agent programmatic dispatch table.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,

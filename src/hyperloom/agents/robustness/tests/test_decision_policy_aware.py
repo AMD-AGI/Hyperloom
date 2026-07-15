@@ -26,9 +26,7 @@ def policy() -> PolicyAware:
     return PolicyAware()
 
 
-# ---------------------------------------------------------------------------
 # Happy path — every builder output should be emit-safe
-# ---------------------------------------------------------------------------
 
 
 def test_heartbeat_passes(policy: PolicyAware):
@@ -62,7 +60,7 @@ def test_delegate_passes(policy: PolicyAware):
 
 
 def test_delegate_recover_gpu_leak_payload_passes(policy: PolicyAware):
-    """``gpu_memory_leaked`` -> delegate(recover) payload regression: pin the PolicyAware contract against schema drift."""
+    """Pin the PolicyAware contract for the delegate(recover) payload against schema drift."""
     intent = build_delegate(
         action_name="recover",
         params={
@@ -84,9 +82,7 @@ def test_update_state_passes(policy: PolicyAware):
     policy.assert_payload_complete(build_update_state({"crash_count": 1}))
 
 
-# ---------------------------------------------------------------------------
 # Role gate
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -105,9 +101,7 @@ def test_role_blocks_disallowed_intents(intent_type, policy: PolicyAware):
     assert excinfo.value.rule == "role"
 
 
-# ---------------------------------------------------------------------------
 # Required-field gate
-# ---------------------------------------------------------------------------
 
 
 def test_alert_missing_severity_is_payload_error(policy: PolicyAware):
@@ -221,9 +215,7 @@ def test_send_message_missing_topic(policy: PolicyAware):
     assert excinfo.value.rule == "payload"
 
 
-# ---------------------------------------------------------------------------
 # validate_all collects every violation
-# ---------------------------------------------------------------------------
 
 
 def test_validate_all_collects_multiple_violations(policy: PolicyAware):

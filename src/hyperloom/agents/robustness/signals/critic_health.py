@@ -31,23 +31,18 @@ from .symptom import Symptom, SymptomSeverity
 class CriticHealthConfig:
     """Tunables for :func:`evaluate_critic_health_signals`.
 
-    Threshold defaults are deliberately permissive — Critic recovers on
-    its own most of the time (KB circuit-breaker auto-resets after
-    cooldown), so we only escalate when the outage persists.
+    Threshold defaults are permissive; escalate only when an outage persists.
     """
 
     # E1 — KB unreachable across N+ consecutive recent turns.
     min_outage_judges: int = 3
     # E2 — critic_unavailable verdicts across N+ consecutive recent items.
     min_unavailable_verdicts: int = 3
-    # E4 — ``critic-workdir/`` count above this is a leak. The
-    # critic-agent backend caps at 50 by design (CRITIC_AGENT_WORKDIR_KEEP_COUNT)
-    # so 100 = 2x the keep count = pruner stuck for >= 50 turns.
+    # E4 — ``critic-workdir/`` count above this is a leak (2x the backend keep count).
     max_workdir_count: int = 100
     # E5 — log-pattern marker that the runtime-cli timed out.
     runtime_stuck_pattern_marker: str = "runtime.cli"
-    # E5 needs at least N log lines mentioning the marker AND a
-    # ``timed out`` substring to fire (single occurrence may be a one-off).
+    # E5 needs log lines with the marker AND a ``timed out`` substring to fire.
     min_runtime_stuck_hits: int = 1
 
 
@@ -106,9 +101,7 @@ def _kb_outage_symptoms(
     recent = critic.get("recent_judges") or []
     if not isinstance(recent, list) or not recent:
         return []
-    # Recent_judges is mtime-desc; walk from the top and count
-    # consecutive ``kb_unreachable`` reasons. A single fresh judge
-    # without the marker resets the streak.
+    # recent_judges is mtime-desc; count leading consecutive ``kb_unreachable`` reasons.
     streak = 0
     samples: list[str] = []
     for entry in recent:

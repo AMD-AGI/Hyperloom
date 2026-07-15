@@ -46,7 +46,6 @@ def _validate_stack_event(
                 "optimization_stack": stack or [{"action": "backends", "variant_name": "fp8"}],
                 "config_path": "/tmp/baseline_config.yaml",
             },
-            # Different idempotency_key each attempt — the smoking gun.
             "idempotency_key": f"validate-stack-tick-{task_id}",
         },
     }
@@ -89,7 +88,7 @@ def test_three_identical_payloads_fires_high():
 
 
 def test_different_idempotency_key_does_not_break_dedup():
-    """The 2026-05-18 GPU-leak failure mode: distinct keys, same payload."""
+    """Distinct idempotency keys, same payload, still dedups."""
     events = [_validate_stack_event(task_id=str(i)) for i in range(5)]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(_ctx(), data)
@@ -109,7 +108,6 @@ def test_payload_change_resets_streak():
         data,
         config=RepeatedPayloadConfig(streak_threshold=3),
     )
-    # After the t3 payload change the streak resets to length 1.
     assert all(s.name != "same_payload_loop" for s in out)
 
 
@@ -210,8 +208,7 @@ def test_inbox_and_coordinator_events_combined():
         inbox=inbox,
         now_unix=1.0,
     )
-    # config_path differs so inbox + coord won't merge into one hash;
-    # match them up:
+    # Match config_path so inbox + coord merge into one hash.
     inbox[0].payload["params"]["config_path"] = coord_events[0]["payload"]["params"]["config_path"]
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_repeated_payload_signals(

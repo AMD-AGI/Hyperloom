@@ -33,11 +33,8 @@ from hyperloom.orchestrator.state.shared_state import (
 )
 
 
-# ===========================================================================
-# pure helpers
-# ===========================================================================
 def test_lifecycle_label_resolves_human_labels():
- # The five #266 pipeline names map to the internal step/handler names.
+ # Pipeline names map to the internal step/handler names.
     assert lifecycle_label("trace_analyze") == "TraceLens"
     assert lifecycle_label("roofline") == "TraceLens"
     assert lifecycle_label("run_optimization") == "GEAK"
@@ -74,7 +71,7 @@ def test_make_lifecycle_event_shape():
     assert event["label"] == "TraceLens"  # defaulted from step
     assert event["status"] == "START"  # upper-cased
     assert event["detail"] == "starting"  # stripped
-    # Empty / None artifact values are dropped; survivors are str-coerced.
+    # Empty / None artifacts dropped; survivors str-coerced.
     assert event["artifacts"] == {"out_dir": "/tmp/run"}
     assert event["duration_s"] == 1.235  # rounded to 3dp
 
@@ -97,14 +94,10 @@ def test_make_lifecycle_event_omits_duration_when_none():
 
 
 def test_lifecycle_statuses_enum():
-    # ENTER is the phase-boundary marker (point-in-time, never paired with
-    # an END); START / END / ERROR are the step-level statuses.
+    # ENTER is the phase-boundary marker; START / END / ERROR are step-level.
     assert LIFECYCLE_STATUSES == frozenset({"START", "END", "ERROR", "ENTER"})
 
 
-# ===========================================================================
-# SharedState writer
-# ===========================================================================
 def test_record_lifecycle_event_appends_and_defaults_phase():
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
@@ -145,12 +138,10 @@ def test_record_lifecycle_event_monotonic_seq_and_cap():
         s.record_lifecycle_event(step="trace_analyze", status="END", detail=f"#{i}")
     # Cap is enforced ...
     assert len(s.lifecycle) == _LIFECYCLE_CAP
-    # ... but seq stays monotonic and reflects the true emission order even
-    # after the oldest rows are trimmed.
+    # ... but seq stays monotonic across the trim.
     seqs = [e["seq"] for e in s.lifecycle]
     assert seqs == sorted(seqs)
     assert seqs[-1] == total - 1
-    # The very first surviving row is the (total - cap)-th emitted event.
     assert seqs[0] == total - _LIFECYCLE_CAP
 
 
@@ -175,6 +166,5 @@ def test_lifecycle_persists_round_trip(tmp_path):
 
 
 def test_lifecycle_is_core_state_field():
-    # Defense-in-depth: an LLM update_state intent must not be able to
-    # forge lifecycle events (would let it fake "phase finished" lines).
+    # An LLM update_state intent must not be able to forge lifecycle events.
     assert "lifecycle" in CORE_STATE_FIELDS

@@ -3,8 +3,8 @@
 """Aggregate kernel-optimization attempts into a single forensic report.
 
 Combines the per-kernel ledger (:attr:`SharedState.kernel_opt_attempts`)
-with the kernel-agent run results to answer "why did the kernel-agent not
-produce an optimized kernel?". All public helpers are pure functions over
+with the kernel-agent run results to explain why the kernel-agent did not
+produce an optimized kernel. All public helpers are pure functions over
 ``SharedState`` + ``session_dir`` returning JSON-ready dicts; never raise on
 missing files.
 """
@@ -20,27 +20,22 @@ from typing import Any, NamedTuple
 from hyperloom.common.coerce import to_float
 
 
-# Category vocabulary. Per-kernel outcome bucket; closed set (new categories
-# require a schema_version bump).
+# Per-kernel outcome bucket (closed set).
 CATEGORY_INTEGRATED = "INTEGRATED"
 CATEGORY_KEEP_PENDING = "KEEP_PENDING"
 CATEGORY_ATTEMPTED_REJECTED = "ATTEMPTED_REJECTED"
 CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 CATEGORY_UNATTEMPTED = "UNATTEMPTED"
 
-#: Terminal kernel-outcome bucket. Closed 4-value set the dashboard reads
-#: directly (one uniform field across forge / geak / forge backends) instead of
-#: re-deriving from decision/status strings. ``IN_FLIGHT`` (no terminal
-#: decision) folds into ``fail`` -- a completed session should never leave a
-#: kernel mid-flight.
+#: Closed 4-value terminal kernel-outcome bucket the dashboard reads directly.
+#: ``IN_FLIGHT`` (no terminal decision) folds into ``fail``.
 OUTCOME_SUCCESS = "success"
 OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_SKIP = "skip"
 
-#: Sub-reason vocabulary for ``UNATTEMPTED`` kernels. Picked off the
-#: top15 entry's geometry (``source_file``, ``reusable_native_kernel``,
-#: ``recommended_backends``) so the front-end can filter by why.
+#: Sub-reason vocabulary for ``UNATTEMPTED`` kernels, derived from the top15
+#: entry's geometry so the front-end can filter by why.
 UNATTEMPTED_NO_SOURCE = "no_source_file"
 UNATTEMPTED_NOT_REUSABLE = "not_reusable_native_kernel"
 UNATTEMPTED_NO_BACKEND = "no_recommended_backend"
@@ -56,9 +51,7 @@ KNOWN_REJECTION_REASONS = (
 )
 
 #: ``backend_ladder[].error_class`` vocabulary surfaced into
-#: ``failure_reason_breakdown`` so root causes (timeout / preprocess /
-#: compile / correctness / agent error) are no longer buried in ``other``.
-#: Empty string is reserved for succeeded attempts.
+#: ``failure_reason_breakdown``. Empty string is reserved for succeeded attempts.
 ERROR_CLASS_TIMEOUT = "timeout"
 ERROR_CLASS_PREPROCESS_FAILED = "preprocess_failed"
 ERROR_CLASS_COMPILE_FAILED = "compile_failed"
@@ -66,9 +59,8 @@ ERROR_CLASS_CORRECTNESS_FAILED = "correctness_failed"
 ERROR_CLASS_AGENT_ERROR = "agent_error"
 ERROR_CLASS_UNKNOWN = "unknown"
 
-#: kernel-agent points ``optimized_path`` at a stdout/stderr dump on early
-#: failure; those must not flip ``produced_artifact=true`` (masking
-#: ``ladder_all_failed``).
+#: On early failure kernel-agent points ``optimized_path`` at a stdout/stderr
+#: dump; those must not flip ``produced_artifact=true``.
 _ARTIFACT_LOG_SUFFIXES = (
     "_stdout.log",
     "_stderr.log",
@@ -104,7 +96,7 @@ def _is_real_artifact_path(path: str) -> bool:
 
 
 _RE_TIMEOUT = re.compile(r"Timed out after (\d+)s")
-# stdout_tail is ~80-col wrapped, so the signal can straddle newlines.
+# stdout_tail is column-wrapped, so the signal can straddle newlines.
 _RE_PREPROCESS_FAILED = re.compile(
     r"preprocess[\s\S]{0,300}?success=False"
     r"(?:[\s\S]{0,80}?errors=(\d+))?",
@@ -140,7 +132,6 @@ def _classify_attempt_failure(
     stdout = str(attempt.get("stdout_tail") or "")
     explicit_err = str(attempt.get("error_message") or "")
 
-    # timeout — check stdout AND error_message
     for blob in (explicit_err, stdout):
         m = _RE_TIMEOUT.search(blob)
         if m:
@@ -168,7 +159,6 @@ def _classify_attempt_failure(
     return ERROR_CLASS_UNKNOWN, ""
 
 
-# Glossary block (kept inline so the report self-documents)
 FIELD_GLOSSARY: dict[str, str] = {
     "gpu_pct": (
         "Share of total GPU time spent in this kernel "
@@ -193,7 +183,6 @@ FIELD_GLOSSARY: dict[str, str] = {
 }
 
 
-# kernel-agent results harvesting
 def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
     """Return ``<sd>/kernel-agent/runs/<key>/results`` or ``None``.
 
@@ -288,7 +277,6 @@ def _load_backend_ladder(
     for a in raw_attempts:
         if not isinstance(a, dict):
             continue
-        # produced_artifact: real kernel code, not a stdout/stderr dump.
         produced = _is_real_artifact_path(a.get("optimized_path") or "")
         row: dict[str, Any] = {
             "backend": str(a.get("backend") or ""),
@@ -296,8 +284,7 @@ def _load_backend_ladder(
             "attempt_id": str(a.get("attempt_id") or ""),
             "produced_artifact": produced,
         }
-        # Structured backend self-skip marker (forge bailed before any real
-        # attempt); surfaced so the outcome classifier can label ``skip``.
+        # Backend self-skip marker for the outcome classifier.
         if a.get("skipped"):
             row["skipped"] = True
         elapsed = a.get("elapsed_s")
@@ -328,7 +315,6 @@ def _relative_to_session(p: Path, session_dir: Path) -> str:
         return str(p)
 
 
-# Per-kernel classification
 def _classify_attempted(
     entry: dict[str, Any],
     *,
@@ -389,8 +375,7 @@ def _kernel_outcome_class(
     if category == CATEGORY_UNATTEMPTED:
         return OUTCOME_SKIP
     ladder = backend_ladder or []
-    # Every recorded attempt self-skipped before doing real work -> skip. A mixed
-    # ladder (one backend skipped, another really tried) is NOT a skip.
+    # Every recorded attempt self-skipped -> skip; a mixed ladder is not.
     if ladder and all(bool(r.get("skipped")) for r in ladder):
         return OUTCOME_SKIP
     if any(str(r.get("error_class") or "") == ERROR_CLASS_TIMEOUT for r in ladder):
@@ -582,7 +567,6 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
-# Top-level builder
 def build_kernel_optimization_summary(
     state: Any,
     session_dir: Path | str,
@@ -648,7 +632,7 @@ def build_kernel_optimization_summary(
         "unattempted": 0,
     }
 
-    # Process top15 kernels first (already pre-sorted by gpu_pct desc).
+    # Process top15 kernels first (pre-sorted by gpu_pct desc).
     processed_kids: set[str] = set()
     for top_entry in top15:
         if not isinstance(top_entry, dict):
@@ -676,8 +660,7 @@ def build_kernel_optimization_summary(
             rej_reason = str(attempt.get("rejected_reason") or "").strip()
             bucket = rej_reason if rej_reason in KNOWN_REJECTION_REASONS else None
             if bucket is None:
-                # max_partial / max_failures encode the threshold in the
-                # reason string; collapse onto the canonical key.
+                # Collapse threshold-encoding reason strings onto canonical keys.
                 if rej_reason.startswith("max_partial_attempts_"):
                     bucket = "max_partial_attempts_without_keep"
                 elif rej_reason.startswith("max_failures_"):
@@ -696,8 +679,7 @@ def build_kernel_optimization_summary(
             )
         )
 
-    # Kernels with a ledger row but not in top15 (e.g. dropped out on a
-    # later roofline refresh): render with category from the ledger.
+    # Kernels with a ledger row but not in top15.
     for kid, attempt in attempts_map.items():
         if kid in processed_kids:
             continue
@@ -733,16 +715,12 @@ def build_kernel_optimization_summary(
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
-        # Session-level kernel-optimization verdict (success/fail/timeout/skip),
-        # rolled up from each kernel's ``outcome_class``.
         "kernel_opt_outcome": _session_kernel_opt_outcome(by_kernel),
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "unattempted_reason_breakdown": unattempted_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
-        # Honest, non-failure breadcrumb for a kernel-opt dispatch that found no
-        # eligible kernels (empty batch, no named kernel) and was skipped wholesale.
-        # Empty {} when no such skip occurred.
+        # Non-failure breadcrumb for a wholesale dispatch skip; {} otherwise.
         "dispatch_skip_reason": dict(getattr(state, "last_kernel_opt_dispatch_skip", {}) or {}),
         "field_glossary": FIELD_GLOSSARY,
         "by_kernel": by_kernel,
@@ -750,7 +728,6 @@ def build_kernel_optimization_summary(
     }
 
 
-# Row renderers
 def _render_unattempted_row(
     top_entry: dict[str, Any],
     reason_code: str,
@@ -818,9 +795,8 @@ def _render_attempted_row(
         "compile_passed": attempt.get("compile_passed"),
         "correctness_passed": attempt.get("correctness_passed"),
     }
-    # Detail-file passthrough: IN_FLIGHT / ATTEMPTED_REJECTED kernels don't
-    # populate ledger compile/correctness fields, so pull them from the
-    # detail file.
+    # Detail-file passthrough for kernels that don't populate ledger
+    # compile/correctness fields.
     if isinstance(kernel_result, dict):
         ver_block = kernel_result.get("verification")
         if isinstance(ver_block, dict):
@@ -838,7 +814,7 @@ def _render_attempted_row(
                 v = ver_block.get(key)
                 if v is not None:
                     verification[key] = v
-    # last_kernel_opt (KEEP_PENDING handoff) wins over ledger + detail file.
+    # last_kernel_opt wins over ledger + detail file.
     if isinstance(last_kernel_opt, dict) and last_kernel_opt:
         for key in (
             "compile_passed",
@@ -894,7 +870,6 @@ def _render_attempted_row(
     return row
 
 
-# Aggregations / takeaways
 #: ``backend_ladder[].error_class`` -> ``failure_reason_breakdown`` bucket.
 _ERROR_CLASS_TO_BUCKET = {
     ERROR_CLASS_TIMEOUT: "timeout",
@@ -919,12 +894,12 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
         Mapping of failure-mode bucket to count.
     """
     breakdown: dict[str, int] = {
-        # Structural buckets used when no error_class is available.
+        # Structural buckets (used when no error_class is available).
         "ladder_all_failed": 0,
         "ladder_partial_no_artifact": 0,
         "speedup_below_threshold": 0,
         "ladder_unavailable": 0,
-        # Root-cause buckets derived from error_class.
+        # Root-cause buckets (from error_class).
         "timeout": 0,
         "preprocess_failed": 0,
         "compile_failed": 0,
@@ -941,8 +916,7 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
             breakdown["ladder_unavailable" if ladder_unavail else "other"] += 1
             continue
 
-        # 1) error_class wins: pick the most common failure mode across
-        #    failed/partial attempts.
+        # error_class wins: pick the most common failure mode.
         ec_counts: dict[str, int] = {}
         for r in ladder:
             ec = str(r.get("error_class") or "")
@@ -954,8 +928,7 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
             breakdown[bucket] += 1
             continue
 
-        # 2) Structural fallback when no ladder attempt carries an error_class:
-        #    classify via produced artifacts and the verification block.
+        # Structural fallback: classify via produced artifacts and verification.
         any_artifact = any(r.get("produced_artifact") for r in ladder)
         all_failed = all(r.get("status") == "failed" for r in ladder)
         verification = row.get("verification") or {}

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Winner-decision gates (throughput / accuracy / completed) split out of ``explorer.py`` for isolated testing and reuse by ``runtime/tools_api.evaluate_candidate_outcome``."""
+"""Winner-decision gates (throughput / accuracy / completed) for candidate evaluation."""
 
 from __future__ import annotations
 

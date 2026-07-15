@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression: the ``wait_for_auto_roofline`` deny is gone — proposals proceed while an analysis task is in flight."""
+"""Proposals proceed while an analysis task is in flight (no ``wait_for_auto_roofline`` deny)."""
 
 from __future__ import annotations
 

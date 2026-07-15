@@ -525,7 +525,7 @@ def main() -> int:
     )
     log.info("wrote summary and normalized results under %s", out)
 
-    # Echo the table to stdout so the GitHub Actions log shows it.
+    # Echo the table to stdout for the GitHub Actions log.
     print(md)
     return 0
 

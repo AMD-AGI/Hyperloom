@@ -18,10 +18,7 @@ def _write_request(
     work_dir: Path,
 ) -> Path:
     """Materialise an ExploreRequest JSON for execute-mode integration."""
-    # Inline shell-friendly commands: echo a JSON blob into the
-    # well-known per-candidate paths used by the explorer's
-    # _evaluate_candidate step. Single-quoted JSON keeps the brace
-    # characters opaque to render_template's identifier regex.
+    # Inline shell commands writing JSON to per-candidate paths.
     bench_cmd = (
         'python3 -c "import json,sys; '
         "open(sys.argv[1],'w').write(json.dumps({'throughput': 200.0, 'completed': '1/1'}))\" "

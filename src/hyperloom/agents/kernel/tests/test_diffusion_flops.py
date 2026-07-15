@@ -75,7 +75,7 @@ def test_unknown_class_returns_none(tmp_path):
 
 # ---- FLOPs math ----------------------------------------------------------
 def test_mmdit_forward_flops_matches_formula(tmp_path):
-    # Minimal SD3-like MMDiT: 2 layers, h=8 heads x 4 = 32, non-gated FFN 4x.
+    # Minimal SD3-like MMDiT: 2 layers, h=32, non-gated FFN 4x.
     cfg = {
         "_class_name": "SD3Transformer2DModel",
         "num_layers": 2,
@@ -114,7 +114,7 @@ def test_ceiling_scales_with_steps_and_precision(tmp_path):
 
 
 def test_moe_uses_active_experts(tmp_path):
-    # MoE single with 64 experts, top-2 active -> FFN counts only 2 experts.
+    # 64 experts, top-2 active -> FFN counts only 2 experts.
     cfg = {"_class_name": "NucleusMoEImageTransformer2DModel", "num_layers": 4,
            "num_attention_heads": 8, "attention_head_dim": 16, "num_experts": 64,
            "num_experts_per_tok": 2, "moe_intermediate_dim": 512, "patch_size": 2}
@@ -146,8 +146,7 @@ def test_unet_flops_positive_and_resolution_scales(tmp_path):
 
 
 def test_sana_linear_attention_cheaper_than_full(tmp_path):
-    # Sana's linear attention must be far cheaper than full softmax attention
-    # at the same token count.
+    # Linear attention must be far cheaper than full softmax at the same token count.
     seq, h, hd = 4096, 2240, 32
     assert df._linear_attention_flops(seq, h, hd) < df._full_attention_flops(seq, h) / 10
 
@@ -173,8 +172,7 @@ def test_real_models_resolve_or_reference(slug):
         pytest.skip(f"{d} not mounted")
     g = df.resolve_geometry(d)
     if g is None:
-        # SRPO / raw sd3-medium ship only single-file weights (no diffusers
-        # config); they map to FLUX / SD3 reference archs at dispatch time.
+        # SRPO / raw sd3-medium ship only single-file weights (no diffusers config).
         assert slug in ("tencent-SRPO", "stabilityai-stable-diffusion-3-medium")
         return
     est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
@@ -192,7 +190,7 @@ def _write_safetensors(model_dir: Path, header: dict, name: str = "diffusion_pyt
 
 def test_safetensors_header_bad_file_returns_none(tmp_path):
     p = tmp_path / "bad.safetensors"
-    # Valid 8-byte length prefix but non-JSON body -> JSONDecodeError -> None.
+    # Valid length prefix but non-JSON body -> None.
     p.write_bytes(struct.pack("<Q", 12) + b"not-json----")
     assert df._safetensors_header(p) is None
 
@@ -237,7 +235,7 @@ def test_infer_geometry_blocks_without_hidden_returns_none(tmp_path):
 def test_infer_geometry_unreadable_header_returns_none(tmp_path):
     md = tmp_path / "z"
     md.mkdir()
-    # Header length points far past EOF -> json parse fails -> header None.
+    # Header length points far past EOF -> header None.
     (md / "diffusion_pytorch_model.safetensors").write_bytes(struct.pack("<Q", 10**9))
     assert df._infer_geometry_from_safetensors(md) is None
 
@@ -254,8 +252,7 @@ def test_estimate_and_ceiling_none_for_unknown_class(tmp_path):
 
 
 def test_unet_int_transformer_layers_per_block():
-    """The ``isinstance(tlpb, int)`` broadcast branch in ``_unet_forward_flops``
-    is a defensive path (built directly rather than via ``resolve_geometry``)."""
+    """Exercise the ``isinstance(tlpb, int)`` broadcast branch in ``_unet_forward_flops``."""
     g = df.DenoiserGeometry(
         model_class="UNet2DConditionModel",
         family="unet",
@@ -268,7 +265,7 @@ def test_unet_int_transformer_layers_per_block():
         unet={
             "block_out_channels": [320, 640],
             "layers_per_block": 2,
-            "transformer_layers_per_block": 2,  # int -> broadcast branch (line 481)
+            "transformer_layers_per_block": 2,  # int -> broadcast branch
             "cross_attention_dim": 2048,
             "in_channels": 4,
         },
@@ -284,7 +281,7 @@ def test_fmt_with_and_without_ideal_ms(tmp_path):
     est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
     line = df._fmt(est)
     assert "TFLOP/img" in line and "ideal=" in line
-    # unknown gpu -> peak 0 -> no ideal_ms key -> no "ideal=" suffix.
+    # unknown gpu -> peak 0 -> no "ideal=" suffix.
     est_no_peak = df.analytic_ceiling(d, gpu_type="unknown", precision="bf16")
     assert "ideal=" not in df._fmt(est_no_peak)
 

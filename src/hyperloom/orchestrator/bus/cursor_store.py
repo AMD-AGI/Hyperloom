@@ -2,8 +2,7 @@
 
 """CursorStore
 
-Per-agent ``last_processed_seq`` cursor via a single SQL UPSERT, giving the
-cross-table atomicity ADR-42 promises.
+Per-agent ``last_processed_seq`` cursor via a single SQL UPSERT.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
 
 

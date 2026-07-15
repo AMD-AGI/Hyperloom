@@ -27,7 +27,6 @@ class ConversationCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    # Context-pull tools
     def _orchestration_conversational(self) -> bool:
         """True when the orchestration backend runs in persistent-conversation mode.
 
@@ -181,6 +180,7 @@ class ConversationCollaborator:
             return "(no recent outcomes)"
 
         # Flip newest-first query to newest-last for chronological reading.
+        # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
         lines = ["=== Recent action outcomes (newest last) ==="]
         lines.extend(_format_inbox_event(m) for m in msgs)
@@ -218,14 +218,10 @@ class ConversationCollaborator:
     ) -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn.
 
-        Persists the full (redacted) prompt + completion the backend put on
-        ``metadata`` (``prompt`` / ``response``). Only rows that actually
-        carry conversation text are written, so subprocess-backed reactors
-        (critic / robustness) that don't surface text here don't emit empty
-        rows — their conversation is captured by their own workdir artefacts.
-
-        Best-effort: any failure degrades to a logged warning rather than
-        breaking the tick loop.
+        Persists the full (redacted) prompt + completion from the backend
+        ``metadata`` (``prompt`` / ``response``). Only rows that carry
+        conversation text are written. Best-effort: any failure degrades to a
+        logged warning rather than breaking the tick loop.
 
         Args:
             agent_name: The reactor role; doubles as trace component and role.
@@ -268,10 +264,10 @@ class ConversationCollaborator:
         """
         sections: list[str] = []
 
-        # 0. SESSION_DIR contract — literal path for every agent (pairs with PolicyGate path containment).
+        # SESSION_DIR contract — literal path for every agent.
         sections.append(f"SESSION_DIR={self.session_dir}")
 
-        # per-tick phase block for every agent, high in the prompt because R1 rejection is phase-driven.
+        # Per-tick phase block for every agent, high in the prompt.
         try:
             phase_block = self.shared_state.to_phase_status_summary(
                 budget_pct=self._phase_budget_pct,
@@ -283,7 +279,6 @@ class ConversationCollaborator:
             sections.append("=== Phase ===")
             sections.append(phase_block)
 
-        # 0a. Mission progress (Orchestration only), shown before the verbose dump.
         # Conversational delta gating: first turn gets full SEED, later turns thin DELTA.
         push_full = True
         if agent_name == "orchestration":
@@ -296,7 +291,7 @@ class ConversationCollaborator:
                     getattr(self.shared_state, "tick", 0),
                 )
 
-        # On a full SEED push, inject recovered working memory so the agent re-anchors its plan.
+        # On a full SEED push, inject recovered working memory.
         if (
             agent_name == "orchestration"
             and push_full
@@ -351,12 +346,12 @@ class ConversationCollaborator:
                 f"closing_phase={self.shared_state.closing_phase}"
             )
 
-        # 1. Shared session state — goal + progress context; omitted on orchestration DELTA turns.
+        # Shared session state; omitted on orchestration DELTA turns.
         if push_full:
             sections.append("=== Shared session state ===")
             sections.append(self.shared_state.to_prompt_summary())
         if agent_name == "orchestration":
-            # target_gap_pct is a fact (gain still needed for --target-gain); refresh to keep prompt current.
+            # target_gap_pct is the gain still needed for --target-gain.
             obj = getattr(self, "_current_objective", None)
             obj_kind = getattr(obj, "kind", "") if obj is not None else ""
             if obj_kind == "gain_pct":
@@ -367,7 +362,7 @@ class ConversationCollaborator:
                 )
             else:
                 self.shared_state.target_gap_pct = 0.0
-            # Advisory/ledger blocks below are part of the full SEED push; omitted on DELTA turns.
+            # Advisory/ledger blocks below are part of the full SEED push only.
             if push_full:
                 denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
                 if denial_summary:
@@ -449,9 +444,7 @@ class ConversationCollaborator:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
 
-            # On a plateau, review the whole lineage and surface candidate
-            # directions (exhausted directions to avoid + under-exploited
-            # bottleneck to push). Advisory; never gates phase advance.
+            # On a plateau, surface candidate directions (advisory).
             if plateau_block:
                 try:
                     from ..knowledge import trajectory_reviewer as _trajectory_reviewer
@@ -467,7 +460,7 @@ class ConversationCollaborator:
                     sections.append("=== Trajectory review (advisory) ===")
                     sections.append(trajectory_block)
 
-            # R3: cyclic bottleneck-redirect advisory (next-cycle re-targeting).
+            # Cyclic bottleneck-redirect advisory (next-cycle re-targeting).
             try:
                 redirect_block = self._bottleneck_redirect_advisory_block()
             except Exception:  # noqa: BLE001 — defensive
@@ -559,23 +552,14 @@ class ConversationCollaborator:
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
         rendered = list(msgs[-20:])
-        # Durable, at-least-once-until-decided delivery of proposals to the
-        # Critic. The inbox tail is lossy: it is capped to the last N events
-        # since the cursor, and after any Critic turn ``_cursor_advance_to_latest``
-        # jumps the cursor to the newest message. So a ``topic=proposal`` message
-        # buried behind >N later events (e.g. a slow discover window full of
-        # timeouts/observations) before a Critic turn renders it is dropped from
-        # the window AND skipped by the advancing cursor — lost forever, no
-        # verdict, and the proposer phase wedges waiting on a verdict that can
-        # never land. Re-present every still-undecided proposal from the durable
-        # ``pending_proposals`` registry (survives ticks + resume) until it is
-        # decided, independent of the tail/cursor.
+        # Durable at-least-once-until-decided delivery of proposals to the
+        # Critic: the inbox tail is lossy, so re-present every still-undecided
+        # proposal from the durable ``pending_proposals`` registry.
         if agent_name == "critic":
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
             for m in rendered:
-                # Structured rendering for delegated_result/denial/verdict; compact dump otherwise.
                 sections.append(f"  {_format_inbox_event(m)}")
         else:
             sections.append(f"=== Inbox for {agent_name} ===")
@@ -589,13 +573,10 @@ class ConversationCollaborator:
         """Ensure every undecided proposal awaiting a Critic verdict is present.
 
         The rendered tail can drop proposals that scrolled past the capped
-        window; because the Critic's cursor then advances past them, they would
-        never be re-presented and never get a verdict. Source the review set
-        from the durable ``pending_proposals`` registry and merge any missing
-        proposal messages into the rendered window (deduped by ``msg_id``,
-        re-sorted by ``seq`` so "newest last" holds). A decided proposal drops
-        out on the next turn (``_apply_review_verdict`` stamps ``decided``), so
-        this never re-reviews a resolved proposal.
+        window. Source the review set from the durable ``pending_proposals``
+        registry and merge any missing proposal messages into the rendered
+        window (deduped by ``msg_id``, re-sorted by ``seq`` so "newest last"
+        holds).
 
         Args:
             rendered: The tail-capped messages already selected for the inbox.
@@ -643,7 +624,6 @@ class ConversationCollaborator:
             The override prompt if configured, the role's prompt file
             contents, or a placeholder string when none exists.
         """
-        # Demo/test override via self.system_prompt_overrides[agent_name].
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
             return override

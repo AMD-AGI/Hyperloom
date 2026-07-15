@@ -1,15 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Deterministic collectors for ``session_breakdown.json`` (tree-reform.MD §6.2).
+"""Deterministic collectors for ``session_breakdown.json``.
 
 Each ``collect_<section>`` is a pure function over ``session_dir`` / ``state`` /
 ``manifest`` returning its schema section (see :mod:`..schema`). Collectors never
 mutate state, fabricate values, or raise — failures are recorded in ``warnings``
 and the section returns a best-effort partial.
 
-The former 7k-line ``collectors.py`` god-file was split into cohesive submodules
-(shared foundation helpers in :mod:`._common`); this package re-exports the full
-original namespace so every importer and monkeypatch site keeps working.
+Split into cohesive submodules (shared foundation helpers in :mod:`._common`);
+this package re-exports the full namespace so every importer and monkeypatch
+site keeps working.
 """
 
 from __future__ import annotations

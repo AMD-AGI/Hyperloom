@@ -106,7 +106,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             detected.append({"kernel_id": str(d)})
             continue
         if not d.get("kernel_id"):
-            # Filter out anonymous placeholder rows from older collectors.
             continue
         detected.append(d)
 
@@ -186,7 +185,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
         )
 
-    # Drop bw% / compute% columns when every entry is None/0 (no roofline data).
+    # Drop bw% / compute% columns when every entry is None/0.
     show_bw = any(d.get("bandwidth_util_pct") for d in detected)
     show_compute = any(d.get("compute_util_pct") for d in detected)
 
@@ -226,8 +225,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ]
         return row
 
-    # Partition into "actionable" (selected/touched/decided) vs "residual"
-    # long-tail kernels; residual rows collapse into a <details> block.
+    # Partition into actionable vs residual long-tail kernels.
     actionable: list[dict[str, Any]] = []
     residual: list[dict[str, Any]] = []
     for d in detected:
@@ -253,7 +251,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if residual:
         total_dur = sum((d.get("duration_us") or 0.0) for d in residual)
         total_gpu = sum((d.get("gpu_pct") or 0.0) for d in residual)
-        # Inner blank lines are required so the table inside <details> still parses as markdown.
+        # Inner blank lines needed so the table inside <details> parses as markdown.
         parts.append("")
         parts.append(
             f"<details><summary>Show {len(residual)} residual kernels "

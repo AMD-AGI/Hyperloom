@@ -13,8 +13,6 @@ consistent with GEAK's own e2e speedup:
   * 2a — the GEAK-harness fallback validates using GEAK's OWN reported speedup
     (``throughput_speedup`` on the promoted basis), so Hyperloom's validated
     number equals GEAK's headline instead of an inflated hot A/B.
-
-Run: python3 -m pytest inference_optimizer/tests/test_geak_gain_alignment.py -v
 """
 
 from __future__ import annotations

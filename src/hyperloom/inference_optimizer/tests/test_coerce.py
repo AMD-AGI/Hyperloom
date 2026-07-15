@@ -58,8 +58,7 @@ class TestToInt:
 
     @pytest.mark.parametrize("value", [None, True, False, "abc", "", "1.5"])
     def test_non_int_string_and_float_string_reject(self, value):
-        # A float *string* like "1.5" is not a valid int(); bool/None/garbage
-        # collapse to the default. A real float (2.5) truncates -- see below.
+        # A float string like "1.5" is not a valid int(); a real float truncates.
         assert to_int(value) is None
 
     def test_real_float_truncates(self):

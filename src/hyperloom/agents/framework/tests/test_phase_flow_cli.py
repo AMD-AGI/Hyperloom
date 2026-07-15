@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the FRAMEWORK_AGENT phase-discover subcommand. Hermetic - stubs ``sources.enumerate_candidates`` so no network/git is required."""
+"""Tests for the FRAMEWORK_AGENT phase-discover subcommand. Hermetic - stubs ``sources.enumerate_candidates``."""
 
 from __future__ import annotations
 
@@ -85,9 +85,7 @@ def test_phase_discover_happy_path(monkeypatch, tmp_path: Path, capsys) -> None:
 
 
 def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Regression: phase-discover MUST set search_perf_prs=True (else
-    enumerate_candidates short-circuits to explicit-refs-only and always returns
-    0 candidates) and degrade to GitHub-only when no primus URL is configured."""
+    """phase-discover must set search_perf_prs=True and degrade to GitHub-only when no primus URL is configured."""
     monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
     captured: dict[str, object] = {}
 
@@ -116,7 +114,7 @@ def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, cap
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert captured["search_perf_prs"] is True
-    # No primus URL configured -> GitHub-only (no SourceConfigError raise).
+    # No primus URL configured -> GitHub-only.
     assert captured["search_modes"] == ["github"]
     assert "moe" in captured["keywords"]
     assert payload["candidate_count"] == 1
@@ -147,7 +145,7 @@ def test_phase_discover_uses_primus_when_url_present(monkeypatch, tmp_path: Path
     assert captured["primus_cfg"] is True
 
 
-# Step B — hard-dedup + same-PR de-prioritisation ----------------------------
+# hard-dedup + same-PR de-prioritisation
 def test_extract_pr_number_from_ref_and_url() -> None:
     assert cli._extract_pr_number("PR:1234") == "1234"
     assert cli._extract_pr_number("https://github.com/sgl-project/sglang/pull/1234") == "1234"
@@ -156,12 +154,12 @@ def test_extract_pr_number_from_ref_and_url() -> None:
 
 
 def test_candidate_excluded_by_memory_matches_id_and_pr_number() -> None:
-    # pr_url / ref id match.
+    # ref id match.
     assert cli._candidate_excluded_by_memory(
         pr_url="https://github.com/o/r/pull/7", ref="PR:7", pr_number=7,
         excluded_ids={"PR:7"}, excluded_pr_numbers=set(),
     )
-    # PR-number match (from a failed candidate).
+    # PR-number match.
     assert cli._candidate_excluded_by_memory(
         pr_url="", ref="PR:9", pr_number=9,
         excluded_ids=set(), excluded_pr_numbers={"9"},
@@ -183,9 +181,9 @@ def test_phase_discover_hard_filters_excluded_and_failed(monkeypatch, tmp_path: 
         "gaps": [{"gap_canonical_id": "g1", "gap_description": "decode"}],
         "max_search_candidates": 5,
         "batch_id": "batch-x",
-        # PR:1234 already discovered/finalised → hard-excluded by id.
+        # PR:1234 hard-excluded by id.
         "excluded_candidate_ids": ["PR:1234"],
-        # PR:5678 already failed this session → dropped by same-PR-number.
+        # PR:5678 dropped by same-PR-number.
         "failed_candidate_context": [{"ref": "PR:5678", "status": "reverted", "why": "no-op"}],
     }
     req_path = tmp_path / "req.json"

@@ -146,8 +146,7 @@ def test_mirroring_kb_put_and_delegate() -> None:
     assert kb.put_recipe(canonical_id="a:b:c:d:e") == "wrote"
     assert inner.put_calls  # local write happened first
     assert mcp.calls  # mirror happened
-    # __getattr__ delegates unknown attributes
-    assert kb.get_recipe("z") == "got:z"
+    assert kb.get_recipe("z") == "got:z"  # __getattr__ delegates unknown attrs
 
 
 def test_mirroring_kb_swallows_mirror_error(monkeypatch) -> None:

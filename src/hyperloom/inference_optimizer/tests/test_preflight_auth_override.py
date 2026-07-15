@@ -22,21 +22,16 @@ from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
-# _preflight() override semantics
 @pytest.fixture
 def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", lambda: None)
-    # N24: stub the kernel-agent env fallback (it hard-fails when missing);
-    # its fail-loud behaviour is covered by test_n24_kernel_agent_env_hardfail.
+    # Stub the kernel-agent env fallback (it hard-fails when missing).
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", lambda: None)
 
-    # InferenceX setup is orthogonal to the auth block under test. On a CI
-    # runner the auto-detect finds no checkout and the clone path is a real
-    # ``git fetch`` against GitHub (no network / no writable runtime dir),
-    # so _preflight() would hit ``sys.exit(2)`` before reaching the auth
-    # logic. Point INFERENCEX_PATH at a writable dir so detection short-
-    # circuits, and stub the clone as a belt-and-braces fallback.
+    # InferenceX setup is orthogonal to the auth block under test. Point
+    # INFERENCEX_PATH at a writable dir so detection short-circuits, and stub
+    # the clone as a fallback.
     inferencex_dir = tmp_path / "InferenceX"
     (inferencex_dir / "benchmarks").mkdir(parents=True)
     (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text("# stub", encoding="utf-8")
@@ -65,9 +60,8 @@ def stub_install_steps(monkeypatch, tmp_path):
 def clean_url_env(monkeypatch):
     """Strip URL env vars and fully restore os.environ afterwards.
 
-    ``_preflight`` writes alias vars (GEAK_*/LLM_*/…) directly into
-    ``os.environ``; monkeypatch cannot roll those back, so snapshot and
-    restore the whole environ to stop cross-test leakage.
+    ``_preflight`` writes alias vars directly into ``os.environ``; monkeypatch
+    cannot roll those back, so snapshot and restore the whole environ.
     """
     import os
 
@@ -117,7 +111,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     )
     # ANTHROPIC_BASE_URL unset -> re-derived from OPENAI_BASE_URL.
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    # Key aliases start unset so SAFE API key fills them (gap-fill semantics).
+    # Key aliases start unset so SAFE API key fills them.
     for name in (
         "_".join(("OPENAI", "API", "KEY")),
         "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
@@ -176,7 +170,6 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     monkeypatch.setenv("_".join(("SAFE", "API", "KEY")), "safe-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    # User-set provider keys for a true dual entrypoint.
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     for name in ("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "_".join(("GEAK", "API", "KEY")), "_".join(("LLM", "API", "KEY")), "_".join(("AMD_LLM", "API", "KEY"))):
@@ -184,7 +177,7 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
 
     resolved = cli_preflight._preflight()
 
-    # Both base URLs are kept distinct (no derivation collapse).
+    # Both base URLs are kept distinct.
     assert resolved == ("https://api.anthropic.com", "https://api.openai.com/v1")
     # Explicit provider keys are preserved.
     assert cli.os.environ["_".join(("OPENAI", "API", "KEY"))] == "openai-user-token"
@@ -230,7 +223,7 @@ def test_preflight_anthropic_only_backfills_geak_aliases(
 
     resolved = cli_preflight._preflight()
 
-    # Official Anthropic is not OpenAI-compatible; only the Anthropic side is resolved.
+    # Official Anthropic is not OpenAI-compatible; only Anthropic side resolved.
     assert resolved == ("https://api.anthropic.com", "")
     for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
         assert cli.os.environ[name] == "https://api.anthropic.com"
@@ -324,10 +317,8 @@ def test_preflight_preserves_operator_geak_tunnel_url(
 ):
     """An operator-pinned GEAK tunnel URL survives preflight.
 
-    GEAK runs in a separate network namespace that cannot reach the gateway
-    directly; the operator points GEAK_BASE_URL at the host-local reverse
-    tunnel. Preflight must NOT clobber it back to the direct gateway URL, while
-    still defaulting the unset LLM_API_BASE to the gateway.
+    Preflight must NOT clobber GEAK_BASE_URL back to the direct gateway URL,
+    while still defaulting the unset LLM_API_BASE to the gateway.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("SAFE", "API", "KEY")), "safe-key")
@@ -342,9 +333,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     resolved = cli_preflight._preflight()
 
     gateway = resolved[1]
-    # Operator tunnel preserved.
     assert cli.os.environ["GEAK_BASE_URL"] == tunnel
-    # Unset alias still defaults to the gateway.
     assert cli.os.environ["LLM_API_BASE"] == gateway
     assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
@@ -381,7 +370,6 @@ def test_is_stale_proxy_url_matches_legacy_only():
     assert not cli_credentials._is_stale_proxy_url(None)
 
 
-# _sync_geak_config_base_url : GEAK reads $GEAK_CONFIG yaml, not env.
 _GEAK_CFG_TEMPLATE = """model:
   model_class: litellm
   model_name: openai/claude-opus-4-7
@@ -411,7 +399,6 @@ def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
     text = cfg.read_text(encoding="utf-8")
     assert f"base_url: {tunnel}" in text
     assert "core42.primus-safe.amd.com" not in text
-    # Other keys untouched.
     assert "model_class: litellm" in text
     assert "api_key: test-token" in text
 
@@ -503,7 +490,6 @@ def test_sync_geak_config_preserves_url_with_special_chars(tmp_path):
     assert f"base_url: {weird}" in cfg.read_text(encoding="utf-8")
 
 
-# _ensure_python_sdks
 class _RecordingRun:
     """Test double for subprocess.run that records calls and replays a script."""
 
@@ -577,6 +563,96 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
     assert "installed claude-agent-sdk" in captured
 
 
+# _ensure_ray
+def test_ensure_ray_skips_when_importable(monkeypatch, capsys):
+    """`import ray` returns rc=0 → no pip install fires (probe uses the interpreter)."""
+    runner = _RecordingRun([_Completed(returncode=0)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_ray("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 1
+    probe = runner.calls[0]
+    # Probe imports ray with the SAME interpreter, not shutil.which on PATH.
+    assert probe == ["/opt/venv/bin/python", "-c", "import ray"]
+    assert "ray OK" in capsys.readouterr().out
+
+
+def test_ensure_ray_installs_when_not_importable(monkeypatch, capsys):
+    """When `import ray` fails, pip install runs with the SAME interpreter.
+
+    Guards the bypass-only regression: a stray ``ray`` on PATH must not stop
+    the install when the active interpreter cannot import ray.
+    """
+    runner = _RecordingRun([_Completed(returncode=1), _Completed(returncode=0)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
+
+    assert len(runner.calls) == 2
+    install_call = runner.calls[1]
+    assert install_call[0] == "/opt/venv/bin/python"
+    assert install_call[1:4] == ["-m", "pip", "install"]
+    assert "--break-system-packages" in install_call
+    assert any(arg.startswith("ray[default]==") for arg in install_call)
+    captured = capsys.readouterr().out
+    assert "ray not importable" in captured
+    assert "ray installed OK" in captured
+
+
+# _ensure_bench_serving_deps
+def test_ensure_bench_serving_deps_skips_when_all_present(monkeypatch, capsys):
+    """find_spec probe reports nothing missing -> no pip install fires."""
+    runner = _RecordingRun([_Completed(returncode=0, stdout="")])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_bench_serving_deps("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 1
+    probe = runner.calls[0]
+    assert probe[0] == "/opt/venv/bin/python"
+    assert probe[1] == "-c"
+    # every dep name is handed to the probe as argv (checked via find_spec).
+    for dep in cli_preflight._BENCH_SERVING_DEPS:
+        assert dep in probe
+    assert "benchmark_serving client deps OK" in capsys.readouterr().out
+
+
+def test_ensure_bench_serving_deps_installs_only_missing_subset(monkeypatch, capsys):
+    """Only the modules the probe reports missing are pip-installed (same interp)."""
+    runner = _RecordingRun(
+        [
+            _Completed(returncode=0, stdout="transformers\ndatasets\n"),
+            _Completed(returncode=0),
+        ]
+    )
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_bench_serving_deps("/opt/venv/bin/python", ["--break-system-packages"])
+
+    assert len(runner.calls) == 2
+    install = runner.calls[1]
+    assert install[0] == "/opt/venv/bin/python"
+    assert install[1:4] == ["-m", "pip", "install"]
+    assert "--break-system-packages" in install
+    assert "transformers" in install and "datasets" in install
+    assert "aiohttp" not in install  # present deps are not reinstalled
+    assert "installing benchmark_serving client deps" in capsys.readouterr().out
+
+
+def test_ensure_bench_serving_deps_probe_failure_installs_all(monkeypatch):
+    """A crashed probe falls back to attempting the full dep set."""
+    runner = _RecordingRun([_Completed(returncode=2, stdout=""), _Completed(returncode=0)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_bench_serving_deps("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 2
+    install = runner.calls[1]
+    for dep in cli_preflight._BENCH_SERVING_DEPS:
+        assert dep in install
+
+
 # _unset_hip_visible_devices
 def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
@@ -602,7 +678,6 @@ def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     assert _os.environ["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
 
 
-# _validate_and_resolve_claude_model — hard gate
 def _make_args(**overrides) -> argparse.Namespace:
     """Build a minimal Namespace; translates legacy ``critic_mock`` into ``critic_backend``."""
     base = dict(
@@ -618,7 +693,6 @@ def _make_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-# _resolve_robustness_choice — default backend
 def test_resolve_robustness_choice_defaults_to_agent():
     args = _make_args(robustness_backend=None)
 
@@ -672,8 +746,7 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
 def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
     """Opt-out lets a non-AMD orchestration model pass when in catalog."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
-    # Pin a probe URL so the stubbed catalog probe runs without relying on a
-    # base-URL leaked from other tests (clean_url_env now restores os.environ).
+    # Pin a probe URL so the stubbed catalog probe runs.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         cli,
@@ -696,7 +769,6 @@ def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
-        # 4-6 present, but custom id absent → must NOT fall back to 4-6.
         lambda **kw: {"claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="my-org/custom-claude")
@@ -838,9 +910,8 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
 
 def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch, capsys):
     """Dual entry: Anthropic side returns 404/405 for /models (no catalog route)
-    → proceed without probing the OpenAI side. The 404 sentinel means "no
-    catalog endpoint", which is safe to pass; the OpenAI (gpt-*) catalog must
-    never gate a Claude model."""
+    → proceed without probing the OpenAI side. The OpenAI catalog must never
+    gate a Claude model."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
@@ -853,7 +924,6 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
     def _probe(**kw):
         url = kw.get("base_url", "")
         probed.append(url)
-        # Anthropic-compatible endpoint has no /models route -> 404 sentinel.
         if "anthropic" in url or "deepseek" in url:
             return cli._CATALOG_NO_MODELS_ENDPOINT
         return {"gpt-5.4"}
@@ -862,7 +932,7 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
     args = _make_args(claude_model="claude-opus-4-7")
     result = cli._validate_and_resolve_claude_model(args, None)
 
-    # Only the Anthropic side is probed; OpenAI side is never consulted.
+    # Only the Anthropic side is probed.
     assert probed == ["https://api.deepseek.com/anthropic"]
     assert result is None
     assert args.claude_model == "claude-opus-4-7"
@@ -871,7 +941,7 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
 
 def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     """Dual entry: Anthropic catalog probe fails with auth/network (None, not the
-    404 sentinel) and custom models are explicitly disabled → refuse to start."""
+    404 sentinel) and custom models disabled → refuse to start."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
@@ -879,7 +949,7 @@ def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
 
-    # None models a 401/403/network/5xx failure (unverifiable, not "no route").
+    # None models a 401/403/network/5xx failure, not "no route".
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(claude_model="claude-opus-4-7")
     with pytest.raises(SystemExit) as exc:
@@ -957,7 +1027,6 @@ def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, caps
     assert "Refusing to start" in err
 
 
-# _probe_llm_catalog — retry behaviour
 class _FakeResp:
     def __init__(self, status_code: int, payload: Any):
         self.status_code = status_code
@@ -1095,7 +1164,7 @@ def test_probe_llm_catalog_returns_sentinel_on_404_without_retry(monkeypatch):
 
     result = cli._probe_llm_catalog(base_url="https://api.deepseek.com/anthropic", api_key="test-token")
     assert result is cli._CATALOG_NO_MODELS_ENDPOINT
-    assert attempt[0] == 1  # no retries on a definitive 404
+    assert attempt[0] == 1
 
 
 def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
@@ -1112,7 +1181,6 @@ def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
     assert result is None
 
 
-# _smoke_test_codex_model — WARN-only
 def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
     args = _make_args(codex_model="gpt-99.9")
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
@@ -1358,8 +1426,6 @@ def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
     assert args.claude_model == "GPT-5.4"
 
 
-# Merged from test_v08_ir3_preflight.py
-
 """preflight soft-degrade tests."""
 
 
@@ -1430,7 +1496,6 @@ def marker_path(tmp_path, monkeypatch) -> Path:
     return user_data / "runtime" / "cortex" / ".kb_preflight.json"
 
 
-# 1. KB ok + PR ok → both reachable, reasons None.
 def test_ir3_kb_ok_pr_ok(marker_path):
     args = _ns()
     with patch.object(
@@ -1445,7 +1510,6 @@ def test_ir3_kb_ok_pr_ok(marker_path):
     assert args.pr_degraded_reason is None
 
 
-# 2. KB 5xx + no flag → soft degrade ir3_auto; cli does not abort.
 def test_ir3_kb_5xx_auto_degrade(marker_path):
     args = _ns()
     with patch.object(
@@ -1465,7 +1529,6 @@ def test_ir3_kb_5xx_auto_degrade(marker_path):
     assert args.pr_degraded_reason is None
 
 
-# 3. KB 5xx + --degraded-kb → script gets SKIP_KB_PROBE=1, reason=explicit.
 def test_ir3_kb_explicit_flag(marker_path):
     args = _ns(degraded_kb=True)
     seen_env: dict = {}
@@ -1485,7 +1548,6 @@ def test_ir3_kb_explicit_flag(marker_path):
     assert args.pr_degraded_reason is None
 
 
-# 4. KB 401 + non-empty token → kb reachable (auth path).
 def test_ir3_kb_401_with_token(marker_path, monkeypatch):
     monkeypatch.setenv("KB_SERVICE_TOKEN", "tok-abc")
     args = _ns()
@@ -1499,7 +1561,6 @@ def test_ir3_kb_401_with_token(marker_path, monkeypatch):
     assert args.kb_degraded_reason is None
 
 
-# 5. KB 401 + empty token → soft degrade ir3_auto, marker missing_token.
 def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
     monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
     args = _ns()
@@ -1520,7 +1581,6 @@ def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
     assert marker["kb_failure_reason"] == "missing_token"
 
 
-# 6. PR timeout + --degraded-pr → reason=explicit_flag, KB stays ok.
 def test_ir3_pr_explicit_flag_kb_ok(marker_path):
     args = _ns(degraded_pr=True)
     seen_env: dict = {}
@@ -1540,7 +1600,6 @@ def test_ir3_pr_explicit_flag_kb_ok(marker_path):
     assert args.pr_degraded_reason == "explicit_flag"
 
 
-# 7. Both flags → preflight_kb.sh NOT invoked.
 def test_ir3_both_flags_short_circuit(marker_path):
     args = _ns(degraded_kb=True, degraded_pr=True)
     with patch.object(cli_preflight.subprocess, "run") as run_mock:
@@ -1552,7 +1611,6 @@ def test_ir3_both_flags_short_circuit(marker_path):
     assert args.pr_degraded_reason == "explicit_flag"
 
 
-# 8. No cortex KB URL → KB probe skipped, stays local-only without soft-degrading.
 def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     args = _ns()
@@ -1575,7 +1633,6 @@ def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
     assert args.kb_degraded_reason is None
 
 
-# 9. Explicit --cortex-kb-url → injected into the probe environment.
 def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     args = _ns(cortex_kb_url="http://my-kb.example")
@@ -1593,7 +1650,6 @@ def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
     assert args.kb_degraded_reason is None
 
 
-# Bonus: CLI flag plumbing
 def test_cli_parser_exposes_degraded_flags():
     parser = _build_parser()
     args = parser.parse_args(["optimize", "--model", "/x", "--degraded-kb"])
@@ -1634,8 +1690,7 @@ def test_expected_framework_guard_namespaced_env_var(monkeypatch):
 
 
 def test_expected_framework_guard_namespaced_takes_precedence(monkeypatch):
-    # Namespaced var wins over the compact one, so a matching compact value
-    # cannot rescue a namespaced mismatch.
+    # Namespaced var wins over the compact one.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "vllm")
     monkeypatch.setenv("EXPECTED_FRAMEWORK", "sglang")
     with pytest.raises(SystemExit):
@@ -1645,6 +1700,6 @@ def test_expected_framework_guard_namespaced_takes_precedence(monkeypatch):
 def test_expected_framework_guard_unset_is_noop(monkeypatch):
     monkeypatch.delenv("EXPECTED_FRAMEWORK", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", raising=False)
-    # No env pins -> guard is a no-op regardless of framework.
+    # No env pins -> guard is a no-op.
     cli._enforce_expected_framework("sglang")
     cli._enforce_expected_framework("anything")
