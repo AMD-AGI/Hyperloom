@@ -342,6 +342,65 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
     print("Preflight: ray installed OK")
 
 
+# InferenceX benchmark_serving client-side deps. Mirrors the ``_BENCH_SERVING_DEPS``
+# list in assets/install.sh (keep in sync). ``benchmark_serving.py`` lives under
+# InferenceX (not Magpie's pyproject), so ``pip install -e Magpie`` never pulls
+# these; every bypass/Magpie client launch imports them before hitting the server.
+_BENCH_SERVING_DEPS = (
+    "aiohttp",
+    "tqdm",
+    "numpy",
+    "requests",
+    "transformers",
+    "huggingface_hub",
+    "datasets",
+    "pandas",
+)
+
+
+def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install the InferenceX benchmark_serving client deps in python_exe.
+
+    ``assets/install.sh:ensure_bench_serving_deps`` installs these into the
+    install-time ``$PYTHON`` (often ``/opt/venv``). The bypass runner, however,
+    launches ``benchmark_serving.py`` with the ACTIVE benchmark interpreter
+    (``sys.executable``); when that differs from the install-time interpreter the
+    client dies with a missing-module error even though Ray reported OK. Route the
+    ensure through ``python_exe`` (the resolved benchmark interpreter) so the two
+    stay aligned. Detection uses ``importlib.util.find_spec`` (no heavy import) in
+    a single probe subprocess, then pip-installs only the missing modules.
+
+    Args:
+        python_exe (str): The interpreter that will import the client deps.
+        pip_extra (list[str]): Extra ``pip install`` arguments (e.g.
+            ``--break-system-packages``).
+    """
+    mods = list(_BENCH_SERVING_DEPS)
+    probe = (
+        "import importlib.util, sys; "
+        "print('\\n'.join(m for m in sys.argv[1:] "
+        "if importlib.util.find_spec(m) is None))"
+    )
+    result = subprocess.run(
+        [python_exe, "-c", probe, *mods], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        # Probe itself failed unexpectedly; fall back to attempting all so a
+        # genuinely missing client is not silently left uninstalled.
+        missing = mods
+    else:
+        missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if not missing:
+        print("Preflight: benchmark_serving client deps OK")
+        return
+    print(f"Preflight: installing benchmark_serving client deps: {' '.join(missing)} ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *missing],
+        check=True,
+    )
+    print("Preflight: benchmark_serving client deps installed OK")
+
+
 def _unset_hip_visible_devices() -> None:
     """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
 
@@ -867,6 +926,13 @@ def _preflight(
     # Install it with the active backend's interpreter so a bypass-only box
     # gets Ray in its own venv instead of Magpie's.
     _ensure_ray(benchmark_python, pip_extra)
+
+    # 1b. InferenceX benchmark_serving client deps — required by every serving
+    # benchmark client launch. install.sh installs these into the install-time
+    # $PYTHON, but the bypass runner launches the client with the active
+    # benchmark interpreter; ensure them there too so a bypass-only box whose
+    # sys.executable differs from /opt/venv can still import the client.
+    _ensure_bench_serving_deps(benchmark_python, pip_extra)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to
     # ($MAGPIE_PATH override; auto-clones if missing). Skipped entirely when the

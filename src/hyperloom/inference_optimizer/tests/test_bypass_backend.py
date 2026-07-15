@@ -1205,9 +1205,19 @@ def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
     """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc.
 
     The client is identified by --result-dir (writes inferencex_result.json);
-    anything else is treated as the eval subprocess.
+    the lm_eval dep probe/install is a no-op passthrough; anything else is
+    treated as the eval subprocess.
     """
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
+        # _ensure_eval_deps probes/install lm_eval before the eval subprocess;
+        # treat it as already-present so this fake stays focused on client/eval.
+        if "import lm_eval" in cmd or ("pip" in cmd and "install" in cmd):
+            class _Ok:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _Ok()
         is_client = "--result-dir" in cmd and "benchmark_serving.py" in " ".join(cmd)
         if is_client:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
@@ -1755,3 +1765,49 @@ def test_lifecycle_all_boot_cleanup_tears_down_server(tmp_path, monkeypatch):
     assert rc == 0
     assert terminated["n"] == 1
     assert teardown["called"] is True
+
+
+def test_ensure_eval_deps_present_skips_install(monkeypatch):
+    """lm_eval importable by the interpreter -> only the probe runs, no pip."""
+    calls = []
+
+    class _P:
+        returncode = 0
+
+    def fake_run(cmd, capture_output=False, check=False, **kwargs):
+        calls.append(list(cmd))
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
+
+    assert len(calls) == 1  # probe only
+    assert calls[0] == ["/opt/venv/bin/python", "-c", "import lm_eval"]
+
+
+def test_ensure_eval_deps_installs_when_missing(monkeypatch):
+    """lm_eval not importable -> pip install runs with the SAME interpreter.
+
+    Mirrors InferenceX benchmark_lib.sh's runtime shim so bypass-only accuracy
+    runs (Magpie install skipped) do not die on a missing lm_eval.
+    """
+    calls = []
+    rcs = [1, 0]  # probe fails, pip succeeds
+
+    def fake_run(cmd, capture_output=False, check=False, **kwargs):
+        calls.append(list(cmd))
+
+        class _P:
+            returncode = rcs[len(calls) - 1]
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
+
+    assert len(calls) == 2
+    assert calls[0] == ["/opt/venv/bin/python", "-c", "import lm_eval"]
+    install = calls[1]
+    assert install[0] == "/opt/venv/bin/python"
+    assert install[1:4] == ["-m", "pip", "install"]
+    assert "lm_eval" in install

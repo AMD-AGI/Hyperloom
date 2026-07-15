@@ -476,6 +476,32 @@ def _run_scriptable_benchmark(
     return 0 if success else (rc or 1)
 
 
+def _ensure_eval_deps(python_exe: str) -> None:
+    """Ensure ``lm_eval`` is importable by ``python_exe`` before an accuracy pass.
+
+    The Magpie path relies on InferenceX's ``benchmark_lib.sh`` runtime shim to
+    auto-install ``lm_eval`` when RUN_EVAL is on; bypass does not shell through
+    that shim, so on a bypass-only box (Magpie install skipped) ``lm_eval`` may
+    never have been installed and the eval subprocess dies immediately. Mirror
+    the shim here: probe-then-install with the SAME interpreter that runs eval.
+
+    Best-effort: a failed install is not fatal here — the eval subprocess will
+    then fail and be surfaced through its exit code (``_finalize_report`` already
+    fails the run on a non-zero eval rc), so we never crash the whole benchmark
+    on a transient pip error.
+
+    Args:
+        python_exe (str): The interpreter that will run ``python -m lm_eval``.
+    """
+    probe = subprocess.run([python_exe, "-c", "import lm_eval"], capture_output=True)
+    if probe.returncode == 0:
+        return
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", "lm_eval"],
+        check=False,
+    )
+
+
 def _run_client_and_eval(
     *, inferencex_root, model, base_url, isl, osl, conc, rrr, profile,
     bench_envs, workspace, timeout_s,
@@ -495,6 +521,7 @@ def _run_client_and_eval(
     )
     rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
     if rc == 0 and _run_eval_enabled(bench_envs):
+        _ensure_eval_deps(sys.executable)
         eval_cmd = bypass_engine.build_eval_command(
             python_exe=sys.executable, model=model, base_url=base_url, conc=conc,
             out_dir=str(workspace / "lm_eval"),
