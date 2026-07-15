@@ -341,7 +341,7 @@ async def test_task_registry_illegal_transition_rejected(db):
     tr = TaskRegistry(db)
     t = await tr.create(kind="bench_runner", params={}, idempotency_key="kT2")
     with pytest.raises(IllegalTransition):
-        await tr.transition(t.task_id, "succeeded")  # queued -> succeeded not allowed
+        await tr.transition(t.task_id, "succeeded")  # queued -> succeeded illegal
 
 
 @pytest.mark.asyncio

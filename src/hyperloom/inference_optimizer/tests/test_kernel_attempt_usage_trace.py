@@ -72,7 +72,6 @@ def test_forge_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     assert row["task_id"] == "k042"
     assert row["input_tokens"] == 5000
     assert row["output_tokens"] == 1200
-    # claude usage carries the prompt-cache split, so forge preserves it.
     assert row["cache_creation_input_tokens"] == 400
     assert row["cache_read_input_tokens"] == 3000
 

@@ -3,8 +3,8 @@
 
 """Run TraceLens analysis-orchestrator skill through Claude SDK.
 
-The LLM-backed path for issue #124; kept outside ``tracelens_analysis.py``
-so the deterministic CLI/csv fallback stays isolated.
+The LLM-backed path, kept outside ``tracelens_analysis.py`` so the
+deterministic CLI/csv fallback stays isolated.
 """
 
 from __future__ import annotations
@@ -54,13 +54,9 @@ class _OpenAIToolScope:
     output_dir: Path
     read_roots: tuple[Path, ...]
 
-# Per-message stream-idle timeout (seconds). The in-process Claude SDK query
-# has no client-side read timeout, so a gateway that returns a partial response
-# (stop_reason=None) and then stops pushing chunks would block forever on
-# socket.read() and freeze the whole optimizer chain (Hyperloom Sandbox-hang
-# RCA). We bound the wait for EACH next SDK message (inactivity, not total) so a
-# stalled stream aborts while a legitimately long-but-progressing analysis is
-# untouched. Env-overridable.
+# Per-message stream-idle timeout (seconds). The in-process Claude SDK query has
+# no client-side read timeout, so a stalled gateway stream would block forever;
+# we bound the wait for each next SDK message (inactivity, not total). Env-overridable.
 _DEFAULT_STREAM_IDLE_TIMEOUT_SEC = 300.0
 
 
@@ -88,11 +84,8 @@ def _resolve_stream_idle_timeout_sec() -> float:
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
 _KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
 
-# #266 transcript field cap: a single tool_result / text / thinking block can
-# be megabytes (a big file Read, a CSV dump), and the transcript is diagnostic
-# only — so cap every serialized string field. Without this the
-# agent_transcript.jsonl grows unbounded and can dwarf the artifacts it exists
-# to point at. Truncation appends a marker so a reader knows it was clipped.
+# Transcript field cap: a single block can be megabytes and the transcript is
+# diagnostic-only, so cap every serialized string field. Truncation appends a marker.
 _TRANSCRIPT_FIELD_MAX_CHARS = 16_384
 
 
@@ -210,7 +203,6 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
-    # atom shares the chrome-trace JSON shape of sglang/vllm.
     if (framework or "").strip().lower() in {"vllm", "sglang", "atom"}:
         return "inference"
     return requested or "default"
@@ -703,7 +695,7 @@ def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
         limit: Maximum length before truncation.
 
     Returns:
-        The original string, or a truncated copy with a clip marker (#266).
+        The original string, or a truncated copy with a clip marker.
     """
     if len(value) <= limit:
         return value
@@ -713,12 +705,9 @@ def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
 def _json_safe(value: Any, *, cap: bool = True) -> Any:
     """Best-effort coercion of an SDK field into a JSON-serializable value.
 
-    Tool inputs / results are usually plain dicts already, but the SDK may
-    hand back nested objects; falling back to ``str`` keeps the transcript
-    write infallible so a serialization edge case never aborts a TraceLens
-    run (#266). When ``cap`` is set every string (at any nesting depth) is
-    bounded to ``_TRANSCRIPT_FIELD_MAX_CHARS`` so a megabyte tool_result cannot
-    bloat the transcript.
+    Falling back to ``str`` keeps the transcript write infallible. When ``cap``
+    is set every string (at any nesting depth) is bounded to
+    ``_TRANSCRIPT_FIELD_MAX_CHARS``.
 
     Args:
         value: The value to coerce.
@@ -743,12 +732,9 @@ def _json_safe(value: Any, *, cap: bool = True) -> Any:
 def _serialize_sdk_block(block: Any) -> dict[str, Any]:
     """Serialize one message content block into a JSON-safe record.
 
-    Blocks are tagged by class name (``TextBlock`` / ``ToolUseBlock`` /
-    ``ToolResultBlock`` / ``ThinkingBlock`` / ...) and probed for the
-    union of fields those types expose, rather than importing the SDK's
-    concrete block classes. This mirrors
-    ``ClaudeBackend._iter_blocks`` so the runner stays decoupled from
-    claude-agent-sdk internals.
+    Blocks are tagged by class name and probed for the union of fields those
+    types expose, rather than importing the SDK's concrete block classes, so the
+    runner stays decoupled from claude-agent-sdk internals.
 
     Args:
         block: An SDK content block (or a plain dict).
@@ -790,8 +776,7 @@ def _serialize_sdk_block(block: Any) -> dict[str, Any]:
     if isinstance(is_error, bool):
         record["is_error"] = is_error
     if set(record.keys()) == {"block"}:
-        # Unknown block with no recognized fields: keep a bounded repr so
-        # the transcript still records that something streamed.
+        # Unknown block with no recognized fields: keep a bounded repr.
         record["repr"] = str(block)[:2000]
     return record
 
@@ -913,10 +898,7 @@ async def run_tracelens_skill(
         query, options_cls = _import_sdk()
         sdk_query_factory = sdk_query_factory or query
         sdk_options_cls = sdk_options_cls or options_cls
-        # Only harden the real SDK path; tests inject fakes and skip this. Keep
-        # API_TIMEOUT_MS opt-in because external clients may interpret it as a
-        # total request timeout. The per-message wait_for below is the
-        # Hyperloom-controlled idle timeout.
+        # Only harden the real SDK path; tests inject fakes and skip this.
         os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
 
@@ -926,7 +908,7 @@ async def run_tracelens_skill(
         "write artifacts under the requested output directory, and do not "
         "modify application source code."
     )
-    # Fixed turn budget so smoke and production runs share the same orchestration envelope.
+    # Fixed turn budget shared by smoke and production runs.
     max_turns = 300
     kwargs: dict[str, Any] = {
         "max_turns": max_turns,
@@ -951,12 +933,9 @@ async def run_tracelens_skill(
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
 
-    # #266: persist a stream-JSON transcript of the agent's turns (text +
-    # tool_use/tool_result blocks) so operators can inspect the lifecycle
-    # and the artifacts it produced during execution. Capture is
-    # best-effort: a serialization or IO error on the logging side must
-    # never abort an otherwise-successful TraceLens run, so every write is
-    # guarded and the transcript handle open is tolerant of IO failure.
+    # Persist a stream-JSON transcript of the agent's turns for inspection.
+    # Best-effort: a logging-side error must never abort a successful run, so
+    # every write and the handle open are guarded.
     transcript_path = output_dir / "agent_transcript.jsonl"
     transcript_written = False
     transcript_seq = 0
@@ -966,13 +945,9 @@ async def run_tracelens_skill(
         transcript_fh = None
         if log:
             log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
-    # Drive the SDK stream manually (instead of ``async for``) so each next
-    # message is bounded by a per-message idle timeout. The in-process SDK has
-    # no client-side read timeout, so a gateway that stalls mid-stream
-    # (stop_reason=None, no further chunks) would otherwise block forever on
-    # socket.read() and freeze the whole optimizer chain. The wait is per
-    # message (inactivity), not a total budget, so long-but-progressing runs are
-    # unaffected.
+    # Drive the SDK stream manually so each next message is bounded by a
+    # per-message idle timeout (inactivity, not a total budget); the in-process
+    # SDK has no client-side read timeout and would otherwise block on a stall.
     idle_timeout = _resolve_stream_idle_timeout_sec()
     stream = sdk_query_factory(prompt=prompt, options=options)
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
@@ -986,9 +961,8 @@ async def run_tracelens_skill(
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                # No new SDK message for ``idle_timeout`` s: the gateway stream
-                # stalled mid-response. Abort and tear the generator down so its
-                # transport/subprocess does not leak as an orphan.
+                # Gateway stream stalled mid-response: abort and tear the
+                # generator down so its transport/subprocess does not leak.
                 sdk_error = f"stream idle timeout: no SDK message for {idle_timeout:.0f}s (gateway stall)"
                 if log:
                     log(f"[claude-sdk] WARNING: {sdk_error}")
@@ -1014,7 +988,7 @@ async def run_tracelens_skill(
                 if log:
                     log(f"[claude-sdk] {text[:1000]}")
     except Exception as exc:  # noqa: BLE001
-        # SDK may error (e.g. "max turns reached") after writing artifacts; treat artifact presence as truth.
+        # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
@@ -1028,8 +1002,7 @@ async def run_tracelens_skill(
                 if log:
                     log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
 
-    # Final report is ``analysis.md`` (the v0.2 standalone_analysis.md
-    # fallback was dropped for masking orchestrator failures with stale data).
+    # Final report is ``analysis.md``.
     report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if sdk_error:
@@ -1040,17 +1013,12 @@ async def run_tracelens_skill(
         "tracelens_agent_report": str(report_path),
         "tracelens_cmd_prefix": str(prefix_path),
     }
-    # #266: surface the stream-JSON transcript so it flows into the
-    # kernel-agent status sidecar (``artifacts.update(skill_result
-    # .artifact_paths)`` in tracelens_analysis.py) and a launcher/operator
-    # can tail it during execution. Only advertise it when at least one
-    # turn was actually recorded.
+    # Surface the stream-JSON transcript into the kernel-agent status sidecar,
+    # but only when at least one turn was actually recorded.
     if transcript_written:
         artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
     else:
-        # No turn was recorded (empty stream, or every serialization failed):
-        # remove the zero-byte file we truncated open at start so we don't
-        # leave a misleading empty agent_transcript.jsonl on disk.
+        # No turn recorded: remove the zero-byte file truncated open at start.
         try:
             transcript_path.unlink(missing_ok=True)
         except OSError as exc:
@@ -1083,7 +1051,7 @@ _DATA_TABLE_HEADER_TOKENS = (
     "efficiency",
     "bound",
 )
-# Lowercased canonical header tokens; separates the 9 typed fields from trailing extras.
+# Lowercased canonical header tokens; separate the 9 typed fields from extras.
 _DATA_TABLE_CANONICAL_KEY_SET = frozenset(tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS)
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
@@ -1102,8 +1070,7 @@ _EFFICIENCY_RE = re.compile(
     r"([\d.]+)\s*%\s*of\s*([\d.]+)\s*([A-Za-z/]+)",
     re.IGNORECASE,
 )
-# Detailed Analysis sibling labels (Reasoning/Resolution/Impact estimate); extracted
-# prose is a hypothesis to validate, not imperative guidance — see ``build_prompt``.
+# Detailed Analysis sibling labels; extracted prose is a hypothesis to validate.
 _IDENTIFICATION_LABEL = "**Identification:**"
 _DATA_LABEL = "**Data:**"
 _REASONING_LABEL = "**Reasoning for Slowdown:**"
@@ -1338,7 +1305,7 @@ def _row_to_candidate(
     if len(cells) != len(headers):
         return None
     record = dict(zip(headers, cells))
-    # Trailing extras (spec allows appended columns) preserved verbatim for downstream consumers.
+    # Preserve trailing extra columns verbatim for downstream consumers.
     extra_columns = {key: value for key, value in record.items() if key not in _DATA_TABLE_CANONICAL_KEY_SET}
 
     name = record.get("operation", "").strip()
@@ -1349,15 +1316,11 @@ def _row_to_candidate(
     kernel_path = record.get("kernel path", "").strip()
     if kernel_path in {"-", "—"}:
         kernel_path = ""
-    # Device kernel symbol(s) (TraceLens "Kernel Name" column, an appended extra):
-    # the mangled __global__ name(s) used to disambiguate dispatch ops in the
-    # op -> source resolver. The going-forward report may list several kernels per
-    # row ("Kernel 1: a<br>Kernel 2: b"); keep the full list and use the first for
-    # dispatch matching. Placeholders normalize to "".
+    # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
+    # list and use the first for matching. Placeholders normalize to "".
     device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
     device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
-    # Promote a framework-relative launcher path to its absolute on-disk source so the
-    # patchability gate passes; verbatim launcher kept on tracelens_launcher_path below.
+    # Promote a framework-relative launcher path to its absolute on-disk source.
     resolved_source_file = kernel_path
     if kernel_path:
         resolved = _resolve_launcher_to_abs_source(kernel_path)
@@ -1384,11 +1347,11 @@ def _row_to_candidate(
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
         "source_file": resolved_source_file,
-        # Keep raw Kernel Path verbatim so aggregation's AST resolution survives _finalize_candidates' source_file overwrite.
+        # Raw Kernel Path kept so aggregation's AST resolution survives the source_file overwrite.
         "tracelens_launcher_path": kernel_path,
-        # Device kernel symbol for dispatch resolution (op -> source); "" when absent.
+        # Device kernel symbol for dispatch resolution; "" when absent.
         "device_kernel_name": device_kernel_name,
-        # Full list when the row names multiple kernels (composite); [] when absent.
+        # Full list when the row names multiple kernels; [] when absent.
         "device_kernel_names": device_kernel_names,
         "source_type": "tracelens_report",
         "shapes": shapes,
@@ -1409,7 +1372,7 @@ def _row_to_candidate(
     if extra_columns:
         candidate["tracelens_extra_columns"] = extra_columns
     if prose:
-        # Duplicate the block-shared P-item prose onto each candidate so it stays self-describing.
+        # Duplicate the block-shared P-item prose onto each candidate.
         for key in (
             "identification",
             "reasoning_for_slowdown",
@@ -1514,17 +1477,10 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
         if not rows:
             continue
         header_row = [cell.strip().lower() for cell in rows[0]]
-        # Validate by PRESENCE of every canonical column (matched by name anywhere
-        # in the header), not by fixed position. ``_row_to_candidate`` reads cells
-        # name-keyed (``dict(zip(headers, cells))`` -> ``record.get("kernel path")``),
-        # so any column ORDER works as long as every required name is present and
-        # the per-cell names stay aligned. This tolerates a remapped report that
-        # INSERTS or APPENDS extra columns (e.g. a ``Source Path`` column the
-        # path-resolution step adds) — TraceLens's own spec permits appended
-        # columns, and downstream consumers must not break when one is added.
-        # We normalize each header cell to its canonical name when it CONTAINS one
-        # (e.g. "kernel path (resolved)" -> "kernel path") so name-keyed lookup
-        # still hits; unknown extras (e.g. "source path") are kept verbatim.
+        # Validate by presence of every canonical column (matched by name), not by
+        # position, and tolerate inserted/appended extra columns. Normalize each
+        # header cell to its canonical name when it contains one (e.g. "kernel path
+        # (resolved)" -> "kernel path"); unknown extras are kept verbatim.
         if len(header_row) < canonical_width:
             continue
         normalized_header: list[str] = []
@@ -1534,17 +1490,14 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
                 cell,
             )
             normalized_header.append(match)
-        # Accept EXTRA/INSERTED columns (e.g. a ``Source Path`` column the
-        # path-resolution remap appends) but still REJECT genuine REORDERING of the
-        # canonical columns — a swap (e.g. Bound<->Efficiency) is a corrupt report
-        # and must be skipped, not silently mis-read. So: every canonical column
-        # must be present AND the canonical columns must appear in their canonical
-        # relative order (extras may be interleaved anywhere).
+        # Accept extra/inserted columns but reject genuine reordering of the
+        # canonical columns: every canonical column must be present and appear in
+        # canonical relative order (extras may be interleaved anywhere).
         canonical_in_header = [c for c in normalized_header if c in headers_canonical]
         if canonical_in_header != headers_canonical:
             continue
         header_row = normalized_header
-        # P-item meta by 1-based rank (P1 → pitems[0]); a missing entry => category unknown.
+        # P-item meta by 1-based rank; a missing entry => category unknown.
         pitem_meta = pitems[rank - 1] if rank - 1 < len(pitems) else {}
         category = pitem_meta.get("category", "")
         library_match = _LIBRARY_PARENS_RE.search(title)
@@ -1578,13 +1531,14 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     return candidates
 
 
-# Source-function aggregation: group candidates sharing an AST-resolved (source_path, line, fn) triple to avoid wasting per-kernel GEAK budget; unparseable kernel_path falls back to per-kernel dispatch.
+# Source-function aggregation: group candidates sharing an AST-resolved
+# (source_path, line, fn) triple; unparseable kernel_path falls back to per-kernel dispatch.
 
-# Launcher path shapes: ``<path>(<line>): <func>`` (Python) or bare / ``<path>#L<line>`` (HIP); missing pieces None.
+# Launcher path shapes: ``<path>(<line>): <func>`` (Python) or bare / ``<path>#L<line>`` (HIP).
 _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
-# Placeholders for unresolved Kernel Paths; must not survive parsing (else all group under a bogus path).
+# Placeholders for unresolved Kernel Paths; must not survive parsing.
 _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
     {
         "",
@@ -1603,10 +1557,9 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
 def _launcher_frame_from_dict(obj: dict) -> str | None:
     """Pull the first ``<path>(<line>): <func>`` frame out of a TraceLens launcher dict.
 
-    Newer TraceLens reports emit ``launcher_path`` as a traversal dict
-    ``{'entry_point': '<frame>', 'wrappers': "[<frame>, ...]", ...}`` instead of a
-    bare frame string. Prefer ``entry_point``; fall back to the first parseable
-    ``wrappers`` frame. Returns ``None`` when no frame matches the launcher shape.
+    The dict shape is ``{'entry_point': '<frame>', 'wrappers': "[<frame>, ...]"}``.
+    Prefer ``entry_point``; fall back to the first parseable ``wrappers`` frame.
+    Returns ``None`` when no frame matches the launcher shape.
     """
     if not isinstance(obj, dict):
         return None
@@ -1643,10 +1596,8 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     """
     if not kernel_path:
         return "", None, None
-    # TraceLens may hand us the launcher as a dict (or a stringified dict) whose
+    # TraceLens may hand us the launcher as a dict (or stringified dict) whose
     # real frame lives under entry_point/wrappers; reduce it to that frame first.
-    # sglang launcher_paths are plain strings or placeholders (never dicts), so
-    # this branch is inert for sglang and only rescues the newer vLLM dict shape.
     if isinstance(kernel_path, dict):
         frame = _launcher_frame_from_dict(kernel_path)
         if not frame:
@@ -1679,7 +1630,8 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     return text, None, None
 
 
-# Launcher path → absolute source file resolver: resolve sys.path-relative Kernel Paths to absolute so the patchability gate accepts them. Strategy (most-specific first): $HYPERLOOM_FRAMEWORK_SOURCE_ROOTS override, importlib find_spec, then hardcoded fallback table.
+# Launcher path → absolute source file resolver. Strategy (most-specific first):
+# $HYPERLOOM_FRAMEWORK_SOURCE_ROOTS override, importlib find_spec, then this fallback table.
 _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
     "aiter": ("/sgl-workspace/aiter",),
     "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
@@ -1689,11 +1641,8 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/opt/venv/lib/python3.10/site-packages",
         "/sgl-workspace/vllm",
     ),
-    # atom fallback roots for CSV-only / static-analysis parses (import atom may not have run).
-    # Kept in sync with the reusable-source roots in kernel_request_handlers
-    # (``_reusable_source_roots``) / tracelens_analysis (``_reusable_roots`` /
-    # ``KNOWN_SEARCH_ROOTS``), pinned by test_framework_paths_units.py. /app/ATOM
-    # is the editable-install parent.
+    # atom fallback roots for CSV-only / static-analysis parses. Kept in sync
+    # with the reusable-source roots elsewhere, pinned by test_framework_paths_units.py.
     "atom": (
         "/app/ATOM",
         "/usr/local/lib/python3.12/dist-packages",
@@ -1745,11 +1694,9 @@ def _package_root_parent(pkg: str) -> str | None:
     if spec is None:
         return None
     if spec.submodule_search_locations:
-        # Package dir's parent is what we prepend to ``pkg/rest/of/path``.
         loc = list(spec.submodule_search_locations)[0]
         return os.path.dirname(loc)
     if spec.origin and spec.origin.endswith(".py"):
-        # Single-file module.
         return os.path.dirname(os.path.dirname(spec.origin))
     return None
 
@@ -1793,7 +1740,7 @@ def _resolve_launcher_to_abs_source(
         abs_path = os.path.join(root, raw_path)
         if not os.path.isfile(abs_path):
             continue
-        # Validate the file actually hosts the launcher's function (guards sys.path shadowing); AST misses try the next root.
+        # Validate the file actually hosts the launcher's function (guards sys.path shadowing).
         if func and abs_path.endswith(".py"):
             if _function_line_from_ast(Path(abs_path), func) is None:
                 continue
@@ -1888,13 +1835,11 @@ _NATIVE_SOURCE_SUFFIXES = (
 
 
 def _is_native_source(path: str) -> bool:
-    """True for C/C++/HIP/CUDA source files (#420).
+    """True for C/C++/HIP/CUDA source files.
 
     Native sources have no Python AST to resolve a stable ``def`` line, so
-    TraceLens reports the call-site ``#L<line>`` which differs per call —
-    keying a task_group on that line splits one device kernel across
-    groups. Callers therefore drop the line/function key components for
-    these files.
+    TraceLens reports the per-call call-site ``#L<line>``. Callers therefore
+    drop the line/function key components for these files.
 
     Args:
         path: The source file path to classify.
@@ -1906,13 +1851,11 @@ def _is_native_source(path: str) -> bool:
 
 
 def _normalize_operation_key(operation: str) -> str:
-    """Canonicalize a TraceLens operation name for task-group keying (#420).
+    """Canonicalize a TraceLens operation name for task-group keying.
 
-    Strips balanced ``<...>`` template-argument lists (nested-safe) so the
-    SAME kernel profiled at different dtypes/shapes — e.g.
-    ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
-    while DISTINCT kernels (different base names) stay separate (the Q1
-    invariant).
+    Strips balanced ``<...>`` template-argument lists (nested-safe) so the same
+    kernel profiled at different dtypes/shapes groups together, while distinct
+    kernels (different base names) stay separate.
 
     Args:
         operation: The TraceLens operation name.
@@ -1969,7 +1912,9 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    # Grouping key: native (.cu/.hip/.cpp) on (source_path, function) only; Python on (operation, path, line, function). TraceLens Kernel Path is the calling frame so distinct kernels share a caller, operation MUST stay in the key normalized across dtypes. source_path is normpath-canonicalized.
+    # Grouping key: native on (source_path, function) only; Python on
+    # (operation, path, line, function) with operation normalized across dtypes.
+    # source_path is normpath-canonicalized.
     groups: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
@@ -1981,12 +1926,11 @@ def aggregate_by_source_function(
         src_norm = os.path.normpath(str(target["source_path"]))
         function_name = str(target["function_name"])
         if _is_native_source(src_norm):
-            # Drop the mangled operation + per-call line: one __global__
-            # template == one composite job, keyed on its source TU.
+            # Drop the mangled operation + per-call line; key on the source TU.
             key: tuple = ("native", src_norm, function_name)
         else:
-            # Keep the (normalized) operation so distinct kernels sharing
-            # one Python caller frame stay separate.
+            # Keep the normalized operation so distinct kernels sharing one
+            # Python caller frame stay separate.
             norm_op = _normalize_operation_key(operation)
             key = (
                 "py",
@@ -2011,7 +1955,7 @@ def aggregate_by_source_function(
                 "aggregate_duration_us": 0.0,
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
-                # Distinct per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item when one function spans multiple.
+                # Per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item.
                 "all_pitem_prose": [],
                 "_pitem_prose_seen": set(),  # popped before return
             }
@@ -2020,7 +1964,7 @@ def aggregate_by_source_function(
         if kid and kid not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(kid)
         bucket["rows"].append(cand)
-        # Collect P-item prose deduped by (rank, title); missing rank/title still yields a valid key.
+        # Collect P-item prose deduped by (rank, title).
         try:
             pitem_rank = int(cand.get("tracelens_pitem_rank") or 0)
         except (TypeError, ValueError):
@@ -2065,7 +2009,7 @@ def aggregate_by_source_function(
     )
     for idx, group in enumerate(ordered, start=1):
         group["task_group_id"] = f"tg{idx:03d}"
-        # Heaviest row (by duration) becomes primary; the rest are additional benchmark cases.
+        # Heaviest row (by duration) becomes primary; the rest are supplementary.
         group["rows"].sort(
             key=lambda r: float(r.get("duration_us") or 0.0),
             reverse=True,

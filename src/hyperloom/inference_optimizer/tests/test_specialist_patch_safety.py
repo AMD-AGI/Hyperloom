@@ -115,7 +115,7 @@ def test_ground_patch_text_applies_for_existing_target(tmp_path: Path):
 def test_ground_patch_text_stale_kept_when_target_exists(tmp_path: Path):
     repo = tmp_path / "repo"
     _init_repo(repo)
-    # File exists but hunk context is wrong => stale (kept, not garbage):
+    # File exists but hunk context is wrong => stale (kept, not garbage).
     stale = _PATCH_EXISTING.replace("    return 1", "    return 999")
     res = ground_patch_text(stale, base_checkout=repo)
     assert res.verdict == GROUND_STALE

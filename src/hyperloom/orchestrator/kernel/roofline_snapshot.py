@@ -92,7 +92,6 @@ def _parse_top_bottleneck(raw: str | None) -> str | None:
     """
     if not raw:
         return None
-    # ``MoE_fused (28.78%)`` -> ``MoE_fused``
     name = raw.split("(")[0].strip()
     return name or None
 
@@ -255,8 +254,6 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         )
         snapshot["roofline_provenance"] = {
             "formula": "perfmodel" if pm_bd is not None else "legacy",
-            # Compute-peak convention (achievable vs vendor-fallback) + value +
-            # source, so within%/gap is interpretable and single-convention.
             **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
             "runtime_weight_dtype": rt.weight_dtype_tag,
             "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
@@ -313,7 +310,10 @@ def build_roofline_snapshot(
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
-    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
+    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling;
+    mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and
+    ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All
+    default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
 
     Args:
         snapshot_id: The snapshot identifier, or ``None``.
@@ -345,41 +345,34 @@ def build_roofline_snapshot(
         peak=theoretical_peak_tok_per_sec,
         achieved=achieved_tok_per_sec,
     )
-    # Unit-agnostic fallback: when there is no tok/s ceiling (scriptable
-    # diffusion has a compute-latency roofline, not a decode-throughput one),
-    # derive within/gap from the ms pair. For latency "closer to the ceiling"
-    # means the measured time approaches the ideal floor, so within = ideal /
-    # measured (mirrors serving's achieved / peak: higher = nearer the ceiling).
+    # Unit-agnostic fallback: with no tok/s ceiling, derive within/gap from the
+    # ms pair as within = ideal / measured.
     if within is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
         within = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
         gap = round(100.0 - within, 2)
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
-        # Framework tag so the report layer renders the achieved primary metric
-        # in the right unit (serving: tok/s; scriptable xDiT: per-image latency).
+        # Framework tag so the report layer renders the achieved metric's unit.
         "framework": str(framework or ""),
-        # sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
+        # sidecar pointer — overwritten by record_trace_analyze.
         "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
-        # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
+        # Primary decode ceiling plus memory/compute sides; None when unavailable.
         "theoretical_peak_tok_per_sec": (
             float(theoretical_peak_tok_per_sec) if theoretical_peak_tok_per_sec > 0 else None
         ),
         "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
         "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
         "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
-        # Unit the *_tok_per_sec numeric fields are expressed in: "tok/s" for
-        # text-gen, "img/s" for diffusion (xDiT). Field names stay stable for
-        # wire compatibility; consumers should render using this unit.
+        # Unit for the *_tok_per_sec fields ("tok/s" text-gen, "img/s" xDiT).
         "throughput_unit": (str(throughput_unit) if throughput_unit else "tok/s"),
         "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
-        # Scriptable/diffusion siblings (compute-latency roofline). None for
-        # serving; the renderer selects tok/s vs ms by framework/unit.
+        # Scriptable/diffusion siblings (compute-latency roofline); None for serving.
         "e2e_mean_ms": (float(e2e_mean_ms) if e2e_mean_ms > 0 else None),
         "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),
         "within_roofline_pct": within,
@@ -470,7 +463,6 @@ def build_roofline_comparison_from_history(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
             ),
-            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
             "gap_to_roofline_pct": _num_delta(
                 latest.get("gap_to_roofline_pct"),
                 baseline.get("gap_to_roofline_pct"),
@@ -499,8 +491,7 @@ def _fmt_tput(v: float | None, framework: str = "") -> str:
 
     Serving frameworks render ``tok/s``; scriptable image frameworks (xDiT)
     store an img/s value whose meaningful surface is per-image latency, so
-    defer to :func:`framework_registry.format_primary_metric` for the correct
-    unit (mirrors the session's primary-metric rendering after #799).
+    defer to :func:`framework_registry.format_primary_metric` for the unit.
 
     Args:
         v (float | None): The stored primary metric (tok/s for serving, img/s
@@ -574,9 +565,8 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         )
         ceiling_lines.append("")
     else:
-        # Scriptable/diffusion has no tok/s decode ceiling; surface the
-        # compute-roofline ideal per-image latency floor instead (same unit as
-        # the achieved e2e latency, so within/gap read as a latency roofline).
+        # Scriptable/diffusion has no tok/s ceiling; surface the compute-roofline
+        # ideal per-image latency floor instead.
         ideal_ms = baseline.get("roofline_ideal_ms")
         if not isinstance(ideal_ms, (int, float)) or ideal_ms <= 0:
             ideal_ms = latest.get("roofline_ideal_ms")
@@ -660,8 +650,7 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
 
 
 #: Dominant roofline direction → (specialist domain, kb tag). Shared by the
-#: profiler digest and the coordinator's bottleneck-redirect advisory so both
-#: name the same dispatch target for a saturated direction.
+#: profiler digest and the coordinator's bottleneck-redirect advisory.
 BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
     "comm": ("comm_specialist", "communication"),
     "host_overhead": ("system_specialist", "systems"),

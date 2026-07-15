@@ -19,7 +19,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 )
 
 
-# Fixtures
 @pytest.fixture
 def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wipe the env vars these helpers consult so each test's precedence tier is explicit."""
@@ -45,7 +44,6 @@ def _ns(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**fields)  # type: ignore[arg-type]
 
 
-# _resolve_local_kb_root
 def test_resolve_local_kb_root_uses_explicit_flag(
     env_clean: None,
     tmp_path: Path,
@@ -107,7 +105,6 @@ def test_resolve_local_kb_root_does_not_create_directory(
     assert not target.exists()
 
 
-# _build_recipe_kb_dispatcher
 def test_build_dispatcher_returns_recipe_kb(
     env_clean: None,
     tmp_path: Path,
@@ -187,7 +184,6 @@ def test_build_dispatcher_idempotent(
     assert a.remote is None and b.remote is None
 
 
-# Argparse parser integration — flag really is wired
 def test_parser_accepts_local_kb_root_flag() -> None:
     """End-to-end: the parser accepts ``--local-kb-root`` and exposes it on the Namespace."""
     from hyperloom.inference_optimizer.cli.parser import _build_parser

@@ -133,9 +133,8 @@ class TestPromoteGemmTuningKeep:
         assert envs["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == "/tuned/gemm.csv"
 
     def test_geak_keep_writes_gemm_tuning_journal_event(self, tmp_path):
-        # The adopted GEMM-tuning run must surface as a phase_timeline event:
-        # a KIND_GEMM_TUNING KEEP journal row carrying the serving throughput
-        # and the originating task_id (for token attribution).
+        # Adopted GEMM-tuning run surfaces as a KIND_GEMM_TUNING KEEP journal row
+        # carrying the serving throughput and originating task_id.
         coord = _coord(tmp_path, baseline_tput=200.0)
         coord._promote_gemm_tuning_keep(
             {
@@ -768,8 +767,7 @@ def _eligible_coord(tmp_path, monkeypatch, **overrides):
     """Coordinator wired for a CK-switch-eligible forge workload.
 
     forge + sglang + fp8 + gfx942 (mi300x) + block-scale fp8. The block-scale
-    probe is forced to ``True`` unless overridden, so the helper does not depend
-    on a real model config on disk.
+    probe is forced to ``True`` unless overridden.
     """
     kwargs = dict(
         baseline_tput=100.0,
@@ -785,8 +783,8 @@ def _eligible_coord(tmp_path, monkeypatch, **overrides):
 
 
 class TestCkBlockscaleSwitchEligible:
-    """``_ck_blockscale_switch_eligible`` gates the standalone CK backend switch
-    to forge + sglang + fp8 (any signal) + gfx942 + block-scale checkpoints."""
+    """``_ck_blockscale_switch_eligible`` gates the CK backend switch to
+    forge + sglang + fp8 + gfx942 + block-scale checkpoints."""
 
     def test_eligible_for_forge_sglang_fp8_mi300x_blockscale(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
@@ -814,15 +812,13 @@ class TestCkBlockscaleSwitchEligible:
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_not_eligible_non_block_scale_fp8(self, tmp_path, monkeypatch):
-        # Per-tensor / static / per-channel-per-token fp8: no weight_block_size,
-        # so the positive block-scale probe declines (Bug #1).
+        # No weight_block_size, so the block-scale probe declines.
         coord = _eligible_coord(tmp_path, monkeypatch)
         monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_eligible_for_runtime_fp8_via_result_precision(self, tmp_path, monkeypatch):
-        # Session precision is bf16, but the forge result envelope stamps the
-        # runtime-resolved precision fp8 (Bug #2, signal #2).
+        # Session precision is bf16, but the forge result stamps runtime precision fp8.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
         monkeypatch.setattr(
             krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto")
@@ -833,8 +829,7 @@ class TestCkBlockscaleSwitchEligible:
         )
 
     def test_eligible_for_runtime_fp8_via_quantization_arg(self, tmp_path, monkeypatch):
-        # Session precision bf16 and no result precision, but runtime
-        # --quantization fp8 is resolved from server args (Bug #2, signal #3).
+        # Runtime --quantization fp8 is resolved from server args.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
         monkeypatch.setattr(
             krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto")
@@ -855,9 +850,8 @@ class TestCkBlockscaleSwitchEligible:
 class TestPromoteInjectsCkBlockscaleEnv:
     """Inline-promote safety net: an eligible forge result that reaches
     ``_promote_gemm_tuning_keep`` (without the validator) injects
-    ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M=256`` (attributed to gemm_tuning). The
-    primary forge path is the E2E validator; the GEAK path is no longer gated on
-    the a8w8 table env and never injects the un-validated CK switch."""
+    ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M=256``. The GEAK path never injects the
+    un-validated CK switch."""
 
     def test_injects_for_forge_eligible_keep(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
@@ -872,13 +866,11 @@ class TestPromoteInjectsCkBlockscaleEnv:
         )
         envs = coord.shared_state.current_best["extra_envs"]
         assert envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
-        # Flows into the stacked entry too (shared extra_envs object).
         stack_envs = coord.shared_state.optimization_stack[0]["extra_envs"]
         assert stack_envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
 
     def test_does_not_inject_for_geak_backend(self, tmp_path, monkeypatch):
-        # GEAK is not forge: the helper rejects it, so the un-validated CK
-        # switch is never stamped on the inline (non-E2E) promote path.
+        # GEAK is not forge, so the CK switch is never stamped inline.
         coord = _eligible_coord(tmp_path, monkeypatch)
         coord._promote_gemm_tuning_keep(
             {
@@ -1034,9 +1026,8 @@ class TestHandleGemmTuningResult:
     async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(
         self, tmp_path, monkeypatch
     ):
-        # a8w8 table tuner reported no_improvement (decision REVERT, no
-        # requires_e2e_validation), but the CK block-scale switch is eligible →
-        # must still route to the E2E validator, not inline promote.
+        # a8w8 tuner reported no_improvement but the CK block-scale switch is
+        # eligible → route to the E2E validator, not inline promote.
         coord = _eligible_coord(tmp_path, monkeypatch)
         called: dict[str, object] = {}
 
@@ -1097,7 +1088,6 @@ class TestValidateForgeGemmTuningE2E:
         await coord._validate_forge_gemm_tuning_e2e(result)
 
         assert fake.calls == []
-        # No candidates means the result is left untouched (no rewrite).
         assert result["requires_e2e_validation"] is True
         assert "e2e_validated" not in result
         assert coord.shared_state.optimization_stack == []
@@ -1134,7 +1124,6 @@ class TestValidateForgeGemmTuningE2E:
         # fmoe_ck on sglang carries the aiter MoE runner arg; dense does not.
         assert fake.calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
         assert fake.calls[1]["extra_server_args"] == ""
-        # First integrate sees only its own env; the second sees the stacked set.
         assert fake.calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": "/fmoe.json"}
         assert fake.calls[1]["extra_envs"] == {
             "AITER_CONFIG_FMOE": "/fmoe.json",
@@ -1144,8 +1133,7 @@ class TestValidateForgeGemmTuningE2E:
         assert fake.calls[1]["base_tput"] == pytest.approx(120.0)
 
         assert len(coord.shared_state.optimization_stack) == 2
-        # Each kept tuner also lands as a gemm_tuning KEEP journal event with
-        # its serving throughput + per-tuner task_id.
+        # Each kept tuner lands as a gemm_tuning KEEP journal event.
         gj = [e for e in _journal_entries(tmp_path) if e.get("kind") == "gemm_tuning"]
         assert [e["throughput_after"] for e in gj] == pytest.approx([120.0, 132.0])
         assert {e["task_id"] for e in gj} == {
@@ -1169,7 +1157,7 @@ class TestValidateForgeGemmTuningE2E:
             "AITER_CONFIG_FMOE": "/fmoe.json",
             "AITER_DENSE": "/dense.json",
         }
-        # Raw (pre-validation) envs are preserved for debugging.
+        # Raw (pre-validation) envs are preserved.
         assert result["recommended_env_raw"] == {
             "AITER_CONFIG_FMOE": "/fmoe.json",
             "AITER_DENSE": "/dense.json",
@@ -1179,9 +1167,8 @@ class TestValidateForgeGemmTuningE2E:
     async def test_injects_synthetic_ck_candidate_when_eligible_no_table_candidates(
         self, tmp_path, monkeypatch
     ):
-        # No table candidates (all no_improvement), but CK switch is eligible:
-        # the synthetic CK candidate is injected and E2E-validated, landing in
-        # the optimization_stack attributed to gemm_tuning.
+        # No table candidates, but CK switch is eligible: the synthetic CK
+        # candidate is injected, E2E-validated, and stacked under gemm_tuning.
         coord = _eligible_coord(tmp_path, monkeypatch)
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 209.0, "gain_pct": 109.0}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -1200,8 +1187,6 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_forge_gemm_tuning_e2e(result)
 
-        # The synthetic candidate flows through the existing integrate loop with
-        # the same payload shape as a table candidate.
         assert len(fake.calls) == 1
         assert fake.calls[0]["extra_envs"] == {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"}
         assert fake.calls[0]["extra_server_args"] == ""
@@ -1218,8 +1203,7 @@ class TestValidateForgeGemmTuningE2E:
 
     @pytest.mark.asyncio
     async def test_no_synthetic_ck_candidate_when_not_eligible(self, tmp_path, monkeypatch):
-        # Not eligible (vllm framework): no table candidates → early return,
-        # no synthetic CK candidate, integrate never called.
+        # Not eligible (vllm): no candidates → early return, integrate never called.
         coord = _eligible_coord(tmp_path, monkeypatch, framework="vllm")
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 209.0, "gain_pct": 109.0}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -1348,5 +1332,5 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_forge_gemm_tuning_e2e(result)
 
-        # Fallback budget is 15 * 60 sec → 15 minutes.
+        # Fallback budget is 15 minutes.
         assert captured["budget"] == 15

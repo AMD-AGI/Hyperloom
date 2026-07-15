@@ -30,7 +30,6 @@ def _render(domain_key: str, *, framework: str = "") -> str:
     return system + "\n" + user
 
 
-# 1. Atom hint blocks: serving / kernels / dist render atom paths
 def test_focus_serving_renders_atom_paths_when_framework_atom():
     text = _render("serving_specialist", framework="atom")
     for marker in (
@@ -57,7 +56,6 @@ def test_focus_dist_notes_single_node_only_under_atom():
     assert "atom/utils/distributed/utils.py" in text
 
 
-# 2. Atom hint blocks DROP literal sglang/vllm paths
 @pytest.mark.parametrize(
     "domain_key",
     ["serving_specialist", "kernel_switch_specialist", "comm_specialist"],
@@ -73,7 +71,6 @@ def test_no_sglang_or_vllm_paths_in_atom_focus_blocks(domain_key):
     assert "sglang/python/sglang/srt/" not in block, f"atom {domain_key} block mentions sglang srt: {block!r}"
 
 
-# 3. Cross-framework regression guard — non-atom still renders canonical hints.
 @pytest.mark.parametrize("framework", ["", "sglang", "vllm"])
 def test_focus_serving_renders_canonical_paths_under_non_atom(framework):
     text = _render("serving_specialist", framework=framework)
@@ -96,7 +93,6 @@ def test_specialist_focus_renders_non_empty_for_all_frameworks(
     assert "**Pitfalls" in text
 
 
-# 4. Option A: dedicated cross-framework rewrite domain + porting focus.
 def test_cross_framework_rewrite_domain_registered():
     domain = get_domain("cross_framework_rewrite_specialist")
     assert domain is not None
@@ -107,10 +103,8 @@ def test_cross_framework_rewrite_domain_registered():
 def test_cross_framework_rewrite_focus_renders_porting_methodology(framework):
     text = _render("cross_framework_rewrite_specialist", framework=framework)
     lower = text.lower()
-    # Rewrite (not git apply) methodology + self-check + unified-diff deliverable.
     assert "port" in lower
     assert "git apply" in lower
     assert "self-check" in lower
     assert "unified-diff" in lower or "unified diff" in lower
-    # Provenance echo so the KB ledger records the cross-framework outcome.
     assert "provenance" in lower

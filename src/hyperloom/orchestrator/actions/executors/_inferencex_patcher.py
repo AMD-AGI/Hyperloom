@@ -1,18 +1,17 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Idempotent, backward-compatible patcher for InferenceX
-``benchmarks/benchmark_lib.sh`` (Hyperloom issue #194).
+``benchmarks/benchmark_lib.sh``.
 
 Upstream resets ``num_prompts="$max_concurrency"`` under ``PROFILE=1``,
 stomping ``--num-prompts`` so the engine finishes before the steady-state
-profiling window opens (empty traces). The patch makes that line honour
+profiling window opens. The patch makes that line honour
 ``${NUM_PROMPTS:-$max_concurrency}`` — bit-for-bit identical when the env is
-unset, so existing consumers are unaffected.
+unset.
 
-Applied in place, once, never reverted: idempotent via a sentinel substring,
-serialized across processes via ``fcntl.flock``, written atomically (temp file
-+ ``os.replace``). Returns ``False`` (non-fatal) when the legacy line is
-missing so callers can decide whether to fail-loud.
+Applied in place, once: idempotent via a sentinel substring, serialized across
+processes via ``fcntl.flock``, written atomically. Returns ``False``
+(non-fatal) when the legacy line is missing.
 """
 
 from __future__ import annotations
@@ -42,15 +41,13 @@ _LOCK_PATH = "/tmp/hyperloom_benchmark_lib_patcher.lock"
 
 
 # ``benchmark_serving.py`` hardcodes the ``/start_profile`` ``extra_body`` and
-# never reads Hyperloom's ``PROFILE_EXTRA_BODY`` env, collapsing the tuned
-# steady-state window. Single-line replacement gated on the exact legacy text;
-# sentinel is the ``PROFILE_EXTRA_BODY`` substring.
+# never reads Hyperloom's ``PROFILE_EXTRA_BODY`` env. Single-line replacement
+# gated on the exact legacy text; sentinel is ``PROFILE_EXTRA_BODY``.
 _BENCH_SERVING_LEGACY = (
     '                                         extra_body={"num_steps": 1, '
     '"merge_profiles": True, "profile_by_stage": True},'
 )
-# JSON fallback uses lowercase ``true`` (Python ``True`` would be a
-# JSONDecodeError on the unset-env path); ``json.loads`` maps it back so the
+# JSON fallback uses lowercase ``true``; ``json.loads`` maps it back so the
 # dict matches the upstream literal byte-for-byte.
 _BENCH_SERVING_PATCHED = (
     "                                         extra_body=__import__('json')."
@@ -66,11 +63,10 @@ def _discover_inferencex_roots(
 ) -> list[Path]:
     """Return every InferenceX checkout root Hyperloom should patch.
 
-    #210: Magpie loads its bundled ``$MAGPIE_PATH/InferenceX`` at runtime, not
-    ``$INFERENCEX_PATH``; patching only the latter leaves Magpie's actual copy
-    unpatched. Patches ALL discovered roots (deduped by resolved path):
-    ``inferencex_path`` arg, ``$INFERENCEX_PATH``, ``$MAGPIE_PATH/InferenceX``.
-    Returns ``[]`` when none resolve (callers fail-soft).
+    Magpie loads its bundled ``$MAGPIE_PATH/InferenceX`` at runtime, not
+    ``$INFERENCEX_PATH``, so all discovered roots (deduped by resolved path)
+    are patched: ``inferencex_path`` arg, ``$INFERENCEX_PATH``,
+    ``$MAGPIE_PATH/InferenceX``. Returns ``[]`` when none resolve.
 
     Args:
         inferencex_path: Caller-provided override root to include in the scan.
@@ -229,7 +225,7 @@ def _ensure_patched(
     empty_msg: str,
     failure_msg: str,
 ) -> bool:
-    """Drive a set of discovered files to patched state (#210 multi-root).
+    """Drive a set of discovered files to patched state.
 
     Empty fast-path: ``log.info(empty_msg)`` + ``False``. All-already-patched
     fast-path skips the lock. Otherwise, under the lock, each source is
@@ -252,9 +248,9 @@ def _ensure_patched(
         log.info(empty_msg)
         return False
 
-    # #210 fix: patch every discovered InferenceX root, not just the first.
+    # Patch every discovered InferenceX root, not just the first.
     if all(is_patched(s) for s in sources):
-        return True  # all paths already patched, fast-path no lock
+        return True  # all already patched, fast-path no lock
 
     any_patched = False
     with best_effort_file_lock(lock_path, label="_inferencex_patcher"):
@@ -327,8 +323,8 @@ def _resolve_benchmark_serving_paths(
 ) -> list[Path]:
     """Return every existing
     ``<root>/utils/bench_serving/benchmark_serving.py`` to patch (one per
-    :func:`_discover_inferencex_roots` root, including Magpie's bundled copy
-    per the #210 fix). Independent of the benchmark_lib.sh resolver.
+    :func:`_discover_inferencex_roots` root, including Magpie's bundled copy).
+    Independent of the benchmark_lib.sh resolver.
 
     Args:
         inferencex_path: Caller-provided override root to include in the scan.

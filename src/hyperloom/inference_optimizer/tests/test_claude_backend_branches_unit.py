@@ -2,7 +2,7 @@
 
 """Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring,
 option building (resume / context tools / raw mode), timeout handling, the
-conversational session capture, and the SDK-stream error tolerance."""
+conversational session capture, and SDK-stream error tolerance."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def test_import_sdk_missing(monkeypatch):
 
 
 def test_import_sdk_incomplete(monkeypatch):
-    monkeypatch.setattr(cl.importlib, "import_module", lambda name: SimpleNamespace())  # no query/options
+    monkeypatch.setattr(cl.importlib, "import_module", lambda name: SimpleNamespace())
     with pytest.raises(BackendError, match="missing query"):
         cl._import_sdk()
 
@@ -210,9 +210,8 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
 
     async def _slow_live(*, prompt, options):
         for _ in range(4):
-            # Per-message gap (0.03s) stays under the idle budget (0.05s),
-            # but the cumulative time (~0.12s) exceeds it — proving the guard
-            # is idle-based, not a total wall-clock cap.
+            # Per-message gap stays under the idle budget while cumulative time exceeds it,
+            # proving the guard is idle-based, not a total wall-clock cap.
             await asyncio.sleep(0.03)
             yield _Msg(content=[_emit_tool_block()])
 

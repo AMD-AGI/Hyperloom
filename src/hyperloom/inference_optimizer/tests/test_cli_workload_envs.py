@@ -39,7 +39,7 @@ def _write_yaml_with_envs(path, framework, envs):
 
 
 def test_framework_script_mismatch_fails_fast(tmp_path):
-    """vllm framework + sglang script must raise before server boot (QRWKV-72B bug)."""
+    """vllm framework + sglang script must raise before server boot."""
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm", benchmark_script="sglang_mi300x.sh")
     with pytest.raises(FrameworkScriptMismatchError, match="framework/script mismatch"):

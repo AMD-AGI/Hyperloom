@@ -112,7 +112,7 @@ def get_registry() -> MetricsRegistry:
     return _registry
 
 
-# Conventional metric names — keep stable so dashboards don't churn.
+# Conventional metric names — keep stable for dashboards.
 CRITIC_KB_WRITE_TOTAL = "critic_kb_write_total"
 CRITIC_KB_WRITE_DURATION_SECONDS = "critic_kb_write_duration_seconds"
 CRITIC_KB_DEAD_LETTER_COUNT = "critic_kb_dead_letter_count"

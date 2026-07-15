@@ -321,7 +321,7 @@ def _collect_lane_timeline(
         try:
             conn.close()
         except Exception:  # noqa: BLE001
-            # Closing a read-only telemetry connection is best-effort during breakdown export.
+            # Closing a read-only telemetry connection is best-effort.
             pass
 
     rows: list[dict[str, Any]] = []
@@ -420,7 +420,7 @@ def collect_kb_provenance(
         recipe_snapshot_audit_jsonl as _recipe_audit_path,
     )
 
-    # Surface the PR Monitor reachability snapshot via ``warnings`` so it's greppable.
+    # Surface the PR Monitor reachability snapshot via ``warnings``.
     pr_status_path = _pr_status_path(session_dir)
     if pr_status_path.exists():
         try:
@@ -486,16 +486,13 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # Recipe-snapshot / gbrain remote read audit (RecipeKB.audit_hook ->
-    # recipe_snapshot/.audit.jsonl). Summarises whether the snapshot KB was
-    # actually consulted, which backend served it, and how each read resolved.
+    # Recipe-snapshot / gbrain remote read audit: whether the snapshot KB was
+    # consulted, which backend served it, and how each read resolved.
     recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
     recipe_by_resolution: dict[str, int] = {}
     recipe_by_remote: dict[str, int] = {}
-    # Per-path (e.g. gbrain vs cortex) attribution derived from the composite
-    # remote's provenance, emitted by the dispatcher audit. ``by_source``
-    # counts how often each path contributed a returned row; ``best_config_by
-    # _source`` counts which path supplied the replayable champion config.
+    # Per-path (gbrain vs cortex) attribution. ``by_source`` counts contributed
+    # rows; ``best_config_by_source`` counts who supplied the champion config.
     recipe_by_source: dict[str, int] = {}
     recipe_best_config_by_source: dict[str, int] = {}
     recipe_hits = 0
@@ -689,8 +686,7 @@ def collect_specialist_runs(
 ) -> list[dict[str, Any]]:
     """Build the ``specialist_runs`` section by merging ``state.specialist_rounds[]`` with on-disk transcripts; best-effort.
 
-    ``include_transcripts`` inlines the transcript bytes under each ref's
-    ``body`` (default False = path-only).
+    ``include_transcripts`` inlines the transcript bytes under each ref's ``body``.
 
     Args:
         session_dir (Path): Absolute session root.

@@ -60,16 +60,13 @@ def test_classify_attempt_failure_priority():
 
 
 def test_backend_results_dir_lookup(tmp_path: Path):
-    # No runs root at all.
     assert kas._backend_results_dir(tmp_path, "sid") is None
 
-    # Exact key match.
     sd = tmp_path / "sess"
     results = sd / "kernel-agent" / "runs" / "sess" / "results"
     results.mkdir(parents=True)
     assert kas._backend_results_dir(sd, "") == results
 
-    # Single-subdir recovery when neither key matches.
     sd2 = tmp_path / "sess2"
     other = sd2 / "kernel-agent" / "runs" / "migrated-key" / "results"
     other.mkdir(parents=True)
@@ -197,7 +194,6 @@ def test_unattempted_reason_order():
 
 
 def test_load_backend_ladder_skipped_flag(tmp_path: Path):
-    # A forge self-skip attempt carries skipped=True; it must ride into the row.
     payload = {
         "attempts": [
             {
@@ -215,38 +211,30 @@ def test_load_backend_ladder_skipped_flag(tmp_path: Path):
     ladder, reason = kas._load_backend_ladder(tmp_path, "k")
     assert reason == "" and len(ladder) == 2
     assert ladder[0]["skipped"] is True
-    # Non-skip rows must not gain a skipped key.
     assert "skipped" not in ladder[1]
 
 
 def test_kernel_outcome_class_mapping():
-    # success: kept / integrated.
     assert kas._kernel_outcome_class(kas.CATEGORY_INTEGRATED, []) == kas.OUTCOME_SUCCESS
     assert kas._kernel_outcome_class(kas.CATEGORY_KEEP_PENDING, []) == kas.OUTCOME_SUCCESS
 
-    # skip: never dispatched.
     assert kas._kernel_outcome_class(kas.CATEGORY_UNATTEMPTED, []) == kas.OUTCOME_SKIP
 
-    # skip: every recorded attempt self-skipped.
     all_skipped = [{"skipped": True, "error_class": kas.ERROR_CLASS_AGENT_ERROR}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, all_skipped) == kas.OUTCOME_SKIP
 
-    # mixed ladder (one skipped, one really failed) is NOT a skip -> fail.
     mixed = [
         {"skipped": True},
         {"error_class": kas.ERROR_CLASS_COMPILE_FAILED},
     ]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, mixed) == kas.OUTCOME_FAIL
 
-    # timeout: any attempt timed out (and not all-skipped).
     to = [{"error_class": kas.ERROR_CLASS_TIMEOUT}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, to) == kas.OUTCOME_TIMEOUT
 
-    # fail: attempted, real error, no skip/timeout.
     fail = [{"error_class": kas.ERROR_CLASS_AGENT_ERROR}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, fail) == kas.OUTCOME_FAIL
 
-    # IN_FLIGHT folds into fail.
     assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
 
 
@@ -335,24 +323,19 @@ def test_summary_one_line_per_category():
 
 def test_session_kernel_opt_outcome_rollup():
     out = kas._session_kernel_opt_outcome
-    # No kernels -> skip.
     assert out([]) == kas.OUTCOME_SKIP
-    # Any success wins.
     assert out([
         {"outcome_class": kas.OUTCOME_FAIL},
         {"outcome_class": kas.OUTCOME_SUCCESS},
     ]) == kas.OUTCOME_SUCCESS
-    # All skip -> skip.
     assert out([
         {"outcome_class": kas.OUTCOME_SKIP},
         {"outcome_class": kas.OUTCOME_SKIP},
     ]) == kas.OUTCOME_SKIP
-    # timeout only when present and no real fail.
     assert out([
         {"outcome_class": kas.OUTCOME_SKIP},
         {"outcome_class": kas.OUTCOME_TIMEOUT},
     ]) == kas.OUTCOME_TIMEOUT
-    # fail dominates a co-occurring timeout.
     assert out([
         {"outcome_class": kas.OUTCOME_TIMEOUT},
         {"outcome_class": kas.OUTCOME_FAIL},

@@ -17,8 +17,7 @@ import tempfile
 from pathlib import Path
 
 _SENTINEL = "<your_benchmark.py>"  # presence == already patched
-# Upstream GEAK (ec61bdb+) replaced the task_runner.py examples with generic
-# placeholders; when this marker is present the YAML needs no Hyperloom patch.
+# When this upstream marker is present the YAML needs no Hyperloom patch.
 _UPSTREAM_FIXED_MARKER = "<your-test-command>"
 
 _OLD_BLOCK = (
@@ -84,7 +83,6 @@ def _atomic_write(target: Path, content: str) -> None:
     try:
         shutil.copystat(target, tmp_path)
     except OSError:
-        # copystat is best-effort metadata; ignore if the FS rejects it.
         pass
     tmp_path.replace(target)
 

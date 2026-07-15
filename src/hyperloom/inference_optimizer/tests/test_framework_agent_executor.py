@@ -28,8 +28,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
 
-# Helpers
-
 _VALID_PATCH = """\
 diff --git a/src.py b/src.py
 index 0000000..1111111 100644
@@ -83,7 +81,6 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# 1. Pure helpers
 def test_candidate_slug_prefers_repo_and_pr_number():
     cand = _make_candidate(repo="sgl-project/sglang", pr_number=1234)
     slug = _candidate_slug(cand)
@@ -125,7 +122,6 @@ def test_fetch_diff_to_path_fails_on_bad_url(tmp_path: Path):
     assert err
 
 
-# 2. End-to-end executor (apply_only / explicit patches)
 @pytest.mark.asyncio
 async def test_executor_missing_candidate_fails_cleanly(tmp_path: Path):
     session_dir = tmp_path / "session"
@@ -145,7 +141,7 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
     repo = tmp_path / "framework"
     init_git_repo(repo)
     executor = FrameworkAgentExecutor(session_dir=session_dir)
-    cand = {  # source-less candidate
+    cand = {
         "repo": "sgl-project/sglang",
         "pr_number": "",
         "ref": "",
@@ -166,15 +162,14 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Path):
-    """Regression: missing explicit patches must short-circuit to
-    no_patch, never falling back to the candidate's diff_url."""
+    """Missing explicit patches short-circuit to no_patch, never falling back to diff_url."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
-    cand = _make_candidate()  # carries a real diff_url
+    cand = _make_candidate()
     missing = [str(tmp_path / "nope-1.patch"), str(tmp_path / "nope-2.patch")]
     ctx = _make_ctx(
         "t-fp-no-explicit",
@@ -307,7 +302,6 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# 3. KEEP / REVERT decision (mocked bench)
 def _mk_variant_result(*, tput: float | None, status: str = "succeeded") -> VariantResult:
     return VariantResult(
         name="framework-x",
@@ -361,7 +355,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
-    """D2: a KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
+    """A KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
     import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
@@ -409,7 +403,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
-    """D2: a REVERT appends a 'reverted_smoke_fail' record for dedup."""
+    """A REVERT appends a 'reverted_smoke_fail' record for dedup."""
     import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
@@ -564,7 +558,6 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# 3b. Serial-KEEP integrity — REJECT must not clobber prior KEPT patches
 _PATCH_B_ADDS_FILE = """\
 diff --git a/new.py b/new.py
 new file mode 100644
@@ -579,7 +572,7 @@ index 0000000..1111111
 
 @pytest.mark.asyncio
 async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
-    """Regression: B's REVERT must reset to A's KEEP commit, not baseline."""
+    """B's REVERT must reset to A's KEEP commit, not baseline."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -634,7 +627,6 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
         res_b = await executor(ctx_b)
     assert res_b["status"] == "reverted", res_b
 
-    # B's added file is gone; A's KEPT change in src.py survives.
     assert not (repo / "new.py").exists()
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
@@ -689,7 +681,6 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# 3c. checkout-head (diff source) mode
 def _git_env() -> dict[str, str]:
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = "FRAMEWORK Test"
@@ -717,7 +708,6 @@ def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
         text=True,
         env=env,
     ).stdout.strip()
-    # Back to main; point origin at ourselves.
     subprocess.run(["git", "-C", str(path), "checkout", "main"], check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "-C", str(path), "remote", "add", "origin", str(path)],
@@ -764,7 +754,6 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, monkeypatch):
     """apply_mode=checkout_head extracts the PR's net diff, applies, benches (+10%), KEEPs."""
-    # Redirect the KB writeback root so the KEEP record doesn't leak into the real KB.
     import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
 
     monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
@@ -841,7 +830,7 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
-    """Regression: a PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
+    """A PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -885,7 +874,7 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
-    """Regression: a cross-repo candidate must fall back to diff_url, not checkout-head."""
+    """A cross-repo candidate must fall back to diff_url, not checkout-head."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -900,12 +889,12 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {
-        "repo": "ROCm/vllm",  # cross-repo vs the sglang live origin
+        "repo": "ROCm/vllm",
         "pr_number": 42,
         "ref": "pr-head",
         "title": "cross-repo PR",
         "diff_url": f"file://{diff_file}",
-        "apply_mode": "checkout_head",  # explicitly requested
+        "apply_mode": "checkout_head",
     }
     ctx = _make_ctx(
         "t-fp-crossrepo",
@@ -922,14 +911,8 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# Accuracy gate inside _bench_candidate.
-#
-# Regression for the framework accuracy-gate bug: the gate read the
-# nonexistent ``score`` key from parse_eval_results (which returns
-# ``accuracy``) and passed (new, baseline) reversed into accuracy_passed,
-# so accuracy_pass was always None -> KEEP always allowed. These tests drive
-# the real _bench_candidate gate (the prior accuracy test mocked the whole
-# method, masking the bug).
+# Accuracy gate inside _bench_candidate: the gate must read the ``accuracy`` key
+# and produce a real verdict rather than always allowing KEEP.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "new_accuracy, expected_pass",
@@ -969,8 +952,7 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
         )
 
     assert bench["status"] == "succeeded"
-    # The core regression: a real accuracy verdict, never None when an eval
-    # result + positive baseline are present.
+    # A real accuracy verdict, never None when an eval result + positive baseline are present.
     assert gate["accuracy_pass"] is expected_pass
 
 
@@ -1074,7 +1056,6 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
             "base_tput": 1000.0,
             "keep_threshold_pct": 1.0,
             "require_accuracy_for_keep": True,
-            # no accuracy_baseline -> cannot enforce -> degrade
         },
     )
     with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
@@ -1084,7 +1065,6 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# 4. Registration / import surface
 def test_framework_agent_executor_imports_clean():
     from hyperloom.orchestrator.actions.executors import (
         framework_agent as fp_mod,

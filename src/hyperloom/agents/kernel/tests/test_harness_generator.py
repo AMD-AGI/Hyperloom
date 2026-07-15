@@ -22,8 +22,7 @@ def _load_module():
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    # Register before exec: dataclasses with PEP 563 annotations resolve their
-    # module via sys.modules during class creation.
+    # Register before exec: PEP 563 dataclass annotations resolve via sys.modules.
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
@@ -67,9 +66,8 @@ def test_get_imports():
 
 
 def test_get_imports_dedents_function_local():
-    """Regression: ast.walk yields imports nested inside functions with their
-    source indentation; emitted verbatim at the harness module top they raise
-    'unexpected indent'. get_imports must dedent them to valid top-level imports.
+    """get_imports must dedent function-local imports to valid top-level imports
+    (ast.walk yields them with their source indentation).
     """
     import ast as _ast
 
@@ -87,9 +85,8 @@ def test_get_imports_dedents_function_local():
 
 
 def test_aiter_harness_recognizes_perftest(tmp_path):
-    """Regression: aiter op_tests that time the op with @perftest (not
-    @benchmark) must be picked up by the aiter idiom path and emit a valid
-    harness (previously they fell through to the weaker generic path)."""
+    """aiter op_tests that time the op with @perftest (not @benchmark) must be
+    picked up by the aiter idiom path and emit a valid harness."""
     import ast as _ast
 
     src = (

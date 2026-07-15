@@ -325,13 +325,8 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# Regression: the torch.profiler Chrome-trace category for a GPU
-# kernel is literally "kernel". A global rename (#734 / commit 33ac6cc) once
-# replaced this data-format literal with "kernel_agent", so is_kernel_event
-# matched nothing and count_gpu_kernel_events returned 0 for every healthy
-# trace -> tracelens_analysis raised "Trace contains zero GPU kernel events".
-# These assertions pin the torch convention so a future rename cannot silently
-# break GPU-kernel detection again.
+# The torch.profiler Chrome-trace category for a GPU kernel is literally
+# "kernel". Pin the torch convention so a rename cannot break GPU-kernel detection.
 def test_issue_769_kernel_event_uses_torch_cat_kernel():
     """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
     real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
@@ -401,7 +396,6 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         is False
     )
     assert tla.is_reusable_native_kernel(candidate) is True
-    # Ladder converged to forge-only.
     assert tla.recommend_backends(candidate) == ["forge"]
 
 
@@ -770,8 +764,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
- # hot_kernels carries only routable candidates; set the marker
-        # explicitly since this test bypasses _finalize_candidates.
+        # Set the routable marker explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -909,7 +902,6 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "gpu_pct": 10.0,
         "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
- # Per AMD-AGI/Hyperloom#314, see twin fixture above.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -1039,12 +1031,9 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# P0 contract: ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL
-# ranked hotspot set (routable + non-routable) while ``routable_kernels`` /
-# ``skipped_kernels`` carry the reusable / non-reusable subsets. This locks the
-# TraceLens-side disk contract (twin of the bypass ``build_candidates`` tests)
-# so read-disk consumers (breakdown collectors, ``_all_kernel_candidates``) can
-# rely on the routable-only -> full change staying intentional and stable.
+# ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL ranked hotspot
+# set (routable + non-routable) while ``routable_kernels`` / ``skipped_kernels``
+# carry the reusable / non-reusable subsets.
 def _contract_candidates():
     return [
         {"kernel_id": "k001", "name": "fused_moe", "duration_us": 300.0, "gpu_pct": 30.0,
@@ -1280,7 +1269,6 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         captured["options"] = options.kwargs
         output_dir.mkdir(parents=True, exist_ok=True)
         # TraceLens contract: orchestrator writes ``analysis.md``.
- # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
@@ -1311,10 +1299,8 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     """TraceLens SDK runner must not inherit stale global Claude settings.
 
-    The production failure this guards against: ``~/.claude/settings.json`` can
-    contain a stale gateway token, while the active Hyperloom run is correctly
-    configured via process env. Passing ``env`` and ``setting_sources=[]`` keeps
-    the SDK child tied to the active run contract.
+    Passing ``env`` and ``setting_sources=[]`` keeps the SDK child tied to the
+    active run contract rather than a stale ``~/.claude/settings.json`` token.
     """
     import asyncio
     from dataclasses import dataclass
@@ -1526,10 +1512,10 @@ def test_openai_tool_runner_allows_output_write_and_tracelens_python(tmp_path):
 
 
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
-    """Sandbox-hang RCA: a gateway stream that goes silent mid-response must
-    abort on the per-message idle timeout instead of blocking forever on
-    socket.read(). The runner records the idle-timeout error and, since
-    analysis.md was already written, still returns it as the report."""
+    """A gateway stream that goes silent mid-response must abort on the
+    per-message idle timeout instead of blocking forever. The runner records
+    the idle-timeout error and, since analysis.md was already written, still
+    returns it as the report."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1593,14 +1579,9 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
 
 def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
     """The SDK runner must persist a full stream-JSON transcript
-    (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
-    operator can inspect the agent's lifecycle and the artifacts it
-    produced *during* execution. The transcript path is surfaced via
-    ``artifact_paths`` so it flows into the kernel-agent status sidecar.
-
-    Granularity is top-level orchestrator only: ``Task``-tool subagent
-    turns are collapsed by the SDK into a single tool_use/tool_result
-    pair at this level, which is sufficient for lifecycle visibility.
+    (text + tool_use/tool_result blocks) next to ``analysis.md``, surfaced
+    via ``artifact_paths`` so it flows into the kernel-agent status sidecar.
+    Granularity is top-level orchestrator only.
     """
     import asyncio
     import json as _json
@@ -2614,7 +2595,7 @@ def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
 
 # classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
-    """Previously-reusable candidate stays reusable; skip_reason is empty."""
+    """A stable Triton source is reusable; skip_reason is empty."""
     cand = {
         "name": "triton_attention_decode_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attn.py",
@@ -2634,8 +2615,8 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
-    """RCA root cause 2: a csrc/cpp_itfs/*.py host launcher (device code is in a
-    sibling .cuh/.cpp.jinja) must be skipped, not edited."""
+    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling
+    .cuh/.cpp.jinja) must be skipped, not edited."""
     src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
@@ -2647,7 +2628,7 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
 
 
 def test_library_token_pairing():
-    """RCA root cause 2: library detection keeps kernel<->benchmark same-lib."""
+    """Library detection keeps kernel<->benchmark same-lib."""
     assert tla._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
     # sgl-kernel / sgl_kernel normalize to sglang.
     assert tla._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
@@ -3424,15 +3405,11 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
 
 
 # ===========================================================================
-# task-group over-splitting — one device kernel fragmented across
-# multiple groups, each costing a redundant GEAK dispatch. Two fragmentation
-# sources:
-#   (1) native (.cu/.hip/.cpp) kernels have no Python AST def-line, so
-#       TraceLens reports the per-call ``#L`` line that differs per call site;
-#   (2) C++ template/dtype mangling (``rmsnorm_kernel<bf16>`` vs ``<fp16>``).
-# The fix keys native sources on ``(normalized_op, canonical_path)`` only and
-# normalizes the operation name, while preserving the Q1 invariant that
-# distinct base-name kernels sharing a wrapper never merge.
+# task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST
+# def-line (TraceLens reports the per-call ``#L`` line), and C++ template/dtype
+# mangling varies the name. Native sources key on ``(normalized_op,
+# canonical_path)`` only, preserving the invariant that distinct base-name
+# kernels sharing a wrapper never merge.
 # ===========================================================================
 def test_normalize_operation_key_strips_templates():
     """Template/dtype args are dropped; distinct base names stay distinct;
@@ -3459,11 +3436,9 @@ def test_is_native_source_detects_device_extensions():
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """A native .cu kernel invoked from two call sites reports
-    two different ``#L`` lines (no Python AST def-line exists, so the
-    reported line is the call site). The OLD key ``(op, path, line, fn)``
-    split one kernel into two task_groups — two redundant GEAK dispatches.
-    Native sources must key on ``(op, path)`` only and collapse to one."""
+    """A native .cu kernel invoked from two call sites reports two different
+    ``#L`` lines (no Python AST def-line exists). Native sources must key on
+    ``(op, path)`` only and collapse to one task_group."""
     src = tmp_path / "rmsnorm.cu"
     src.write_text(
         "__global__ void rmsnorm_kernel(float* x) { /* ... */ }\n",
@@ -3496,20 +3471,11 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """Real-world Qwen3-32B rmsnorm_quant case:
-    k005/k006/k007 are three instantiations of ONE ``__global__`` template
-    (``add_rmsnorm_quant_kernel``) living in ONE .cu. TraceLens names them
-    with DIFFERENT Itanium-mangled operation symbols — a mangled symbol,
-    NOT a ``<...>`` spelling — and the candidates autoresolve to the SAME
-    bare .cu path (no ``(line): func`` suffix), so resolution yields the
-    file stem as ``function``. They MUST collapse into ONE composite
-    task_group: the mangled operation and the per-call line are NOT part of
-    the native key, so 3 instantiations don't become 3 redundant GEAK
-    dispatches that each edit the same template body from the same baseline.
-
-    Regression guard for the original fix that wrongly kept a normalized
-    operation in the native key — since the real symbols carry no ``<...>``
-    to strip, that left k005/k006/k007 in three separate groups."""
+    """Three instantiations of ONE ``__global__`` template
+    (``add_rmsnorm_quant_kernel``) in ONE .cu, named with DIFFERENT
+    Itanium-mangled symbols and autoresolving to the SAME bare .cu path, must
+    collapse into ONE task_group: the mangled operation and per-call line are
+    NOT part of the native key."""
     src = tmp_path / "rmsnorm_quant_kernels.cu"
     src.write_text(
         "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"

@@ -106,9 +106,9 @@ def _json_has_any_number(value) -> bool:
 
 
 def _breakdown_has_basic_data(path: Path) -> bool:
-    """True when a session_breakdown JSON carries usable audit/perf payload. The
-    delivery contract is "has structured data", not "has positive gain" (aborted
-    runs may legitimately be zero).
+    """True when a session_breakdown JSON carries usable audit/perf payload.
+
+    The delivery contract is "has structured data", not "has positive gain".
 
     Args:
         path (Path): Path to a ``session_breakdown`` JSON file.
@@ -166,7 +166,6 @@ def _mark_record_delivery(rec: SubmissionRecord) -> None:
         root = Path(rec.artifacts_dir)
         if root.is_dir():
             candidates.extend(p for p in root.glob("**/session_breakdown*.json") if p.is_file())
-    # De-duplicate while preserving order.
     seen: set[str] = set()
     unique = []
     for p in candidates:
@@ -406,9 +405,8 @@ def _session_has_terminal_marker(session_dir: str | Path) -> bool:
 def _session_activity_mtime(session_dir: str | Path) -> float:
     """Return a bounded best-effort activity timestamp for a session.
 
-    ``state.json`` can be quiet while long Magpie subprocesses append logs or
-    traces, so include the runtime subtrees CI relies on. The file cap avoids
-    expensive walks for very large sessions.
+    Scans state files plus the runtime subtrees CI relies on, with a file cap to
+    avoid expensive walks for very large sessions.
 
     Args:
         session_dir (str | Path): Session directory to scan.
@@ -612,7 +610,7 @@ def _wait_for_nfs_session_delivery(
 
 def _category_from_arch(arch: str | None) -> str:
     """Coarse model-shape classification: "moe" if arch contains "moe", else
-    "dense"; "" when unknown so downstream JSON stays "n/a".
+    "dense"; "" when unknown.
 
     Args:
         arch (str | None): HF architecture class name.

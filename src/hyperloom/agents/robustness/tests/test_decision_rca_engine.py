@@ -54,9 +54,7 @@ def _engine(handler, *, throttle: RcaThrottle | None = None, **overrides) -> Llm
     )
 
 
-# ---------------------------------------------------------------------------
 # Noop engine
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -65,9 +63,7 @@ async def test_noop_engine_returns_empty():
     assert await engine.summarize(_sym()) == ""
 
 
-# ---------------------------------------------------------------------------
 # Happy path
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -226,11 +222,10 @@ async def test_drain_usage_accumulates_and_resets():
     usage = engine.drain_usage()
     assert usage is not None
     assert usage["calls"] == 2
-    assert usage["input_tokens"] == 22      # 11 * 2
-    assert usage["output_tokens"] == 8      # 4 * 2
+    assert usage["input_tokens"] == 22
+    assert usage["output_tokens"] == 8
     assert usage["model"] == "claude-opus-4-8"
     assert usage["latency_ms"] >= 0
-    # Draining resets the accumulator.
     assert engine.drain_usage() is None
 
 
@@ -249,8 +244,7 @@ def test_noop_engine_drain_usage_is_none():
 
 @pytest.mark.asyncio
 async def test_drain_usage_counts_call_even_without_usage_block():
-    # Provider omits a usage block: the call is still counted (with latency)
-    # so the trace reflects that an RCA LLM call happened.
+    # Provider omits a usage block: the call is still counted so the trace reflects it happened.
     engine = _engine(
         lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}),
     )
@@ -313,9 +307,7 @@ async def test_llm_engine_handles_list_content_parts():
     assert text == "Hello World"
 
 
-# ---------------------------------------------------------------------------
 # Throttle
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -402,9 +394,7 @@ async def test_throttle_enforces_per_key_cooldown():
     assert calls == 1
 
 
-# ---------------------------------------------------------------------------
 # Error paths
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

@@ -7,14 +7,9 @@
 
 ``IntentRouter`` holds a back-reference to its owning ``Coordinator`` and
 delegates every attribute it does not define itself to that coordinator via
-``__getattr__``. The handlers read and call ``self.shared_state`` /
-``self.bus`` / ``self._refresh_gaps(...)`` etc., which transparently resolve
-back onto the coordinator. Coordinator state is mutated only through method
-calls and mutable-object access, both of which route correctly through the
-back-reference; the handlers never rebind ``self.<attr>`` directly.
-
-``Coordinator`` keeps thin forwarding shims (``_handle_intent`` etc.) that
-delegate to the router.
+``__getattr__``, so handler bodies keep using ``self.shared_state`` /
+``self.bus`` etc. ``Coordinator`` keeps thin forwarding shims that delegate
+to the router.
 """
 
 from __future__ import annotations
@@ -33,11 +28,9 @@ from ..policy.gate import PolicyDenied
 from ..state.task_registry import Task
 from ..kernel.request_handlers import get_handler
 
-# NOTE: ``Coordinator`` is intentionally NOT imported (not even under
-# TYPE_CHECKING) to avoid a module-level import cycle with coordinator.py,
-# which imports this module at runtime. The owning coordinator is held as a
-# back-reference; the ``"Coordinator"`` annotation below is a deferred string
-# (``from __future__ import annotations``) that is never evaluated at runtime.
+# ``Coordinator`` is intentionally NOT imported (avoids a module-level import
+# cycle with coordinator.py); it is held as a back-reference and the annotation
+# below is a deferred string.
 
 log = __import__("logging").getLogger(__name__)
 
@@ -70,11 +63,7 @@ class IntentRouter:
         self._coord = coordinator
 
     def __getattr__(self, name: str) -> Any:
-        # Any attribute not defined on the router resolves onto the owning
-        # coordinator. This lets the verbatim-moved handler bodies keep using
-        # ``self.shared_state`` / ``self.bus`` / ``self._refresh_gaps`` etc.
-        # ``__getattr__`` is only consulted on miss, so the handler methods
-        # defined on this class take precedence.
+        # Attributes not defined on the router resolve onto the coordinator.
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
@@ -101,7 +90,7 @@ class IntentRouter:
             if handler_name is not None:
                 await getattr(self._coord, handler_name)(source, intent)
             else:
-                # Unknown / unhandled intent — record for replay (defensive).
+                # Unknown / unhandled intent — record for replay.
                 await self._record_observation(
                     source, "observation",
                     {"intent": it.value, "payload": intent.payload},
@@ -145,7 +134,7 @@ class IntentRouter:
                 ``action_name`` and optional ``params`` / ``predicted_gain_pct``.
         """
         action_name = intent.payload["action_name"]
-        # Pruned families are advisory: proposal still queues, but the inbox carries an advisory note.
+        # Pruned families are advisory: proposal still queues with an advisory note.
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
                 "coordinator", "observation",
@@ -179,7 +168,6 @@ class IntentRouter:
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=dict(intent.payload),
         )
-        # Proposals enter the queue directly; facts are written after the task lands.
         self.state.pending_proposals[msg.msg_id] = pending
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
@@ -297,11 +285,8 @@ class IntentRouter:
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
                 )
-        # Critic contract (critic-agent/references/verdict_schema.md): both
-        # `approve` and `advise` mean "dispatch may proceed" (advise = proceed
-        # with advisory notes). Treat them identically for materialization so an
-        # `advise` verdict is not silently dropped (which previously stranded
-        # FRAMEWORK config-lever deliverables — routed but never benched).
+        # Both `approve` and `advise` mean "dispatch may proceed"; treat them
+        # identically for materialization.
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(pending)
         elif verdict == "reject" and pending.action_name == "framework_agent":
@@ -349,11 +334,11 @@ class IntentRouter:
                 source, intent, denied, action_name=action_name,
             )
             return
-        # delegate explore runs variants directly (config/env grids are not source patches → no Critic pre-review).
+        # delegate explore runs variants directly (no Critic pre-review).
         params = dict(intent.payload.get("params") or {})
-        # idempotency_key is top-level per schema; treat a nested params value as a compat alias and strip it.
+        # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
-        # Plumb baseline's materialized YAML into grid-style tasks for the workload contract; setdefault lets delegator override.
+        # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
         if (
             action_name in ("sweep", "explore")
             and self.shared_state.baseline_config_path
@@ -361,32 +346,27 @@ class IntentRouter:
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
-        # Parity with _materialize_approved_proposal: direct delegates need the same operational knobs.
+        # Parity with _materialize_approved_proposal: direct delegates need the same knobs.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-            # Inject base_tput tied to current_best (or baseline_tput); else every variant lands FAILED.
-            # Defensive getattr: lightweight state doubles in tests may omit current_best.
+            # Inject base_tput tied to current_best (or baseline_tput).
             cb = getattr(self.shared_state, "current_best", None) or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else getattr(self.shared_state, "baseline_tput", 0.0)
             params.setdefault("base_tput", float(base or 0.0))
-        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans
-        # out into N standard freeform specialist tasks (scope=freeform,
-        # lane=cpu, mode=research defaults), each dispatched through the
-        # normal SpecialistRunner + TaskRegistry + lease + reap path. This
-        # preserves the low-cost wide-net recon that the retired
-        # dynamic_specialist channel provided.
+        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out
+        # into N standard freeform specialist tasks, each dispatched through the
+        # normal SpecialistRunner + TaskRegistry + lease + reap path.
         if action_name == "specialist" and isinstance(
             params.get("tasks"), list,
         ) and params["tasks"]:
             await self._fan_out_specialist_wave(source, intent, params)
             return
-        # Specialist pre-dispatch warmup: warm external-knowledge sections via KnowledgePlane (setdefault fills gaps).
+        # Specialist pre-dispatch warmup via KnowledgePlane.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
-        # Idempotency-key chain: top-level → nested compat alias → content-fingerprint auto-key.
-        # Terminal collisions retry with -retry<N> (up to 5); non-terminal collisions → policy_denied.
+        # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
             content_fp = hashlib.sha1(
@@ -414,14 +394,9 @@ class IntentRouter:
                 from ..specialists.profile import resolve_specialist_profile
                 if resolve_specialist_profile(params).reserves_benchmark_lane:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
-                # Any GPU-holding specialist (not just bench-enabled) must
-                # serialize against serving via gpu_research_lane, else its
-                # cards (range(cap) = the serving cards) would be over-
-                # subscribed against a live server. research_lane is kept for
-                # LLM-concurrency accounting. The lane lease TTL is sourced
-                # from the agent wall budget (×grace) so it never expires mid-run
-                # and lets serving grab the cards (iron law:
-                # kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL).
+                # Any GPU-holding specialist serializes against serving via
+                # gpu_research_lane. Its lane lease TTL comes from the agent wall
+                # budget (iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL).
                 needs_gpu_raw = params.get("needs_gpu", False)
                 needs_gpu = (
                     needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
@@ -431,8 +406,7 @@ class IntentRouter:
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     try:
-                        # Shared with the GPU-pool lease at dispatch so the lane
-                        # lease and the GPU lease TTL never drift apart.
+                        # Shared with the GPU-pool lease so the two TTLs never drift.
                         ttl = self._coord._gpu_lease_ttl_sec(int(ttl or 0))
                     except Exception:  # noqa: BLE001 — fall back to registry ttl
                         log.exception(
@@ -536,13 +510,13 @@ class IntentRouter:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
-        # Always record the request on the bus so the kernel reactor (and tests/replay) can see it.
+        # Always record the request on the bus for the kernel reactor / replay.
         request_msg = Message.new(
             source, target_agent, "request", dict(intent.payload), priority=1,
         )
         await self.bus.append_and_seq(request_msg)
 
-        # Safety net: auto-reject when the target agent was removed (e.g. --no-kernel) so Orch doesn't hang.
+        # Safety net: auto-reject when the target agent was removed (e.g. --no-kernel).
         if target_agent not in self.role_registry:
             await self.bus.append_and_seq(Message.new(
                 target_agent, source, "response",
@@ -561,13 +535,13 @@ class IntentRouter:
             ))
             return
 
-        # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE so a deterministic shell-tool invocation doesn't burn an LLM turn (see kernel_request_handlers.py).
+        # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE without burning an LLM turn.
         if target_agent == "kernel_agent":
             handler = get_handler(kind)
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
-                # Force batch dispatch for run_optimization: inject candidates_path from last_trace_analyze (else collapses to single-kernel run). LLM value wins.
+                # Force batch dispatch for run_optimization: inject candidates_path from last_trace_analyze. LLM value wins.
                 if (
                     kind == "run_optimization"
                     and self.shared_state.last_trace_analyze
@@ -584,11 +558,8 @@ class IntentRouter:
                 if cached_result is not None:
                     result = cached_result
                     cache_hit_source = "shared_state_cache"
-                    # A cache hit produces a response but never runs the
-                    # handler, so emit a single END (no paired START). Without
-                    # this the lifecycle log would show no record at all for a
-                    # cache-served step, leaving an operator unsure whether it
-                    # ran. detail=cache_hit marks it as served-from-cache.
+                    # A cache hit never runs the handler; emit a single END
+                    # (detail=cache_hit) so the lifecycle log records the step.
                     self._emit_lifecycle(
                         step=kind,
                         status="END",
@@ -616,10 +587,8 @@ class IntentRouter:
                             "reason": rejected.get("reason"),
                         }
                         cache_hit_source = "shared_state_kernel_rejection"
-                        # A short-circuited integrate (patch already
-                        # exhausted) also never runs the handler; emit a lone
-                        # END so the log records the step was resolved as a
-                        # rejection rather than silently missing.
+                        # A short-circuited integrate never runs the handler;
+                        # emit a lone END recording the rejection.
                         self._emit_lifecycle(
                             step=kind,
                             status="END",
@@ -627,7 +596,7 @@ class IntentRouter:
                             detail="rejected",
                         )
                     else:
-                        # Inject base_tput from current_best.tput when an integrate request omits it (else 2nd/3rd multi-KEEP integrate fails base_tput > 0); operator value wins.
+                        # Inject base_tput from current_best.tput when an integrate request omits it; operator value wins.
                         if (
                             kind == "integrate"
                             and not merged_payload.get("base_tput")
@@ -638,7 +607,7 @@ class IntentRouter:
                             if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                                 merged_payload["base_tput"] = float(cb_tput)
 
-                        # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately (else a slow sibling starves a fast KEEP's integrate).
+                        # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately.
                         handler_kwargs: dict[str, Any] = {
                             "session_dir": self.session_dir,
                         }
@@ -646,13 +615,9 @@ class IntentRouter:
                             handler_kwargs["record_partial"] = (
                                 self._record_kernel_opt_partial
                             )
-                        # Bracket the programmatic kernel step with
-                        # START / END lifecycle events so operators see the
-                        # step ran, how long it took, and where its outputs
-                        # landed. ``kind`` is the machine step name
-                        # (trace_analyze / run_optimization / integrate /
-                        # run_gemm_tuning); the human label is resolved by
-                        # SharedState from LIFECYCLE_STEP_LABELS.
+                        # Bracket the programmatic kernel step with START / END
+                        # lifecycle events. ``kind`` is the machine step name;
+                        # the human label is resolved from LIFECYCLE_STEP_LABELS.
                         _lc_t0 = time.monotonic()
                         self._emit_lifecycle(
                             step=kind,
@@ -706,7 +671,7 @@ class IntentRouter:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
-                # Cache trace_analyze output (successful runs only) to short-circuit identical next-tick requests.
+                # Cache trace_analyze output (successful runs only).
                 if (
                     kind == "trace_analyze"
                     and cache_hit_source is None
@@ -714,16 +679,15 @@ class IntentRouter:
                 ):
                     self.shared_state.record_trace_analyze(merged_payload, result)
                     self.shared_state.save(self.session_dir)
-                # Mirror kernel-opt outcomes into SharedState so Orch sees decision/speedup next tick.
+                # Mirror kernel-opt outcomes into SharedState.
                 if kind == "run_optimization":
-                    # Batch mode already streamed each sub-result; re-recording would double-count. Cache hits lack batch_mode.
+                    # Batch mode already streamed each sub-result; re-recording would double-count.
                     if not bool(
                         isinstance(result, dict) and result.get("batch_mode")
                     ):
                         self.shared_state.record_kernel_opt(result)
                     self.shared_state.save(self.session_dir)
-                    # Auto-enqueue integrate for KEEP'd kernels that haven't
-                    # been integrated yet (IR-3: integration is mandatory).
+                    # Auto-enqueue integrate for KEEP'd kernels not yet integrated.
                     await self._auto_enqueue_pending_integrations()
                 if kind == "run_gemm_tuning":
                     await self._handle_gemm_tuning_result(result)
@@ -742,7 +706,7 @@ class IntentRouter:
                                 result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
-                # Advance the kernel cursor past this request seq so the LLM Kernel-agent doesn't re-answer it next tick.
+                # Advance the kernel cursor past this request seq.
                 await self.cursors.advance(
                     target_agent,
                     seq=request_msg.seq,
@@ -830,7 +794,7 @@ class IntentRouter:
                 closed-vocab ``next_action_hint``.
         """
         payload = dict(intent.payload or {})
-        # Always emit the broadcast first (back-compat with legacy contract tests).
+        # Always emit the broadcast first.
         await self.bus.append_and_seq(Message.new(
             source, "*", "strategy_change",
             payload, priority=0,
@@ -849,14 +813,8 @@ class IntentRouter:
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
             return
-        # Pre-enablement close guard: a not-yet-runnable model blocks the whole
-        # loop on establishing a baseline, so a ``skip_to_close`` here (from the
-        # Orchestration LLM OR Robustness) is premature — giving up before the
-        # model even boots is not a legitimate finish. Drop it and let the
-        # enablement loop keep going; the run still ends honestly via
-        # ``enablement_stalled`` (stall cap), ``prelude_baseline_failed``, the
-        # wall-clock deadline, or a hard abort — none of which route through
-        # ``skip_to_close``.
+        # Pre-enablement close guard: drop a premature ``skip_to_close`` while
+        # the model is not yet runnable and let the enablement loop continue.
         if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
             log.info(
                 "escalate_strategy_change: dropping premature skip_to_close from %s "
@@ -872,7 +830,7 @@ class IntentRouter:
                 },
             ))
             return
-        # extend_*_budget mutates phase_budget_pct directly (consulted every tick).
+        # extend_*_budget mutates phase_budget_pct directly.
         now_ts = datetime.now(timezone.utc).isoformat()
         if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
@@ -890,7 +848,7 @@ class IntentRouter:
             self.shared_state.last_consumed_escalate_hint_ts = now_ts
             self.shared_state.save(self.session_dir)
             return
-        # pause_specialist_<domain>: bump the per-domain empty-streak so the next EXPLORE round skips it.
+        # pause_specialist_<domain>: bump the per-domain empty-streak.
         if is_pause_specialist_hint(hint):
             domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX):]
             self.shared_state.bump_specialist_domain_empty_streak(
@@ -953,8 +911,7 @@ class IntentRouter:
             intent (Intent): The UPDATE_STATE intent; ``payload`` carries a
                 ``changes`` dict.
         """
-        # Apply to persistent SharedState (PolicyGate already enforced that
-        # the source role can't write CORE_STATE_FIELDS unless allowed).
+        # Apply to persistent SharedState (PolicyGate enforces core-field writes).
         applied = self.shared_state.apply_changes(
             intent.payload["changes"], allow_core=False,
         )

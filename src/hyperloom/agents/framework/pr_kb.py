@@ -10,7 +10,7 @@ framework-agent already consumes:
 * :func:`parse_index_prs` — candidate discovery inputs (P2).
 
 All helpers are defensive: missing keys / unparseable blocks yield empty
-results so callers fall back to Cortex / GitHub (design §7 degradation).
+results so callers fall back to Cortex / GitHub.
 """
 
 from __future__ import annotations
@@ -28,11 +28,8 @@ log = logging.getLogger(__name__)
 def _page_markdown(page: dict[str, Any]) -> str:
     """Extract page body markdown across known gbrain key spellings.
 
-    ``compiled_truth`` is the actual field ``get_page`` returns on this
-    gbrain deployment (confirmed against PR-KB-worker-written pages) — checked
-    first since every other key in this list has never been observed in
-    practice; kept as a defensive fallback in case a future/older gbrain build
-    differs.
+    ``compiled_truth`` is the field ``get_page`` returns on this gbrain
+    deployment; the rest are defensive fallbacks.
     """
     for key in ("compiled_truth", "markdown", "content", "body", "text", "page_content"):
         val = page.get(key)
@@ -166,8 +163,7 @@ def fetch_pr_kb_diff(
     if not page:
         return "", ""
     parsed = parse_files_page(page)
-    # Never feed a partial diff downstream (design R3): bail so the caller
-    # degrades to the full diff_url.
+    # Never feed a partial diff downstream; degrade to the full diff_url.
     if parsed["files_truncated"] or parsed["patch_omitted_any"]:
         log.info("pr_kb: files page %s truncated/omitted; degrading to diff_url", files_page_slug)
         return "", ""
