@@ -29,7 +29,7 @@ AMD GPUs.
 
 ## The optimization loop
 
-![Hyperloom optimization loop](../images/Hyperloom_architecture.png)
+![Hyperloom optimization loop](images/optimization-loop.svg)
 
 - **Workload understanding and profiling** — Submit your inference workload; the agent profiles it with
    TraceLens (trace collection using Magpie), capturing bottlenecks and roofline targets.

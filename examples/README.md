@@ -60,7 +60,8 @@ It asks for:
 - Secret placeholders in `.env`; edit secrets directly in `.env` and never
   paste API keys into chat.
 - `USER_DATA_PATH` (defaults to `<workspace>/session`).
-- Setup scenario: `baremetal` or `baremetal + Docker`.
+- Setup scenario: `baremetal` or `baremetal + Docker` (recorded in `.env` as
+  `HYPERLOOM_RUN_MODE=baremetal` or `HYPERLOOM_RUN_MODE=docker`).
 
 ## Setup Scenarios
 
@@ -141,7 +142,7 @@ Common keys:
 
 - `USER_DATA_PATH`
 - `HYPERLOOM_RUN_MODE`
-- `HYPERLOOM_DOCKER_TARGET_HOST` (only for `baremetal + Docker`)
+- `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`)
 
 Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. Kernel-agent paths (`MAGPIE_PATH`,
@@ -153,7 +154,7 @@ skill's `install.sh`.
 ## Run a Demo
 
 When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
-is written in `baremetal + Docker` mode, the setup skill offers a model demo run
+is written in `docker` mode, the setup skill offers a model demo run
 and hands off to the matching demo skill. Pick a length:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best

@@ -17,7 +17,7 @@ generates a report with all proposed changes and expected performance improvemen
 automation enables developers to achieve significant performance improvements while maintaining code
 quality and reducing the manual effort traditionally required for GPU optimization.
 
-<p align="center"><img width="600" alt="Hyperloom Architecture" src="docs/images/Hyperloom_architecture.png" /></p>
+<p align="center"><img width="600" alt="Hyperloom optimization loop" src="docs/images/optimization-loop.svg" /></p>
 
 Hyperloom combines:
 

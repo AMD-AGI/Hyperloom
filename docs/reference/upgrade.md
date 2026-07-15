@@ -67,8 +67,9 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
     --max-hours 2.0
 ```
 
-Supported `--model-class` values (non-exhaustive; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)): `dense`, `moe`,
-`moe_mla`, `moe_mla_nsa`, `mxfp4_moe`, `hybrid_attention`.
+Recognised `--model-class` values (case-insensitive, with `-`/`+`/space
+tolerated; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)):
+`dense`, `moe_mla`, `moe_swa`, `moe_mla_nsa`.
 
 If `--model-class` is omitted and inference cannot determine the family, the
 Coordinator falls back to a generic dense prior — likely sub-optimal for mixture of experts (MoE) /

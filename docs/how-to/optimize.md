@@ -39,7 +39,7 @@ Optimize inference for this workload:
 - Budget: 24 hours
 
 Before launch, run exactly:
-bash src/hyperloom/inference_optimizer/assets/install.sh
+bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
 

@@ -388,7 +388,7 @@ export INFERENCE_OPTIMIZER_RESCUE_PATHS="/tmp/inferencex_results:/var/tmp/bench"
 
 The harvest step scans these on each tick and copies any orphaned
 `result.json` into the session dir. See
-[Environment variables](environment-variables.md) §6.
+[Environment variables](environment-variables.md) — "Framework / source-tree discovery".
 
 ---
 

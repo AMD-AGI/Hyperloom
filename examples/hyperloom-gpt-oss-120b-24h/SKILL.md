@@ -5,7 +5,7 @@ description: Run a long-horizon Hyperloom gpt-oss-120b optimization session. Use
 
 # Hyperloom gpt-oss-120b Long-Horizon Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@../../inference_optimizer/SKILL.md`. This skill provides the concrete workload and launch constraints for a long-horizon gpt-oss-120b demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a long-horizon gpt-oss-120b demo.
 
 ## Run Mode
 
@@ -68,7 +68,7 @@ Current Hyperloom treats `--max-hours 24` as a long-horizon run. Long-horizon cy
 1. `--max-hours >= 24`
 2. an unbounded run (`max_minutes == 0`)
 
-`INFERENCE_OPTIMIZER_CYCLIC_PHASES` is enabled by default, but a falsy value (`0`, `false`, `no`, or `off`) disables cyclic macro-cycles. For this skill, ensure it is unset or truthy.
+Cyclic macro-cycling is always on; the long-horizon behavior is gated purely by the budget above (`--max-hours >= 24` or an unbounded run).
 
 ## Environment
 
@@ -82,7 +82,6 @@ Required optimize CLI flags:
 - `--isl 1024`
 - `--osl 1024`
 - `--precision bf16`
-- `INFERENCE_OPTIMIZER_CYCLIC_PHASES=1`
 - `--target-gain 30`
 - `--max-hours 24`
 

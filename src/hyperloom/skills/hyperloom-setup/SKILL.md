@@ -181,6 +181,11 @@ Common keys (all modes):
 - `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`; the host
   where the demo skill should run Docker)
+- `HYPERLOOM_SKILL_PATH` — absolute path to the optimizer skill
+  (`<workspace>/hyperloom/inference_optimizer/SKILL.md` for a wheel install,
+  `<workspace>/src/hyperloom/inference_optimizer/SKILL.md` for a source checkout).
+  Write it in both modes so the demo skill can resolve it even when `docker`
+  mode skips the host setup backend.
 
 ### AMD APIM subscription header
 
@@ -304,12 +309,13 @@ framework first (see Step 5).
 When the user picks a length, load the matching demo skill and follow it — you
 stop acting on this setup skill and run the demo skill's instructions instead:
 
-- `3h` → `@.agents/skills/hyperloom-qwen3-8b-3h/SKILL.md`
-- `8h` → `@.agents/skills/hyperloom-qwen3-30b-a3b-8h/SKILL.md`
-- `24h` → `@.agents/skills/hyperloom-gpt-oss-120b-24h/SKILL.md`
+The demo skills are installed under each agent's discovery dir (`.agents/skills/`,
+`.claude/skills/`, `.cursor/skills/`); load the matching one by name:
+
+- `3h` → `hyperloom-qwen3-8b-3h`
+- `8h` → `hyperloom-qwen3-30b-a3b-8h`
+- `24h` → `hyperloom-gpt-oss-120b-24h`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
-`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. Where the demo
-skill references `@../../inference_optimizer/SKILL.md`, that relative path does
-not resolve in an installed workspace; use the absolute optimizer skill path
-from `.env` `HYPERLOOM_SKILL_PATH` instead.
+`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. It resolves the
+optimizer skill from `.env` `HYPERLOOM_SKILL_PATH` (written by Step 3).
