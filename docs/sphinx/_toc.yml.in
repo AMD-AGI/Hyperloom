@@ -27,15 +27,15 @@ subtrees:
     title: Components
     subtrees:
     - entries:
-      - file: components/intellikit.md
+      - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
         title: IntelliKit
-      - file: components/magpie.md
+      - url: https://rocm.docs.amd.com/projects/magpie/en/latest
         title: Magpie
-      - file: components/tracelens.md
+      - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
         title: TraceLens
-      - file: components/geak.md
+      - url: https://rocm.docs.amd.com/projects/geak/en/latest/
         title: GEAK
-      - file: components/agentkernelarena.md
+      - url: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
         title: AgentKernelArena
 
 - caption: How to
