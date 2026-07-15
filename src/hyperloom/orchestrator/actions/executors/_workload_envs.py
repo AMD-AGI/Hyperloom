@@ -37,6 +37,7 @@ from ._grid_runner import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
+from ._grid_server_args import remove_server_args
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
@@ -53,6 +54,18 @@ log = logging.getLogger(__name__)
 # gfx942 / CDNA3 dies (MI300X and its MI308X/MI325X siblings) that ship the
 # aiter CK gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
 _GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize optional string/list controls to non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
 
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
 
@@ -272,6 +285,9 @@ def materialize_config_with_envs(
     *,
     extra_server_args: str = "",
     extra_envs: dict[str, Any] | None = None,
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    args_mode: str = "append",
     model_path: str | None = None,
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
@@ -303,6 +319,11 @@ def materialize_config_with_envs(
         output_dir: Directory the materialized YAML is written into.
         extra_server_args: Extra framework server args merged into the env.
         extra_envs: Overrides applied last over any computed env values.
+        remove_args: Inherited framework server args to remove before launch.
+        unset_envs: Inherited env names to remove before applying
+            ``extra_envs``.
+        args_mode: ``"append"`` (default) or ``"replace"`` for
+            ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
         gpu_type: GPU type; sets ``runner_type`` and pins the generic script.
         inferencex_path: Explicit InferenceX checkout to pin into the YAML.
@@ -322,7 +343,8 @@ def materialize_config_with_envs(
     """
     server_args = (extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-    if operator_server_args:
+    replace_args = str(args_mode or "append").strip().lower() == "replace"
+    if operator_server_args and not replace_args:
         if server_args:
             from ._grid_runner import merge_server_args
 
@@ -735,6 +757,15 @@ def materialize_config_with_envs(
             envs[framework_env] = merge_server_args(existing, server_args)
         else:
             envs[framework_env] = server_args
+    framework_env = server_args_env_name(bench.get("framework"))
+    if replace_args and server_args:
+        envs[framework_env] = server_args
+    remove_list = _coerce_str_list(remove_args)
+    unset_list = _coerce_str_list(unset_envs)
+    if remove_list:
+        envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
+    for key in unset_list:
+        envs.pop(str(key), None)
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────

@@ -3631,6 +3631,20 @@ class FrameworkPhase(PhaseHandler):
             cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
+            _raw_remove = cb.get("remove_args")
+            _raw_unset = cb.get("unset_envs")
+            cb_remove = [_raw_remove] if isinstance(_raw_remove, str) and _raw_remove.strip() else [
+                str(v) for v in (_raw_remove or []) if str(v).strip()
+            ]
+            cb_unset = [_raw_unset] if isinstance(_raw_unset, str) and _raw_unset.strip() else [
+                str(v) for v in (_raw_unset or []) if str(v).strip()
+            ]
+            if cb_remove:
+                params["base_remove_args"] = cb_remove
+            if cb_unset:
+                params["base_unset_envs"] = cb_unset
+            if str(cb.get("args_mode") or "").strip().lower() == "replace":
+                params["base_args_mode"] = "replace"
         base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if base_tput:
             params["base_tput"] = base_tput

@@ -423,6 +423,15 @@ def _collect_forward_env() -> dict[str, str]:
                     fwd[str(k)] = str(v)
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    if unset_fwd:
+        try:
+            parsed_unset = json.loads(unset_fwd)
+            if isinstance(parsed_unset, list):
+                for key in parsed_unset:
+                    fwd.pop(str(key), None)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
     return filter_forward_env(fwd, warn_on_drop=True)
 
 def _dynamo_fanout_launch(

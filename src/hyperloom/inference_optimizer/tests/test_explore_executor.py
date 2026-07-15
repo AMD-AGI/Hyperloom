@@ -533,6 +533,58 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 
 @pytest.mark.asyncio
+async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_runner, tmp_path):
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-out"),
+            "base_tput": 800.0,
+            "base_extra_args": "--bad-base 1 --keep-base 2",
+            "enable_stack_rebench": False,
+            "grid": [
+                {
+                    "name": "remove_bad_base",
+                    "extra_args": "--variant 4",
+                    "remove_args": ["--bad-base"],
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-remove-keep",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    winner = res.result["winners"][0]
+    assert winner["remove_args"] == ["--bad-base"]
+    assert "--bad-base" not in winner["extra_server_args"]
+    assert "--keep-base 2" in winner["extra_server_args"]
+    assert "--variant 4" in winner["extra_server_args"]
+    assert res.result["best_variant"]["extra_server_args"] == winner["extra_server_args"]
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_recovers_base_tput_from_shared_state(
     sub_agent_runner,
     tmp_path,
