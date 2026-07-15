@@ -5,6 +5,8 @@ root: index
 
 subtrees:
 - entries:
+  - file: what-is-hyperloom.md
+    title: What is Hyperloom?
   - file: release-notes.md
     title: Release notes
   - file: compatibility.md
@@ -43,7 +45,7 @@ subtrees:
   - file: how-to/quantization-quark.md
     title: Quantization with AMD Quark
 
-- caption: conceptual
+- caption: Conceptual
   entries:
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
@@ -60,14 +62,6 @@ subtrees:
     title: Knowledge base integration
   - file: reference/troubleshooting.md
     title: Troubleshooting
-  - file: reference/operator-scripts.md
-    title: Operator scripts
-  - file: reference/session-breakdown.md
-    title: session_breakdown.json
-  - file: reference/operations.md
-    title: Operations
-  - file: reference/upgrade.md
-    title: Upgrade
 
 - caption: About
   entries:
